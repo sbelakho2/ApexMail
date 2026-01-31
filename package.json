@@ -1,0 +1,47 @@
+{
+  "name": "apexmail",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Enterprise-grade transactional email platform",
+  "author": "Bel Consulting OÜ",
+  "license": "PROPRIETARY",
+  "workspaces": [
+    "api",
+    "worker",
+    "web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "db:migrate": "node tools/migrate/index.js",
+    "db:migrate:dry": "node tools/migrate/index.js --dry-run",
+    "db:seed": "node tools/migrate/seed.js",
+    "bootstrap": "./tools/bootstrap.sh",
+    "verify:routes": "node tools/verify-routes.js",
+    "verify:unused": "node tools/verify-unused.js",
+    "sbom:generate": "cyclonedx-node --output sbom.json",
+    "chaos:run": "node tools/chaos/runner.js",
+    "reconcile": "node tools/reconcile.js"
+  },
+  "devDependencies": {
+    "@cyclonedx/bom": "^4.1.0",
+    "@types/node": "^20.11.0",
+    "eslint": "^8.56.0",
+    "eslint-plugin-unused-imports": "^3.0.0",
+    "prettier": "^3.2.0",
+    "turbo": "^1.11.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=8.14.0"
+  },
+  "packageManager": "pnpm@8.14.0"
+}
