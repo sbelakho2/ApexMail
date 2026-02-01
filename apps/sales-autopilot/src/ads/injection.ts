@@ -13,7 +13,7 @@ import type {
     PipelineStage,
 } from '../types.js';
 
-const logger = createLogger('promo-injection');
+const logger = createLogger({ name: 'promo-injection', level: 'info' });
 
 // In-memory storage
 const promoConfigs = new Map<string, PromoConfig>();
@@ -407,7 +407,7 @@ export function recordConversion(promoId: string): void {
  */
 export function getPromoAnalytics(
     tenantId: string,
-    options?: {
+    _options?: {
         startDate?: Date;
         endDate?: Date;
     }

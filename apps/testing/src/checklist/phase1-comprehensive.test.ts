@@ -5,10 +5,9 @@
  * Based on ApexMail Implementation Checklist v11-Complete
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
 
 const ROOT_DIR = path.resolve(__dirname, '../../../..');
 
@@ -33,24 +32,6 @@ function isExecutable(filePath: string): boolean {
         return (stats.mode & 0o111) !== 0;
     } catch {
         return false;
-    }
-}
-
-function exec(command: string, options: { cwd?: string; timeout?: number } = {}): { stdout: string; stderr: string; exitCode: number } {
-    try {
-        const stdout = execSync(command, {
-            cwd: options.cwd || ROOT_DIR,
-            encoding: 'utf-8',
-            timeout: options.timeout || 30000,
-            stdio: ['pipe', 'pipe', 'pipe']
-        });
-        return { stdout, stderr: '', exitCode: 0 };
-    } catch (error: any) {
-        return {
-            stdout: error.stdout || '',
-            stderr: error.stderr || error.message,
-            exitCode: error.status || 1
-        };
     }
 }
 

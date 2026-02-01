@@ -62,12 +62,26 @@ export class ChaosRunner extends EventEmitter {
     private config: ChaosConfig;
     private experiments: Map<string, ChaosExperiment> = new Map();
     private runId: string = '';
-    private isRunning: boolean = false;
+    private _isRunning: boolean = false;
     private abortController: AbortController | null = null;
 
     constructor(config: ChaosConfig) {
         super();
         this.config = config;
+    }
+
+    /**
+     * Check if experiments are currently running
+     */
+    get isRunning(): boolean {
+        return this._isRunning;
+    }
+
+    /**
+     * Set running state
+     */
+    set isRunning(value: boolean) {
+        this._isRunning = value;
     }
 
     /**
@@ -82,7 +96,7 @@ export class ChaosRunner extends EventEmitter {
      */
     async runAll(): Promise<ChaosReport> {
         this.runId = `chaos-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        this.isRunning = true;
+        this._isRunning = true;
         this.abortController = new AbortController();
 
         const startTime = new Date();
@@ -136,7 +150,7 @@ export class ChaosRunner extends EventEmitter {
         }
 
         const endTime = new Date();
-        this.isRunning = false;
+        this._isRunning = false;
 
         const report = this.createReport(startTime, endTime, results);
         this.emit('run:complete', { report });

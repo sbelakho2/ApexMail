@@ -8,7 +8,7 @@ import { Pool } from 'pg';
 import Redis from 'ioredis';
 import * as mimeTypes from 'mime-types';
 import { config, BASE64_OVERHEAD } from '../config.js';
-import net from 'net';
+import * as net from 'net';
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };

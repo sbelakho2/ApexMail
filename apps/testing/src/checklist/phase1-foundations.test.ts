@@ -4,10 +4,9 @@
  * Tests verify each checklist item is properly implemented.
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
 
 const ROOT_DIR = path.resolve(__dirname, '../../../..');
 
@@ -217,10 +216,7 @@ describe('Phase 1: Foundations', () => {
         
         it('should have canary token infrastructure', () => {
             // Check for canary/security monitoring
-            const securityPaths = [
-                'apps/compliance/src/secrets',
-                'ops/canary_tokens.txt'
-            ];
+            // Security paths: apps/compliance/src/secrets, ops/canary_tokens.txt
             
             // At minimum should have compliance/secrets module
             const hasSecrets = fs.existsSync(

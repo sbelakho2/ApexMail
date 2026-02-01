@@ -11,7 +11,7 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
-import { config, RegionConfig } from '../config.js';
+import { config } from '../config.js';
 
 export enum RegionStatus {
   HEALTHY = 'healthy',
@@ -100,15 +100,16 @@ export class MultiRegionService {
    * Initialize multi-region service
    */
   async initialize(): Promise<void> {
-    // Load regions from config
-    for (const regionConfig of config.regions) {
+    // Load regions from config (config.regions is string[])
+    for (const regionId of config.regions) {
+      const isPrimary = regionId === config.primaryRegion;
       const region: RegionInfo = {
-        id: regionConfig.id,
-        name: regionConfig.name,
-        endpoint: regionConfig.endpoint,
+        id: regionId,
+        name: regionId,
+        endpoint: `https://${regionId}.apexmail.io`,
         status: RegionStatus.HEALTHY,
-        role: regionConfig.role as RegionRole ?? RegionRole.SECONDARY,
-        weight: regionConfig.weight ?? 1,
+        role: isPrimary ? RegionRole.PRIMARY : RegionRole.SECONDARY,
+        weight: isPrimary ? 2 : 1,
         latencyMs: 0,
         lastCheck: new Date(),
         healthScore: 100,
@@ -118,7 +119,7 @@ export class MultiRegionService {
         replicationLagMs: 0,
         metadata: {},
       };
-      this.regions.set(regionConfig.id, region);
+      this.regions.set(regionId, region);
     }
 
     // Load routing rules from database
@@ -519,7 +520,13 @@ export class MultiRegionService {
         region.lastCheck = new Date();
 
         if (response.ok) {
-          const health = await response.json();
+          const health = await response.json() as {
+            score?: number;
+            connections?: number;
+            rps?: number;
+            errorRate?: number;
+            replicationLagMs?: number;
+          };
           region.healthScore = health.score ?? 100;
           region.activeConnections = health.connections ?? 0;
           region.requestsPerSecond = health.rps ?? 0;

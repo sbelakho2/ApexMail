@@ -5,10 +5,9 @@
  * Each test corresponds to a specific checklist item with evidence collection.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
 
 // ============================================================================
 // Test Utilities
@@ -33,23 +32,6 @@ function listDir(relativePath: string): string[] {
   const fullPath = path.join(ROOT_DIR, relativePath);
   if (!fs.existsSync(fullPath)) return [];
   return fs.readdirSync(fullPath);
-}
-
-function execCommand(command: string, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
-  try {
-    const stdout = execSync(command, { 
-      cwd: cwd || ROOT_DIR, 
-      encoding: 'utf-8',
-      timeout: 30000 
-    });
-    return { stdout, stderr: '', exitCode: 0 };
-  } catch (error: any) {
-    return { 
-      stdout: error.stdout || '', 
-      stderr: error.stderr || error.message, 
-      exitCode: error.status || 1 
-    };
-  }
 }
 
 // ============================================================================

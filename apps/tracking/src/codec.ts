@@ -141,10 +141,16 @@ export class TrackingCodec {
         return null;
       }
       
+      const tenantId = parts[0];
+      const timestamp = parts[parts.length - 1];
+      if (!tenantId || !timestamp) {
+        return null;
+      }
+      
       return {
-        tenantId: parts[0],
+        tenantId,
         recipient: parts.slice(1, -1).join(':'), // Handle emails with colons (unlikely but safe)
-        timestamp: parseInt(parts[parts.length - 1], 10),
+        timestamp: parseInt(timestamp, 10),
       };
       
     } catch {
@@ -281,7 +287,11 @@ export class TrackingCodec {
     
     let result = 0;
     for (let i = 0; i < a.length; i++) {
-      result |= a[i] ^ b[i];
+      const aVal = a[i];
+      const bVal = b[i];
+      if (aVal !== undefined && bVal !== undefined) {
+        result |= aVal ^ bVal;
+      }
     }
     return result === 0;
   }

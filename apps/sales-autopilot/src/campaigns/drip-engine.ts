@@ -13,12 +13,11 @@ import type {
     Lead,
     StepDelay,
     StepCondition,
-    EnrollmentStatus,
     CampaignStatus,
     AbVariant,
 } from '../types.js';
 
-const logger = createLogger('drip-engine');
+const logger = createLogger({ name: 'drip-engine', level: 'info' });
 
 // In-memory storage for demo - in production, use database
 const campaigns = new Map<string, DripCampaign>();
@@ -256,7 +255,8 @@ function selectAbVariant(abTest: { variants: AbVariant[] }): AbVariant {
         }
     }
 
-    return abTest.variants[0];
+    // variants array is never empty when called, return first element
+    return abTest.variants[0]!;
 }
 
 /**
@@ -567,8 +567,8 @@ function extractFirstName(email: string | null): string | null {
 
     // Try common patterns: firstname.lastname, firstname_lastname, firstnamelastname
     const parts = local.split(/[._]/);
-    if (parts.length > 0) {
-        const firstName = parts[0];
+    const firstName = parts[0];
+    if (firstName && firstName.length > 0) {
         return firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
     }
 

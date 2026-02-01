@@ -168,7 +168,7 @@ export function createRoutes(ctx: TrackingContext): Hono {
     }
 
     // Redirect to original URL
-    return c.redirect(redirectUrl, config.tracking.click.redirectStatus);
+    return c.redirect(redirectUrl, config.tracking.click.redirectStatus as 301 | 302 | 303 | 307 | 308);
   });
 
   // =============================================================================
@@ -302,7 +302,7 @@ export function createRoutes(ctx: TrackingContext): Hono {
       WHERE tenant_id = $1 AND email = $2
     `, [data.tenantId, data.recipient.toLowerCase()]);
 
-    const preferences = new Map(prefsResult.rows.map(r => [r.category, r.subscribed]));
+    const preferences = new Map(prefsResult.rows.map((r: { category: string; subscribed: boolean }) => [r.category, r.subscribed]));
 
     // Get available categories for this tenant
     const categoriesResult = await db.query<{ name: string; description: string }>(`
@@ -311,7 +311,7 @@ export function createRoutes(ctx: TrackingContext): Hono {
       ORDER BY display_order
     `, [data.tenantId]);
 
-    const categories = categoriesResult.rows.map(cat => ({
+    const categories = categoriesResult.rows.map((cat: { name: string; description: string }) => ({
       name: cat.name,
       description: cat.description,
       subscribed: preferences.get(cat.name) ?? true, // Default to subscribed

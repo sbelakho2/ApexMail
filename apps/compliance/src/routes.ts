@@ -19,8 +19,15 @@ import { GDPRAutomation } from './gdpr';
 import { complianceConfig } from './config';
 
 // Initialize dependencies
-const db = new Pool({ connectionString: complianceConfig.databaseUrl });
-const redis = new Redis(complianceConfig.redisUrl);
+const db = new Pool({
+    host: complianceConfig.database.host,
+    port: complianceConfig.database.port,
+    database: complianceConfig.database.name,
+    user: complianceConfig.database.user,
+    password: complianceConfig.database.password,
+    max: complianceConfig.database.maxConnections,
+});
+const redis = new Redis(complianceConfig.redis.url);
 const riskEngine = new RiskScoringEngine(db, redis);
 const contentScanner = new ContentScanner(db, redis);
 const auditLogger = new AuditLogger(db, redis, complianceConfig.auditLog.signingKey);
@@ -448,7 +455,7 @@ app.post('/api/gdpr/requests/:requestId/process', async (c) => {
 });
 
 app.get('/api/gdpr/requests/:requestId', async (c) => {
-    const { requestId } = c.req.param();
+    const { requestId: _requestId } = c.req.param();
     // Get request details (requires implementation in GDPRAutomation)
     return c.json({ error: 'Not implemented' }, 501);
 });

@@ -102,16 +102,17 @@ export class ReplicationService {
    */
   async initialize(): Promise<void> {
     // Connect to replica databases
-    for (const replica of config.replicaHosts) {
+    for (const replicaHost of config.replicaHosts) {
+      if (!replicaHost) continue;
       const pool = new Pool({
-        host: replica.host,
-        port: replica.port,
-        database: config.database,
+        host: replicaHost,
+        port: config.dbReplicaPort,
+        database: config.dbName,
         user: config.dbUser,
         password: config.dbPassword,
         max: 5,
       });
-      this.replicaPools.set(replica.host, pool);
+      this.replicaPools.set(replicaHost, pool);
     }
 
     console.log('[Replication] Service initialized');

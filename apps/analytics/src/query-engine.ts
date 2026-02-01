@@ -5,7 +5,7 @@
 import type { Pool } from 'pg';
 import type { Logger } from '@apexmail/lib';
 import { config } from './config.js';
-import { readdir, stat } from 'fs/promises';
+import { readdir } from 'fs/promises';
 import { join } from 'path';
 
 interface QueryEngineConfig {
@@ -37,7 +37,6 @@ interface AnalyticsQuery {
 export class QueryEngine {
   private readonly db: Pool;
   private readonly logger: Logger;
-  private duckdbConnection: unknown = null; // DuckDB connection
 
   constructor(options: QueryEngineConfig) {
     this.db = options.db;
@@ -55,7 +54,6 @@ export class QueryEngine {
 
   async close(): Promise<void> {
     // Close DuckDB connection if open
-    this.duckdbConnection = null;
     this.logger.info('Query engine closed');
   }
 
@@ -85,7 +83,7 @@ export class QueryEngine {
       : [tenantId, startDate, endDate]
     );
 
-    return result.rows.map(row => ({
+    return result.rows.map((row: { period: Date; count: string }) => ({
       timestamp: row.period.toISOString(),
       value: parseInt(row.count, 10),
     }));
@@ -131,9 +129,9 @@ export class QueryEngine {
     );
 
     // Calculate total for percentages
-    const total = result.rows.reduce((sum, row) => sum + parseInt(row.count, 10), 0);
+    const total = result.rows.reduce((sum: number, row: { dimension: string; count: string }) => sum + parseInt(row.count, 10), 0);
 
-    return result.rows.map(row => {
+    return result.rows.map((row: { dimension: string; count: string }) => {
       const count = parseInt(row.count, 10);
       return {
         dimension: row.dimension,
@@ -168,15 +166,15 @@ export class QueryEngine {
           AND event_type = $4
       `, [tenantId, startDate, endDate, stage]);
 
-      counts.push(parseInt(result.rows[0].count, 10));
+      counts.push(parseInt(result.rows[0]?.count ?? '0', 10));
     }
 
     const initial = counts[0] || 1;
 
     return {
       stages: stages.map((stage, i) => {
-        const count = counts[i];
-        const prevCount = i > 0 ? counts[i - 1] : count;
+        const count = counts[i] ?? 0;
+        const prevCount = i > 0 ? (counts[i - 1] ?? count) : count;
         return {
           stage,
           count,
@@ -283,7 +281,7 @@ export class QueryEngine {
     `, [tenantId, startDate, endDate]);
 
     return {
-      buckets: result.rows.map(row => ({
+      buckets: result.rows.map((row: { bucket: string; count: string }) => ({
         range: row.bucket,
         count: parseInt(row.count, 10),
       })),
@@ -302,7 +300,7 @@ export class QueryEngine {
       timestamp: string;
     }>;
   }> {
-    const { tenantId, startDate, endDate, limit = 100 } = query;
+    const { tenantId, startDate, endDate } = query;
 
     // Find relevant Parquet files
     const files = await this.findParquetFiles(tenantId, startDate, endDate);
@@ -329,14 +327,13 @@ export class QueryEngine {
   /**
    * Get real-time stats from Redis
    */
-  async getRealtimeStats(tenantId: string): Promise<{
+  async getRealtimeStats(_tenantId: string): Promise<{
     today: Record<string, number>;
     thisHour: Record<string, number>;
   }> {
     // This would query Redis for real-time counters
     // Placeholder implementation
-    const date = new Date().toISOString().split('T')[0];
-    const hour = new Date().getUTCHours();
+    // TODO: Use _tenantId to query Redis for tenant-specific stats
 
     return {
       today: {

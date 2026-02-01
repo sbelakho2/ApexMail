@@ -79,6 +79,8 @@ export class DashboardPage extends BasePage {
     readonly welcomeMessage: Locator;
     readonly statsCards: Locator;
     readonly recentCampaignsTable: Locator;
+    readonly recentCampaigns: Locator;
+    readonly activityFeed: Locator;
     readonly quickActions: Locator;
     readonly searchInput: Locator;
     readonly userMenu: Locator;
@@ -89,6 +91,8 @@ export class DashboardPage extends BasePage {
         this.welcomeMessage = page.getByRole('heading', { level: 1 });
         this.statsCards = page.locator('[data-testid="stats-card"]');
         this.recentCampaignsTable = page.getByRole('table');
+        this.recentCampaigns = page.getByRole('table');
+        this.activityFeed = page.locator('[data-testid="activity-feed"]');
         this.quickActions = page.locator('[data-testid="quick-actions"]');
         this.searchInput = page.getByPlaceholder('Search');
         this.userMenu = page.getByRole('button', { name: 'User menu' });
@@ -97,6 +101,17 @@ export class DashboardPage extends BasePage {
 
     async getStatsCount(): Promise<number> {
         return this.statsCards.count();
+    }
+
+    async getMetrics(): Promise<{ name: string; value: string }[]> {
+        const cards = await this.statsCards.all();
+        const metrics: { name: string; value: string }[] = [];
+        for (const card of cards) {
+            const name = await card.locator('[data-testid="metric-name"]').textContent() ?? '';
+            const value = await card.locator('[data-testid="metric-value"]').textContent() ?? '';
+            metrics.push({ name, value });
+        }
+        return metrics;
     }
 
     async search(query: string): Promise<void> {
@@ -241,9 +256,11 @@ export class CampaignEditorPage extends BasePage {
  */
 export class ContactsPage extends BasePage {
     readonly addContactButton: Locator;
+    readonly addButton: Locator;
     readonly importButton: Locator;
     readonly searchInput: Locator;
     readonly contactsTable: Locator;
+    readonly contactTable: Locator;
     readonly contactRows: Locator;
     readonly listsSidebar: Locator;
     readonly bulkActionsMenu: Locator;
@@ -251,12 +268,18 @@ export class ContactsPage extends BasePage {
     constructor(page: Page) {
         super(page, '/contacts');
         this.addContactButton = page.getByRole('button', { name: 'Add Contact' });
+        this.addButton = page.getByRole('button', { name: 'Add Contact' });
         this.importButton = page.getByRole('button', { name: 'Import' });
         this.searchInput = page.getByPlaceholder('Search contacts');
         this.contactsTable = page.getByRole('table');
+        this.contactTable = page.getByRole('table');
         this.contactRows = page.getByRole('row').filter({ hasNot: page.getByRole('columnheader') });
         this.listsSidebar = page.locator('[data-testid="lists-sidebar"]');
         this.bulkActionsMenu = page.getByRole('button', { name: 'Bulk Actions' });
+    }
+
+    async clickAdd(): Promise<void> {
+        await this.addContactButton.click();
     }
 
     async addContact(data: {
@@ -278,6 +301,26 @@ export class ContactsPage extends BasePage {
 
     async selectList(listName: string): Promise<void> {
         await this.listsSidebar.getByText(listName).click();
+    }
+
+    async filterByList(listName: string): Promise<void> {
+        await this.listsSidebar.getByText(listName).click();
+    }
+
+    async filterByTag(tagName: string): Promise<void> {
+        await this.page.getByRole('button', { name: 'Filter by Tag' }).click();
+        await this.page.getByRole('option', { name: tagName }).click();
+    }
+
+    async clickContact(email: string): Promise<void> {
+        await this.page.getByRole('cell', { name: email }).click();
+    }
+
+    async deleteContact(email: string): Promise<void> {
+        const row = this.page.getByRole('row', { name: new RegExp(email) });
+        await row.getByRole('button', { name: 'Actions' }).click();
+        await this.page.getByRole('menuitem', { name: 'Delete' }).click();
+        await this.page.getByRole('button', { name: 'Confirm' }).click();
     }
 
     async getContactCount(): Promise<number> {

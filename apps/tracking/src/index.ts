@@ -5,7 +5,7 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { createLogger } from '@apexmail/lib';
 import { config } from './config.js';
 import { createRoutes } from './routes.js';
@@ -14,8 +14,7 @@ import { EventProcessor } from './processor.js';
 
 const logger = createLogger({
   level: config.logging.level,
-  format: config.logging.format,
-  service: 'tracking',
+  name: 'tracking',
 });
 
 // =============================================================================
@@ -33,7 +32,7 @@ const db = new Pool({
   connectionTimeoutMillis: config.database.connectionTimeout,
 });
 
-db.on('error', (err) => {
+db.on('error', (err: Error) => {
   logger.error('Database pool error', { error: err.message });
 });
 
@@ -47,7 +46,7 @@ const redis = new Redis({
   password: config.redis.password || undefined,
   db: config.redis.db,
   maxRetriesPerRequest: 3,
-  retryStrategy(times) {
+  retryStrategy(times: number) {
     if (times > 10) {
       logger.error('Redis connection failed after 10 retries');
       return null;
@@ -56,7 +55,7 @@ const redis = new Redis({
   },
 });
 
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
   logger.error('Redis error', { error: err.message });
 });
 
@@ -203,7 +202,7 @@ async function main(): Promise<void> {
     processor.start();
 
     // Start HTTP server
-    const server = serve({
+    serve({
       fetch: app.fetch,
       port: config.server.port,
       hostname: config.server.host,

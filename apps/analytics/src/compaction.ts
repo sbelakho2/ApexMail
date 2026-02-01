@@ -132,7 +132,7 @@ export class CompactionWorker {
   }
 
   private async compactDate(date: Date): Promise<void> {
-    const dateStr = date.toISOString().split('T')[0];
+    const dateStr = date.toISOString().slice(0, 10);
     this.logger.info('Compacting date', { date: dateStr });
 
     const lockKey = `compaction:lock:${dateStr}`;
@@ -162,10 +162,11 @@ export class CompactionWorker {
       }
 
       // Write parquet files for each tenant
-      for (const [tenantId, tenantEvents] of eventsByTenant) {
+      for (const [tenantId, tenantEvents] of eventsByTenant.entries()) {
         if (this.stopRequested) break;
-        
-        await this.writeParquetFile(tenantId, dateStr, tenantEvents);
+        if (tenantId) {
+          await this.writeParquetFile(tenantId, dateStr, tenantEvents);
+        }
       }
 
       // Mark compaction as complete
@@ -205,7 +206,7 @@ export class CompactionWorker {
 
   private async writeParquetFile(tenantId: string, dateStr: string, events: EventRow[]): Promise<void> {
     // Create directory structure: basePath/tenant_id/year/month/
-    const [year, month] = dateStr.split('-');
+    const [year, month] = dateStr.split('-') as [string, string];
     const dirPath = join(config.storage.basePath, tenantId, year, month);
     await mkdir(dirPath, { recursive: true });
 
@@ -273,20 +274,20 @@ export class CompactionWorker {
     };
 
     for (const event of events) {
-      columns.id.push(event.id);
-      columns.tenant_id.push(event.tenant_id);
-      columns.message_id.push(event.message_id);
-      columns.event_type.push(event.event_type);
-      columns.recipient.push(event.recipient);
-      columns.timestamp.push(event.timestamp.getTime());
-      columns.user_agent.push(event.user_agent);
-      columns.ip_address.push(event.ip_address);
-      columns.link_id.push(event.link_id);
-      columns.link_url.push(event.link_url);
-      columns.bounce_type.push(event.bounce_type);
-      columns.bounce_subtype.push(event.bounce_subtype);
-      columns.diagnostic_code.push(event.diagnostic_code);
-      columns.complaint_type.push(event.complaint_type);
+      columns.id!.push(event.id);
+      columns.tenant_id!.push(event.tenant_id);
+      columns.message_id!.push(event.message_id);
+      columns.event_type!.push(event.event_type);
+      columns.recipient!.push(event.recipient);
+      columns.timestamp!.push(event.timestamp.getTime());
+      columns.user_agent!.push(event.user_agent);
+      columns.ip_address!.push(event.ip_address);
+      columns.link_id!.push(event.link_id);
+      columns.link_url!.push(event.link_url);
+      columns.bounce_type!.push(event.bounce_type);
+      columns.bounce_subtype!.push(event.bounce_subtype);
+      columns.diagnostic_code!.push(event.diagnostic_code);
+      columns.complaint_type!.push(event.complaint_type);
     }
 
     return columns;

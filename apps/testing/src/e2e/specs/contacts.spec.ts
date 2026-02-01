@@ -8,21 +8,21 @@ import { test, expect, generators, helpers } from '../fixtures.js';
 
 test.describe('Contacts', () => {
     test.describe('Contact List', () => {
-        test('should display contacts page', async ({ authenticatedPage, contactsPage }) => {
+        test('should display contacts page', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await expect(contactsPage.addButton).toBeVisible();
             await expect(contactsPage.searchInput).toBeVisible();
         });
         
-        test('should display contacts in table', async ({ authenticatedPage, contactsPage }) => {
+        test('should display contacts in table', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             const count = await contactsPage.getContactCount();
             expect(count).toBeGreaterThanOrEqual(0);
         });
         
-        test('should search contacts by email', async ({ authenticatedPage, contactsPage }) => {
+        test('should search contacts by email', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await contactsPage.searchContacts('test@example.com');
@@ -30,7 +30,7 @@ test.describe('Contacts', () => {
             await helpers.waitForApi(contactsPage.page, '/api/contacts');
         });
         
-        test('should filter contacts by list', async ({ authenticatedPage, contactsPage }) => {
+        test('should filter contacts by list', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await contactsPage.filterByList('Newsletter');
@@ -38,7 +38,7 @@ test.describe('Contacts', () => {
             await expect(contactsPage.page).toHaveURL(/list=/);
         });
         
-        test('should sort contacts by date', async ({ authenticatedPage, contactsPage }) => {
+        test('should sort contacts by date', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await contactsPage.contactTable.getByRole('columnheader', { name: 'Created' }).click();
@@ -49,14 +49,14 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Creation', () => {
-        test('should open add contact dialog', async ({ authenticatedPage, contactsPage }) => {
+        test('should open add contact dialog', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             await contactsPage.clickAdd();
             
             await expect(contactsPage.page.getByRole('dialog')).toBeVisible();
         });
         
-        test('should add a new contact', async ({ authenticatedPage, contactsPage }) => {
+        test('should add a new contact', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             const email = generators.email();
@@ -70,7 +70,7 @@ test.describe('Contacts', () => {
             await expect(contactsPage.page.getByText('Contact added')).toBeVisible();
         });
         
-        test('should validate email format', async ({ authenticatedPage, contactsPage }) => {
+        test('should validate email format', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             await contactsPage.clickAdd();
             
@@ -80,7 +80,7 @@ test.describe('Contacts', () => {
             await expect(contactsPage.page.getByText('Invalid email format')).toBeVisible();
         });
         
-        test('should prevent duplicate emails', async ({ authenticatedPage, contactsPage }) => {
+        test('should prevent duplicate emails', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             // Try to add existing contact
@@ -92,7 +92,7 @@ test.describe('Contacts', () => {
             await expect(contactsPage.page.getByText('Contact already exists')).toBeVisible();
         });
         
-        test('should add custom attributes', async ({ authenticatedPage, contactsPage }) => {
+        test('should add custom attributes', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             await contactsPage.clickAdd();
             
@@ -109,7 +109,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Editing', () => {
-        test('should open contact details', async ({ authenticatedPage, contactsPage }) => {
+        test('should open contact details', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await contactsPage.clickContact('test@example.com');
@@ -117,7 +117,7 @@ test.describe('Contacts', () => {
             await expect(contactsPage.page.getByRole('dialog')).toBeVisible();
         });
         
-        test('should edit contact details', async ({ authenticatedPage, page }) => {
+        test('should edit contact details', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             await page.getByRole('row', { name: /test@example.com/ }).click();
@@ -127,7 +127,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('Contact updated')).toBeVisible();
         });
         
-        test('should add contact to list', async ({ authenticatedPage, page }) => {
+        test('should add contact to list', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             await page.getByRole('row', { name: /test@example.com/ }).click();
@@ -137,7 +137,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('Contact added to list')).toBeVisible();
         });
         
-        test('should remove contact from list', async ({ authenticatedPage, page }) => {
+        test('should remove contact from list', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             await page.getByRole('row', { name: /test@example.com/ }).click();
@@ -148,7 +148,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Deletion', () => {
-        test('should delete a contact', async ({ authenticatedPage, contactsPage }) => {
+        test('should delete a contact', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await contactsPage.deleteContact('delete-me@example.com');
@@ -156,7 +156,7 @@ test.describe('Contacts', () => {
             await expect(contactsPage.page.getByText('Contact deleted')).toBeVisible();
         });
         
-        test('should bulk delete contacts', async ({ authenticatedPage, page }) => {
+        test('should bulk delete contacts', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             // Select multiple contacts
@@ -171,7 +171,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Import', () => {
-        test('should open import dialog', async ({ authenticatedPage, page }) => {
+        test('should open import dialog', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             await page.getByRole('button', { name: 'Import' }).click();
@@ -179,7 +179,7 @@ test.describe('Contacts', () => {
             await expect(page.getByRole('dialog')).toBeVisible();
         });
         
-        test('should validate CSV format', async ({ authenticatedPage, page }) => {
+        test('should validate CSV format', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             await page.getByRole('button', { name: 'Import' }).click();
             
@@ -194,7 +194,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('Please upload a CSV file')).toBeVisible();
         });
         
-        test('should preview import data', async ({ authenticatedPage, page }) => {
+        test('should preview import data', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             await page.getByRole('button', { name: 'Import' }).click();
             
@@ -210,7 +210,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('2 contacts to import')).toBeVisible();
         });
         
-        test('should complete import', async ({ authenticatedPage, page }) => {
+        test('should complete import', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             await page.getByRole('button', { name: 'Import' }).click();
             
@@ -228,7 +228,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Export', () => {
-        test('should export all contacts', async ({ authenticatedPage, page }) => {
+        test('should export all contacts', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             const [download] = await Promise.all([
@@ -239,7 +239,7 @@ test.describe('Contacts', () => {
             expect(download.suggestedFilename()).toMatch(/contacts.*\.csv$/);
         });
         
-        test('should export filtered contacts', async ({ authenticatedPage, page }) => {
+        test('should export filtered contacts', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts?list=newsletter');
             
             const [download] = await Promise.all([
@@ -252,7 +252,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Lists', () => {
-        test('should create a new list', async ({ authenticatedPage, page }) => {
+        test('should create a new list', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/lists');
             
             await page.getByRole('button', { name: 'Create List' }).click();
@@ -262,7 +262,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('List created')).toBeVisible();
         });
         
-        test('should rename a list', async ({ authenticatedPage, page }) => {
+        test('should rename a list', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/lists');
             
             await page.getByRole('row', { name: /Test List/ }).getByRole('button', { name: 'Actions' }).click();
@@ -274,7 +274,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('List renamed')).toBeVisible();
         });
         
-        test('should delete an empty list', async ({ authenticatedPage, page }) => {
+        test('should delete an empty list', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/lists');
             
             await page.getByRole('row', { name: /Empty List/ }).getByRole('button', { name: 'Actions' }).click();
@@ -286,7 +286,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Segments', () => {
-        test('should create a segment', async ({ authenticatedPage, page }) => {
+        test('should create a segment', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/segments');
             
             await page.getByRole('button', { name: 'Create Segment' }).click();
@@ -303,7 +303,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('Segment created')).toBeVisible();
         });
         
-        test('should preview segment size', async ({ authenticatedPage, page }) => {
+        test('should preview segment size', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/segments/new');
             
             await page.getByRole('button', { name: 'Add Condition' }).click();
@@ -318,7 +318,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Activity', () => {
-        test('should display contact activity history', async ({ authenticatedPage, page }) => {
+        test('should display contact activity history', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/test-contact-1');
             
             await page.getByRole('tab', { name: 'Activity' }).click();
@@ -326,7 +326,7 @@ test.describe('Contacts', () => {
             await expect(page.getByText('Activity History')).toBeVisible();
         });
         
-        test('should filter activity by type', async ({ authenticatedPage, page }) => {
+        test('should filter activity by type', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts/test-contact-1?tab=activity');
             
             await page.getByRole('combobox', { name: 'Activity Type' }).selectOption('open');
@@ -337,7 +337,7 @@ test.describe('Contacts', () => {
     });
     
     test.describe('Contact Tags', () => {
-        test('should add tag to contact', async ({ authenticatedPage, page }) => {
+        test('should add tag to contact', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             await page.getByRole('row', { name: /test@example.com/ }).click();
@@ -348,7 +348,7 @@ test.describe('Contacts', () => {
             await expect(page.locator('[data-testid="tag-VIP"]')).toBeVisible();
         });
         
-        test('should remove tag from contact', async ({ authenticatedPage, page }) => {
+        test('should remove tag from contact', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/contacts');
             
             await page.getByRole('row', { name: /test@example.com/ }).click();
@@ -357,7 +357,7 @@ test.describe('Contacts', () => {
             await expect(page.locator('[data-testid="tag-VIP"]')).not.toBeVisible();
         });
         
-        test('should filter contacts by tag', async ({ authenticatedPage, contactsPage }) => {
+        test('should filter contacts by tag', async ({ authenticatedPage: _authenticatedPage, contactsPage }) => {
             await contactsPage.goto();
             
             await contactsPage.filterByTag('VIP');

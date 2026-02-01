@@ -671,4 +671,50 @@ export class FailoverService {
       this.configs.set(componentName, { ...existing, ...updates });
     }
   }
+
+  // Alias methods for app.ts and routes compatibility
+  async initialize(): Promise<void> {
+    console.log('[Failover] Initializing failover service...');
+    // Start monitoring
+    this.startMonitoring();
+    console.log('[Failover] Initialized');
+  }
+
+  async getStatus(): Promise<{
+    state: FailoverState;
+    failureCount: Record<string, number>;
+    lastFailover: Record<string, Date>;
+    configuredComponents: string[];
+  }> {
+    return {
+      state: this.getState(),
+      failureCount: Object.fromEntries(this.failureCount),
+      lastFailover: Object.fromEntries(this.lastFailover),
+      configuredComponents: Array.from(this.configs.keys()),
+    };
+  }
+
+  async initiateFailover(component: string, reason: string): Promise<FailoverEvent> {
+    const failoverConfig = this.configs.get(component);
+    if (!failoverConfig) {
+      throw new Error(`No failover config for component: ${component}`);
+    }
+    const result = await this.triggerFailover(component, failoverConfig, 'manual', reason);
+    if (!result.ok) {
+      throw result.error;
+    }
+    return result.value;
+  }
+
+  async failback(component: string): Promise<void> {
+    console.log(`[Failover] Initiating failback for ${component}`);
+    // Reset state to normal
+    this.state = FailoverState.NORMAL;
+    this.failureCount.set(component, 0);
+    console.log(`[Failover] Failback complete for ${component}`);
+  }
+
+  getFailoverHistory(limit: number = 100): FailoverEvent[] {
+    return this.getHistory(limit);
+  }
 }

@@ -23,8 +23,15 @@ import { GDPRAutomation } from './gdpr';
 import { complianceConfig } from './config';
 
 // Initialize database and Redis
-const db = new Pool({ connectionString: complianceConfig.databaseUrl });
-const redis = new Redis(complianceConfig.redisUrl);
+const db = new Pool({
+    host: complianceConfig.database.host,
+    port: complianceConfig.database.port,
+    database: complianceConfig.database.name,
+    user: complianceConfig.database.user,
+    password: complianceConfig.database.password,
+    max: complianceConfig.database.maxConnections,
+});
+const redis = new Redis(complianceConfig.redis.url);
 
 // Initialize services
 const riskEngine = new RiskScoringEngine(db, redis);

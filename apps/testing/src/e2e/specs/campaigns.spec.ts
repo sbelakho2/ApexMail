@@ -8,14 +8,14 @@ import { test, expect, generators, helpers } from '../fixtures.js';
 
 test.describe('Campaigns', () => {
     test.describe('Campaign List', () => {
-        test('should display campaigns page', async ({ authenticatedPage, page, campaignsPage }) => {
+        test('should display campaigns page', async ({ authenticatedPage: _authenticatedPage, page: _page, campaignsPage }) => {
             await campaignsPage.goto();
             
             await expect(campaignsPage.createButton).toBeVisible();
             await expect(campaignsPage.searchInput).toBeVisible();
         });
         
-        test('should show empty state when no campaigns', async ({ authenticatedPage, page }) => {
+        test('should show empty state when no campaigns', async ({ authenticatedPage: _authenticatedPage, page }) => {
             // Mock empty campaigns response
             await helpers.mockApi(page, '/api/campaigns', { campaigns: [], total: 0 });
             
@@ -24,14 +24,14 @@ test.describe('Campaigns', () => {
             await expect(page.locator('[data-testid="empty-state"]')).toBeVisible();
         });
         
-        test('should display campaign list', async ({ authenticatedPage, campaignsPage }) => {
+        test('should display campaign list', async ({ authenticatedPage: _authenticatedPage, campaignsPage }) => {
             await campaignsPage.goto();
             
             const count = await campaignsPage.getCampaignCount();
             expect(count).toBeGreaterThanOrEqual(0);
         });
         
-        test('should filter campaigns by status', async ({ authenticatedPage, campaignsPage }) => {
+        test('should filter campaigns by status', async ({ authenticatedPage: _authenticatedPage, campaignsPage }) => {
             await campaignsPage.goto();
             
             await campaignsPage.filterByStatus('Draft');
@@ -40,7 +40,7 @@ test.describe('Campaigns', () => {
             await expect(campaignsPage.page).toHaveURL(/status=draft/);
         });
         
-        test('should search campaigns by name', async ({ authenticatedPage, campaignsPage }) => {
+        test('should search campaigns by name', async ({ authenticatedPage: _authenticatedPage, campaignsPage }) => {
             await campaignsPage.goto();
             
             await campaignsPage.searchCampaigns('Test');
@@ -49,7 +49,7 @@ test.describe('Campaigns', () => {
             await helpers.waitForApi(campaignsPage.page, '/api/campaigns');
         });
         
-        test('should paginate through campaigns', async ({ authenticatedPage, campaignsPage }) => {
+        test('should paginate through campaigns', async ({ authenticatedPage: _authenticatedPage, campaignsPage }) => {
             await campaignsPage.goto();
             
             // If pagination exists, click next
@@ -61,14 +61,14 @@ test.describe('Campaigns', () => {
     });
     
     test.describe('Campaign Creation', () => {
-        test('should open campaign editor', async ({ authenticatedPage, campaignsPage }) => {
+        test('should open campaign editor', async ({ authenticatedPage: _authenticatedPage, campaignsPage }) => {
             await campaignsPage.goto();
             await campaignsPage.clickCreate();
             
             await expect(campaignsPage.page).toHaveURL(/\/campaigns\/new/);
         });
         
-        test('should create a new draft campaign', async ({ authenticatedPage, campaignEditorPage }) => {
+        test('should create a new draft campaign', async ({ authenticatedPage: _authenticatedPage, campaignEditorPage }) => {
             await campaignEditorPage.goto();
             
             const campaignName = generators.campaignName();
@@ -85,7 +85,7 @@ test.describe('Campaigns', () => {
             await expect(campaignEditorPage.page.getByText('Campaign saved')).toBeVisible();
         });
         
-        test('should validate required fields', async ({ authenticatedPage, campaignEditorPage }) => {
+        test('should validate required fields', async ({ authenticatedPage: _authenticatedPage, campaignEditorPage }) => {
             await campaignEditorPage.goto();
             
             // Try to save without filling required fields
@@ -96,7 +96,7 @@ test.describe('Campaigns', () => {
             await expect(campaignEditorPage.subjectInput).toHaveAttribute('aria-invalid', 'true');
         });
         
-        test('should select recipients for campaign', async ({ authenticatedPage, campaignEditorPage }) => {
+        test('should select recipients for campaign', async ({ authenticatedPage: _authenticatedPage, campaignEditorPage }) => {
             await campaignEditorPage.goto();
             
             await campaignEditorPage.fillBasicInfo({
@@ -110,7 +110,7 @@ test.describe('Campaigns', () => {
             await expect(campaignEditorPage.recipientsSelector).toContainText('Test List');
         });
         
-        test('should send a test email', async ({ authenticatedPage, campaignEditorPage }) => {
+        test('should send a test email', async ({ authenticatedPage: _authenticatedPage, campaignEditorPage }) => {
             await campaignEditorPage.goto();
             
             await campaignEditorPage.fillBasicInfo({
@@ -126,14 +126,14 @@ test.describe('Campaigns', () => {
     });
     
     test.describe('Campaign Editing', () => {
-        test('should load existing campaign for editing', async ({ authenticatedPage, page }) => {
+        test('should load existing campaign for editing', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/edit');
             
             // Should load campaign data
             await expect(page.getByLabel('Campaign Name')).toHaveValue('Test Campaign');
         });
         
-        test('should update campaign details', async ({ authenticatedPage, page }) => {
+        test('should update campaign details', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/edit');
             
             await page.getByLabel('Subject Line').fill('Updated Subject');
@@ -142,7 +142,7 @@ test.describe('Campaigns', () => {
             await expect(page.getByText('Campaign updated')).toBeVisible();
         });
         
-        test('should preview campaign', async ({ authenticatedPage, page }) => {
+        test('should preview campaign', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/edit');
             
             await page.getByRole('button', { name: 'Preview' }).click();
@@ -153,7 +153,7 @@ test.describe('Campaigns', () => {
     });
     
     test.describe('Campaign Scheduling', () => {
-        test('should schedule campaign for future send', async ({ authenticatedPage, page }) => {
+        test('should schedule campaign for future send', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/edit');
             
             await page.getByRole('button', { name: 'Schedule' }).click();
@@ -170,7 +170,7 @@ test.describe('Campaigns', () => {
             await expect(page.getByText('Campaign scheduled')).toBeVisible();
         });
         
-        test('should not allow scheduling in the past', async ({ authenticatedPage, page }) => {
+        test('should not allow scheduling in the past', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/edit');
             
             await page.getByRole('button', { name: 'Schedule' }).click();
@@ -186,7 +186,7 @@ test.describe('Campaigns', () => {
     });
     
     test.describe('Campaign Sending', () => {
-        test('should send campaign immediately', async ({ authenticatedPage, page }) => {
+        test('should send campaign immediately', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/edit');
             
             await page.getByRole('button', { name: 'Send' }).click();
@@ -200,7 +200,7 @@ test.describe('Campaigns', () => {
             await expect(page.getByText('Campaign is sending')).toBeVisible();
         });
         
-        test('should require recipients before sending', async ({ authenticatedPage, campaignEditorPage }) => {
+        test('should require recipients before sending', async ({ authenticatedPage: _authenticatedPage, campaignEditorPage }) => {
             await campaignEditorPage.goto();
             
             await campaignEditorPage.fillBasicInfo({
@@ -216,10 +216,11 @@ test.describe('Campaigns', () => {
     });
     
     test.describe('Campaign Deletion', () => {
-        test('should delete a campaign', async ({ authenticatedPage, campaignsPage }) => {
+        test('should delete a campaign', async ({ authenticatedPage: _authenticatedPage, campaignsPage }) => {
             await campaignsPage.goto();
             
-            const initialCount = await campaignsPage.getCampaignCount();
+            // Get initial count for potential verification
+            await campaignsPage.getCampaignCount();
             
             await campaignsPage.deleteCampaign('Test Campaign');
             
@@ -227,7 +228,7 @@ test.describe('Campaigns', () => {
             await expect(campaignsPage.page.getByText('Campaign deleted')).toBeVisible();
         });
         
-        test('should not delete a sent campaign', async ({ authenticatedPage, page }) => {
+        test('should not delete a sent campaign', async ({ authenticatedPage: _authenticatedPage, page }) => {
             // Assuming test-campaign-2 is a sent campaign
             await page.goto('/campaigns');
             
@@ -240,7 +241,7 @@ test.describe('Campaigns', () => {
     });
     
     test.describe('Campaign Analytics', () => {
-        test('should display campaign stats', async ({ authenticatedPage, page }) => {
+        test('should display campaign stats', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/analytics');
             
             // Stats should be visible
@@ -249,7 +250,7 @@ test.describe('Campaigns', () => {
             await expect(page.getByText('Bounce Rate')).toBeVisible();
         });
         
-        test('should export campaign report', async ({ authenticatedPage, page }) => {
+        test('should export campaign report', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/campaigns/test-campaign-1/analytics');
             
             const [download] = await Promise.all([

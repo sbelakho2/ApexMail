@@ -12,11 +12,10 @@ import { waitForRateLimit } from './rate-limiter.js';
 import {
     resolveMxRecords,
     identifyEmailProvider,
-    getEmailInfrastructure,
 } from './dns-resolver.js';
 import type { Lead, LeadSource, MxRecord } from '../types.js';
 
-const logger = createLogger('saas-hunter');
+const logger = createLogger({ name: 'saas-hunter', level: 'info' });
 
 interface ScrapedCompany {
     name: string;
@@ -287,7 +286,7 @@ export async function scrapeCapterra(
  */
 export async function scrapeCrunchbase(
     query: string,
-    maxPages: number = 3
+    _maxPages: number = 3
 ): Promise<ScrapeResult> {
     const companies: ScrapedCompany[] = [];
     const errors: string[] = [];

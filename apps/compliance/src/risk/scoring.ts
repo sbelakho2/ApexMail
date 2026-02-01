@@ -102,7 +102,7 @@ export class RiskScoringEngine {
         );
 
         if (result.rows.length > 0) {
-            const profile = this.mapRowToProfile(result.rows[0]);
+            const profile = this.mapRowToProfile(result.rows[0]!);
 
             if (new Date() > profile.nextAssessmentAt) {
                 return this.assessTenant(tenantId);
@@ -528,7 +528,7 @@ export class RiskScoringEngine {
     /**
      * Calculate sending limits based on risk level
      */
-    private calculateLimits(riskLevel: RiskLevel, metrics: TenantMetrics): TenantLimits {
+    private calculateLimits(riskLevel: RiskLevel, _metrics: TenantMetrics): TenantLimits {
         const baseLimits = this.config.baseLimits;
 
         const multipliers: Record<RiskLevel, number> = {
@@ -556,7 +556,7 @@ export class RiskScoringEngine {
      * Evaluate and create risk flags
      */
     private async evaluateFlags(
-        tenantId: string,
+        _tenantId: string,
         metrics: TenantMetrics,
         blocklistStatus: BlocklistStatus
     ): Promise<RiskFlag[]> {
@@ -687,7 +687,8 @@ export class RiskScoringEngine {
     /**
      * Map database row to profile object
      */
-    private mapRowToProfile(row: Record<string, unknown>): TenantRiskProfile {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private mapRowToProfile(row: any): TenantRiskProfile {
         return {
             tenantId: row.tenant_id as string,
             riskScore: row.risk_score as number,

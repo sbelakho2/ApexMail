@@ -4,7 +4,7 @@
  */
 
 import * as cheerio from 'cheerio';
-import { createLogger, generateId } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
 import { isUrlAllowed } from '../scrapers/robots-service.js';
 import { waitForRateLimit } from '../scrapers/rate-limiter.js';
@@ -12,15 +12,10 @@ import type {
     EnrichmentResult,
     TechnologyStack,
     SocialProfile,
-    LeadLocation,
-    FundingInfo,
-    ContactInfo,
-    EnrichmentSource,
     EmployeeRange,
-    RevenueRange,
 } from '../types.js';
 
-const logger = createLogger('company-enrichment');
+const logger = createLogger({ name: 'company-enrichment', level: 'info' });
 
 /**
  * Fetches a page with proper headers
@@ -208,49 +203,6 @@ function parseEmployeeRange(text: string): EmployeeRange | null {
 }
 
 /**
- * Extracts location from structured data or text
- */
-function parseLocation(locationText: string): LeadLocation | null {
-    if (!locationText) return null;
-
-    // Common patterns: "City, State, Country" or "City, Country"
-    const parts = locationText.split(',').map((p) => p.trim());
-
-    if (parts.length >= 2) {
-        const country = parts[parts.length - 1];
-        const city = parts[0];
-        const state = parts.length > 2 ? parts[1] : null;
-
-        // Simple country code mapping
-        const countryCodes: Record<string, string> = {
-            'United States': 'US',
-            USA: 'US',
-            'United Kingdom': 'GB',
-            UK: 'GB',
-            Canada: 'CA',
-            Australia: 'AU',
-            Germany: 'DE',
-            France: 'FR',
-            Netherlands: 'NL',
-            Estonia: 'EE',
-            Singapore: 'SG',
-            India: 'IN',
-        };
-
-        return {
-            city,
-            state,
-            country,
-            countryCode: countryCodes[country] || country.substring(0, 2).toUpperCase(),
-            postalCode: null,
-            timezone: null,
-        };
-    }
-
-    return null;
-}
-
-/**
  * Enriches from LinkedIn company page (public data only)
  */
 async function enrichFromLinkedIn(companyName: string): Promise<Partial<EnrichmentResult>> {
@@ -278,7 +230,7 @@ async function enrichFromLinkedIn(companyName: string): Promise<Partial<Enrichme
 
         // Try to extract employee count from description
         const empMatch = description.match(/(\d[\d,]+)\s*employees?/i);
-        if (empMatch) {
+        if (empMatch && empMatch[1]) {
             const empCount = parseInt(empMatch[1].replace(/,/g, ''), 10);
             if (empCount <= 10) {
                 result.employeeRange = { min: 1, max: 10, label: '1-10' };
@@ -299,7 +251,7 @@ async function enrichFromLinkedIn(companyName: string): Promise<Partial<Enrichme
 
         // Try to extract industry
         const industryMatch = description.match(/industry:\s*([^|•\n]+)/i);
-        if (industryMatch) {
+        if (industryMatch && industryMatch[1]) {
             result.industry = industryMatch[1].trim();
         }
     }
@@ -524,9 +476,11 @@ export async function batchEnrichCompanies(
             const result = batchResults[j];
             const company = batch[j];
 
+            if (!result || !company) continue;
+
             if (result.status === 'fulfilled') {
                 results.set(company.domain, result.value);
-            } else {
+            } else if (result.status === 'rejected') {
                 logger.warn('Failed to enrich company', {
                     domain: company.domain,
                     error: result.reason,

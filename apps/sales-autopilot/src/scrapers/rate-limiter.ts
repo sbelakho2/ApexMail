@@ -7,7 +7,7 @@ import { createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
 import { getCrawlDelay } from './robots-service.js';
 
-const logger = createLogger('rate-limiter');
+const logger = createLogger({ name: 'rate-limiter', level: 'info' });
 
 interface DomainBucket {
     tokens: number;

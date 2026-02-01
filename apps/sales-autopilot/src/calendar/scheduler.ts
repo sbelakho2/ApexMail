@@ -8,11 +8,10 @@ import type {
     DemoSlot,
     SchedulingPreferences,
     AvailableHours,
-    SlotStatus,
     MeetingType,
 } from '../types.js';
 
-const logger = createLogger('calendar');
+const logger = createLogger({ name: 'calendar', level: 'info' });
 
 // In-memory storage for demo
 const slots = new Map<string, DemoSlot>();
@@ -173,12 +172,12 @@ export function getAvailableSlots(
     // Check max bookings per day
     const bookingsPerDay = new Map<string, number>();
     for (const booking of existingBookings) {
-        const dayKey = booking.startTime.toISOString().split('T')[0];
+        const dayKey = booking.startTime.toISOString().split('T')[0] ?? '';
         bookingsPerDay.set(dayKey, (bookingsPerDay.get(dayKey) || 0) + 1);
     }
 
     return availableSlots.filter((slot) => {
-        const dayKey = slot.startTime.toISOString().split('T')[0];
+        const dayKey = slot.startTime.toISOString().split('T')[0] ?? '';
         return (bookingsPerDay.get(dayKey) || 0) < prefs.maxBookingsPerDay;
     });
 }
@@ -499,7 +498,7 @@ export function parseTimeRequest(
         tomorrow.setDate(tomorrow.getDate() + 1);
 
         const timeMatch = lowerText.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-        if (timeMatch) {
+        if (timeMatch && timeMatch[1]) {
             let hours = parseInt(timeMatch[1], 10);
             const minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
             const meridiem = timeMatch[3]?.toLowerCase();
@@ -520,7 +519,7 @@ export function parseTimeRequest(
         const dayMatch = lowerText.match(
             /next\s+(monday|tuesday|wednesday|thursday|friday)/i
         );
-        if (dayMatch) {
+        if (dayMatch && dayMatch[1]) {
             const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
             const targetDay = dayNames.indexOf(dayMatch[1].toLowerCase());
 
@@ -539,7 +538,7 @@ export function parseTimeRequest(
     const dateMatch = lowerText.match(
         /(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/
     );
-    if (dateMatch) {
+    if (dateMatch && dateMatch[1] && dateMatch[2]) {
         const month = parseInt(dateMatch[1], 10) - 1;
         const day = parseInt(dateMatch[2], 10);
         const year = dateMatch[3]

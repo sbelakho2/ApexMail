@@ -4,7 +4,7 @@
  * Tests for login, logout, signup, and password reset flows.
  */
 
-import { test, expect, generators, helpers } from '../fixtures.js';
+import { test, expect, generators } from '../fixtures.js';
 
 test.describe('Authentication', () => {
     test.describe('Login', () => {
@@ -189,7 +189,7 @@ test.describe('Authentication', () => {
     });
     
     test.describe('Session Security', () => {
-        test('should handle expired session gracefully', async ({ page, authenticatedPage }) => {
+        test('should handle expired session gracefully', async ({ page, authenticatedPage: _authenticatedPage }) => {
             // Clear auth cookie to simulate expired session
             await page.context().clearCookies();
             

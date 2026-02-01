@@ -16,14 +16,6 @@ function fileExists(relativePath: string): boolean {
     return fs.existsSync(path.join(ROOT_DIR, relativePath));
 }
 
-function readFile(relativePath: string): string {
-    const fullPath = path.join(ROOT_DIR, relativePath);
-    if (!fs.existsSync(fullPath)) {
-        throw new Error(`File not found: ${relativePath}`);
-    }
-    return fs.readFileSync(fullPath, 'utf-8');
-}
-
 function directoryExists(relativePath: string): boolean {
     const fullPath = path.join(ROOT_DIR, relativePath);
     return fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory();

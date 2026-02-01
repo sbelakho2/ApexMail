@@ -9,7 +9,7 @@ import app from './routes.js';
 import { startCampaignProcessor, stopCampaignProcessor } from './campaigns/index.js';
 import { getLead } from './crm/index.js';
 
-const logger = createLogger('autopilot');
+const logger = createLogger({ name: 'autopilot', level: 'info' });
 
 async function main(): Promise<void> {
     logger.info('Starting Sales Autopilot service', {

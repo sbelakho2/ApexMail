@@ -13,7 +13,7 @@ import type {
     EmailAddress,
 } from '../types.js';
 
-const logger = createLogger('inbox-sentinel');
+const logger = createLogger({ name: 'inbox-sentinel', level: 'info' });
 
 // Classification patterns
 const CLASSIFICATION_PATTERNS: Array<{
@@ -295,8 +295,8 @@ export function analyzeIntent(
  */
 export function suggestAction(
     classification: MessageClassification,
-    sentiment: SentimentAnalysis,
-    intent: IntentAnalysis
+    _sentiment: SentimentAnalysis,
+    _intent: IntentAnalysis
 ): SuggestedAction | null {
     switch (classification) {
         case 'interested':
@@ -388,7 +388,7 @@ export function parseEmailAddress(rawAddress: string): EmailAddress {
     // Handle formats like "Name <email@example.com>" or just "email@example.com"
     const match = rawAddress.match(/(?:"?([^"<]+)"?\s*)?<?([^<>\s]+@[^<>\s]+)>?/);
 
-    if (match) {
+    if (match && match[2]) {
         return {
             email: match[2].trim(),
             name: match[1]?.trim() || null,
@@ -421,11 +421,13 @@ export function extractReturnDate(text: string): Date | null {
         const match = text.match(pattern);
         if (match) {
             // Try to parse the date
-            const dateStr = match[match.length - 1] || match[3] || match[2];
-            const parsed = new Date(dateStr);
+            const dateStr = match[match.length - 1] ?? match[3] ?? match[2];
+            if (dateStr) {
+                const parsed = new Date(dateStr);
 
-            if (!isNaN(parsed.getTime())) {
-                return parsed;
+                if (!isNaN(parsed.getTime())) {
+                    return parsed;
+                }
             }
         }
     }

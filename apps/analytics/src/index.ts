@@ -3,7 +3,7 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { createLogger } from '@apexmail/lib';
 import { config } from './config.js';
 import { CompactionWorker } from './compaction.js';
@@ -12,8 +12,7 @@ import { QueryEngine } from './query-engine.js';
 
 const logger = createLogger({
   level: config.logging.level,
-  format: config.logging.format,
-  service: 'analytics',
+  name: 'analytics',
 });
 
 // =============================================================================
@@ -29,7 +28,7 @@ const db = new Pool({
   max: config.database.maxConnections,
 });
 
-db.on('error', (err) => {
+db.on('error', (err: Error) => {
   logger.error('Database pool error', { error: err.message });
 });
 
@@ -43,7 +42,7 @@ const redis = new Redis({
   password: config.redis.password || undefined,
   db: config.redis.db,
   maxRetriesPerRequest: 3,
-  retryStrategy(times) {
+  retryStrategy(times: number) {
     if (times > 10) {
       logger.error('Redis connection failed after 10 retries');
       return null;
@@ -52,7 +51,7 @@ const redis = new Redis({
   },
 });
 
-redis.on('error', (err) => {
+redis.on('error', (err: Error) => {
   logger.error('Redis error', { error: err.message });
 });
 
@@ -89,8 +88,8 @@ function parseCronSchedule(cron: string): { hour: number; minute: number } {
   // Simple parser for "minute hour * * *" format
   const parts = cron.split(' ');
   return {
-    minute: parseInt(parts[0], 10),
-    hour: parseInt(parts[1], 10),
+    minute: parseInt(parts[0] ?? '0', 10),
+    hour: parseInt(parts[1] ?? '0', 10),
   };
 }
 

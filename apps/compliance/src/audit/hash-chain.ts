@@ -15,7 +15,6 @@ import {
     AuditResource,
     AuditLogQuery,
 } from '../types';
-import { complianceConfig } from '../config';
 import { randomUUID } from 'crypto';
 
 interface LogContext {
@@ -36,7 +35,6 @@ interface ChainValidationResult {
 export class AuditLogger {
     private db: Pool;
     private redis: Redis;
-    private _config = complianceConfig.auditLog;
     private signingKey: string;
     private lastHash: Map<string, string> = new Map();
 
@@ -785,6 +783,7 @@ export class AuditLogger {
     /**
      * Notify webhooks of audit events
      */
+    // @ts-expect-error Reserved for future webhook notifications
     private async notifyWebhooks(entry: AuditLogEntry): Promise<void> {
         if (!entry.tenantId) return;
 

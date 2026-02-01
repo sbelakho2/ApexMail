@@ -52,8 +52,8 @@ haRoutes.get('/health/readiness', async (c) => {
   const healthCheck = c.get('healthCheck');
   const result = await healthCheck.checkDatabase();
   
-  if (!result.healthy) {
-    return c.json({ status: 'not ready', reason: result.error }, 503);
+  if (result.status !== 'healthy') {
+    return c.json({ status: 'not ready', reason: result.message }, 503);
   }
   
   return c.json({ status: 'ready', timestamp: new Date().toISOString() });
@@ -80,51 +80,39 @@ haRoutes.get('/health/detailed', async (c) => {
 
 haRoutes.get('/failover/status', async (c) => {
   const failover = c.get('failover');
-  const status = failover.getStatus();
+  const status = await failover.getStatus();
   
   return c.json(status);
 });
 
 haRoutes.post('/failover/initiate', async (c) => {
   const failover = c.get('failover');
-  const body = await c.req.json<{ targetHost?: string; reason?: string }>();
+  const body = await c.req.json<{ component?: string; reason?: string }>().catch(() => ({ component: undefined, reason: undefined }));
   
-  const result = await failover.initiateFailover(
-    FailoverType.MANUAL,
-    body.targetHost,
-    body.reason
-  );
+  const component = body.component ?? 'database';
+  const reason = body.reason ?? 'Manual failover initiated';
+  const result = await failover.initiateFailover(component, reason);
   
-  if (!result.ok) {
-    return c.json({ error: result.error.message }, 400);
-  }
-  
-  return c.json({ message: 'Failover initiated', event: result.value });
+  return c.json({ message: 'Failover initiated', event: result });
 });
 
 haRoutes.post('/failover/failback', async (c) => {
   const failover = c.get('failover');
+  const body = await c.req.json<{ component?: string }>().catch(() => ({ component: undefined }));
   
-  const result = await failover.failback();
+  const component = body.component ?? 'database';
+  await failover.failback(component);
   
-  if (!result.ok) {
-    return c.json({ error: result.error.message }, 400);
-  }
-  
-  return c.json({ message: 'Failback completed', event: result.value });
+  return c.json({ message: 'Failback completed' });
 });
 
 haRoutes.get('/failover/history', async (c) => {
   const failover = c.get('failover');
   const limit = parseInt(c.req.query('limit') || '100');
   
-  const result = await failover.getFailoverHistory(limit);
+  const events = failover.getFailoverHistory(limit);
   
-  if (!result.ok) {
-    return c.json({ error: result.error.message }, 500);
-  }
-  
-  return c.json({ events: result.value });
+  return c.json({ events });
 });
 
 // ===== Backup Routes =====
@@ -158,7 +146,7 @@ haRoutes.post('/backups/full', async (c) => {
 
 haRoutes.post('/backups/incremental', async (c) => {
   const backup = c.get('backup');
-  const body = await c.req.json<{ baseBackupId?: string }>().catch(() => ({}));
+  const body = await c.req.json<{ baseBackupId?: string }>().catch(() => ({ baseBackupId: undefined }));
   
   const result = await backup.createIncrementalBackup(body.baseBackupId);
   
@@ -618,9 +606,9 @@ haRoutes.post('/chaos/experiments/:id/end', async (c) => {
 haRoutes.post('/chaos/experiments/:id/abort', async (c) => {
   const chaos = c.get('chaos');
   const id = c.req.param('id');
-  const body = await c.req.json<{ reason?: string }>().catch(() => ({}));
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({ reason: undefined }));
   
-  const result = await chaos.abortExperiment(id, body.reason);
+  const result = await chaos.abortExperiment(id, body.reason ?? 'Manual abort');
   
   if (!result.ok) {
     return c.json({ error: result.error.message }, 400);

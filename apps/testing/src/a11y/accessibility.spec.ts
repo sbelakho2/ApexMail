@@ -5,7 +5,38 @@
  */
 
 import { test, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { injectAxe, getViolations } from 'axe-playwright';
+
+/**
+ * Custom AxeBuilder class for compatibility with the test code
+ */
+class AxeBuilder {
+    private page: any;
+    private tags: string[] = [];
+    private includeSelector: string | null = null;
+
+    constructor(options: { page: any }) {
+        this.page = options.page;
+    }
+
+    withTags(tags: string[]): AxeBuilder {
+        this.tags = tags;
+        return this;
+    }
+
+    include(selector: string): AxeBuilder {
+        this.includeSelector = selector;
+        return this;
+    }
+
+    async analyze(): Promise<{ violations: Array<{ id: string; nodes: any[] }> }> {
+        await injectAxe(this.page);
+        const violations = await getViolations(this.page, this.includeSelector || undefined, {
+            runOnly: this.tags.length > 0 ? { type: 'tag', values: this.tags } : undefined,
+        });
+        return { violations };
+    }
+}
 
 const pages = [
     { name: 'Login', path: '/login', authenticated: false },
@@ -233,7 +264,7 @@ test.describe('Accessibility Tests', () => {
                 .analyze();
 
             const contrastViolations = contrastResults.violations.filter(
-                (v) => v.id === 'color-contrast'
+                (v: { id: string }) => v.id === 'color-contrast'
             );
 
             expect(contrastViolations).toHaveLength(0);

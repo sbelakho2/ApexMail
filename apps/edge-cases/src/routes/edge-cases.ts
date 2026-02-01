@@ -29,7 +29,7 @@ export function createEdgeCaseRoutes(
 
     if (emails && Array.isArray(emails)) {
       const result = await eai.validateEmailAddresses(emails);
-      if (!result.ok) {
+      if (result.ok === false) {
         return c.json({ error: result.error.message }, 500);
       }
       return c.json({ results: result.value });
@@ -37,7 +37,7 @@ export function createEdgeCaseRoutes(
 
     if (email) {
       const result = await eai.validateEmail(email);
-      if (!result.ok) {
+      if (result.ok === false) {
         return c.json({ error: result.error.message }, 500);
       }
       return c.json(result.value);
@@ -58,7 +58,7 @@ export function createEdgeCaseRoutes(
     }
 
     const result = await eai.parseEmailAddress(email, displayName);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 400);
     }
 
@@ -104,7 +104,7 @@ export function createEdgeCaseRoutes(
     }));
 
     const result = await attachments.validateAttachments(processedAttachments);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 500);
     }
 
@@ -197,7 +197,7 @@ export function createEdgeCaseRoutes(
       recurrence: body.recurrence,
     });
 
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 500);
     }
 
@@ -220,7 +220,7 @@ export function createEdgeCaseRoutes(
     }
 
     const result = calendar.parseICS(icsContent);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 400);
     }
 
@@ -234,7 +234,7 @@ export function createEdgeCaseRoutes(
     const body = await c.req.json();
 
     const result = await calendar.createInvite(body);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 500);
     }
 
@@ -310,7 +310,7 @@ export function createEdgeCaseRoutes(
       return c.json({ error: 'Headers object and subject required' }, 400);
     }
 
-    const headersMap = new Map(Object.entries(headers));
+    const headersMap = new Map<string, string>(Object.entries(headers));
     const result = delivery.detectAutoResponder(headersMap, subject, messageBody);
 
     return c.json(result);
@@ -323,7 +323,7 @@ export function createEdgeCaseRoutes(
     const domain = c.req.param('domain');
 
     const result = await delivery.resolveMX(domain);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 404);
     }
 
@@ -337,7 +337,7 @@ export function createEdgeCaseRoutes(
     const messageId = c.req.param('messageId');
 
     const result = await delivery.getDeliveryHistory(messageId);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 500);
     }
 
@@ -356,7 +356,7 @@ export function createEdgeCaseRoutes(
     }
 
     const result = await delivery.scheduleGreylistRetry(messageId, delay || 300000);
-    if (!result.ok) {
+    if (result.ok === false) {
       return c.json({ error: result.error.message }, 500);
     }
 

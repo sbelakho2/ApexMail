@@ -8,13 +8,13 @@ import { test, expect, helpers } from '../fixtures.js';
 
 test.describe('Dashboard', () => {
     test.describe('Overview', () => {
-        test('should display dashboard after login', async ({ authenticatedPage, dashboardPage }) => {
+        test('should display dashboard after login', async ({ authenticatedPage: _authenticatedPage, dashboardPage }) => {
             await dashboardPage.goto();
             
             await expect(dashboardPage.welcomeMessage).toBeVisible();
         });
         
-        test('should display key metrics', async ({ authenticatedPage, dashboardPage }) => {
+        test('should display key metrics', async ({ authenticatedPage: _authenticatedPage, dashboardPage }) => {
             await dashboardPage.goto();
             
             const metrics = await dashboardPage.getMetrics();
@@ -25,13 +25,13 @@ test.describe('Dashboard', () => {
             expect(metrics).toHaveProperty('clickRate');
         });
         
-        test('should display recent campaigns', async ({ authenticatedPage, dashboardPage }) => {
+        test('should display recent campaigns', async ({ authenticatedPage: _authenticatedPage, dashboardPage }) => {
             await dashboardPage.goto();
             
             await expect(dashboardPage.recentCampaigns).toBeVisible();
         });
         
-        test('should display activity feed', async ({ authenticatedPage, dashboardPage }) => {
+        test('should display activity feed', async ({ authenticatedPage: _authenticatedPage, dashboardPage }) => {
             await dashboardPage.goto();
             
             await expect(dashboardPage.activityFeed).toBeVisible();
@@ -39,7 +39,7 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Metrics Cards', () => {
-        test('should show total contacts metric', async ({ authenticatedPage, page }) => {
+        test('should show total contacts metric', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const contactsCard = page.locator('[data-testid="metric-contacts"]');
@@ -49,14 +49,14 @@ test.describe('Dashboard', () => {
             expect(Number(value?.replace(/,/g, ''))).toBeGreaterThanOrEqual(0);
         });
         
-        test('should show emails sent metric', async ({ authenticatedPage, page }) => {
+        test('should show emails sent metric', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const emailsCard = page.locator('[data-testid="metric-emails"]');
             await expect(emailsCard).toBeVisible();
         });
         
-        test('should show trend indicators', async ({ authenticatedPage, page }) => {
+        test('should show trend indicators', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const trendIndicator = page.locator('[data-testid="metric-trend"]').first();
@@ -66,7 +66,7 @@ test.describe('Dashboard', () => {
             expect(trendClass).toMatch(/positive|negative|neutral/);
         });
         
-        test('should navigate to detail on metric click', async ({ authenticatedPage, page }) => {
+        test('should navigate to detail on metric click', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.locator('[data-testid="metric-contacts"]').click();
@@ -76,14 +76,14 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Charts and Graphs', () => {
-        test('should display email performance chart', async ({ authenticatedPage, page }) => {
+        test('should display email performance chart', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const chart = page.locator('[data-testid="performance-chart"]');
             await expect(chart).toBeVisible();
         });
         
-        test('should change chart time range', async ({ authenticatedPage, page }) => {
+        test('should change chart time range', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('button', { name: '30 days' }).click();
@@ -92,14 +92,14 @@ test.describe('Dashboard', () => {
             await helpers.waitForApi(page, '/api/analytics');
         });
         
-        test('should display engagement rate chart', async ({ authenticatedPage, page }) => {
+        test('should display engagement rate chart', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const engagementChart = page.locator('[data-testid="engagement-chart"]');
             await expect(engagementChart).toBeVisible();
         });
         
-        test('should toggle chart data series', async ({ authenticatedPage, page }) => {
+        test('should toggle chart data series', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             // Click on legend to toggle series
@@ -112,7 +112,7 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Recent Campaigns Widget', () => {
-        test('should display recent campaigns', async ({ authenticatedPage, page }) => {
+        test('should display recent campaigns', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const widget = page.locator('[data-testid="recent-campaigns"]');
@@ -122,7 +122,7 @@ test.describe('Dashboard', () => {
             await expect(campaigns).toHaveCount(5); // Default shows 5
         });
         
-        test('should show campaign status', async ({ authenticatedPage, page }) => {
+        test('should show campaign status', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const campaignItem = page.locator('[data-testid="campaign-item"]').first();
@@ -131,7 +131,7 @@ test.describe('Dashboard', () => {
             await expect(status).toHaveText(/Draft|Scheduled|Sent|Sending/);
         });
         
-        test('should navigate to campaign on click', async ({ authenticatedPage, page }) => {
+        test('should navigate to campaign on click', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.locator('[data-testid="campaign-item"]').first().click();
@@ -139,7 +139,7 @@ test.describe('Dashboard', () => {
             await expect(page).toHaveURL(/\/campaigns\//);
         });
         
-        test('should show view all link', async ({ authenticatedPage, page }) => {
+        test('should show view all link', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('link', { name: 'View all campaigns' }).click();
@@ -149,14 +149,14 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Activity Feed', () => {
-        test('should display recent activity', async ({ authenticatedPage, page }) => {
+        test('should display recent activity', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const feed = page.locator('[data-testid="activity-feed"]');
             await expect(feed).toBeVisible();
         });
         
-        test('should show activity details', async ({ authenticatedPage, page }) => {
+        test('should show activity details', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const activity = page.locator('[data-testid="activity-item"]').first();
@@ -165,7 +165,7 @@ test.describe('Dashboard', () => {
             await expect(activity.locator('[data-testid="activity-time"]')).toBeVisible();
         });
         
-        test('should filter activity by type', async ({ authenticatedPage, page }) => {
+        test('should filter activity by type', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('combobox', { name: 'Activity Type' }).selectOption('opens');
@@ -176,7 +176,7 @@ test.describe('Dashboard', () => {
             expect(firstType?.toLowerCase()).toContain('open');
         });
         
-        test('should auto-refresh activity feed', async ({ authenticatedPage, page }) => {
+        test('should auto-refresh activity feed', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             // Wait for auto-refresh (simulated by checking API call)
@@ -185,14 +185,14 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Quick Actions', () => {
-        test('should show quick action buttons', async ({ authenticatedPage, page }) => {
+        test('should show quick action buttons', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await expect(page.getByRole('button', { name: 'New Campaign' })).toBeVisible();
             await expect(page.getByRole('button', { name: 'Add Contact' })).toBeVisible();
         });
         
-        test('should navigate to campaign creation', async ({ authenticatedPage, page }) => {
+        test('should navigate to campaign creation', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('button', { name: 'New Campaign' }).click();
@@ -200,7 +200,7 @@ test.describe('Dashboard', () => {
             await expect(page).toHaveURL('/campaigns/new');
         });
         
-        test('should open add contact dialog', async ({ authenticatedPage, page }) => {
+        test('should open add contact dialog', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('button', { name: 'Add Contact' }).click();
@@ -210,13 +210,13 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Date Range Selector', () => {
-        test('should display date range selector', async ({ authenticatedPage, page }) => {
+        test('should display date range selector', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await expect(page.getByRole('button', { name: /Last \d+ days/ })).toBeVisible();
         });
         
-        test('should change date range', async ({ authenticatedPage, page }) => {
+        test('should change date range', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('button', { name: /Last \d+ days/ }).click();
@@ -226,7 +226,7 @@ test.describe('Dashboard', () => {
             await helpers.waitForApi(page, '/api/analytics');
         });
         
-        test('should support custom date range', async ({ authenticatedPage, page }) => {
+        test('should support custom date range', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.getByRole('button', { name: /Last \d+ days/ }).click();
@@ -238,14 +238,14 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Notifications', () => {
-        test('should display notifications badge', async ({ authenticatedPage, page }) => {
+        test('should display notifications badge', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             const badge = page.locator('[data-testid="notifications-badge"]');
             await expect(badge).toBeVisible();
         });
         
-        test('should open notifications panel', async ({ authenticatedPage, page }) => {
+        test('should open notifications panel', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.locator('[data-testid="notifications-button"]').click();
@@ -253,7 +253,7 @@ test.describe('Dashboard', () => {
             await expect(page.locator('[data-testid="notifications-panel"]')).toBeVisible();
         });
         
-        test('should mark notification as read', async ({ authenticatedPage, page }) => {
+        test('should mark notification as read', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.goto('/dashboard');
             
             await page.locator('[data-testid="notifications-button"]').click();
@@ -266,7 +266,7 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Responsive Layout', () => {
-        test('should adapt to mobile viewport', async ({ authenticatedPage, page }) => {
+        test('should adapt to mobile viewport', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.setViewportSize({ width: 375, height: 667 });
             await page.goto('/dashboard');
             
@@ -277,7 +277,7 @@ test.describe('Dashboard', () => {
             await expect(page.locator('[data-testid="mobile-menu-button"]')).toBeVisible();
         });
         
-        test('should open mobile sidebar', async ({ authenticatedPage, page }) => {
+        test('should open mobile sidebar', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.setViewportSize({ width: 375, height: 667 });
             await page.goto('/dashboard');
             
@@ -286,7 +286,7 @@ test.describe('Dashboard', () => {
             await expect(page.locator('[data-testid="mobile-sidebar"]')).toBeVisible();
         });
         
-        test('should stack cards on tablet', async ({ authenticatedPage, page }) => {
+        test('should stack cards on tablet', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.setViewportSize({ width: 768, height: 1024 });
             await page.goto('/dashboard');
             
@@ -301,7 +301,7 @@ test.describe('Dashboard', () => {
     });
     
     test.describe('Loading States', () => {
-        test('should show skeleton loading state', async ({ authenticatedPage, page }) => {
+        test('should show skeleton loading state', async ({ authenticatedPage: _authenticatedPage, page }) => {
             // Slow down API to see loading state
             await page.route('/api/**', async (route) => {
                 await new Promise(resolve => setTimeout(resolve, 1000));
@@ -313,7 +313,7 @@ test.describe('Dashboard', () => {
             await expect(page.locator('[data-testid="skeleton"]').first()).toBeVisible();
         });
         
-        test('should handle API errors gracefully', async ({ authenticatedPage, page }) => {
+        test('should handle API errors gracefully', async ({ authenticatedPage: _authenticatedPage, page }) => {
             await page.route('/api/analytics', async (route) => {
                 await route.fulfill({
                     status: 500,

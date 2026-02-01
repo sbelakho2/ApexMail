@@ -5,8 +5,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
-import { createLogger, generateId } from '@apexmail/lib';
-import { config } from './config.js';
+import { createLogger } from '@apexmail/lib';
 
 // Import modules
 import * as scrapers from './scrapers/index.js';
@@ -16,9 +15,9 @@ import * as inbox from './inbox/index.js';
 import * as crm from './crm/index.js';
 import * as calendar from './calendar/index.js';
 import * as ads from './ads/index.js';
-import type { Lead } from './types.js';
+import type { Lead, LeadFilters } from './types.js';
 
-const logger = createLogger('autopilot-api');
+const logger = createLogger({ name: 'autopilot-api', level: 'info' });
 
 const app = new Hono();
 
@@ -79,7 +78,7 @@ app.post('/api/v1/discovery/export', async (c) => {
         };
     }>();
 
-    const leads = crm.filterLeads(body.tenantId, body.filters || {});
+    const leads = crm.filterLeads(body.tenantId, (body.filters || {}) as LeadFilters);
     const csv = scrapers.exportLeadsToCsv(leads);
 
     return new Response(csv, {

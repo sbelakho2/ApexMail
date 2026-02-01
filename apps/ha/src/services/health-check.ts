@@ -320,7 +320,7 @@ export class HealthCheckService {
         };
       }
 
-      const data = await response.json().catch(() => ({}));
+      const data = await response.json().catch(() => ({})) as Record<string, unknown>;
 
       return {
         name: endpoint.name,
@@ -528,5 +528,31 @@ export class HealthCheckService {
   getHealthHistory(componentName: string, limit: number = 100): ComponentHealth[] {
     const history = this.healthHistory.get(componentName) ?? [];
     return history.slice(-limit);
+  }
+
+  // Alias methods for app.ts compatibility
+  startMonitoring(): void {
+    this.startPeriodicChecks();
+  }
+
+  stopMonitoring(): void {
+    this.stopPeriodicChecks();
+  }
+
+  async getSystemHealth(): Promise<ClusterHealth> {
+    return this.getClusterHealth();
+  }
+
+  async checkDatabase(): Promise<ComponentHealth> {
+    return this.checkDatabaseHealth('primary', this.primaryDb);
+  }
+
+  async checkRedis(): Promise<ComponentHealth> {
+    return this.checkRedisHealth();
+  }
+
+  async checkReplicationLag(): Promise<number | null> {
+    const result = await this.getReplicationLag();
+    return result ?? null;
   }
 }

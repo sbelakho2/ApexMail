@@ -11,7 +11,6 @@ import type {
     LeadActivity,
     LeadTask,
     PipelineStage,
-    LeadStatus,
     ActivityType,
     TaskType,
     TaskPriority,
@@ -20,7 +19,7 @@ import type {
     LeadFilters,
 } from '../types.js';
 
-const logger = createLogger('crm-pipeline');
+const logger = createLogger({ name: 'crm-pipeline', level: 'info' });
 
 // In-memory storage for demo - in production, use database
 const pipelines = new Map<string, PipelineConfig>();
@@ -625,7 +624,10 @@ export function getPipelineStats(tenantId: string): {
         if (!byStage[lead.stage]) {
             byStage[lead.stage] = { count: 0, value: 0 };
         }
-        byStage[lead.stage].count++;
+        const stageData = byStage[lead.stage];
+        if (stageData) {
+            stageData.count++;
+        }
         totalScore += lead.score;
 
         if (lead.stage === 'closed_won') {

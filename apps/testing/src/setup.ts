@@ -111,8 +111,8 @@ expect.extend({
 
 // Extend Vitest types
 declare module 'vitest' {
-    interface Assertion<T = unknown> {
-        toBeWithinRange(floor: number, ceiling: number): T;
-        toContainObject(expected: Record<string, unknown>): T;
+    interface Assertion<T> {
+        toBeWithinRange(floor: number, ceiling: number): this;
+        toContainObject(expected: Record<string, unknown>): this;
     }
 }

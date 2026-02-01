@@ -71,7 +71,7 @@ export class ReconciliationWorker {
     if (this.running) {
       this.logger.warn('Reconciliation already in progress');
       return {
-        date: date.toISOString().split('T')[0],
+        date: date.toISOString().slice(0, 10),
         status: 'error',
         messagesSent: 0,
         eventsExpected: 0,
@@ -83,7 +83,7 @@ export class ReconciliationWorker {
 
     this.running = true;
     const startTime = Date.now();
-    const dateStr = date.toISOString().split('T')[0];
+    const dateStr = date.toISOString().slice(0, 10);
 
     this.logger.info('Starting reconciliation', { date: dateStr });
 
@@ -142,8 +142,10 @@ export class ReconciliationWorker {
         eventsExpected += expectedEvents.length;
 
         // Find missing and extra events
-        const foundEventTypes = new Set(
-          Array.from(messageEvents).map(e => e.split(':')[0])
+        const foundEventTypes = new Set<string>(
+          Array.from(messageEvents)
+            .map(e => e.split(':')[0])
+            .filter((t): t is string => typeof t === 'string' && t.length > 0)
         );
         
         const missingEvents: string[] = [];
@@ -163,7 +165,7 @@ export class ReconciliationWorker {
             messageId: message.id,
             tenantId: message.tenant_id,
             expectedEvents,
-            foundEvents: Array.from(foundEventTypes),
+            foundEvents: Array.from(foundEventTypes) as string[],
             missingEvents: [],
             extraEvents: foundTerminal.slice(1),
           });
@@ -174,7 +176,7 @@ export class ReconciliationWorker {
             messageId: message.id,
             tenantId: message.tenant_id,
             expectedEvents,
-            foundEvents: Array.from(foundEventTypes),
+            foundEvents: Array.from(foundEventTypes) as string[],
             missingEvents,
             extraEvents: [],
           });
@@ -353,7 +355,7 @@ export class ReconciliationWorker {
           )
       `);
 
-      const orphanedCount = parseInt(orphanedResult.rows[0].count, 10);
+      const orphanedCount = parseInt(orphanedResult.rows[0]?.count ?? '0', 10);
       if (orphanedCount > 0) {
         issues.push(`${orphanedCount} messages without events`);
       }
@@ -378,7 +380,7 @@ export class ReconciliationWorker {
           AND created_at < NOW() - INTERVAL '5 minutes'
       `);
 
-      const queueBacklog = parseInt(queueResult.rows[0].count, 10);
+      const queueBacklog = parseInt(queueResult.rows[0]?.count ?? '0', 10);
       if (queueBacklog > 1000) {
         issues.push(`Queue backlog: ${queueBacklog} messages`);
       }

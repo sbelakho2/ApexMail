@@ -11,7 +11,7 @@ import type {
     PipelineStage,
 } from '../types.js';
 
-const logger = createLogger('lead-scoring');
+const logger = createLogger({ name: 'lead-scoring', level: 'info' });
 
 interface ScoringWeights {
     firmographic: FirmographicWeights;

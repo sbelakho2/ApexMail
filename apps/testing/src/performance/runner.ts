@@ -194,9 +194,8 @@ export class PerformanceRunner {
 
             // Navigate and wait
             const url = `${this.config.baseUrl}${pageConfig.path}`;
-            const startTime = Date.now();
 
-            const response = await page.goto(url, { waitUntil: 'load' });
+            await page.goto(url, { waitUntil: 'load' });
             
             if (pageConfig.waitFor) {
                 await page.waitForSelector(pageConfig.waitFor);
@@ -226,7 +225,7 @@ export class PerformanceRunner {
                 ...resourceMetrics,
                 ...memoryMetrics,
                 ...timingMetrics,
-            };
+            } as PerformanceMetrics;
         } finally {
             await page.close();
             await context.close();

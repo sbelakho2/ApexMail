@@ -41,7 +41,6 @@ export class EventProcessor {
   private buffer: TrackingEvent[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
-  private stopped = false;
 
   constructor(options: EventProcessorConfig) {
     this.db = options.db;
@@ -65,8 +64,6 @@ export class EventProcessor {
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
-    
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = null;

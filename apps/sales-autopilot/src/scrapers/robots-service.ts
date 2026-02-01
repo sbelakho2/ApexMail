@@ -3,14 +3,21 @@
  * Ensures ethical scraping by respecting robots.txt directives
  */
 
-import robotsParser from 'robots-parser';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const robotsParser = require('robots-parser') as (url: string, txt: string) => RobotsParser;
 import { createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
 
-const logger = createLogger('robots-service');
+const logger = createLogger({ name: 'robots-service', level: 'info' });
+
+interface RobotsParser {
+    isAllowed(url: string, userAgent?: string): boolean | undefined;
+    getCrawlDelay(userAgent?: string): number | undefined;
+    getSitemaps(): string[];
+}
 
 interface RobotsCache {
-    parser: ReturnType<typeof robotsParser>;
+    parser: RobotsParser;
     fetchedAt: number;
 }
 
@@ -20,7 +27,7 @@ const CACHE_TTL_MS = 3600000; // 1 hour
 /**
  * Fetches and parses robots.txt for a given domain
  */
-export async function fetchRobotsTxt(domain: string): Promise<ReturnType<typeof robotsParser>> {
+export async function fetchRobotsTxt(domain: string): Promise<RobotsParser> {
     const cached = robotsCache.get(domain);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
         return cached.parser;

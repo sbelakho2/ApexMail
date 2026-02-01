@@ -9,7 +9,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { config } from './config.js';
 import { haRoutes } from './routes/ha.js';
 import { HealthCheckService } from './services/health-check.js';
@@ -54,7 +54,6 @@ const redis = new Redis({
   password: config.redisPassword,
   db: config.redisDb,
   maxRetriesPerRequest: 3,
-  retryDelayOnFailover: 100,
 });
 
 // Initialize services

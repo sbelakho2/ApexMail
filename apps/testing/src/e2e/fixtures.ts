@@ -4,7 +4,7 @@
  * Extended Playwright fixtures for ApexMail testing.
  */
 
-import { test as base, expect } from '@playwright/test';
+import { test as base, expect, Page, Route, Response } from '@playwright/test';
 import {
     LoginPage,
     DashboardPage,
@@ -201,11 +201,13 @@ export const helpers = {
     /**
      * Wait for API response
      */
-    waitForApi: async (page: base['page'], urlPattern: string | RegExp): Promise<void> => {
-        await page.waitForResponse((response) =>
-            typeof urlPattern === 'string'
-                ? response.url().includes(urlPattern)
-                : urlPattern.test(response.url())
+    waitForApi: async (page: Page, urlPattern: string | RegExp, options?: { timeout?: number }): Promise<void> => {
+        await page.waitForResponse(
+            (response: Response) =>
+                typeof urlPattern === 'string'
+                    ? response.url().includes(urlPattern)
+                    : urlPattern.test(response.url()),
+            options
         );
     },
     
@@ -213,11 +215,11 @@ export const helpers = {
      * Intercept and mock API response
      */
     mockApi: async (
-        page: base['page'],
+        page: Page,
         urlPattern: string | RegExp,
         response: unknown
     ): Promise<void> => {
-        await page.route(urlPattern, (route) => {
+        await page.route(urlPattern, (route: Route) => {
             route.fulfill({
                 status: 200,
                 contentType: 'application/json',
@@ -229,7 +231,7 @@ export const helpers = {
     /**
      * Clear all local storage
      */
-    clearStorage: async (page: base['page']): Promise<void> => {
+    clearStorage: async (page: Page): Promise<void> => {
         await page.evaluate(() => {
             localStorage.clear();
             sessionStorage.clear();
@@ -239,7 +241,7 @@ export const helpers = {
     /**
      * Set authentication cookie
      */
-    setAuthCookie: async (page: base['page'], token: string): Promise<void> => {
+    setAuthCookie: async (page: Page, token: string): Promise<void> => {
         await page.context().addCookies([
             {
                 name: 'auth_token',

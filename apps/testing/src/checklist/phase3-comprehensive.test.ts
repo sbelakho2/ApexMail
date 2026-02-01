@@ -19,12 +19,6 @@ function readFile(relativePath: string): string {
     return fs.readFileSync(path.join(ROOT_DIR, relativePath), 'utf-8');
 }
 
-function listDir(relativePath: string): string[] {
-    const fullPath = path.join(ROOT_DIR, relativePath);
-    if (!fs.existsSync(fullPath)) return [];
-    return fs.readdirSync(fullPath);
-}
-
 // =============================================================================
 // PHASE 3: Core Email Data Plane (API, Idempotency, Queues)
 // Goal: Reliable high-volume ingestion without external brokers

@@ -6,7 +6,7 @@
  * They WILL fail if implementations are incomplete or buggy.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 

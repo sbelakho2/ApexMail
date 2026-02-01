@@ -82,7 +82,7 @@ describe('PHASE 2: Data Layer - Deep Analysis', () => {
 
     it('should handle PgBouncer transaction mode (documented in comments)', () => {
       // PgBouncer config is documented in file header, not necessarily in code
-      expect(content).toContain('PgBouncer') || expect(content.length).toBeGreaterThan(100);
+      expect(content.includes('PgBouncer') || content.length > 100).toBe(true);
     });
   });
 
@@ -134,8 +134,7 @@ describe('PHASE 3: Core Email API - Deep Analysis', () => {
     });
 
     it('should implement sliding window rate limiter', () => {
-      expect(content).toContain('slidingWindow') || 
-      expect(content).toContain('SlidingWindow');
+      expect(content.includes('slidingWindow') || content.includes('SlidingWindow')).toBe(true);
     });
   });
 
@@ -271,8 +270,7 @@ describe('PHASE 5: Analytics & Tracking - Deep Analysis', () => {
     it('⚠️ BUG: Unbounded buffer growth during flush', () => {
       // Check if buffer can grow unbounded while flushing
       const hasFlushing = content.includes('flushing');
-      const checksBufferDuringFlush = content.includes('flushing') && 
-                                      content.includes('buffer.length');
+      // Note: checksBufferDuringFlush would check if buffer is monitored during flush
       
       if (hasFlushing && !content.includes('reject') && !content.includes('drop')) {
         console.warn('🐛 BUG FOUND: Buffer can grow unbounded while flushing is in progress');
@@ -296,7 +294,7 @@ describe('PHASE 6: Sales Autopilot - Deep Analysis', () => {
     const pipelineContent = readSourceFile('apps/sales-autopilot/src/crm/pipeline.ts');
     
     it('should have deal pipeline management', () => {
-      expect(pipelineContent).toContain('Pipeline') || expect(pipelineContent).toContain('Deal');
+      expect(pipelineContent.includes('Pipeline') || pipelineContent.includes('Deal')).toBe(true);
     });
   });
 
@@ -318,7 +316,7 @@ describe('PHASE 6.5: Security & Compliance - Deep Analysis', () => {
     const content = readSourceFile('apps/compliance/src/risk/scoring.ts');
 
     it('should calculate composite risk score', () => {
-      expect(content).toContain('riskScore') || expect(content).toContain('risk_score');
+      expect(content.includes('riskScore') || content.includes('risk_score')).toBe(true);
     });
 
     it('should evaluate multiple risk factors', () => {
@@ -582,9 +580,11 @@ describe('PHASE 15: Multi-Tenant Isolation - Deep Analysis', () => {
     });
 
     it('should validate queries for dangerous patterns', () => {
-      expect(content).toContain('dangerousPatterns') || 
-      expect(content).toContain('information_schema') ||
-      expect(content).toContain('pg_catalog');
+      expect(
+        content.includes('dangerousPatterns') || 
+        content.includes('information_schema') ||
+        content.includes('pg_catalog')
+      ).toBe(true);
     });
   });
 });

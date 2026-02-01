@@ -26,6 +26,7 @@ interface DataExport {
     events: Array<Record<string, unknown>>;
     consents: ConsentRecord[];
     preferences: Record<string, unknown>;
+    [key: string]: unknown;
 }
 
 export class GDPRAutomation {

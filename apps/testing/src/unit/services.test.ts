@@ -23,12 +23,6 @@ describe('CampaignService', () => {
         add: vi.fn(),
     };
     
-    const mockCache = {
-        get: vi.fn(),
-        set: vi.fn(),
-        del: vi.fn(),
-    };
-    
     beforeEach(() => {
         vi.clearAllMocks();
     });

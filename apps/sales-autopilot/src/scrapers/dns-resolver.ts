@@ -7,7 +7,7 @@ import { Resolver } from 'node:dns/promises';
 import { createLogger } from '@apexmail/lib';
 import type { MxRecord } from '../types.js';
 
-const logger = createLogger('dns-resolver');
+const logger = createLogger({ name: 'dns-resolver', level: 'info' });
 
 const resolver = new Resolver();
 resolver.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
@@ -68,7 +68,11 @@ export function identifyEmailProvider(mxRecords: MxRecord[]): string | null {
         return null;
     }
 
-    const primaryMx = mxRecords[0].exchange;
+    const firstRecord = mxRecords[0];
+    if (!firstRecord) {
+        return null;
+    }
+    const primaryMx = firstRecord.exchange;
 
     for (const [provider, patterns] of Object.entries(EMAIL_PROVIDERS)) {
         for (const pattern of patterns) {

@@ -31,11 +31,11 @@ function directoryExists(relativePath: string): boolean {
 
 describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
     beforeAll(() => {
-        console.log('🧪 Starting Phase 5 Analytics test suite...');
+        // Test suite initialization
     });
 
     afterAll(() => {
-        console.log('✅ Phase 5 test suite completed');
+        // Test suite cleanup
     });
 
     describe('5.1 Event Ingestion', () => {
