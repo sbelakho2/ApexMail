@@ -1,0 +1,1 @@
+export { SecretManager } from './manager';

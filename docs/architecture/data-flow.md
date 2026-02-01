@@ -1,0 +1,539 @@
+# Data Flow Architecture
+
+## Email Sending Pipeline
+
+### Overview
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              Email Sending Pipeline                             │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
+  │  API    │────▶│ Validate │────▶│  Queue   │────▶│  Render  │────▶│ Postfix │
+  │ Request │     │ & Enrich │     │ (BullMQ) │     │ Template │     │   MTA   │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘     └─────────┘
+       │                                                                   │
+       │                                                                   │
+       ▼                                                                   ▼
+  ┌─────────┐                                                        ┌─────────┐
+  │  Log    │                                                        │ Deliver │
+  │ Attempt │                                                        │  Email  │
+  └─────────┘                                                        └─────────┘
+```
+
+### Step-by-Step Flow
+
+#### 1. API Request Reception
+```typescript
+// POST /api/v1/messages
+{
+  "to": "user@example.com",
+  "from": "sender@company.com",
+  "subject": "Welcome!",
+  "template_id": "welcome-001",
+  "variables": {
+    "name": "John",
+    "company": "Acme"
+  },
+  "metadata": {
+    "campaign_id": "camp_123"
+  }
+}
+```
+
+#### 2. Validation Layer
+```typescript
+// Validation checks performed:
+// 1. Email syntax validation (RFC 5322)
+// 2. Domain existence (DNS MX lookup)
+// 3. Suppression list check (bounces, complaints, unsubs)
+// 4. Rate limiting (per-sender, per-domain)
+// 5. Template existence and variable validation
+
+interface ValidationResult {
+  valid: boolean;
+  recipient: string;
+  checks: {
+    syntax: boolean;
+    mx_exists: boolean;
+    not_suppressed: boolean;
+    rate_allowed: boolean;
+    template_valid: boolean;
+  };
+  enrichment?: {
+    mx_host: string;
+    domain_reputation: number;
+    historical_engagement: number;
+  };
+}
+```
+
+#### 3. Queue Insertion
+```typescript
+// Message written to BullMQ queue with priority
+await messageQueue.add('send', {
+  messageId: 'msg_abc123',
+  to: 'user@example.com',
+  from: 'sender@company.com',
+  templateId: 'welcome-001',
+  variables: { ... },
+  priority: calculatePriority(campaign, sender),
+  scheduledAt: null, // or ISO timestamp for delayed send
+}, {
+  priority: 1,
+  attempts: 3,
+  backoff: {
+    type: 'exponential',
+    delay: 5000,
+  },
+});
+```
+
+#### 4. Worker Processing
+```typescript
+// Worker picks up job and processes
+messageQueue.process('send', async (job) => {
+  const { messageId, templateId, variables, to } = job.data;
+  
+  // 1. Load template
+  const template = await templateEngine.load(templateId);
+  
+  // 2. Render with variables
+  const { html, text, subject } = await template.render(variables);
+  
+  // 3. Apply tracking pixels
+  const trackedHtml = trackingService.injectPixel(html, messageId);
+  
+  // 4. Rewrite links for click tracking
+  const finalHtml = trackingService.rewriteLinks(trackedHtml, messageId);
+  
+  // 5. Build MIME message
+  const message = mimeBuilder.build({
+    to,
+    from: job.data.from,
+    subject,
+    html: finalHtml,
+    text,
+    headers: {
+      'X-ApexMail-ID': messageId,
+      'List-Unsubscribe': `<mailto:unsub@domain.com?subject=${messageId}>`,
+    },
+  });
+  
+  // 6. Submit to Postfix
+  await postfixClient.submit(message);
+  
+  // 7. Update status
+  await db.messages.update({
+    where: { id: messageId },
+    data: { status: 'sent', sentAt: new Date() },
+  });
+});
+```
+
+#### 5. Postfix Delivery
+```
+# Postfix queue stages:
+incoming → active → deferred → bounce
+
+# Success path:
+incoming → active → delivered
+
+# Temporary failure:
+incoming → active → deferred (retry) → active → delivered
+
+# Permanent failure:
+incoming → active → bounce → notification
+```
+
+---
+
+## Event Collection Pipeline
+
+### Overview
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              Event Collection Pipeline                          │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
+  │ Webhook │────▶│  Parse   │────▶│ Validate │────▶│  Store   │────▶│ Publish │
+  │ /Event  │     │ Payload  │     │  Dedup   │     │ (Postgres│     │  (CDC)  │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘     └─────────┘
+       │                                                                   │
+       │                                                                   │
+       ▼                                                                   ▼
+  ┌─────────┐                                                        ┌─────────┐
+  │ Sources │                                                        │ClickHse │
+  │ - Opens │                                                        │ Analytics│
+  │ - Clicks│                                                        └─────────┘
+  │ - Bounce│
+  │ - Complt│
+  └─────────┘
+```
+
+### Event Types
+
+#### Open Events
+```typescript
+// Tracking pixel request
+// GET /t/o/{{messageId}}.gif
+
+interface OpenEvent {
+  type: 'open';
+  messageId: string;
+  timestamp: Date;
+  ip: string;
+  userAgent: string;
+  geo?: {
+    country: string;
+    region: string;
+    city: string;
+  };
+  device?: {
+    type: 'mobile' | 'desktop' | 'tablet';
+    os: string;
+    client: string;
+  };
+}
+```
+
+#### Click Events
+```typescript
+// Click redirect
+// GET /t/c/{{linkId}}?r={{base64Url}}
+
+interface ClickEvent {
+  type: 'click';
+  messageId: string;
+  linkId: string;
+  originalUrl: string;
+  timestamp: Date;
+  ip: string;
+  userAgent: string;
+  geo?: GeoData;
+  device?: DeviceData;
+}
+```
+
+#### Bounce Events
+```typescript
+// From Postfix bounce notifications
+
+interface BounceEvent {
+  type: 'bounce';
+  messageId: string;
+  timestamp: Date;
+  bounceType: 'hard' | 'soft' | 'block';
+  bounceCode: string;
+  bounceMessage: string;
+  recipient: string;
+  diagnosticCode?: string;
+}
+```
+
+#### Complaint Events
+```typescript
+// From feedback loops (FBL)
+
+interface ComplaintEvent {
+  type: 'complaint';
+  messageId: string;
+  timestamp: Date;
+  feedbackType: 'abuse' | 'fraud' | 'other';
+  userAgent?: string;
+  recipient: string;
+}
+```
+
+### Deduplication Strategy
+
+```typescript
+// Events deduplicated using Redis with TTL
+async function processEvent(event: EmailEvent): Promise<boolean> {
+  const dedupKey = `event:${event.type}:${event.messageId}:${event.timestamp.getTime()}`;
+  
+  const isNew = await redis.set(dedupKey, '1', {
+    NX: true,           // Only set if not exists
+    EX: 86400 * 7,      // Expire after 7 days
+  });
+  
+  if (!isNew) {
+    logger.debug('Duplicate event ignored', { event });
+    return false;
+  }
+  
+  // Process unique event
+  await eventStore.insert(event);
+  return true;
+}
+```
+
+### CDC to Analytics
+
+```typescript
+// Change Data Capture using PostgreSQL logical replication
+
+// 1. PostgreSQL publication
+// CREATE PUBLICATION apexmail_events FOR TABLE email_events;
+
+// 2. Debezium connector config
+const debeziumConfig = {
+  'connector.class': 'io.debezium.connector.postgresql.PostgresConnector',
+  'database.hostname': 'postgres',
+  'database.dbname': 'apexmail',
+  'table.include.list': 'public.email_events',
+  'publication.name': 'apexmail_events',
+  'slot.name': 'apexmail_slot',
+  'transforms': 'unwrap',
+  'transforms.unwrap.type': 'io.debezium.transforms.ExtractNewRecordState',
+};
+
+// 3. ClickHouse Kafka engine table
+// CREATE TABLE email_events_queue (
+//   event_id UUID,
+//   message_id String,
+//   event_type Enum8('open'=1, 'click'=2, 'bounce'=3, 'complaint'=4),
+//   timestamp DateTime64(3),
+//   data String
+// ) ENGINE = Kafka
+// SETTINGS kafka_broker_list = 'kafka:9092',
+//          kafka_topic_list = 'apexmail.public.email_events',
+//          kafka_group_name = 'clickhouse_consumers';
+```
+
+---
+
+## Analytics Query Flow
+
+### Overview
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              Analytics Query Flow                               │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │Dashboard│────▶│ API/Next │────▶│ Analytics│────▶│ ClickHse │
+  │ Request │     │  Route   │     │  Service │     │  Query   │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘
+                                          │
+                                          ▼
+                                   ┌──────────┐
+                                   │  Cache   │
+                                   │ (Redis)  │
+                                   └──────────┘
+```
+
+### Query Types
+
+#### Time-Series Aggregations
+```sql
+-- Hourly email metrics
+SELECT
+    toStartOfHour(timestamp) AS hour,
+    countIf(event_type = 'sent') AS sent,
+    countIf(event_type = 'delivered') AS delivered,
+    countIf(event_type = 'open') AS opens,
+    countIf(event_type = 'click') AS clicks,
+    countIf(event_type = 'bounce') AS bounces
+FROM email_events
+WHERE timestamp >= now() - INTERVAL 24 HOUR
+  AND account_id = {accountId:UUID}
+GROUP BY hour
+ORDER BY hour;
+```
+
+#### Funnel Analysis
+```sql
+-- Campaign funnel
+SELECT
+    campaign_id,
+    count(DISTINCT message_id) AS sent,
+    count(DISTINCT IF(event_type = 'delivered', message_id, NULL)) AS delivered,
+    count(DISTINCT IF(event_type = 'open', message_id, NULL)) AS opened,
+    count(DISTINCT IF(event_type = 'click', message_id, NULL)) AS clicked
+FROM email_events
+WHERE campaign_id = {campaignId:String}
+GROUP BY campaign_id;
+```
+
+#### Cohort Analysis
+```sql
+-- Weekly cohort engagement
+SELECT
+    toMonday(first_event) AS cohort_week,
+    dateDiff('week', first_event, event_week) AS weeks_since_first,
+    uniqExact(recipient) AS active_users
+FROM (
+    SELECT
+        recipient,
+        min(timestamp) OVER (PARTITION BY recipient) AS first_event,
+        toMonday(timestamp) AS event_week
+    FROM email_events
+    WHERE event_type IN ('open', 'click')
+      AND account_id = {accountId:UUID}
+)
+GROUP BY cohort_week, weeks_since_first
+ORDER BY cohort_week, weeks_since_first;
+```
+
+---
+
+## CRM Data Flow
+
+### Lead Scoring Pipeline
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              Lead Scoring Pipeline                              │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │ Contact │────▶│ Collect  │────▶│ Calculate│────▶│  Store   │
+  │ Events  │     │ Signals  │     │  Score   │     │  Score   │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘
+       │                                                   │
+       │                                                   │
+       ▼                                                   ▼
+  ┌─────────┐                                        ┌─────────┐
+  │ Sources │                                        │ Trigger │
+  │ - Email │                                        │ Actions │
+  │ - Web   │                                        │ - Notify│
+  │ - CRM   │                                        │ - Assign│
+  │ - API   │                                        │ - Auto  │
+  └─────────┘                                        └─────────┘
+```
+
+### Score Calculation
+```typescript
+interface ScoringSignal {
+  type: 'email_open' | 'email_click' | 'page_view' | 'form_submit' | 'api_call';
+  weight: number;
+  decay: number;  // Daily decay factor
+  timestamp: Date;
+}
+
+function calculateScore(contact: Contact): number {
+  const signals = contact.signals;
+  const now = Date.now();
+  
+  return signals.reduce((score, signal) => {
+    const daysSince = (now - signal.timestamp.getTime()) / (1000 * 60 * 60 * 24);
+    const decayedWeight = signal.weight * Math.pow(signal.decay, daysSince);
+    return score + decayedWeight;
+  }, 0);
+}
+
+// Example scoring rules
+const scoringRules = [
+  { type: 'email_open', weight: 1, decay: 0.95 },
+  { type: 'email_click', weight: 5, decay: 0.90 },
+  { type: 'page_view', weight: 2, decay: 0.98 },
+  { type: 'form_submit', weight: 20, decay: 0.85 },
+  { type: 'demo_request', weight: 50, decay: 0.80 },
+];
+```
+
+---
+
+## AI Inference Flow
+
+### Content Generation
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              AI Content Generation                              │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │ Request │────▶│ Context  │────▶│ ONNX     │────▶│ Post-    │
+  │ Content │     │ Building │     │ Inference│     │ Process  │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘
+       │                                                   │
+       │                                                   │
+       ▼                                                   ▼
+  ┌─────────┐                                        ┌─────────┐
+  │ Inputs  │                                        │ Output  │
+  │ - Tone  │                                        │ - Text  │
+  │ - Topic │                                        │ - Score │
+  │ - Length│                                        │ - Meta  │
+  └─────────┘                                        └─────────┘
+```
+
+### Embedding Generation
+```typescript
+// Sentence embedding for semantic search
+async function generateEmbedding(text: string): Promise<Float32Array> {
+  // 1. Tokenize
+  const tokens = tokenizer.encode(text, {
+    maxLength: 512,
+    padding: true,
+    truncation: true,
+  });
+  
+  // 2. Run inference
+  const feeds = {
+    input_ids: new ort.Tensor('int64', tokens.inputIds, [1, tokens.length]),
+    attention_mask: new ort.Tensor('int64', tokens.attentionMask, [1, tokens.length]),
+  };
+  
+  const results = await session.run(feeds);
+  
+  // 3. Mean pooling
+  const embeddings = results.last_hidden_state.data as Float32Array;
+  return meanPool(embeddings, tokens.attentionMask);
+}
+```
+
+---
+
+## Security Data Flow
+
+### Audit Log Pipeline
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              Audit Log Pipeline                                 │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │ Action  │────▶│  Sign    │────▶│  Chain   │────▶│  Store   │
+  │ Event   │     │ (HMAC)   │     │ (Hash)   │     │  (WORM)  │
+  └─────────┘     └──────────┘     └──────────┘     └──────────┘
+```
+
+### Cryptographic Chain
+```typescript
+interface AuditEntry {
+  id: string;
+  timestamp: Date;
+  actor: { type: 'user' | 'system'; id: string };
+  action: string;
+  resource: { type: string; id: string };
+  changes?: { before?: unknown; after?: unknown };
+  previousHash: string;
+  hash: string;
+  signature: string;
+}
+
+function createAuditEntry(action: AuditAction, previousEntry: AuditEntry | null): AuditEntry {
+  const entry: Partial<AuditEntry> = {
+    id: generateId(),
+    timestamp: new Date(),
+    actor: action.actor,
+    action: action.type,
+    resource: action.resource,
+    changes: action.changes,
+    previousHash: previousEntry?.hash ?? '0000000000000000000000000000000000000000000000000000000000000000',
+  };
+  
+  // Create hash chain
+  const hashInput = JSON.stringify({
+    ...entry,
+    previousHash: entry.previousHash,
+  });
+  entry.hash = crypto.createHash('sha256').update(hashInput).digest('hex');
+  
+  // Sign with HSM/KMS
+  entry.signature = signWithHSM(entry.hash);
+  
+  return entry as AuditEntry;
+}
+```

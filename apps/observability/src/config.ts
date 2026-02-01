@@ -1,0 +1,117 @@
+/**
+ * Observability Service Configuration
+ */
+
+export interface TracingConfig {
+  enabled: boolean;
+  serviceName: string;
+  serviceVersion: string;
+  environment: string;
+  sampleRate: number;
+  jaegerEndpoint: string;
+  zipkinEndpoint: string;
+  otlpEndpoint: string;
+}
+
+export interface MetricsConfig {
+  enabled: boolean;
+  prometheusPort: number;
+  defaultLabels: Record<string, string>;
+  histogramBuckets: number[];
+  aggregationInterval: number;
+}
+
+export interface LoggingConfig {
+  level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+  format: 'json' | 'pretty';
+  includeTimestamp: boolean;
+  includeTraceId: boolean;
+  sensitiveFields: string[];
+  maxMessageLength: number;
+}
+
+export interface AlertConfig {
+  enabled: boolean;
+  webhookUrls: string[];
+  slackWebhook: string;
+  pagerdutyKey: string;
+  opsgenieKey: string;
+  emailRecipients: string[];
+  cooldownMinutes: number;
+}
+
+export const config = {
+  // Server config
+  port: parseInt(process.env.OBSERVABILITY_PORT || '4400'),
+  environment: process.env.NODE_ENV || 'development',
+  version: process.env.APP_VERSION || '1.0.0',
+  
+  // Database
+  dbHost: process.env.DB_HOST || 'localhost',
+  dbPort: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME || 'apexmail',
+  dbUser: process.env.DB_USER || 'apexmail',
+  dbPassword: process.env.DB_PASSWORD || 'apexmail',
+  dbPoolMax: parseInt(process.env.DB_POOL_MAX || '20'),
+  
+  // Redis
+  redisHost: process.env.REDIS_HOST || 'localhost',
+  redisPort: parseInt(process.env.REDIS_PORT || '6379'),
+  redisPassword: process.env.REDIS_PASSWORD || undefined,
+  
+  // Tracing
+  tracing: {
+    enabled: process.env.TRACING_ENABLED !== 'false',
+    serviceName: process.env.SERVICE_NAME || 'apexmail',
+    serviceVersion: process.env.SERVICE_VERSION || '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    sampleRate: parseFloat(process.env.TRACE_SAMPLE_RATE || '1.0'),
+    jaegerEndpoint: process.env.JAEGER_ENDPOINT || 'http://localhost:14268/api/traces',
+    zipkinEndpoint: process.env.ZIPKIN_ENDPOINT || 'http://localhost:9411/api/v2/spans',
+    otlpEndpoint: process.env.OTLP_ENDPOINT || 'http://localhost:4318',
+  } as TracingConfig,
+  
+  // Metrics
+  metrics: {
+    enabled: process.env.METRICS_ENABLED !== 'false',
+    prometheusPort: parseInt(process.env.PROMETHEUS_PORT || '9090'),
+    defaultLabels: {
+      service: process.env.SERVICE_NAME || 'apexmail',
+      environment: process.env.NODE_ENV || 'development',
+    },
+    histogramBuckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+    aggregationInterval: parseInt(process.env.METRICS_INTERVAL || '15000'),
+  } as MetricsConfig,
+  
+  // Logging
+  logging: {
+    level: (process.env.LOG_LEVEL || 'info') as LoggingConfig['level'],
+    format: (process.env.LOG_FORMAT || 'json') as LoggingConfig['format'],
+    includeTimestamp: true,
+    includeTraceId: true,
+    sensitiveFields: ['password', 'token', 'apiKey', 'secret', 'authorization'],
+    maxMessageLength: parseInt(process.env.LOG_MAX_LENGTH || '10000'),
+  } as LoggingConfig,
+  
+  // Alerting
+  alerting: {
+    enabled: process.env.ALERTING_ENABLED === 'true',
+    webhookUrls: (process.env.ALERT_WEBHOOKS || '').split(',').filter(Boolean),
+    slackWebhook: process.env.SLACK_WEBHOOK || '',
+    pagerdutyKey: process.env.PAGERDUTY_KEY || '',
+    opsgenieKey: process.env.OPSGENIE_KEY || '',
+    emailRecipients: (process.env.ALERT_EMAILS || '').split(',').filter(Boolean),
+    cooldownMinutes: parseInt(process.env.ALERT_COOLDOWN || '15'),
+  } as AlertConfig,
+  
+  // Retention
+  traceRetentionDays: parseInt(process.env.TRACE_RETENTION_DAYS || '7'),
+  metricsRetentionDays: parseInt(process.env.METRICS_RETENTION_DAYS || '30'),
+  logRetentionDays: parseInt(process.env.LOG_RETENTION_DAYS || '14'),
+  
+  // API keys
+  internalApiKey: process.env.INTERNAL_API_KEY || 'internal-key',
+  
+  // CORS
+  corsOrigins: (process.env.CORS_ORIGINS || '*').split(','),
+};

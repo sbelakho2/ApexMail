@@ -1,0 +1,296 @@
+/**
+ * @apexmail/ops - Operations & SLO Module
+ * 
+ * Comprehensive operations infrastructure including:
+ * - SLO/SLI management with error budgets
+ * - Prometheus-compatible metrics collection
+ * - Alert management with escalation
+ * - Incident management with workflows
+ * - Status page service
+ * - Trust center
+ * - Health checks
+ * - Distributed tracing
+ */
+
+import { serve } from '@hono/node-server';
+import pino from 'pino';
+
+// Export all modules
+export * from './types.js';
+export * from './slo/index.js';
+export * from './metrics/index.js';
+export * from './alerts/index.js';
+export * from './incidents/index.js';
+export * from './status/index.js';
+export * from './trust/index.js';
+export * from './health/index.js';
+export * from './tracing/index.js';
+export * from './routes.js';
+
+// Import for initialization
+import { SLOManager } from './slo/manager.js';
+import { MetricsCollector } from './metrics/collector.js';
+import { AlertManager } from './alerts/manager.js';
+import { IncidentManager } from './incidents/manager.js';
+import { StatusPageService } from './status/page.js';
+import { TrustCenterService } from './trust/center.js';
+import { HealthChecker } from './health/checker.js';
+import { TracingService } from './tracing/tracer.js';
+import { createOpsRoutes, OpsServices } from './routes.js';
+
+const logger = pino({ name: 'apexmail-ops' });
+
+export interface OpsConfig {
+    serviceName: string;
+    serviceVersion: string;
+    environment: string;
+    port: number;
+    metricsEnabled: boolean;
+    tracingEnabled: boolean;
+    tracingEndpoint?: string;
+    tracingSampleRate: number;
+    statusPageUrl: string;
+    companyName: string;
+    supportEmail: string;
+    dpoEmail: string;
+}
+
+/**
+ * Creates and configures all ops services
+ */
+export function createOpsServices(config: OpsConfig): OpsServices {
+    // SLO Manager
+    const slo = new SLOManager({
+        evaluationInterval: 60000, // 1 minute
+        historyRetention: 30 * 24 * 60 * 60 * 1000, // 30 days
+    });
+
+    // Metrics Collector
+    const metrics = new MetricsCollector({
+        prefix: 'apexmail',
+        defaultLabels: {
+            service: config.serviceName,
+            version: config.serviceVersion,
+            environment: config.environment,
+        },
+        collectDefaultMetrics: true,
+    });
+
+    // Alert Manager
+    const alerts = new AlertManager({
+        defaultChannels: ['slack', 'email'],
+        escalationTimeoutMs: 15 * 60 * 1000, // 15 minutes
+        deduplicationWindowMs: 5 * 60 * 1000, // 5 minutes
+        maxActiveAlerts: 100,
+    });
+
+    // Incident Manager
+    const incidents = new IncidentManager({
+        autoCreateFromAlerts: true,
+        criticalAlertThreshold: 2,
+        slackChannelPrefix: 'inc',
+        postMortemDueDays: 5,
+    });
+
+    // Status Page Service
+    const statusPage = new StatusPageService({
+        publicUrl: config.statusPageUrl,
+        companyName: config.companyName,
+        supportUrl: `mailto:${config.supportEmail}`,
+        timezone: 'UTC',
+        allowSubscriptions: true,
+    });
+
+    // Trust Center Service
+    const trustCenter = new TrustCenterService({
+        publicUrl: `${config.statusPageUrl}/trust`,
+        companyName: config.companyName,
+        legalEntity: `${config.companyName}, Inc.`,
+        supportEmail: config.supportEmail,
+        dpoEmail: config.dpoEmail,
+    });
+
+    // Health Checker
+    const health = new HealthChecker({
+        interval: 30000,
+        timeout: 5000,
+        unhealthyThreshold: 3,
+        healthyThreshold: 2,
+    });
+
+    // Tracing Service
+    const tracing = new TracingService({
+        serviceName: config.serviceName,
+        serviceVersion: config.serviceVersion,
+        environment: config.environment,
+        endpoint: config.tracingEndpoint,
+        sampleRate: config.tracingSampleRate,
+        enabled: config.tracingEnabled,
+    });
+
+    // Wire up event handlers
+    wireEventHandlers({
+        slo,
+        metrics,
+        alerts,
+        incidents,
+        statusPage,
+        trustCenter,
+        health,
+        tracing,
+    });
+
+    return {
+        slo,
+        metrics,
+        alerts,
+        incidents,
+        statusPage,
+        trustCenter,
+        health,
+        tracing,
+    };
+}
+
+/**
+ * Wires up event handlers between services
+ */
+function wireEventHandlers(services: OpsServices): void {
+    const { slo, metrics, alerts, incidents, statusPage, health } = services;
+
+    // SLO events -> Metrics
+    slo.on('slo:evaluated', (data) => {
+        metrics.setSLOValue(data.sloId, data.currentValue);
+        metrics.setSLOErrorBudget(data.sloId, data.errorBudgetRemaining);
+    });
+
+    // SLO events -> Alerts
+    slo.on('slo:breached', (data) => {
+        alerts.evaluateMetric('slo.breached', 1, { slo_id: data.sloId });
+    });
+
+    // Alert events -> Metrics
+    alerts.on('alert:triggered', (alert) => {
+        metrics.incrementAlertCounter(alert.severity, 'triggered');
+    });
+
+    alerts.on('alert:resolved', (alert) => {
+        metrics.incrementAlertCounter(alert.severity, 'resolved');
+    });
+
+    // Alert events -> Incidents (auto-create for critical)
+    alerts.on('alert:triggered', (alert) => {
+        if (alert.severity === 'critical') {
+            incidents.createFromAlert(alert);
+        }
+    });
+
+    // Incident events -> Status page
+    incidents.on('incident:created', (incident) => {
+        statusPage.createIncident({
+            title: incident.title,
+            impact: incident.severity === 'critical' ? 'critical' : 
+                   incident.severity === 'high' ? 'major' : 'minor',
+            affectedComponents: incident.affectedServices,
+            message: incident.description,
+        });
+    });
+
+    // Health events -> Status page
+    health.on('status:changed', (data) => {
+        const componentMap: Record<string, string> = {
+            'api-internal': 'api',
+            'email-service': 'email-sending',
+            'worker-service': 'webhooks',
+            'database-primary': 'api',
+            'redis-cache': 'api',
+        };
+
+        const componentId = componentMap[data.checkId];
+        if (componentId) {
+            const status = data.newStatus === 'healthy' ? 'operational' :
+                          data.newStatus === 'degraded' ? 'degraded' : 'partial_outage';
+            statusPage.updateComponentStatus(componentId, status);
+        }
+    });
+
+    // Health events -> Metrics
+    health.on('check:completed', (data) => {
+        metrics.recordHealthCheck(data.checkId, data.result.healthy, data.result.latency || 0);
+    });
+
+    logger.info('Event handlers wired up');
+}
+
+/**
+ * Starts the ops server
+ */
+export function startOpsServer(
+    services: OpsServices,
+    port: number
+): void {
+    const app = createOpsRoutes(services);
+
+    // Start health checker
+    services.health.start();
+
+    // Start SLO evaluation
+    services.slo.startEvaluation();
+
+    serve({
+        fetch: app.fetch,
+        port,
+    });
+
+    logger.info({ port }, 'Ops server started');
+}
+
+/**
+ * Main entry point
+ */
+export async function main(): Promise<void> {
+    const config: OpsConfig = {
+        serviceName: process.env.SERVICE_NAME || 'apexmail',
+        serviceVersion: process.env.SERVICE_VERSION || '1.0.0',
+        environment: process.env.NODE_ENV || 'development',
+        port: parseInt(process.env.OPS_PORT || '9090'),
+        metricsEnabled: process.env.METRICS_ENABLED !== 'false',
+        tracingEnabled: process.env.TRACING_ENABLED !== 'false',
+        tracingEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+        tracingSampleRate: parseFloat(process.env.TRACING_SAMPLE_RATE || '0.1'),
+        statusPageUrl: process.env.STATUS_PAGE_URL || 'https://status.apexmail.io',
+        companyName: process.env.COMPANY_NAME || 'ApexMail',
+        supportEmail: process.env.SUPPORT_EMAIL || 'support@apexmail.io',
+        dpoEmail: process.env.DPO_EMAIL || 'dpo@apexmail.io',
+    };
+
+    logger.info({ config: { ...config, tracingEndpoint: '***' } }, 'Starting ops services');
+
+    const services = createOpsServices(config);
+    startOpsServer(services, config.port);
+
+    // Graceful shutdown
+    process.on('SIGTERM', async () => {
+        logger.info('Received SIGTERM, shutting down');
+        services.health.stop();
+        services.slo.stopEvaluation();
+        await services.tracing.shutdown();
+        process.exit(0);
+    });
+
+    process.on('SIGINT', async () => {
+        logger.info('Received SIGINT, shutting down');
+        services.health.stop();
+        services.slo.stopEvaluation();
+        await services.tracing.shutdown();
+        process.exit(0);
+    });
+}
+
+// Run if executed directly
+if (import.meta.url === `file://${process.argv[1]}`) {
+    main().catch((error) => {
+        logger.error({ error }, 'Failed to start ops services');
+        process.exit(1);
+    });
+}

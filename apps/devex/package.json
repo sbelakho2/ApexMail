@@ -1,0 +1,40 @@
+{
+  "name": "@apexmail/devex",
+  "version": "1.0.0",
+  "description": "ApexMail Developer Experience - API Versioning, SDKs, CLI, Webhooks",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.8.0",
+    "hono": "^4.0.0",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.3",
+    "zod": "^3.22.4",
+    "nanoid": "^5.0.4",
+    "commander": "^11.1.0",
+    "ora": "^8.0.1",
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.12",
+    "yaml": "^2.3.4",
+    "openapi3-ts": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/pg": "^8.10.9",
+    "@types/inquirer": "^9.0.7",
+    "typescript": "^5.3.3",
+    "tsx": "^4.7.0",
+    "vitest": "^1.2.0",
+    "eslint": "^8.56.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0"
+  }
+}

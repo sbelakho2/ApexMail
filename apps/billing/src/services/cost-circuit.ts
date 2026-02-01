@@ -1,0 +1,472 @@
+/**
+ * Cost Circuit Service
+ * Real-time margin protection and cost monitoring
+ */
+
+import Redis from 'ioredis';
+import { Result } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
+import type { DatabasePool } from '@apexmail/db';
+
+const logger = createLogger('cost-circuit');
+
+export interface TenantCosts {
+  tenantId: string;
+  period: { start: Date; end: Date };
+  costs: {
+    storage: number;        // In cents
+    bandwidth: number;      // In cents
+    compute: number;        // In cents
+    dedicatedIp: number;    // In cents
+    total: number;
+  };
+  revenue: number;          // In cents
+  margin: number;           // Percentage
+  marginDollars: number;    // In cents
+}
+
+export interface CostAlert {
+  id: string;
+  tenantId: string;
+  alertType: 'low_margin' | 'negative_margin' | 'cost_spike';
+  threshold: number;
+  actual: number;
+  costs: TenantCosts['costs'];
+  revenue: number;
+  triggeredAt: Date;
+  resolvedAt: Date | null;
+  actions: string[];
+}
+
+export interface CostCircuitConfig {
+  marginWarningThreshold: number;   // Alert when margin below this %
+  marginCriticalThreshold: number;  // Throttle when margin below this %
+  costSpikeThreshold: number;       // Alert on day-over-day cost increase %
+  checkIntervalMinutes: number;
+}
+
+const DEFAULT_CONFIG: CostCircuitConfig = {
+  marginWarningThreshold: 20,  // 20% margin
+  marginCriticalThreshold: 10, // 10% margin
+  costSpikeThreshold: 50,      // 50% increase
+  checkIntervalMinutes: 60,
+};
+
+// Cost rates (in cents per unit)
+const COST_RATES = {
+  storagePerGbMonth: 2.3,      // $0.023/GB/month
+  bandwidthPerGb: 9,           // $0.09/GB
+  computePerHour: 0.5,         // $0.005/hour per email processed
+  dedicatedIpPerMonth: 2000,   // $20/IP/month
+};
+
+/**
+ * Cost circuit breaker for margin protection
+ */
+export class CostCircuitService {
+  private readonly config: CostCircuitConfig;
+
+  constructor(
+    private readonly db: DatabasePool,
+    private readonly redis: Redis,
+    config?: Partial<CostCircuitConfig>
+  ) {
+    this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /**
+   * Calculate costs for a tenant
+   */
+  async calculateCosts(
+    tenantId: string,
+    periodStart: Date,
+    periodEnd: Date
+  ): Promise<Result<TenantCosts, Error>> {
+    // Calculate storage cost
+    const storageResult = await this.db.query<{ total_bytes: string }>(
+      `SELECT COALESCE(SUM(size_bytes), 0)::text as total_bytes
+       FROM message_attachments ma
+       JOIN messages m ON ma.message_id = m.id
+       WHERE m.tenant_id = $1
+         AND m.created_at >= $2
+         AND m.created_at < $3`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    const storageGb = storageResult.ok
+      ? parseInt(storageResult.value.rows[0]?.total_bytes ?? '0', 10) / (1024 * 1024 * 1024)
+      : 0;
+    const storageCost = Math.round(storageGb * COST_RATES.storagePerGbMonth);
+
+    // Calculate bandwidth cost
+    const bandwidthResult = await this.db.query<{ total_bytes: string }>(
+      `SELECT COALESCE(SUM(size_bytes), 0)::text as total_bytes
+       FROM messages
+       WHERE tenant_id = $1
+         AND created_at >= $2
+         AND created_at < $3
+         AND status IN ('delivered', 'sent')`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    const bandwidthGb = bandwidthResult.ok
+      ? parseInt(bandwidthResult.value.rows[0]?.total_bytes ?? '0', 10) / (1024 * 1024 * 1024)
+      : 0;
+    const bandwidthCost = Math.round(bandwidthGb * COST_RATES.bandwidthPerGb);
+
+    // Calculate compute cost (based on emails processed)
+    const emailsResult = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::text as count
+       FROM messages
+       WHERE tenant_id = $1
+         AND created_at >= $2
+         AND created_at < $3`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    const emailCount = emailsResult.ok
+      ? parseInt(emailsResult.value.rows[0]?.count ?? '0', 10)
+      : 0;
+    const computeCost = Math.round(emailCount * COST_RATES.computePerHour / 100);
+
+    // Calculate dedicated IP cost
+    const ipResult = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::text as count
+       FROM dedicated_ips
+       WHERE tenant_id = $1
+         AND allocated_at <= $2`,
+      [tenantId, periodEnd]
+    );
+
+    const ipCount = ipResult.ok
+      ? parseInt(ipResult.value.rows[0]?.count ?? '0', 10)
+      : 0;
+    const dedicatedIpCost = ipCount * COST_RATES.dedicatedIpPerMonth;
+
+    const totalCost = storageCost + bandwidthCost + computeCost + dedicatedIpCost;
+
+    // Get revenue
+    const revenueResult = await this.db.query<{ total: string }>(
+      `SELECT COALESCE(SUM(total), 0)::text as total
+       FROM invoices
+       WHERE tenant_id = $1
+         AND period_start >= $2
+         AND period_end <= $3
+         AND status = 'paid'`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    const revenue = revenueResult.ok
+      ? parseInt(revenueResult.value.rows[0]?.total ?? '0', 10)
+      : 0;
+
+    const marginDollars = revenue - totalCost;
+    const margin = revenue > 0 ? (marginDollars / revenue) * 100 : 0;
+
+    return Result.ok({
+      tenantId,
+      period: { start: periodStart, end: periodEnd },
+      costs: {
+        storage: storageCost,
+        bandwidth: bandwidthCost,
+        compute: computeCost,
+        dedicatedIp: dedicatedIpCost,
+        total: totalCost,
+      },
+      revenue,
+      margin: Math.round(margin * 100) / 100,
+      marginDollars,
+    });
+  }
+
+  /**
+   * Check margin and trigger alerts/throttling
+   */
+  async checkMargin(tenantId: string): Promise<Result<{
+    status: 'healthy' | 'warning' | 'critical';
+    margin: number;
+    actions: string[];
+  }, Error>> {
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const costsResult = await this.calculateCosts(tenantId, periodStart, now);
+    if (!costsResult.ok) return Result.err(costsResult.error);
+
+    const { margin, costs, revenue } = costsResult.value;
+    const actions: string[] = [];
+
+    let status: 'healthy' | 'warning' | 'critical' = 'healthy';
+
+    if (margin < this.config.marginCriticalThreshold) {
+      status = 'critical';
+
+      // Create alert
+      await this.createAlert(tenantId, {
+        alertType: margin < 0 ? 'negative_margin' : 'low_margin',
+        threshold: this.config.marginCriticalThreshold,
+        actual: margin,
+        costs,
+        revenue,
+      });
+
+      // Apply throttling
+      await this.applyThrottling(tenantId);
+      actions.push('Throttling applied: reduced sending rate');
+
+      logger.warn({ tenantId, margin, costs, revenue }, 'Critical margin - throttling applied');
+
+    } else if (margin < this.config.marginWarningThreshold) {
+      status = 'warning';
+
+      await this.createAlert(tenantId, {
+        alertType: 'low_margin',
+        threshold: this.config.marginWarningThreshold,
+        actual: margin,
+        costs,
+        revenue,
+      });
+
+      actions.push('Warning notification sent');
+
+      logger.info({ tenantId, margin }, 'Low margin warning');
+    }
+
+    // Cache status
+    await this.redis.setex(
+      `cost:status:${tenantId}`,
+      3600,
+      JSON.stringify({ status, margin, checkedAt: now })
+    );
+
+    return Result.ok({ status, margin, actions });
+  }
+
+  /**
+   * Check for cost spikes (daily comparison)
+   */
+  async checkCostSpike(tenantId: string): Promise<Result<boolean, Error>> {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
+
+    const todayCosts = await this.calculateCosts(tenantId, todayStart, now);
+    const yesterdayCosts = await this.calculateCosts(
+      tenantId,
+      yesterdayStart,
+      todayStart
+    );
+
+    if (!todayCosts.ok || !yesterdayCosts.ok) {
+      return Result.ok(false);
+    }
+
+    const todayTotal = todayCosts.value.costs.total;
+    const yesterdayTotal = yesterdayCosts.value.costs.total;
+
+    if (yesterdayTotal === 0) {
+      return Result.ok(false);
+    }
+
+    const increasePercent = ((todayTotal - yesterdayTotal) / yesterdayTotal) * 100;
+
+    if (increasePercent > this.config.costSpikeThreshold) {
+      await this.createAlert(tenantId, {
+        alertType: 'cost_spike',
+        threshold: this.config.costSpikeThreshold,
+        actual: increasePercent,
+        costs: todayCosts.value.costs,
+        revenue: todayCosts.value.revenue,
+      });
+
+      logger.warn({
+        tenantId,
+        todayTotal,
+        yesterdayTotal,
+        increasePercent,
+      }, 'Cost spike detected');
+
+      return Result.ok(true);
+    }
+
+    return Result.ok(false);
+  }
+
+  /**
+   * Get current circuit status
+   */
+  async getCircuitStatus(tenantId: string): Promise<Result<{
+    status: 'open' | 'closed' | 'half_open';
+    throttled: boolean;
+    margin: number | null;
+    lastChecked: Date | null;
+  }, Error>> {
+    const cached = await this.redis.get(`cost:status:${tenantId}`);
+    const throttled = await this.redis.exists(`cost:throttle:${tenantId}`);
+
+    if (!cached) {
+      return Result.ok({
+        status: 'closed',
+        throttled: throttled === 1,
+        margin: null,
+        lastChecked: null,
+      });
+    }
+
+    const data = JSON.parse(cached);
+    return Result.ok({
+      status: data.status === 'critical' ? 'open' : 'closed',
+      throttled: throttled === 1,
+      margin: data.margin,
+      lastChecked: new Date(data.checkedAt),
+    });
+  }
+
+  /**
+   * Get cost report for tenant
+   */
+  async getCostReport(
+    tenantId: string,
+    periodStart: Date,
+    periodEnd: Date
+  ): Promise<Result<{
+    costs: TenantCosts;
+    breakdown: Array<{
+      category: string;
+      amount: number;
+      percentage: number;
+    }>;
+    trend: Array<{
+      date: Date;
+      cost: number;
+    }>;
+  }, Error>> {
+    const costsResult = await this.calculateCosts(tenantId, periodStart, periodEnd);
+    if (!costsResult.ok) return Result.err(costsResult.error);
+
+    const costs = costsResult.value;
+    const total = costs.costs.total || 1;
+
+    const breakdown = [
+      { category: 'Storage', amount: costs.costs.storage, percentage: (costs.costs.storage / total) * 100 },
+      { category: 'Bandwidth', amount: costs.costs.bandwidth, percentage: (costs.costs.bandwidth / total) * 100 },
+      { category: 'Compute', amount: costs.costs.compute, percentage: (costs.costs.compute / total) * 100 },
+      { category: 'Dedicated IPs', amount: costs.costs.dedicatedIp, percentage: (costs.costs.dedicatedIp / total) * 100 },
+    ];
+
+    // Get daily trend
+    const trendResult = await this.db.query<{
+      date: Date;
+      cost: number;
+    }>(
+      `SELECT DATE(created_at) as date,
+              COUNT(*) * ${COST_RATES.computePerHour / 100} as cost
+       FROM messages
+       WHERE tenant_id = $1
+         AND created_at >= $2
+         AND created_at < $3
+       GROUP BY DATE(created_at)
+       ORDER BY date ASC`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    const trend = trendResult.ok ? trendResult.value.rows : [];
+
+    return Result.ok({ costs, breakdown, trend });
+  }
+
+  /**
+   * Run margin check for all tenants (scheduled job)
+   */
+  async runMarginChecks(): Promise<Result<{
+    checked: number;
+    warnings: number;
+    critical: number;
+  }, Error>> {
+    const tenantsResult = await this.db.query<{ id: string }>(
+      `SELECT id FROM tenants WHERE status = 'active'`
+    );
+
+    if (!tenantsResult.ok) return Result.err(tenantsResult.error);
+
+    let warnings = 0;
+    let critical = 0;
+
+    for (const row of tenantsResult.value.rows) {
+      const result = await this.checkMargin(row.id);
+      if (result.ok) {
+        if (result.value.status === 'warning') warnings++;
+        if (result.value.status === 'critical') critical++;
+      }
+    }
+
+    return Result.ok({
+      checked: tenantsResult.value.rows.length,
+      warnings,
+      critical,
+    });
+  }
+
+  private async createAlert(
+    tenantId: string,
+    params: {
+      alertType: CostAlert['alertType'];
+      threshold: number;
+      actual: number;
+      costs: TenantCosts['costs'];
+      revenue: number;
+    }
+  ): Promise<void> {
+    // Check for existing unresolved alert
+    const existingResult = await this.db.query<{ id: string }>(
+      `SELECT id FROM cost_alerts
+       WHERE tenant_id = $1 
+         AND alert_type = $2
+         AND resolved_at IS NULL`,
+      [tenantId, params.alertType]
+    );
+
+    if (existingResult.ok && existingResult.value.rows.length > 0) {
+      return; // Alert already exists
+    }
+
+    await this.db.query(
+      `INSERT INTO cost_alerts (
+        id, tenant_id, alert_type, threshold, actual,
+        costs, revenue, triggered_at, created_at
+      )
+      VALUES (
+        gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW(), NOW()
+      )`,
+      [
+        tenantId,
+        params.alertType,
+        params.threshold,
+        params.actual,
+        JSON.stringify(params.costs),
+        params.revenue,
+      ]
+    );
+
+    // Queue notification
+    await this.db.query(
+      `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+       VALUES (gen_random_uuid(), $1, 'cost_alert', $2, 'pending', NOW())`,
+      [tenantId, JSON.stringify(params)]
+    );
+  }
+
+  private async applyThrottling(tenantId: string): Promise<void> {
+    // Set throttle flag in Redis (24 hour TTL)
+    await this.redis.setex(
+      `cost:throttle:${tenantId}`,
+      24 * 60 * 60,
+      JSON.stringify({ appliedAt: new Date(), reason: 'low_margin' })
+    );
+
+    // Reduce rate limit to 50% of normal
+    const currentLimit = await this.redis.get(`rate:limit:${tenantId}`);
+    const newLimit = currentLimit ? Math.floor(parseInt(currentLimit, 10) / 2) : 50;
+    await this.redis.setex(`rate:limit:${tenantId}:throttled`, 24 * 60 * 60, newLimit.toString());
+  }
+}

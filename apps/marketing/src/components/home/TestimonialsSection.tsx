@@ -1,0 +1,220 @@
+'use client';
+
+import { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useInView } from 'react-intersection-observer';
+import { ChevronLeft, ChevronRight, Quote, Star } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+const testimonials = [
+  {
+    quote: "We switched from SendGrid after our third compliance audit nightmare. ApexMail's cryptographic proof of delivery saved us during our SOC 2 audit. The auditors were impressed we could prove exactly when emails were delivered.",
+    author: 'Sarah Chen',
+    role: 'CTO',
+    company: 'FinanceFlow',
+    industry: 'FinTech',
+    image: '/testimonials/sarah.jpg',
+    stats: { metric: 'Audit Time', before: '3 weeks', after: '2 days' },
+  },
+  {
+    quote: "The forensic render history feature alone is worth the switch. Last month a customer claimed they never got an email - we showed them exactly what they received, pixel for pixel. Case closed.",
+    author: 'Marcus Rodriguez',
+    role: 'Head of Engineering',
+    company: 'SupportHero',
+    industry: 'SaaS',
+    image: '/testimonials/marcus.jpg',
+    stats: { metric: 'Support Disputes', before: '15/month', after: '2/month' },
+  },
+  {
+    quote: "As a healthcare startup, HIPAA compliance was non-negotiable. Other providers either didn't offer it or wanted $10k/month. ApexMail gave us enterprise-grade compliance at a fraction of the cost.",
+    author: 'Dr. Emily Watson',
+    role: 'Founder',
+    company: 'MedConnect',
+    industry: 'Healthcare',
+    image: '/testimonials/emily.jpg',
+    stats: { metric: 'Compliance Cost', before: '$10k/mo', after: '$299/mo' },
+  },
+  {
+    quote: "The API is so clean that our junior devs had email sending working in their first hour. The TypeScript SDK with full type inference made it feel like a native part of our stack.",
+    author: 'James Liu',
+    role: 'Lead Developer',
+    company: 'DevStack',
+    industry: 'Developer Tools',
+    image: '/testimonials/james.jpg',
+    stats: { metric: 'Integration Time', before: '2 days', after: '45 minutes' },
+  },
+  {
+    quote: "During Black Friday, we sent 2M emails in 4 hours. Not a single OTP or password reset was delayed thanks to the priority lane feature. Our competitors' customers were complaining about slow emails.",
+    author: 'Amanda Foster',
+    role: 'VP of Engineering',
+    company: 'ShopFast',
+    industry: 'E-commerce',
+    image: '/testimonials/amanda.jpg',
+    stats: { metric: 'OTP Delivery', before: '8-15 seconds', after: '<2 seconds' },
+  },
+];
+
+export function TestimonialsSection() {
+  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const nextTestimonial = () => {
+    setActiveIndex((prev) => (prev + 1) % testimonials.length);
+  };
+
+  const prevTestimonial = () => {
+    setActiveIndex((prev) => (prev - 1 + testimonials.length) % testimonials.length);
+  };
+
+  const activeTestimonial = testimonials[activeIndex];
+
+  return (
+    <section ref={ref} className="py-20 lg:py-32 relative overflow-hidden">
+      {/* Background */}
+      <div className="absolute inset-0">
+        <div className="absolute inset-0 bg-gradient-to-b from-surface-900/30 via-transparent to-surface-900/30" />
+        <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-primary-600/5 rounded-full blur-3xl" />
+        <div className="absolute bottom-0 left-0 w-[600px] h-[600px] bg-accent-600/5 rounded-full blur-3xl" />
+      </div>
+
+      <div className="relative max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+        {/* Header */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={inView ? { opacity: 1, y: 0 } : {}}
+          className="text-center mb-12"
+        >
+          <h2 className="section-title mb-4">
+            <span className="text-white">Trusted by</span>{' '}
+            <span className="gradient-text">Developers Who Ship</span>
+          </h2>
+          <p className="section-subtitle">
+            Don&apos;t take our word for it. Here&apos;s what our customers have to say.
+          </p>
+        </motion.div>
+
+        {/* Main Testimonial */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={inView ? { opacity: 1, y: 0 } : {}}
+          transition={{ delay: 0.2 }}
+          className="glass-card p-8 lg:p-12 mb-8"
+        >
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeIndex}
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3 }}
+            >
+              <div className="flex flex-col lg:flex-row gap-8 lg:gap-12">
+                {/* Quote */}
+                <div className="flex-1">
+                  <Quote className="w-10 h-10 text-primary-500/30 mb-4" />
+                  <blockquote className="text-xl lg:text-2xl text-white font-light leading-relaxed mb-6">
+                    &ldquo;{activeTestimonial.quote}&rdquo;
+                  </blockquote>
+                  <div className="flex items-center gap-4">
+                    <div className="w-14 h-14 rounded-full bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center text-white font-bold text-lg">
+                      {activeTestimonial.author.split(' ').map(n => n[0]).join('')}
+                    </div>
+                    <div>
+                      <div className="font-semibold text-white">{activeTestimonial.author}</div>
+                      <div className="text-sm text-surface-400">
+                        {activeTestimonial.role} at {activeTestimonial.company}
+                      </div>
+                    </div>
+                    <div className="ml-auto hidden sm:flex items-center gap-0.5">
+                      {[...Array(5)].map((_, i) => (
+                        <Star key={i} className="w-4 h-4 fill-yellow-400 text-yellow-400" />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stats Card */}
+                <div className="lg:w-64 flex-shrink-0">
+                  <div className="bg-surface-800/50 rounded-xl p-6 border border-surface-700">
+                    <div className="text-sm text-surface-400 mb-4">{activeTestimonial.stats.metric}</div>
+                    <div className="space-y-3">
+                      <div>
+                        <div className="text-xs text-surface-500 mb-1">Before</div>
+                        <div className="text-lg font-mono text-red-400/80">{activeTestimonial.stats.before}</div>
+                      </div>
+                      <div className="w-full h-px bg-gradient-to-r from-red-500/20 via-surface-600 to-accent-500/20" />
+                      <div>
+                        <div className="text-xs text-surface-500 mb-1">After</div>
+                        <div className="text-2xl font-mono text-accent-400 font-bold">{activeTestimonial.stats.after}</div>
+                      </div>
+                    </div>
+                    <div className="mt-4 text-xs text-surface-500">
+                      Industry: {activeTestimonial.industry}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </AnimatePresence>
+        </motion.div>
+
+        {/* Navigation */}
+        <div className="flex items-center justify-between">
+          {/* Dots */}
+          <div className="flex items-center gap-2">
+            {testimonials.map((_, index) => (
+              <button
+                key={index}
+                onClick={() => setActiveIndex(index)}
+                className={cn(
+                  'w-2 h-2 rounded-full transition-all',
+                  index === activeIndex
+                    ? 'w-8 bg-primary-500'
+                    : 'bg-surface-600 hover:bg-surface-500'
+                )}
+                aria-label={`Go to testimonial ${index + 1}`}
+              />
+            ))}
+          </div>
+
+          {/* Arrows */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={prevTestimonial}
+              className="w-10 h-10 rounded-lg border border-surface-700 flex items-center justify-center text-surface-400 hover:text-white hover:border-surface-600 transition-colors"
+              aria-label="Previous testimonial"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <button
+              onClick={nextTestimonial}
+              className="w-10 h-10 rounded-lg border border-surface-700 flex items-center justify-center text-surface-400 hover:text-white hover:border-surface-600 transition-colors"
+              aria-label="Next testimonial"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Logos Strip */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={inView ? { opacity: 1 } : {}}
+          transition={{ delay: 0.4 }}
+          className="mt-16 pt-12 border-t border-surface-800"
+        >
+          <p className="text-center text-sm text-surface-500 mb-8">
+            Powering email for innovative companies worldwide
+          </p>
+          <div className="flex items-center justify-center gap-12 flex-wrap opacity-60 grayscale">
+            {['TechCorp', 'ScaleUp', 'DevTools', 'CloudBase', 'DataFlow', 'AppStack'].map((company) => (
+              <span key={company} className="text-surface-400 font-semibold text-lg">
+                {company}
+              </span>
+            ))}
+          </div>
+        </motion.div>
+      </div>
+    </section>
+  );
+}

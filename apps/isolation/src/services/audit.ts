@@ -1,0 +1,556 @@
+/**
+ * Audit Service
+ * 
+ * Comprehensive audit logging:
+ * - Action tracking
+ * - Compliance logging
+ * - Security events
+ * - Data access logging
+ */
+
+import { Pool } from 'pg';
+import Redis from 'ioredis';
+import { v4 as uuidv4 } from 'uuid';
+import { config } from '../config.js';
+
+export enum AuditEventType {
+  // Authentication events
+  AUTH_LOGIN = 'auth.login',
+  AUTH_LOGOUT = 'auth.logout',
+  AUTH_FAILED = 'auth.failed',
+  AUTH_MFA_ENABLED = 'auth.mfa_enabled',
+  AUTH_MFA_DISABLED = 'auth.mfa_disabled',
+  AUTH_PASSWORD_CHANGED = 'auth.password_changed',
+  AUTH_API_KEY_CREATED = 'auth.api_key_created',
+  AUTH_API_KEY_REVOKED = 'auth.api_key_revoked',
+
+  // Organization events
+  ORG_CREATED = 'org.created',
+  ORG_UPDATED = 'org.updated',
+  ORG_SUSPENDED = 'org.suspended',
+  ORG_REACTIVATED = 'org.reactivated',
+  ORG_DELETED = 'org.deleted',
+
+  // Workspace events
+  WORKSPACE_CREATED = 'workspace.created',
+  WORKSPACE_UPDATED = 'workspace.updated',
+  WORKSPACE_DELETED = 'workspace.deleted',
+
+  // Member events
+  MEMBER_INVITED = 'member.invited',
+  MEMBER_ADDED = 'member.added',
+  MEMBER_REMOVED = 'member.removed',
+  MEMBER_ROLE_CHANGED = 'member.role_changed',
+
+  // Data events
+  DATA_CREATED = 'data.created',
+  DATA_READ = 'data.read',
+  DATA_UPDATED = 'data.updated',
+  DATA_DELETED = 'data.deleted',
+  DATA_EXPORTED = 'data.exported',
+  DATA_IMPORTED = 'data.imported',
+
+  // Security events
+  SECURITY_PERMISSION_GRANTED = 'security.permission_granted',
+  SECURITY_PERMISSION_REVOKED = 'security.permission_revoked',
+  SECURITY_ACCESS_DENIED = 'security.access_denied',
+  SECURITY_SUSPICIOUS_ACTIVITY = 'security.suspicious_activity',
+  SECURITY_RATE_LIMITED = 'security.rate_limited',
+
+  // Billing events
+  BILLING_PLAN_CHANGED = 'billing.plan_changed',
+  BILLING_PAYMENT_SUCCESS = 'billing.payment_success',
+  BILLING_PAYMENT_FAILED = 'billing.payment_failed',
+
+  // Email events
+  EMAIL_SENT = 'email.sent',
+  EMAIL_FAILED = 'email.failed',
+  EMAIL_BOUNCED = 'email.bounced',
+  EMAIL_COMPLAINED = 'email.complained',
+
+  // Settings events
+  SETTINGS_CHANGED = 'settings.changed',
+  WEBHOOK_CONFIGURED = 'webhook.configured',
+  DOMAIN_ADDED = 'domain.added',
+  DOMAIN_VERIFIED = 'domain.verified',
+  DOMAIN_REMOVED = 'domain.removed',
+}
+
+export enum AuditSeverity {
+  INFO = 'info',
+  WARNING = 'warning',
+  CRITICAL = 'critical',
+}
+
+export interface AuditEvent {
+  id: string;
+  organizationId: string;
+  workspaceId: string | null;
+  type: AuditEventType;
+  severity: AuditSeverity;
+  actorId: string;
+  actorType: 'user' | 'system' | 'api_key';
+  actorIp: string | null;
+  actorUserAgent: string | null;
+  resource: string | null;
+  resourceId: string | null;
+  action: string;
+  details: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  timestamp: Date;
+}
+
+export interface AuditQuery {
+  organizationId: string;
+  workspaceId?: string;
+  types?: AuditEventType[];
+  severity?: AuditSeverity;
+  actorId?: string;
+  resource?: string;
+  startTime?: Date;
+  endTime?: Date;
+  limit?: number;
+  offset?: number;
+}
+
+type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+
+export class AuditService {
+  private db: Pool;
+  private redis: Redis;
+  private buffer: AuditEvent[] = [];
+  private flushInterval: NodeJS.Timeout | null = null;
+  private bufferSize = 100;
+  private flushIntervalMs = 5000;
+
+  constructor(db: Pool, redis: Redis) {
+    this.db = db;
+    this.redis = redis;
+  }
+
+  /**
+   * Initialize audit service
+   */
+  async initialize(): Promise<void> {
+    // Start buffer flush interval
+    this.flushInterval = setInterval(async () => {
+      await this.flushBuffer();
+    }, this.flushIntervalMs);
+
+    console.log('[Audit] Service initialized');
+  }
+
+  /**
+   * Log an audit event
+   */
+  async log(event: Omit<AuditEvent, 'id' | 'timestamp'>): Promise<Result<AuditEvent>> {
+    const fullEvent: AuditEvent = {
+      ...event,
+      id: uuidv4(),
+      timestamp: new Date(),
+    };
+
+    // Add to buffer
+    this.buffer.push(fullEvent);
+
+    // Flush if buffer is full
+    if (this.buffer.length >= this.bufferSize) {
+      await this.flushBuffer();
+    }
+
+    // Publish real-time event for critical severity
+    if (event.severity === AuditSeverity.CRITICAL) {
+      await this.publishRealTimeEvent(fullEvent);
+    }
+
+    return { ok: true, value: fullEvent };
+  }
+
+  /**
+   * Log authentication event
+   */
+  async logAuth(options: {
+    organizationId: string;
+    type: AuditEventType;
+    actorId: string;
+    actorIp?: string;
+    actorUserAgent?: string;
+    success: boolean;
+    details?: Record<string, unknown>;
+  }): Promise<Result<AuditEvent>> {
+    return this.log({
+      organizationId: options.organizationId,
+      workspaceId: null,
+      type: options.type,
+      severity: options.success ? AuditSeverity.INFO : AuditSeverity.WARNING,
+      actorId: options.actorId,
+      actorType: 'user',
+      actorIp: options.actorIp || null,
+      actorUserAgent: options.actorUserAgent || null,
+      resource: 'auth',
+      resourceId: options.actorId,
+      action: options.type.split('.')[1],
+      details: options.details || {},
+      metadata: { success: options.success },
+    });
+  }
+
+  /**
+   * Log data access event
+   */
+  async logDataAccess(options: {
+    organizationId: string;
+    workspaceId: string;
+    actorId: string;
+    actorType: 'user' | 'system' | 'api_key';
+    resource: string;
+    resourceId: string;
+    action: 'create' | 'read' | 'update' | 'delete';
+    actorIp?: string;
+    details?: Record<string, unknown>;
+  }): Promise<Result<AuditEvent>> {
+    const typeMap: Record<string, AuditEventType> = {
+      create: AuditEventType.DATA_CREATED,
+      read: AuditEventType.DATA_READ,
+      update: AuditEventType.DATA_UPDATED,
+      delete: AuditEventType.DATA_DELETED,
+    };
+
+    return this.log({
+      organizationId: options.organizationId,
+      workspaceId: options.workspaceId,
+      type: typeMap[options.action],
+      severity: AuditSeverity.INFO,
+      actorId: options.actorId,
+      actorType: options.actorType,
+      actorIp: options.actorIp || null,
+      actorUserAgent: null,
+      resource: options.resource,
+      resourceId: options.resourceId,
+      action: options.action,
+      details: options.details || {},
+      metadata: {},
+    });
+  }
+
+  /**
+   * Log security event
+   */
+  async logSecurity(options: {
+    organizationId: string;
+    workspaceId?: string;
+    type: AuditEventType;
+    severity: AuditSeverity;
+    actorId: string;
+    actorIp?: string;
+    details: Record<string, unknown>;
+  }): Promise<Result<AuditEvent>> {
+    return this.log({
+      organizationId: options.organizationId,
+      workspaceId: options.workspaceId || null,
+      type: options.type,
+      severity: options.severity,
+      actorId: options.actorId,
+      actorType: 'user',
+      actorIp: options.actorIp || null,
+      actorUserAgent: null,
+      resource: 'security',
+      resourceId: null,
+      action: options.type.split('.')[1],
+      details: options.details,
+      metadata: {},
+    });
+  }
+
+  /**
+   * Query audit events
+   */
+  async query(query: AuditQuery): Promise<Result<{ events: AuditEvent[]; total: number }>> {
+    try {
+      let whereClause = 'organization_id = $1';
+      const params: unknown[] = [query.organizationId];
+      let paramIndex = 2;
+
+      if (query.workspaceId) {
+        whereClause += ` AND workspace_id = $${paramIndex++}`;
+        params.push(query.workspaceId);
+      }
+
+      if (query.types && query.types.length > 0) {
+        whereClause += ` AND type = ANY($${paramIndex++})`;
+        params.push(query.types);
+      }
+
+      if (query.severity) {
+        whereClause += ` AND severity = $${paramIndex++}`;
+        params.push(query.severity);
+      }
+
+      if (query.actorId) {
+        whereClause += ` AND actor_id = $${paramIndex++}`;
+        params.push(query.actorId);
+      }
+
+      if (query.resource) {
+        whereClause += ` AND resource = $${paramIndex++}`;
+        params.push(query.resource);
+      }
+
+      if (query.startTime) {
+        whereClause += ` AND timestamp >= $${paramIndex++}`;
+        params.push(query.startTime);
+      }
+
+      if (query.endTime) {
+        whereClause += ` AND timestamp <= $${paramIndex++}`;
+        params.push(query.endTime);
+      }
+
+      // Get total count
+      const countResult = await this.db.query(
+        `SELECT COUNT(*) as total FROM iso_audit_logs WHERE ${whereClause}`,
+        params
+      );
+
+      // Get events
+      const result = await this.db.query(`
+        SELECT * FROM iso_audit_logs
+        WHERE ${whereClause}
+        ORDER BY timestamp DESC
+        LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+      `, [...params, query.limit || 100, query.offset || 0]);
+
+      const events = result.rows.map(row => this.rowToEvent(row));
+
+      return {
+        ok: true,
+        value: {
+          events,
+          total: parseInt(countResult.rows[0].total),
+        },
+      };
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
+  }
+
+  /**
+   * Get audit statistics
+   */
+  async getStats(organizationId: string, days: number = 30): Promise<Result<{
+    totalEvents: number;
+    byType: Record<string, number>;
+    bySeverity: Record<string, number>;
+    byDay: Array<{ date: string; count: number }>;
+    topActors: Array<{ actorId: string; count: number }>;
+  }>> {
+    const startTime = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    try {
+      // Total events
+      const totalResult = await this.db.query(`
+        SELECT COUNT(*) as total FROM iso_audit_logs
+        WHERE organization_id = $1 AND timestamp >= $2
+      `, [organizationId, startTime]);
+
+      // By type
+      const typeResult = await this.db.query(`
+        SELECT type, COUNT(*) as count FROM iso_audit_logs
+        WHERE organization_id = $1 AND timestamp >= $2
+        GROUP BY type
+      `, [organizationId, startTime]);
+
+      // By severity
+      const severityResult = await this.db.query(`
+        SELECT severity, COUNT(*) as count FROM iso_audit_logs
+        WHERE organization_id = $1 AND timestamp >= $2
+        GROUP BY severity
+      `, [organizationId, startTime]);
+
+      // By day
+      const dayResult = await this.db.query(`
+        SELECT DATE(timestamp) as date, COUNT(*) as count FROM iso_audit_logs
+        WHERE organization_id = $1 AND timestamp >= $2
+        GROUP BY DATE(timestamp)
+        ORDER BY date
+      `, [organizationId, startTime]);
+
+      // Top actors
+      const actorResult = await this.db.query(`
+        SELECT actor_id, COUNT(*) as count FROM iso_audit_logs
+        WHERE organization_id = $1 AND timestamp >= $2
+        GROUP BY actor_id
+        ORDER BY count DESC
+        LIMIT 10
+      `, [organizationId, startTime]);
+
+      const byType: Record<string, number> = {};
+      for (const row of typeResult.rows) {
+        byType[row.type] = parseInt(row.count);
+      }
+
+      const bySeverity: Record<string, number> = {};
+      for (const row of severityResult.rows) {
+        bySeverity[row.severity] = parseInt(row.count);
+      }
+
+      return {
+        ok: true,
+        value: {
+          totalEvents: parseInt(totalResult.rows[0].total),
+          byType,
+          bySeverity,
+          byDay: dayResult.rows.map(row => ({
+            date: row.date.toISOString().split('T')[0],
+            count: parseInt(row.count),
+          })),
+          topActors: actorResult.rows.map(row => ({
+            actorId: row.actor_id,
+            count: parseInt(row.count),
+          })),
+        },
+      };
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
+  }
+
+  /**
+   * Export audit logs
+   */
+  async export(query: AuditQuery, format: 'json' | 'csv'): Promise<Result<string>> {
+    const result = await this.query({ ...query, limit: 10000 });
+    if (!result.ok) return result;
+
+    const events = result.value.events;
+
+    if (format === 'json') {
+      return { ok: true, value: JSON.stringify(events, null, 2) };
+    }
+
+    // CSV format
+    const headers = [
+      'id', 'timestamp', 'type', 'severity', 'actor_id', 'actor_type',
+      'actor_ip', 'resource', 'resource_id', 'action', 'details',
+    ];
+
+    const rows = events.map(event => [
+      event.id,
+      event.timestamp.toISOString(),
+      event.type,
+      event.severity,
+      event.actorId,
+      event.actorType,
+      event.actorIp || '',
+      event.resource || '',
+      event.resourceId || '',
+      event.action,
+      JSON.stringify(event.details),
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+
+    const csv = [headers.join(','), ...rows].join('\n');
+
+    return { ok: true, value: csv };
+  }
+
+  /**
+   * Clean up old audit logs
+   */
+  async cleanup(): Promise<Result<number>> {
+    const cutoffDate = new Date(Date.now() - config.security.auditRetentionDays * 24 * 60 * 60 * 1000);
+
+    try {
+      const result = await this.db.query(`
+        DELETE FROM iso_audit_logs WHERE timestamp < $1
+      `, [cutoffDate]);
+
+      console.log(`[Audit] Cleaned up ${result.rowCount} old audit logs`);
+
+      return { ok: true, value: result.rowCount ?? 0 };
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
+  }
+
+  /**
+   * Shutdown
+   */
+  async shutdown(): Promise<void> {
+    if (this.flushInterval) {
+      clearInterval(this.flushInterval);
+    }
+    await this.flushBuffer();
+    console.log('[Audit] Service shut down');
+  }
+
+  // ==================== Private Methods ====================
+
+  private async flushBuffer(): Promise<void> {
+    if (this.buffer.length === 0) return;
+
+    const eventsToFlush = [...this.buffer];
+    this.buffer = [];
+
+    try {
+      // Batch insert
+      const values = eventsToFlush.map(event => [
+        event.id,
+        event.organizationId,
+        event.workspaceId,
+        event.type,
+        event.severity,
+        event.actorId,
+        event.actorType,
+        event.actorIp,
+        event.actorUserAgent,
+        event.resource,
+        event.resourceId,
+        event.action,
+        JSON.stringify(event.details),
+        JSON.stringify(event.metadata),
+        event.timestamp,
+      ]);
+
+      const placeholders = values.map((_, i) => {
+        const offset = i * 15;
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15})`;
+      }).join(', ');
+
+      await this.db.query(`
+        INSERT INTO iso_audit_logs (
+          id, organization_id, workspace_id, type, severity, actor_id,
+          actor_type, actor_ip, actor_user_agent, resource, resource_id,
+          action, details, metadata, timestamp
+        ) VALUES ${placeholders}
+      `, values.flat());
+    } catch (error) {
+      console.error('[Audit] Failed to flush buffer:', error);
+      // Re-add events to buffer
+      this.buffer = [...eventsToFlush, ...this.buffer];
+    }
+  }
+
+  private async publishRealTimeEvent(event: AuditEvent): Promise<void> {
+    await this.redis.publish('audit:critical', JSON.stringify(event));
+  }
+
+  private rowToEvent(row: Record<string, unknown>): AuditEvent {
+    return {
+      id: row.id as string,
+      organizationId: row.organization_id as string,
+      workspaceId: row.workspace_id as string | null,
+      type: row.type as AuditEventType,
+      severity: row.severity as AuditSeverity,
+      actorId: row.actor_id as string,
+      actorType: row.actor_type as 'user' | 'system' | 'api_key',
+      actorIp: row.actor_ip as string | null,
+      actorUserAgent: row.actor_user_agent as string | null,
+      resource: row.resource as string | null,
+      resourceId: row.resource_id as string | null,
+      action: row.action as string,
+      details: (row.details as Record<string, unknown>) || {},
+      metadata: (row.metadata as Record<string, unknown>) || {},
+      timestamp: new Date(row.timestamp as string),
+    };
+  }
+}

@@ -1,0 +1,37 @@
+{
+    "name": "@apexmail/ai",
+    "version": "1.0.0",
+    "private": true,
+    "description": "AI Intelligence Suite - Local inference with ONNX Runtime and Phi-3.5-mini",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "dev": "tsx watch src/index.ts",
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "lint": "eslint src --ext .ts",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "@anthropic-ai/sdk": "^0.17.0",
+        "@hono/node-server": "^1.8.0",
+        "@huggingface/transformers": "^3.0.0",
+        "hono": "^4.0.0",
+        "ioredis": "^5.3.2",
+        "ml-matrix": "^6.10.4",
+        "natural": "^6.10.0",
+        "onnxruntime-node": "^1.17.0",
+        "pg": "^8.11.3",
+        "uuid": "^9.0.0",
+        "zod": "^3.22.4"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "@types/pg": "^8.10.9",
+        "@types/uuid": "^9.0.7",
+        "tsx": "^4.7.0",
+        "typescript": "^5.3.3",
+        "vitest": "^1.2.0"
+    }
+}

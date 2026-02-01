@@ -563,7 +563,7 @@
 
   - **Evidence Required:** Unit test classifying 50 sample replies (positive, negative, OOO) correctly.
 
-### 6.3 Internal CRM Dashboard
+### 6.3 Internal Control Plane CRM Dashboard
 
 - [ ] **Implement "Pipeline View"**
   - **Implementation:** Kanban board in Dashboard (Leads -> Contacted -> Demo -> Won).
