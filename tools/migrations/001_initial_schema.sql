@@ -219,6 +219,42 @@ CREATE INDEX idx_queue_tenant ON message_queue(tenant_id);
 CREATE INDEX idx_queue_locked ON message_queue(locked_at) WHERE locked_at IS NOT NULL;
 
 -- =============================================================================
+-- EMAIL QUEUE (Denormalized for worker performance)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS email_queue (
+    id VARCHAR(26) PRIMARY KEY,
+    message_id VARCHAR(26) NOT NULL,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    domain_id VARCHAR(26) REFERENCES domains(id) ON DELETE SET NULL,
+    "from" VARCHAR(255) NOT NULL,
+    "to" VARCHAR(255) NOT NULL,
+    subject VARCHAR(255) NOT NULL,
+    html TEXT,
+    text TEXT,
+    headers JSONB,
+    attachments JSONB,
+    campaign_id VARCHAR(26),
+    tags JSONB,
+    metadata JSONB,
+    scheduled_at TIMESTAMPTZ,
+    priority INTEGER NOT NULL DEFAULT 5,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    locked_until TIMESTAMPTZ,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_email_queue_processing ON email_queue(status, priority DESC, created_at) 
+    WHERE status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= NOW());
+CREATE INDEX idx_email_queue_tenant ON email_queue(tenant_id);
+CREATE INDEX idx_email_queue_scheduled ON email_queue(scheduled_at) WHERE scheduled_at IS NOT NULL;
+CREATE INDEX idx_email_queue_locked ON email_queue(locked_until) WHERE locked_until IS NOT NULL;
+
+-- =============================================================================
 -- EVENTS
 -- =============================================================================
 

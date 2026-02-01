@@ -92,7 +92,11 @@ export class SystemRepository {
                 ]
             );
 
-            return ok(this.mapAlertRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create alert'));
+            }
+            return ok(this.mapAlertRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -156,7 +160,7 @@ export class SystemRepository {
 
         return {
             alerts: dataResult.rows.map(row => this.mapAlertRow(row)),
-            total: parseInt(countResult.rows[0].count, 10)
+            total: parseInt(countResult.rows[0]?.count ?? '0', 10)
         };
     }
 
@@ -220,7 +224,11 @@ export class SystemRepository {
                 ]
             );
 
-            return ok(this.mapIdempotencyRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create idempotency record'));
+            }
+            return ok(this.mapIdempotencyRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -267,7 +275,11 @@ export class SystemRepository {
                 [dateStr, data.status, data.eventCount ?? 0, data.completedAt]
             );
 
-            return ok(this.mapCompactionRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create compaction log'));
+            }
+            return ok(this.mapCompactionRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -321,7 +333,11 @@ export class SystemRepository {
                 return existing ? ok(existing) : err(new Error('Failed to create reconciliation log'));
             }
 
-            return ok(this.mapReconciliationRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create reconciliation log'));
+            }
+            return ok(this.mapReconciliationRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -385,7 +401,11 @@ export class SystemRepository {
                 return err(new Error('Reconciliation log not found'));
             }
 
-            return ok(this.mapReconciliationRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Reconciliation log not found'));
+            }
+            return ok(this.mapReconciliationRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }

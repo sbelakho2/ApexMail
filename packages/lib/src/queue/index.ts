@@ -11,7 +11,7 @@
 
 import { Result } from '../result.js';
 import { getLogger, type Logger } from '../logger/index.js';
-import type { Pool, PoolClient } from 'pg';
+import type { Pool } from 'pg';
 
 export interface QueueJob<T = unknown> {
   id: string;
@@ -50,6 +50,23 @@ export interface QueueStats {
   deadLetter: number;
   completedToday: number;
   failedToday: number;
+}
+
+// Internal database row type
+interface QueueJobRow {
+  id: string;
+  queue: string;
+  payload: string;
+  priority: number;
+  attempts: number;
+  max_attempts: number;
+  visibility_timeout: number;
+  created_at: Date;
+  scheduled_at: Date;
+  locked_until: Date | null;
+  tenant_id: string | null;
+  metadata: string;
+  status: string;
 }
 
 export interface QueueProvider {
@@ -178,7 +195,7 @@ export class PostgresQueueProvider implements QueueProvider {
         params
       );
 
-      const jobs: QueueJob<T>[] = result.rows.map((row) => ({
+      const jobs: QueueJob<T>[] = (result.rows as QueueJobRow[]).map((row) => ({
         id: row.id,
         queue: row.queue,
         payload: JSON.parse(row.payload) as T,

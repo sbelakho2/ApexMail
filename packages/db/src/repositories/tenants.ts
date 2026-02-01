@@ -271,8 +271,20 @@ export class TenantsRepository {
 
     if (!result.ok) return result;
 
+    type TenantRow = {
+      id: string;
+      name: string;
+      slug: string;
+      plan: Tenant['plan'];
+      status: Tenant['status'];
+      settings: string;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    };
+
     return Result.ok({
-      tenants: result.value.rows.map((row) => this.mapRow(row)),
+      tenants: (result.value.rows as TenantRow[]).map((row) => this.mapRow(row)),
       total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
     });
   }

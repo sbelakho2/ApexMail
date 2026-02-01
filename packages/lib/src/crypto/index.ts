@@ -18,16 +18,28 @@ import {
   generateKeyPairSync,
   timingSafeEqual,
   scrypt,
+  type ScryptOptions,
 } from 'node:crypto';
-import { promisify } from 'node:util';
 import { Result } from '../result.js';
 
-const scryptAsync = promisify(scrypt);
+// Promisified scrypt with proper typing
+function scryptAsync(
+  password: string | Buffer,
+  salt: string | Buffer,
+  keylen: number,
+  options: ScryptOptions
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, keylen, options, (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey);
+    });
+  });
+}
 
 // Constants
 const AES_KEY_LENGTH = 32; // 256 bits
 const AES_IV_LENGTH = 12; // 96 bits for GCM
-const AES_AUTH_TAG_LENGTH = 16; // 128 bits
 const SCRYPT_KEYLEN = 32;
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
@@ -155,12 +167,12 @@ export function decrypt(
  */
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
-  const derivedKey = (await scryptAsync(
+  const derivedKey = await scryptAsync(
     password,
     salt,
     SCRYPT_KEYLEN,
     { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P }
-  )) as Buffer;
+  );
   
   // Format: $scrypt$N$r$p$salt$hash
   return [
@@ -192,12 +204,12 @@ export async function verifyPassword(
   const salt = Buffer.from(parts[5] as string, 'base64');
   const storedKey = Buffer.from(parts[6] as string, 'base64');
   
-  const derivedKey = (await scryptAsync(
+  const derivedKey = await scryptAsync(
     password,
     salt,
     SCRYPT_KEYLEN,
     { N: n, r, p }
-  )) as Buffer;
+  );
   
   return timingSafeEqual(storedKey, derivedKey);
 }
@@ -220,18 +232,20 @@ export function sha512(data: string | Buffer): string {
  * Create a hash chain entry (for audit logs)
  */
 export function createHashChainEntry(
-  data: string,
-  previousHash: string,
-  index: number
+  data: string | Record<string, unknown>,
+  previousHash: string | null,
+  index: number = 0
 ): HashChainEntry {
   const timestamp = Date.now();
-  const payload = `${previousHash}|${data}|${timestamp}|${index}`;
+  const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+  const prevHash = previousHash ?? '';
+  const payload = `${prevHash}|${dataStr}|${timestamp}|${index}`;
   const hash = sha256(payload);
   
   return {
     hash,
-    previousHash,
-    data,
+    previousHash: prevHash,
+    data: dataStr,
     timestamp,
     index,
   };
@@ -337,11 +351,11 @@ export function secureRandomBase64(length: number): string {
  * Derive an encryption key from a password
  */
 export async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
-  return (await scryptAsync(password, salt, AES_KEY_LENGTH, {
+  return scryptAsync(password, salt, AES_KEY_LENGTH, {
     N: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P,
-  })) as Buffer;
+  });
 }
 
 /**

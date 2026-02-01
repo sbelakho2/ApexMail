@@ -5,11 +5,10 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
-import { EventsRepository } from '@apexmail/db';
+import { EventsRepository, type Event } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 
 const eventTypeSchema = z.enum([
-  'accepted',
   'queued',
   'sending',
   'sent',
@@ -21,7 +20,7 @@ const eventTypeSchema = z.enum([
   'clicked',
   'unsubscribed',
   'complained',
-  'failed',
+  'list_unsubscribe',
 ]);
 
 const batchEventsSchema = z.object({
@@ -44,8 +43,6 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const messageId = c.req.query('messageId');
     const eventType = c.req.query('type');
     const recipientEmail = c.req.query('recipient');
-    const domainId = c.req.query('domainId');
-    const campaignId = c.req.query('campaignId');
     const since = c.req.query('since');
     const until = c.req.query('until');
     const limit = parseInt(c.req.query('limit') ?? '100', 10);
@@ -63,10 +60,8 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
       messageId,
       eventType: eventType as z.infer<typeof eventTypeSchema>,
       recipientEmail,
-      domainId,
-      campaignId,
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
+      startDate: since ? new Date(since) : undefined,
+      endDate: until ? new Date(until) : undefined,
       limit: Math.min(limit, 1000),
       offset,
     });
@@ -85,10 +80,10 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
         metadata: e.metadata,
         userAgent: e.userAgent,
         ipAddress: e.ipAddress,
-        clickUrl: e.clickUrl,
+        linkUrl: e.linkUrl,
         bounceType: e.bounceType,
-        bounceSubtype: e.bounceSubtype,
-        bounceMessage: e.bounceMessage,
+        bounceCode: e.bounceCode,
+        bounceReason: e.bounceReason,
       })),
       pagination: {
         total: result.value.total,
@@ -101,10 +96,9 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
 
   // Get events for a specific message
   router.get('/message/:messageId', async (c) => {
-    const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
 
-    const result = await eventsRepo.listByMessage(messageId, tenantId);
+    const result = await eventsRepo.findByMessageId(messageId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch events');
@@ -119,10 +113,10 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
         metadata: e.metadata,
         userAgent: e.userAgent,
         ipAddress: e.ipAddress,
-        clickUrl: e.clickUrl,
+        linkUrl: e.linkUrl,
         bounceType: e.bounceType,
-        bounceSubtype: e.bounceSubtype,
-        bounceMessage: e.bounceMessage,
+        bounceCode: e.bounceCode,
+        bounceReason: e.bounceReason,
       })),
       timeline: buildTimeline(result.value),
     });
@@ -155,12 +149,12 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
         metadata: e.metadata,
         userAgent: e.userAgent,
         ipAddress: e.ipAddress,
-        clickUrl: e.clickUrl,
+        linkUrl: e.linkUrl,
         bounceType: e.bounceType,
-        bounceSubtype: e.bounceSubtype,
-        bounceMessage: e.bounceMessage,
+        bounceCode: e.bounceCode,
+        bounceReason: e.bounceReason,
         rawPayload: e.rawPayload,
-        createdAt: e.createdAt,
+        processedAt: e.processedAt,
       },
     });
   });
@@ -168,13 +162,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   // Get event statistics
   router.get('/stats/summary', async (c) => {
     const tenantId = c.get('tenantId');
-    const domainId = c.req.query('domainId');
     const campaignId = c.req.query('campaignId');
     const since = c.req.query('since');
     const until = c.req.query('until');
 
     const result = await eventsRepo.getStats(tenantId, {
-      domainId,
       campaignId,
       since: since ? new Date(since) : undefined,
       until: until ? new Date(until) : undefined,
@@ -193,10 +185,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const clicked = stats.clicked ?? 0;
     const bounced = stats.bounced ?? 0;
     const complained = stats.complained ?? 0;
+    const total = sent + bounced;
 
     return c.json({
       stats: {
-        total: stats.total,
+        total,
         byType: stats,
         rates: {
           deliveryRate: sent > 0 ? ((delivered / sent) * 100).toFixed(2) + '%' : '0%',
@@ -216,7 +209,6 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   // Get time series statistics
   router.get('/stats/timeseries', async (c) => {
     const tenantId = c.get('tenantId');
-    const domainId = c.req.query('domainId');
     const campaignId = c.req.query('campaignId');
     const interval = c.req.query('interval') ?? 'hour';
     const since = c.req.query('since');
@@ -227,7 +219,6 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     const result = await eventsRepo.getTimeSeries(tenantId, {
-      domainId,
       campaignId,
       interval: interval as 'minute' | 'hour' | 'day' | 'week' | 'month',
       since: since ? new Date(since) : new Date(Date.now() - 24 * 60 * 60 * 1000),
@@ -370,13 +361,13 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const items = events.map((e) => ({
       tenantId,
       messageId: e.messageId,
-      eventType: e.eventType,
+      recipientEmail: '', // Will be filled from message lookup
+      eventType: e.eventType as 'queued' | 'sending' | 'sent' | 'deferred' | 'delivered' | 'bounced' | 'dropped' | 'opened' | 'clicked' | 'unsubscribed' | 'complained' | 'list_unsubscribe',
       timestamp: e.timestamp ? new Date(e.timestamp) : new Date(),
       metadata: e.metadata,
-      deduplicationKey: e.deduplicationKey,
     }));
 
-    const result = await eventsRepo.bulkCreate(items);
+    const result = await eventsRepo.createBulk(items);
 
     if (!result.ok) {
       logger.error('Failed to create batch events', { error: result.error });
@@ -411,7 +402,9 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid email format');
     }
 
-    const result = await eventsRepo.getRecipientHistory(email, tenantId, {
+    // Use listByTenant with recipientEmail filter instead of getRecipientHistory
+    const result = await eventsRepo.listByTenant(tenantId, {
+      recipientEmail: email,
       limit: Math.min(limit, 100),
       offset,
     });
@@ -420,75 +413,64 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to fetch recipient history');
     }
 
-    const engagement = result.value;
+    // Calculate simple stats from events
+    const events = result.value.events;
+    const stats = {
+      sent: events.filter(e => e.eventType === 'sent').length,
+      delivered: events.filter(e => e.eventType === 'delivered').length,
+      opened: events.filter(e => e.eventType === 'opened').length,
+      clicked: events.filter(e => e.eventType === 'clicked').length,
+      bounced: events.filter(e => e.eventType === 'bounced').length,
+      complained: events.filter(e => e.eventType === 'complained').length,
+    };
 
     return c.json({
       recipient: maskEmail(email),
       summary: {
-        totalMessages: engagement.totalMessages,
-        lastMessageAt: engagement.lastMessageAt,
-        stats: {
-          sent: engagement.stats.sent,
-          delivered: engagement.stats.delivered,
-          opened: engagement.stats.opened,
-          clicked: engagement.stats.clicked,
-          bounced: engagement.stats.bounced,
-          complained: engagement.stats.complained,
-        },
-        engagementScore: calculateEngagementScore(engagement.stats),
+        totalEvents: result.value.total,
+        stats,
+        engagementScore: calculateEngagementScore(stats),
       },
-      recentEvents: engagement.recentEvents.map((e) => ({
+      recentEvents: events.map((e) => ({
+        id: e.id,
         messageId: e.messageId,
         eventType: e.eventType,
         timestamp: e.timestamp,
-        subject: e.subject,
       })),
       pagination: {
-        total: engagement.totalEvents,
+        total: result.value.total,
         limit,
         offset,
-        hasMore: offset + engagement.recentEvents.length < engagement.totalEvents,
+        hasMore: offset + events.length < result.value.total,
       },
     });
   });
 
-  // Get click tracking details
-  router.get('/clicks', async (c) => {
-    const tenantId = c.get('tenantId');
-    const messageId = c.req.query('messageId');
-    const campaignId = c.req.query('campaignId');
-    const since = c.req.query('since');
-    const until = c.req.query('until');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
+  // Get click tracking details by message ID
+  router.get('/clicks/:messageId', async (c) => {
+    const messageId = c.req.param('messageId');
 
-    const result = await eventsRepo.getClickStats(tenantId, {
-      messageId,
-      campaignId,
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
-      limit: Math.min(limit, 100),
-    });
+    const result = await eventsRepo.getLinkStats(messageId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch click stats');
     }
 
+    const clicks = result.value;
+    const totalClicks = clicks.reduce((sum, c) => sum + c.clicks, 0);
+    const uniqueClicks = clicks.reduce((sum, c) => sum + c.uniqueClicks, 0);
+
     return c.json({
-      clicks: result.value.clicks.map((click) => ({
-        url: click.url,
-        totalClicks: click.totalClicks,
+      messageId,
+      links: clicks.map((click) => ({
+        url: click.linkUrl,
+        totalClicks: click.clicks,
         uniqueClicks: click.uniqueClicks,
-        firstClick: click.firstClick,
-        lastClick: click.lastClick,
       })),
       totals: {
-        totalClicks: result.value.totalClicks,
-        uniqueClicks: result.value.uniqueClicks,
-        uniqueUrls: result.value.uniqueUrls,
-      },
-      period: {
-        since: since ?? 'all-time',
-        until: until ?? 'now',
+        totalClicks,
+        uniqueClicks,
+        uniqueUrls: clicks.length,
       },
     });
   });
@@ -496,12 +478,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   return router;
 }
 
-interface EventItem {
-  eventType: string;
-  timestamp: Date;
-}
-
-function buildTimeline(events: EventItem[]): Array<{
+function buildTimeline(events: Event[]): Array<{
   eventType: string;
   timestamp: Date;
   duration?: number;
@@ -518,7 +495,9 @@ function buildTimeline(events: EventItem[]): Array<{
 
     if (i > 0) {
       const prev = sorted[i - 1];
-      item.duration = new Date(e.timestamp).getTime() - new Date(prev.timestamp).getTime();
+      if (prev) {
+        item.duration = new Date(e.timestamp).getTime() - new Date(prev.timestamp).getTime();
+      }
     }
 
     return item;

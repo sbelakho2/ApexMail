@@ -41,6 +41,7 @@ export type AppEnv = {
     apiKeyId: string | null;
     requestId: string;
     logger: Logger;
+    scopes: string[];
   };
 };
 

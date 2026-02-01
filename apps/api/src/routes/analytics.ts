@@ -8,11 +8,6 @@ import type { AppEnv, AppContext } from '../app.js';
 import { EventsRepository, MessagesRepository, DomainsRepository, SuppressionsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 
-const dateRangeSchema = z.object({
-  since: z.string().datetime().optional(),
-  until: z.string().datetime().optional(),
-});
-
 const intervalSchema = z.enum(['minute', 'hour', 'day', 'week', 'month']);
 
 export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
@@ -759,7 +754,7 @@ function generateBounceRecommendations(bounces: BounceItem[], total: number): st
   return recommendations;
 }
 
-function analyzeISPPerformance(bounces: BounceItem[]): Array<{
+function analyzeISPPerformance(_bounces: BounceItem[]): Array<{
   isp: string;
   bounces: number;
   topIssue: string;
@@ -772,10 +767,10 @@ function analyzeISPPerformance(bounces: BounceItem[]): Array<{
     other: { bounces: 0, issues: {} },
   };
 
-  // In production, parse actual bounce messages to categorize
+  // TODO: In production, parse actual bounce messages from _bounces to categorize
   // For now, return placeholder data
   return Object.entries(ispPatterns)
-    .filter(([_, data]) => data.bounces > 0)
+    .filter(([, data]) => data.bounces > 0)
     .map(([isp, data]) => ({
       isp,
       bounces: data.bounces,
@@ -889,18 +884,24 @@ function convertReportToCSV(data: ReportData): string {
   }
 
   if (data.campaigns && data.campaigns.length > 0) {
-    const headers = Object.keys(data.campaigns[0]);
-    lines.push(headers.join(','));
-    for (const campaign of data.campaigns) {
-      lines.push(headers.map(h => `"${String(campaign[h] ?? '').replace(/"/g, '""')}"`).join(','));
+    const firstCampaign = data.campaigns[0];
+    if (firstCampaign) {
+      const headers = Object.keys(firstCampaign);
+      lines.push(headers.join(','));
+      for (const campaign of data.campaigns) {
+        lines.push(headers.map(h => `"${String(campaign[h] ?? '').replace(/"/g, '""')}"`).join(','));
+      }
     }
   }
 
   if (data.domains && data.domains.length > 0) {
-    const headers = Object.keys(data.domains[0]);
-    lines.push(headers.join(','));
-    for (const domain of data.domains) {
-      lines.push(headers.map(h => `"${String(domain[h] ?? '').replace(/"/g, '""')}"`).join(','));
+    const firstDomain = data.domains[0];
+    if (firstDomain) {
+      const headers = Object.keys(firstDomain);
+      lines.push(headers.join(','));
+      for (const domain of data.domains) {
+        lines.push(headers.map(h => `"${String(domain[h] ?? '').replace(/"/g, '""')}"`).join(','));
+      }
     }
   }
 

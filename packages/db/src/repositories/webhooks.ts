@@ -102,7 +102,11 @@ export class WebhooksRepository {
                 ]
             );
 
-            return ok(this.mapRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create webhook'));
+            }
+            return ok(this.mapRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -189,7 +193,11 @@ export class WebhooksRepository {
                 return err(new Error('Webhook not found'));
             }
 
-            return ok(this.mapRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Webhook not found'));
+            }
+            return ok(this.mapRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -244,7 +252,11 @@ export class WebhooksRepository {
                 [id, data.webhookId, data.tenantId, data.eventType, JSON.stringify(data.payload)]
             );
 
-            return ok(this.mapQueueRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to enqueue webhook'));
+            }
+            return ok(this.mapQueueRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }

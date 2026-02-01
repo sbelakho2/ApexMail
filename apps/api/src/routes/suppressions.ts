@@ -5,7 +5,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
-import { SuppressionsRepository, AuditLogsRepository } from '@apexmail/db';
+import { SuppressionsRepository, AuditLogsRepository, type SuppressionType, type SuppressionScope } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { createHash } from 'crypto';
 
@@ -50,14 +50,15 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // Check if already suppressed
     const existing = await suppressionsRepo.findByEmail(input.email, tenantId);
-    if (existing.ok && existing.value) {
+    if (existing.ok && existing.value && existing.value.length > 0) {
+      const firstSuppression = existing.value[0]!;
       return c.json({
         suppression: {
-          id: existing.value.id,
+          id: firstSuppression.id,
           email: maskEmail(input.email),
-          reason: existing.value.reason,
+          reason: firstSuppression.reason,
           alreadyExists: true,
-          createdAt: existing.value.createdAt,
+          createdAt: firstSuppression.createdAt,
         },
       });
     }
@@ -65,14 +66,14 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const result = await suppressionsRepo.create({
       tenantId,
       email: input.email,
-      reason: input.reason,
-      bounceType: input.bounceType,
-      bounceSubtype: input.bounceSubtype,
+      type: input.reason, // route's 'reason' maps to repo's 'type'
+      reason: input.notes, // route's notes maps to repo's reason
+      bounceType: input.bounceType as 'hard' | 'soft' | undefined,
+      bounceCode: input.bounceSubtype,
       source: input.source ?? 'api',
-      sourceMessageId: input.sourceMessageId,
-      domainId: input.domainId,
-      campaignId: input.campaignId,
-      notes: input.notes,
+      originalMessageId: input.sourceMessageId,
+      scopeId: input.domainId ?? input.campaignId,
+      scope: input.domainId ? 'domain' : (input.campaignId ? 'campaign' : 'tenant'),
       metadata: input.metadata,
     });
 
@@ -124,18 +125,18 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const items = suppressions.map((s) => ({
       tenantId,
       email: s.email,
-      reason: s.reason,
-      bounceType: s.bounceType,
-      bounceSubtype: s.bounceSubtype,
+      type: s.reason as SuppressionType, // route's reason = repo's type
+      bounceType: s.bounceType as 'hard' | 'soft' | undefined,
+      bounceCode: s.bounceSubtype,
       source: s.source ?? 'api',
-      sourceMessageId: s.sourceMessageId,
-      domainId: s.domainId,
-      campaignId: s.campaignId,
-      notes: s.notes,
+      originalMessageId: s.sourceMessageId,
+      scopeId: s.domainId ?? s.campaignId,
+      scope: (s.domainId ? 'domain' : (s.campaignId ? 'campaign' : 'tenant')) as SuppressionScope,
+      reason: s.notes,
       metadata: s.metadata,
     }));
 
-    const result = await suppressionsRepo.bulkCreate(items);
+    const result = await suppressionsRepo.importBulk(items);
 
     if (!result.ok) {
       logger.error('Failed to bulk add suppressions', { error: result.error });
@@ -150,20 +151,20 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       resourceType: 'suppression',
       resourceId: tenantId,
       metadata: {
-        count: result.value.created,
-        skipped: result.value.skipped,
+        count: result.value.imported,
+        skipped: result.value.duplicates,
       },
     });
 
     logger.info('Bulk suppressions added', {
-      created: result.value.created,
-      skipped: result.value.skipped,
+      created: result.value.imported,
+      skipped: result.value.duplicates,
     });
 
     return c.json({
       result: {
-        created: result.value.created,
-        skipped: result.value.skipped,
+        created: result.value.imported,
+        skipped: result.value.duplicates,
         total: suppressions.length,
       },
     }, 201);
@@ -187,19 +188,20 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to check suppression');
     }
 
-    if (!result.value) {
+    if (!result.value || result.value.length === 0) {
       return c.json({
         suppressed: false,
         email: maskEmail(email),
       });
     }
 
+    const firstSuppression = result.value[0]!;
     return c.json({
       suppressed: true,
       email: maskEmail(email),
-      reason: result.value.reason,
-      bounceType: result.value.bounceType,
-      createdAt: result.value.createdAt,
+      reason: firstSuppression.reason,
+      bounceType: firstSuppression.bounceType,
+      createdAt: firstSuppression.createdAt,
     });
   });
 
@@ -210,14 +212,14 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const { emails } = bulkCheckSuppressionSchema.parse(body);
 
-    const result = await suppressionsRepo.bulkCheck(emails, tenantId);
+    const result = await suppressionsRepo.checkBulkSuppression(emails, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to check suppressions');
     }
 
     // Convert Map to object for JSON response
-    const suppressedEmails: Record<string, { reason: string; bounceType?: string }> = {};
+    const suppressedEmails: Record<string, { reason: string | null; bounceType?: string | null }> = {};
     for (const [email, data] of result.value.entries()) {
       if (data) {
         suppressedEmails[maskEmail(email)] = {
@@ -240,24 +242,16 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   // List suppressions
   router.get('/', async (c) => {
     const tenantId = c.get('tenantId');
-    const reason = c.req.query('reason') as 'bounce' | 'complaint' | 'unsubscribe' | 'manual' | undefined;
-    const bounceType = c.req.query('bounceType') as 'hard' | 'soft' | 'undetermined' | undefined;
-    const source = c.req.query('source');
-    const domainId = c.req.query('domainId');
-    const campaignId = c.req.query('campaignId');
-    const since = c.req.query('since');
-    const until = c.req.query('until');
+    const type = c.req.query('reason') as SuppressionType | undefined; // reason maps to type
+    const scope = c.req.query('scope') as SuppressionScope | undefined;
+    const includeExpired = c.req.query('includeExpired') === 'true';
     const limit = parseInt(c.req.query('limit') ?? '50', 10);
     const offset = parseInt(c.req.query('offset') ?? '0', 10);
 
     const result = await suppressionsRepo.listByTenant(tenantId, {
-      reason,
-      bounceType,
-      source,
-      domainId,
-      campaignId,
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
+      type,
+      scope,
+      includeExpired,
       limit: Math.min(limit, 1000),
       offset,
     });
@@ -271,12 +265,13 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         id: s.id,
         email: maskEmail(s.email),
         emailHash: s.emailHash,
+        type: s.type,
+        scope: s.scope,
+        scopeId: s.scopeId,
         reason: s.reason,
         bounceType: s.bounceType,
-        bounceSubtype: s.bounceSubtype,
+        bounceCode: s.bounceCode,
         source: s.source,
-        domainId: s.domainId,
-        campaignId: s.campaignId,
         createdAt: s.createdAt,
       })),
       pagination: {
@@ -330,15 +325,17 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         id: s.id,
         email: maskEmail(s.email),
         emailHash: s.emailHash,
+        type: s.type,
+        scope: s.scope,
+        scopeId: s.scopeId,
         reason: s.reason,
         bounceType: s.bounceType,
-        bounceSubtype: s.bounceSubtype,
+        bounceCode: s.bounceCode,
+        feedbackType: s.feedbackType,
         source: s.source,
-        sourceMessageId: s.sourceMessageId,
-        domainId: s.domainId,
-        campaignId: s.campaignId,
-        notes: s.notes,
+        originalMessageId: s.originalMessageId,
         metadata: s.metadata,
+        expiresAt: s.expiresAt,
         createdAt: s.createdAt,
       },
     });
@@ -357,7 +354,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.notFound('Suppression');
     }
 
-    const result = await suppressionsRepo.delete(suppressionId);
+    const result = await suppressionsRepo.remove(suppressionId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to remove suppression');
@@ -397,11 +394,12 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // Find suppression
     const existing = await suppressionsRepo.findByEmail(email, tenantId);
-    if (!existing.ok || !existing.value) {
+    if (!existing.ok || !existing.value || existing.value.length === 0) {
       throw ApiError.notFound('Suppression');
     }
 
-    const result = await suppressionsRepo.delete(existing.value.id);
+    const firstSuppression = existing.value[0]!;
+    const result = await suppressionsRepo.remove(firstSuppression.id);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to remove suppression');
@@ -413,10 +411,10 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       userId: userId ?? undefined,
       action: 'suppression.deleted',
       resourceType: 'suppression',
-      resourceId: existing.value.id,
+      resourceId: firstSuppression.id,
       metadata: {
-        reason: existing.value.reason,
-        emailHash: existing.value.emailHash,
+        reason: firstSuppression.reason,
+        emailHash: firstSuppression.emailHash,
       },
     });
 
@@ -434,10 +432,21 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const { emails } = bulkRemoveSuppressionSchema.parse(body);
 
-    const result = await suppressionsRepo.bulkDelete(emails, tenantId);
+    // Use removeByEmail for each email since bulkDelete doesn't exist
+    let deleted = 0;
+    let notFound = 0;
 
-    if (!result.ok) {
-      throw ApiError.internal('Failed to remove suppressions');
+    for (const email of emails) {
+      const result = await suppressionsRepo.removeByEmail(email, tenantId);
+      if (result.ok) {
+        if (result.value > 0) {
+          deleted += result.value;
+        } else {
+          notFound++;
+        }
+      } else {
+        notFound++;
+      }
     }
 
     // Audit log
@@ -448,20 +457,20 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       resourceType: 'suppression',
       resourceId: tenantId,
       metadata: {
-        count: result.value.deleted,
-        notFound: result.value.notFound,
+        count: deleted,
+        notFound: notFound,
       },
     });
 
     logger.info('Bulk suppressions removed', {
-      deleted: result.value.deleted,
-      notFound: result.value.notFound,
+      deleted,
+      notFound,
     });
 
     return c.json({
       result: {
-        deleted: result.value.deleted,
-        notFound: result.value.notFound,
+        deleted,
+        notFound,
         total: emails.length,
       },
     });
@@ -471,40 +480,41 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/export', async (c) => {
     const tenantId = c.get('tenantId');
     const format = c.req.query('format') ?? 'json';
-    const reason = c.req.query('reason') as 'bounce' | 'complaint' | 'unsubscribe' | 'manual' | undefined;
-    const since = c.req.query('since');
-    const until = c.req.query('until');
+    const type = c.req.query('type') as SuppressionType | undefined;
 
     if (format !== 'json' && format !== 'csv') {
       throw ApiError.badRequest('Format must be json or csv');
     }
 
-    const result = await suppressionsRepo.export(tenantId, {
-      reason,
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
+    // Use listByTenant with high limit for export
+    const result = await suppressionsRepo.listByTenant(tenantId, {
+      type,
+      limit: 100000,
     });
 
     if (!result.ok) {
       throw ApiError.internal('Failed to export suppressions');
     }
 
+    const suppressions = result.value.suppressions;
+
     if (format === 'csv') {
-      const csv = convertToCSV(result.value);
+      const csv = convertToCSV(suppressions);
       c.header('Content-Type', 'text/csv');
       c.header('Content-Disposition', `attachment; filename="suppressions-${Date.now()}.csv"`);
       return c.body(csv);
     }
 
     return c.json({
-      suppressions: result.value.map((s) => ({
+      suppressions: suppressions.map((s) => ({
         emailHash: s.emailHash,
+        type: s.type,
         reason: s.reason,
         bounceType: s.bounceType,
         source: s.source,
         createdAt: s.createdAt,
       })),
-      total: result.value.length,
+      total: suppressions.length,
       exportedAt: new Date().toISOString(),
     });
   });
@@ -537,7 +547,9 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       const startIndex = lines[0]?.toLowerCase().includes('email') ? 1 : 0;
       
       for (let i = startIndex; i < lines.length; i++) {
-        const parts = lines[i].split(',').map(p => p.trim().replace(/^["']|["']$/g, ''));
+        const line = lines[i];
+        if (!line) continue;
+        const parts = line.split(',').map(p => p.trim().replace(/^["']|["']$/g, ''));
         if (parts[0] && z.string().email().safeParse(parts[0]).success) {
           const reason = (['bounce', 'complaint', 'unsubscribe', 'manual'].includes(parts[1] ?? ''))
             ? parts[1] as 'bounce' | 'complaint' | 'unsubscribe' | 'manual'
@@ -560,11 +572,11 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const items = emails.map((e) => ({
       tenantId,
       email: e.email,
-      reason: e.reason as 'bounce' | 'complaint' | 'unsubscribe' | 'manual',
+      type: e.reason as SuppressionType,
       source: 'import',
     }));
 
-    const result = await suppressionsRepo.bulkCreate(items);
+    const result = await suppressionsRepo.importBulk(items);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to import suppressions');
@@ -578,20 +590,20 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       resourceType: 'suppression',
       resourceId: tenantId,
       metadata: {
-        created: result.value.created,
-        skipped: result.value.skipped,
+        created: result.value.imported,
+        skipped: result.value.duplicates,
       },
     });
 
     logger.info('Suppressions imported', {
-      created: result.value.created,
-      skipped: result.value.skipped,
+      created: result.value.imported,
+      skipped: result.value.duplicates,
     });
 
     return c.json({
       result: {
-        created: result.value.created,
-        skipped: result.value.skipped,
+        created: result.value.imported,
+        skipped: result.value.duplicates,
         total: emails.length,
       },
     }, 201);
@@ -615,19 +627,14 @@ function hashEmail(email: string): string {
   return createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
 }
 
-interface SuppressionExport {
-  emailHash: string;
-  reason: string;
-  bounceType?: string;
-  source: string;
-  createdAt: Date;
-}
+import type { Suppression } from '@apexmail/db';
 
-function convertToCSV(data: SuppressionExport[]): string {
-  const headers = ['emailHash', 'reason', 'bounceType', 'source', 'createdAt'];
+function convertToCSV(data: Suppression[]): string {
+  const headers = ['emailHash', 'type', 'reason', 'bounceType', 'source', 'createdAt'];
   const rows = data.map(row => [
     row.emailHash,
-    row.reason,
+    row.type,
+    row.reason ?? '',
     row.bounceType ?? '',
     row.source,
     row.createdAt.toISOString(),

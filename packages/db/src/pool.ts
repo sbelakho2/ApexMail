@@ -191,17 +191,6 @@ class DatabasePool {
     return this.pool.connect();
   }
 
-  /**
-   * Get the underlying pg Pool instance
-   * Use for direct access when needed
-   */
-  getPool(): Pool {
-    if (!this.pool) {
-      throw new Error('Database pool not initialized');
-    }
-    return this.pool;
-  }
-
   getStats(): {
     totalCount: number;
     idleCount: number;

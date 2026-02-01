@@ -1,0 +1,23 @@
+{
+    "name": "@apexmail/migrate",
+    "version": "1.0.0",
+    "description": "ApexMail Custom Migration Engine",
+    "main": "index.ts",
+    "bin": {
+        "migrate": "./index.ts"
+    },
+    "scripts": {
+        "migrate": "ts-node index.ts migrate",
+        "status": "ts-node index.ts status",
+        "dry-run": "ts-node index.ts migrate --dry-run"
+    },
+    "dependencies": {
+        "pg": "^8.11.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/pg": "^8.10.0",
+        "ts-node": "^10.9.0",
+        "typescript": "^5.0.0"
+    }
+}

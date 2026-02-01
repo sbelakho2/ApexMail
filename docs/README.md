@@ -30,6 +30,19 @@ docs/
 ├── development/            # Development Guides
 │   ├── getting-started.md          ✅
 │   └── contributing.md             ✅
+├── enterprise/             # Enterprise Features
+│   ├── README.md                   ✅
+│   ├── sso.md                      ✅
+│   ├── sub-accounts.md             ✅
+│   ├── whitelabel.md               ✅
+│   ├── template-approval.md        ✅
+│   ├── log-streaming.md            ✅
+│   ├── compliance.md               ✅
+│   ├── private-cloud.md            ✅
+│   ├── support.md                  ✅
+│   └── qbr.md                      ✅
+├── marketing/              # Marketing Website
+│   └── README.md                   ✅
 ├── operations/             # Operations Guides
 │   ├── runbooks/
 │   │   └── incident-response.md    ✅
@@ -42,14 +55,34 @@ docs/
 
 ## Quick Links
 
-- [Getting Started](deployment/quickstart.md)
+### Getting Started
+- [Quick Start Guide](deployment/quickstart.md)
 - [API Reference](api/endpoints/messages.md)
 - [Architecture Overview](architecture/overview.md)
+
+### Enterprise Features
+- [Enterprise Overview](enterprise/README.md)
+- [Single Sign-On (SSO)](enterprise/sso.md)
+- [Sub-Account Management](enterprise/sub-accounts.md)
+- [White-Label Branding](enterprise/whitelabel.md)
+- [Template Approval Workflows](enterprise/template-approval.md)
+- [Log Streaming](enterprise/log-streaming.md)
+- [Compliance & Data Governance](enterprise/compliance.md)
+- [Private Cloud Deployment](enterprise/private-cloud.md)
+- [Premium Support](enterprise/support.md)
+- [Quarterly Business Reviews](enterprise/qbr.md)
+
+### Operations
 - [Security & Compliance](security/compliance.md)
 - [Operations Runbooks](operations/runbooks/incident-response.md)
+- [SLO Management](operations/slo-management.md)
+
+### Development
+- [Marketing Website](marketing/README.md)
+- [Contributing Guide](development/contributing.md)
 
 ## Version
 
-- Documentation Version: 1.0.0
-- ApexMail Version: 1.0.0
-- Last Updated: 2026-02-01
+- Documentation Version: 2.0.0
+- ApexMail Version: 2.0.0
+- Last Updated: 2025-01-15

@@ -1030,6 +1030,13 @@ export class LogStreamingService {
     return decrypted;
   }
 
+  /**
+   * Process batch for a stream (called by background job scheduler)
+   */
+  async processBatch(streamId: string): Promise<Result<void>> {
+    return this.flushBuffer(streamId);
+  }
+
   private rowToStream(row: any): LogStream {
     return {
       id: row.id,

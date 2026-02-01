@@ -597,4 +597,184 @@ export class SuppressionsRepository {
       updatedAt: row.updated_at,
     };
   }
+
+  /**
+   * Get suppression statistics for a tenant
+   */
+  async getStats(
+    tenantId: string,
+    options: { startDate?: Date; endDate?: Date; since?: Date; until?: Date } = {}
+  ): Promise<Result<{
+    total: number;
+    bounces: number;
+    complaints: number;
+    unsubscribes: number;
+    manual: number;
+  }, Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['(tenant_id IS NULL OR tenant_id = $1)'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`created_at >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`created_at <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const result = await this.db.query<{
+      type: string;
+      count: string;
+    }>(
+      `SELECT type, COUNT(*) as count
+       FROM suppressions
+       ${whereClause}
+       GROUP BY type`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    const stats = {
+      total: 0,
+      bounces: 0,
+      complaints: 0,
+      unsubscribes: 0,
+      manual: 0,
+    };
+
+    for (const row of result.value.rows) {
+      const count = parseInt(row.count, 10);
+      stats.total += count;
+      switch (row.type) {
+        case 'bounce':
+          stats.bounces += count;
+          break;
+        case 'complaint':
+          stats.complaints += count;
+          break;
+        case 'unsubscribe':
+          stats.unsubscribes += count;
+          break;
+        case 'manual':
+          stats.manual += count;
+          break;
+      }
+    }
+
+    return Result.ok(stats);
+  }
+
+  /**
+   * Get suppression time series data
+   */
+  async getTimeSeries(
+    tenantId: string,
+    options: {
+      since?: Date;
+      until?: Date;
+      startDate?: Date;
+      endDate?: Date;
+      interval: 'minute' | 'hour' | 'day' | 'week' | 'month';
+    }
+  ): Promise<Result<{
+    timestamp: Date;
+    total: number;
+    bounces: number;
+    complaints: number;
+    unsubscribes: number;
+    manual: number;
+  }[], Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`created_at >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`created_at <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    // Map interval to PostgreSQL date_trunc format
+    const truncInterval = options.interval === 'minute' ? 'hour' : options.interval;
+
+    const result = await this.db.query<{
+      bucket: Date;
+      type: SuppressionType;
+      count: string;
+    }>(
+      `SELECT 
+        DATE_TRUNC('${truncInterval}', created_at) as bucket,
+        type,
+        COUNT(*) as count
+       FROM suppressions
+       ${whereClause}
+       GROUP BY bucket, type
+       ORDER BY bucket ASC`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    // Aggregate by timestamp
+    const byTimestamp = new Map<string, {
+      timestamp: Date;
+      total: number;
+      bounces: number;
+      complaints: number;
+      unsubscribes: number;
+      manual: number;
+    }>();
+
+    for (const row of result.value.rows) {
+      const key = row.bucket.toISOString();
+      const existing = byTimestamp.get(key) ?? {
+        timestamp: row.bucket,
+        total: 0,
+        bounces: 0,
+        complaints: 0,
+        unsubscribes: 0,
+        manual: 0,
+      };
+      const count = parseInt(row.count, 10);
+      existing.total += count;
+
+      switch (row.type) {
+        case 'bounce':
+          existing.bounces += count;
+          break;
+        case 'complaint':
+          existing.complaints += count;
+          break;
+        case 'unsubscribe':
+        case 'list_unsubscribe':
+          existing.unsubscribes += count;
+          break;
+        case 'manual':
+          existing.manual += count;
+          break;
+      }
+
+      byTimestamp.set(key, existing);
+    }
+
+    return Result.ok(Array.from(byTimestamp.values()));
+  }
 }

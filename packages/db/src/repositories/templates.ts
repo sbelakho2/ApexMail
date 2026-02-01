@@ -95,14 +95,16 @@ export class TemplatesRepository {
         const handlebarsRegex = /\{\{(?:#[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/g;
         let match;
         while ((match = handlebarsRegex.exec(content)) !== null) {
-          variables.add(match[1].split('.')[0]);
+          const varPart = match[1]?.split('.')[0];
+          if (varPart) variables.add(varPart);
         }
         break;
       case 'mjml':
         // MJML uses Handlebars by default
         const mjmlRegex = /\{\{(?:#[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/g;
         while ((match = mjmlRegex.exec(content)) !== null) {
-          variables.add(match[1].split('.')[0]);
+          const varPart = match[1]?.split('.')[0];
+          if (varPart) variables.add(varPart);
         }
         break;
       case 'liquid':
@@ -111,7 +113,8 @@ export class TemplatesRepository {
         while ((match = liquidRegex.exec(content)) !== null) {
           const varName = match[1] || match[2];
           if (varName) {
-            variables.add(varName.split('.')[0]);
+            const varPart = varName.split('.')[0];
+            if (varPart) variables.add(varPart);
           }
         }
         break;
@@ -119,7 +122,8 @@ export class TemplatesRepository {
         // Match <%= variable %> and <% variable %>
         const ejsRegex = /<%[=-]?\s*([a-zA-Z_][a-zA-Z0-9_.]*)/g;
         while ((match = ejsRegex.exec(content)) !== null) {
-          variables.add(match[1].split('.')[0]);
+          const varPart = match[1]?.split('.')[0];
+          if (varPart) variables.add(varPart);
         }
         break;
     }

@@ -63,9 +63,9 @@ function calculatePrice(provider: keyof typeof pricingTiers, volume: number, opt
 
   for (const tier of tiers) {
     if (volume <= tier.max) {
-      if (tier.price !== undefined) {
+      if ('price' in tier && tier.price !== undefined) {
         basePrice = tier.price;
-      } else if (tier.pricePerK !== undefined) {
+      } else if ('pricePerK' in tier && tier.pricePerK !== undefined) {
         basePrice = (volume / 1000) * tier.pricePerK;
       }
       break;

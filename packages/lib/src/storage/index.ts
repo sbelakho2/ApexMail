@@ -264,7 +264,7 @@ export class CompressedStorageProvider implements StorageProvider {
       const chunks: Buffer[] = [];
       
       await pipeline(readable, gzip, new Writable({
-        write(chunk: Buffer, _encoding, callback) {
+        write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
           chunks.push(chunk);
           callback();
         },
@@ -304,7 +304,7 @@ export class CompressedStorageProvider implements StorageProvider {
     const chunks: Buffer[] = [];
     
     await pipeline(Readable.from(result.value.data), gunzip, new Writable({
-      write(chunk: Buffer, _encoding, callback) {
+      write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
         chunks.push(chunk);
         callback();
       },

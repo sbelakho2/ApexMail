@@ -110,7 +110,22 @@ export class SSOService {
   constructor(pool: Pool, redis: Redis) {
     this.pool = pool;
     this.redis = redis;
-    this.jwtSecret = process.env.JWT_SECRET || 'change-me-in-production';
+    
+    // SECURITY FIX: Require JWT_SECRET to be explicitly set - no hardcoded defaults
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret || jwtSecret === 'change-me-in-production') {
+      throw new Error(
+        'JWT_SECRET environment variable must be set to a secure value. ' +
+        'Generate one with: openssl rand -base64 32'
+      );
+    }
+    
+    // Validate minimum secret length for security
+    if (jwtSecret.length < 32) {
+      throw new Error('JWT_SECRET must be at least 32 characters long for security');
+    }
+    
+    this.jwtSecret = jwtSecret;
   }
 
   /**

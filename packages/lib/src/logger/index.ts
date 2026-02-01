@@ -8,7 +8,7 @@
  * - JSON and pretty output modes
  */
 
-import pino, { type Logger as PinoLogger, type LoggerOptions } from 'pino';
+import { pino as createPino, type Logger as PinoLogger, type LoggerOptions, type Level } from 'pino';
 
 export interface LogContext {
   requestId?: string;
@@ -61,16 +61,15 @@ class PinoLoggerWrapper implements Logger {
   constructor(options: LoggerOptions = {}) {
     const isPretty = process.env['NODE_ENV'] !== 'production';
     
-    this.pino = pino({
+    this.pino = createPino({
       level: process.env['LOG_LEVEL'] ?? 'info',
       redact: {
         paths: REDACT_PATHS,
         censor: '[REDACTED]',
       },
-      timestamp: pino.stdTimeFunctions.isoTime,
       formatters: {
-        level: (label) => ({ level: label }),
-        bindings: (bindings) => ({
+        level: (label: string) => ({ level: label }),
+        bindings: (bindings: Record<string, unknown>) => ({
           pid: bindings['pid'],
           host: bindings['hostname'],
           service: process.env['SERVICE_NAME'] ?? 'apexmail',
@@ -90,11 +89,11 @@ class PinoLoggerWrapper implements Logger {
     });
   }
 
-  private log(level: pino.Level, msg: string, context?: LogContext): void {
+  private log(level: Level, msg: string, context?: LogContext): void {
     if (context) {
-      this.pino[level](context, msg);
+      (this.pino[level] as (obj: unknown, msg: string) => void)(context, msg);
     } else {
-      this.pino[level](msg);
+      (this.pino[level] as (msg: string) => void)(msg);
     }
   }
 

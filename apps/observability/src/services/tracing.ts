@@ -260,9 +260,29 @@ export class TracingService {
 
   /**
    * Extract trace context from HTTP headers
+   * Supports W3C Trace Context (traceparent/tracestate) headers
    */
   extractContext(headers: Record<string, string>): TraceContext | null {
     try {
+      // W3C Trace Context: Check for traceparent header first
+      // Format: version-traceId-parentId-flags (e.g., "00-{traceId}-{spanId}-01")
+      const traceparent = headers['traceparent'] || headers['Traceparent'];
+      
+      if (traceparent) {
+        const parts = traceparent.split('-');
+        if (parts.length === 4) {
+          const [version, traceId, spanId, flags] = parts;
+          if (version === '00' && traceId.length === 32 && spanId.length === 16) {
+            return {
+              traceId,
+              spanId,
+              sampled: (parseInt(flags, 16) & 1) === 1,
+            };
+          }
+        }
+      }
+      
+      // Fall back to OpenTelemetry propagation API
       const ctx = propagation.extract(context.active(), headers);
       const spanContext = trace.getSpanContext(ctx);
       
@@ -281,6 +301,7 @@ export class TracingService {
 
   /**
    * Inject trace context into HTTP headers
+   * Includes W3C Trace Context (traceparent) header for interoperability
    */
   injectContext(traceContext: TraceContext): Record<string, string> {
     const headers: Record<string, string> = {};
@@ -294,6 +315,11 @@ export class TracingService {
     
     const ctx = trace.setSpanContext(context.active(), spanContext);
     propagation.inject(ctx, headers);
+    
+    // ENHANCEMENT: Explicitly add W3C Trace Context traceparent header
+    // Format: version-traceId-parentId-flags
+    const flags = traceContext.sampled ? '01' : '00';
+    headers['traceparent'] = `00-${traceContext.traceId}-${traceContext.spanId}-${flags}`;
     
     return headers;
   }

@@ -17,6 +17,7 @@ export interface User {
   emailVerified: boolean;
   lastLoginAt: Date | null;
   mfaEnabled: boolean;
+  preferences: Record<string, unknown>; // Stored in metadata.preferences
   metadata: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
@@ -36,6 +37,8 @@ export interface UpdateUserInput {
   status?: User['status'];
   emailVerified?: boolean;
   mfaEnabled?: boolean;
+  lastLoginAt?: Date;
+  preferences?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
 
@@ -216,6 +219,15 @@ export class UsersRepository {
       updates.push(`mfa_enabled = $${paramIndex++}`);
       values.push(input.mfaEnabled);
     }
+    if (input.lastLoginAt !== undefined) {
+      updates.push(`last_login_at = $${paramIndex++}`);
+      values.push(input.lastLoginAt);
+    }
+    if (input.preferences !== undefined) {
+      // Store preferences inside metadata.preferences
+      updates.push(`metadata = jsonb_set(COALESCE(metadata, '{}'), '{preferences}', $${paramIndex++}::jsonb)`);
+      values.push(JSON.stringify(input.preferences));
+    }
     if (input.metadata !== undefined) {
       updates.push(`metadata = metadata || $${paramIndex++}::jsonb`);
       values.push(JSON.stringify(input.metadata));
@@ -351,6 +363,13 @@ export class UsersRepository {
     created_at: Date;
     updated_at: Date;
   }): User {
+    const metadata = typeof row.metadata === 'string'
+      ? JSON.parse(row.metadata) as Record<string, unknown>
+      : row.metadata as unknown as Record<string, unknown>;
+    
+    // Extract preferences from metadata if present
+    const preferences = (metadata.preferences ?? {}) as Record<string, unknown>;
+    
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -361,9 +380,8 @@ export class UsersRepository {
       emailVerified: row.email_verified,
       lastLoginAt: row.last_login_at,
       mfaEnabled: row.mfa_enabled,
-      metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
-        : row.metadata as unknown as Record<string, unknown>,
+      preferences,
+      metadata,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

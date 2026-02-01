@@ -13,7 +13,7 @@ export default defineConfig({
         
         // Test patterns
         include: ['src/**/*.{test,spec}.{ts,tsx}'],
-        exclude: ['src/e2e/**', 'node_modules', 'dist'],
+        exclude: ['src/e2e/**', 'src/a11y/**', 'src/visual/**', 'node_modules', 'dist'],
         
         // Coverage configuration
         coverage: {

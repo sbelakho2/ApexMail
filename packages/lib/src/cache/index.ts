@@ -8,7 +8,7 @@
  * - Pub/Sub for cache invalidation
  */
 
-import Redis, { type Redis as RedisClient, type RedisOptions } from 'ioredis';
+import { Redis, type RedisOptions } from 'ioredis';
 import { Result } from '../result.js';
 import { getLogger, type Logger } from '../logger/index.js';
 
@@ -20,6 +20,7 @@ export interface CacheOptions {
 export interface CacheProvider {
   get<T>(key: string): Promise<T | null>;
   set<T>(key: string, value: T, options?: CacheOptions): Promise<void>;
+  setNX<T>(key: string, value: T, options?: CacheOptions): Promise<boolean>; // Atomic set-if-not-exists
   delete(key: string): Promise<void>;
   exists(key: string): Promise<boolean>;
   incr(key: string, by?: number): Promise<number>;
@@ -44,8 +45,8 @@ export interface CacheProvider {
  * Redis-backed cache implementation
  */
 export class RedisCacheProvider implements CacheProvider {
-  private readonly client: RedisClient;
-  private readonly subscriber: RedisClient;
+  private readonly client: Redis;
+  private readonly subscriber: Redis;
   private readonly prefix: string;
   private readonly logger: Logger;
   private connected = false;
@@ -115,6 +116,25 @@ export class RedisCacheProvider implements CacheProvider {
       await this.client.setex(this.key(key), options.ttlSeconds, serialized);
     } else {
       await this.client.set(this.key(key), serialized);
+    }
+  }
+
+  /**
+   * Atomic set-if-not-exists operation
+   * Returns true if key was set, false if key already exists
+   * SECURITY: Prevents TOCTOU race conditions in lock acquisition
+   */
+  async setNX<T>(key: string, value: T, options: CacheOptions = {}): Promise<boolean> {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    
+    if (options.ttlSeconds) {
+      // Use SET with NX and EX flags for atomic operation with TTL
+      const result = await this.client.set(this.key(key), serialized, 'EX', options.ttlSeconds, 'NX');
+      return result === 'OK';
+    } else {
+      // Use SETNX for atomic operation without TTL
+      const result = await this.client.setnx(this.key(key), serialized);
+      return result === 1;
     }
   }
 
@@ -265,6 +285,32 @@ export class InMemoryCacheProvider implements CacheProvider {
       : undefined;
     
     this.store.set(this.key(key), { value: serialized, expiresAt });
+  }
+
+  /**
+   * Atomic set-if-not-exists operation
+   * Returns true if key was set, false if key already exists
+   */
+  async setNX<T>(key: string, value: T, options: CacheOptions = {}): Promise<boolean> {
+    const existingEntry = this.store.get(this.key(key));
+    
+    // Check if key exists and is not expired
+    if (existingEntry) {
+      if (!existingEntry.expiresAt || existingEntry.expiresAt > Date.now()) {
+        return false; // Key exists
+      }
+      // Key expired, delete it
+      this.store.delete(this.key(key));
+    }
+    
+    // Set the new value
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    const expiresAt = options.ttlSeconds 
+      ? Date.now() + options.ttlSeconds * 1000 
+      : undefined;
+    
+    this.store.set(this.key(key), { value: serialized, expiresAt });
+    return true;
   }
 
   async delete(key: string): Promise<void> {

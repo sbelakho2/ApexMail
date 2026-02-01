@@ -18,10 +18,14 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
   const getCache = async () => {
     if (!cache) {
       cache = createCache({
-        host: ctx.config.redis.host,
-        port: ctx.config.redis.port,
-        password: ctx.config.redis.password,
-        db: ctx.config.redis.db,
+        type: 'redis',
+        prefix: 'apexmail:ratelimit:',
+        redisOptions: {
+          host: ctx.config.redis.host,
+          port: ctx.config.redis.port,
+          password: ctx.config.redis.password,
+          db: ctx.config.redis.db,
+        },
       });
     }
     return cache;
@@ -47,9 +51,8 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
       const windowEnd = windowStart + windowMs;
       const key = `${limitKey}:${windowStart}`;
 
-      // Get current count
-      const currentResult = await redisCache.get<RateLimitState>(key);
-      const current = currentResult.ok ? currentResult.value : null;
+      // Get current count (returns null if not found)
+      const current = await redisCache.get<RateLimitState>(key);
 
       let count: number;
       if (current) {
@@ -58,8 +61,8 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
         count = 1;
       }
 
-      // Update count
-      await redisCache.set(key, { count, resetAt: windowEnd }, Math.ceil(windowMs / 1000) + 1);
+      // Update count with TTL
+      await redisCache.set(key, { count, resetAt: windowEnd }, { ttlSeconds: Math.ceil(windowMs / 1000) + 1 });
 
       // Set rate limit headers
       const remaining = Math.max(0, maxRequests - count);
@@ -91,8 +94,21 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
         throw error;
       }
 
-      // On Redis errors, log and allow the request (fail open)
-      logger.error('Rate limiter error', { error });
+      // SECURITY FIX: On Redis errors, fail CLOSED to prevent DDoS during outages
+      // This is a defense-in-depth measure to prevent abuse when Redis is unavailable
+      logger.error('Rate limiter error - failing closed for security', { error });
+      
+      // In production, fail closed to prevent abuse
+      // In development, allow requests for easier debugging
+      if (process.env.NODE_ENV === 'production') {
+        throw ApiError.serviceUnavailable(
+          'Service temporarily unavailable. Please try again later.',
+          'RATE_LIMITER_UNAVAILABLE'
+        );
+      }
+      
+      // Only fail open in non-production environments
+      logger.warn('Rate limiter failing open (non-production environment)');
       return next();
     }
   };
@@ -107,10 +123,14 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
   const getCache = async () => {
     if (!cache) {
       cache = createCache({
-        host: ctx.config.redis.host,
-        port: ctx.config.redis.port,
-        password: ctx.config.redis.password,
-        db: ctx.config.redis.db,
+        type: 'redis',
+        prefix: 'apexmail:ratelimit:sw:',
+        redisOptions: {
+          host: ctx.config.redis.host,
+          port: ctx.config.redis.port,
+          password: ctx.config.redis.password,
+          db: ctx.config.redis.db,
+        },
       });
     }
     return cache;
@@ -131,7 +151,6 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
     try {
       const redisCache = await getCache();
       const now = Date.now();
-      const windowStart = now - windowMs;
 
       // Use sorted set for sliding window
       // This is a simplified implementation - in production you'd use Redis commands directly
@@ -145,13 +164,13 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
       const currentKey = `${key}:${currentWindow}`;
       const previousKey = `${key}:${previousWindow}`;
 
-      const [currentCountResult, previousCountResult] = await Promise.all([
+      const [currentCountData, previousCountData] = await Promise.all([
         redisCache.get<{ count: number }>(currentKey),
         redisCache.get<{ count: number }>(previousKey),
       ]);
 
-      const currentCount = (currentCountResult.ok ? currentCountResult.value?.count : 0) ?? 0;
-      const previousCount = (previousCountResult.ok ? previousCountResult.value?.count : 0) ?? 0;
+      const currentCount = currentCountData?.count ?? 0;
+      const previousCount = previousCountData?.count ?? 0;
 
       // Calculate weighted count based on time into current window
       const windowProgress = (now % windowMs) / windowMs;
@@ -159,7 +178,7 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
       const totalCount = currentCount + weightedPreviousCount;
 
       // Update current window count
-      await redisCache.set(currentKey, { count: currentCount + 1 }, Math.ceil(windowMs * 2 / 1000));
+      await redisCache.set(currentKey, { count: currentCount + 1 }, { ttlSeconds: Math.ceil(windowMs * 2 / 1000) });
 
       // Set headers
       const remaining = Math.max(0, Math.floor(maxRequests - totalCount));
@@ -191,7 +210,17 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
         throw error;
       }
 
-      logger.error('Sliding window rate limiter error', { error });
+      // SECURITY FIX: On Redis errors, fail CLOSED to prevent DDoS during outages
+      logger.error('Sliding window rate limiter error - failing closed for security', { error });
+      
+      if (process.env.NODE_ENV === 'production') {
+        throw ApiError.serviceUnavailable(
+          'Service temporarily unavailable. Please try again later.',
+          'RATE_LIMITER_UNAVAILABLE'
+        );
+      }
+      
+      logger.warn('Sliding window rate limiter failing open (non-production environment)');
       return next();
     }
   };

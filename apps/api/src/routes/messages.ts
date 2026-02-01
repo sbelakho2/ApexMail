@@ -68,7 +68,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const input = sendMessageSchema.parse(body);
 
     // Verify sending domain is verified
-    const sendingDomain = input.from.email.split('@')[1];
+    const sendingDomain = input.from.email.split('@')[1] ?? '';
     const domainResult = await domainsRepo.findByDomain(sendingDomain, tenantId);
     
     if (!domainResult.ok) {
@@ -156,7 +156,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     await eventsRepo.create({
       tenantId,
       messageId: message.id,
-      recipientEmail: validRecipients[0].email,
+      recipientEmail: validRecipients[0]?.email ?? '',
       eventType: 'queued',
       metadata: { recipientCount: validRecipients.length },
     });
@@ -205,10 +205,11 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     // Process each message
     for (let i = 0; i < messages.length; i++) {
       const input = messages[i];
+      if (!input) continue;
 
       try {
         // Verify sending domain
-        const sendingDomain = input.from.email.split('@')[1];
+        const sendingDomain = input.from.email.split('@')[1] ?? '';
         const domainResult = await domainsRepo.findByDomain(sendingDomain, tenantId);
         
         if (!domainResult.ok || !domainResult.value || domainResult.value.status !== 'verified') {

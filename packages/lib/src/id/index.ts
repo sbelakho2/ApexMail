@@ -9,7 +9,8 @@
  * - API key generation
  */
 
-import { v7 as uuidv7, v4 as uuidv4 } from 'uuid';
+import { v4 as uuidv4 } from 'uuid';
+import { randomBytes, createHash } from 'node:crypto';
 import { nanoid, customAlphabet } from 'nanoid';
 import { secureRandomHex, secureRandomBase64 } from '../crypto/index.js';
 
@@ -22,10 +23,39 @@ const readableId = customAlphabet(READABLE_ALPHABET, 8);
 
 /**
  * Generate a UUID v7 (time-ordered, sortable)
+ * Implementation based on RFC 9562
  * Preferred for database primary keys
  */
 export function generateUuid(): string {
-  return uuidv7();
+  // Get current timestamp in milliseconds
+  const timestamp = Date.now();
+  
+  // Convert timestamp to bytes (48 bits / 6 bytes)
+  const timestampBytes = Buffer.alloc(6);
+  timestampBytes.writeUIntBE(timestamp, 0, 6);
+  
+  // Generate random bytes for the rest
+  const random = randomBytes(10);
+  
+  // Build UUID v7 format: timestamp (48 bits) + version (4 bits) + random (12 bits) + variant (2 bits) + random (62 bits)
+  const uuid = Buffer.alloc(16);
+  
+  // Copy timestamp bytes (48 bits)
+  timestampBytes.copy(uuid, 0, 0, 6);
+  
+  // Set version 7 (0111) in the 4 high bits of byte 6
+  uuid[6] = (random[0]! & 0x0f) | 0x70;
+  uuid[7] = random[1]!;
+  
+  // Set variant (10) in the 2 high bits of byte 8
+  uuid[8] = (random[2]! & 0x3f) | 0x80;
+  
+  // Copy remaining random bytes
+  random.copy(uuid, 9, 3, 10);
+  
+  // Format as UUID string
+  const hex = uuid.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
@@ -57,7 +87,7 @@ export function generateReadableId(length = 8): string {
  * Format: <uuid@domain>
  */
 export function generateMessageId(domain = 'apexmail.ee'): string {
-  return `<${uuidv7()}@${domain}>`;
+  return `<${generateUuid()}@${domain}>`;
 }
 
 /**
@@ -65,7 +95,7 @@ export function generateMessageId(domain = 'apexmail.ee'): string {
  * Use for preventing duplicate API requests
  */
 export function generateIdempotencyKey(): string {
-  return `idem_${uuidv7()}`;
+  return `idem_${generateUuid()}`;
 }
 
 /**
@@ -81,11 +111,32 @@ export function generateApiKey(mode: 'live' | 'test' = 'live'): {
   const secret = secureRandomBase64(32);
   const key = `${prefix}${secret}`;
   
-  // Store only the hash in DB
-  const { sha256 } = require('../crypto/index.js') as typeof import('../crypto/index.js');
-  const hash = sha256(key);
+  // Generate a hash for storage
+  const hash = createHash('sha256').update(key).digest('hex');
   
   return { key, prefix, hash };
+}
+
+/**
+ * Parse an API key to extract mode and validate format
+ */
+export function parseApiKey(key: string): {
+  valid: boolean;
+  mode: 'live' | 'test' | null;
+  prefix: string | null;
+} {
+  const livePrefix = 'apx_live_';
+  const testPrefix = 'apx_test_';
+  
+  if (key.startsWith(livePrefix)) {
+    return { valid: true, mode: 'live', prefix: livePrefix };
+  }
+  
+  if (key.startsWith(testPrefix)) {
+    return { valid: true, mode: 'test', prefix: testPrefix };
+  }
+  
+  return { valid: false, mode: null, prefix: null };
 }
 
 /**
@@ -214,11 +265,13 @@ export function extractUuidFromMessageId(messageId: string): string | null {
 }
 
 /**
- * Generate a unique ID (alias for generateUuid)
+ * Generate a unique ID with optional prefix
  * Default function for generating entity IDs
+ * @param prefix Optional prefix to prepend (e.g., 'whk', 'msg', 'evt')
  */
-export function generateId(): string {
-  return generateUuid();
+export function generateId(prefix?: string): string {
+  const uuid = generateUuid();
+  return prefix ? `${prefix}_${uuid}` : uuid;
 }
 
 // Helper: Get ISO week number

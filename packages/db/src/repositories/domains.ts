@@ -394,4 +394,53 @@ export class DomainsRepository {
       updatedAt: row.updated_at,
     };
   }
+
+  /**
+   * Get domain statistics for a tenant
+   */
+  async getStats(tenantId: string): Promise<Result<{
+    total: number;
+    verified: number;
+    pending: number;
+    failed: number;
+  }, Error>> {
+    const result = await this.db.query<{
+      status: string;
+      count: string;
+    }>(
+      `SELECT status, COUNT(*) as count
+       FROM domains
+       WHERE tenant_id = $1
+       GROUP BY status`,
+      [tenantId]
+    );
+
+    if (!result.ok) return result;
+
+    const stats = {
+      total: 0,
+      verified: 0,
+      pending: 0,
+      failed: 0,
+    };
+
+    for (const row of result.value.rows) {
+      const count = parseInt(row.count, 10);
+      stats.total += count;
+      switch (row.status) {
+        case 'verified':
+          stats.verified += count;
+          break;
+        case 'pending':
+          stats.pending += count;
+          break;
+        case 'failed':
+        case 'expired':
+          stats.failed += count;
+          break;
+      }
+    }
+
+    return Result.ok(stats);
+  }
 }

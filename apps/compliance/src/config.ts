@@ -115,3 +115,4 @@ export function loadConfig(): Config {
 }
 
 export const config = loadConfig();
+export const complianceConfig = config;

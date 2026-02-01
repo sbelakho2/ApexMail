@@ -34,8 +34,11 @@ export type AuditAction =
   | 'template.published'
   | 'template.deleted'
   | 'suppression.created'
+  | 'suppression.deleted'
   | 'suppression.removed'
   | 'suppression.imported'
+  | 'suppression.bulk_created'
+  | 'suppression.bulk_deleted'
   | 'message.sent'
   | 'message.bounced'
   | 'message.complained'
@@ -43,6 +46,9 @@ export type AuditAction =
   | 'webhook.updated'
   | 'webhook.deleted'
   | 'webhook.triggered'
+  | 'webhook.secret_rotated'
+  | 'webhook.enabled'
+  | 'webhook.disabled'
   | 'settings.updated'
   | 'export.requested'
   | 'export.completed'
@@ -185,7 +191,11 @@ export class AuditLogsRepository {
 
     // For bulk inserts, we need to chain hashes sequentially
     // Get the last hash for the tenant
-    const tenantId = inputs[0].tenantId;
+    const firstInput = inputs[0];
+    if (!firstInput) {
+      return Result.ok(0);
+    }
+    const tenantId = firstInput.tenantId;
     const previousResult = await this.db.query<{ hash: string }>(
       `SELECT hash FROM audit_logs 
        WHERE tenant_id = $1 
@@ -493,11 +503,19 @@ export class AuditLogsRepository {
       previousHash: row.previous_hash,
     }));
 
-    const verification = verifyHashChain(entries);
+    const verification = verifyHashChain(entries as unknown as import('@apexmail/lib/crypto').HashChainEntry[]);
+
+    if (!verification.ok) {
+      return Result.ok({
+        valid: false,
+        brokenAt: entries[verification.error.index]?.data.id,
+        checked: entries.length,
+      });
+    }
 
     return Result.ok({
-      valid: verification.valid,
-      brokenAt: verification.brokenAt !== undefined ? entries[verification.brokenAt]?.data.id : undefined,
+      valid: true,
+      brokenAt: undefined,
       checked: entries.length,
     });
   }

@@ -190,7 +190,7 @@ export async function calculateSchemaFingerprint(
     return objectsResult;
   }
 
-  const objects = objectsResult.value;
+  const objects: SchemaObject[] = objectsResult.value;
   
   // Create deterministic string representation
   const schemaString = objects
@@ -215,12 +215,12 @@ export async function calculateSchemaFingerprint(
     // Table might not exist yet
   }
 
-  const counts = objects.reduce(
+  const counts = objects.reduce<Record<string, number>>(
     (acc, obj) => {
       acc[obj.type]++;
       return acc;
     },
-    { table: 0, index: 0, constraint: 0, function: 0, trigger: 0 } as Record<string, number>
+    { table: 0, index: 0, constraint: 0, function: 0, trigger: 0 }
   );
 
   return Result.ok({
@@ -264,12 +264,12 @@ export async function compareSchemas(
     return currentResult;
   }
 
-  const current = currentResult.value;
-  const currentMap = new Map(
-    current.map((obj) => [`${obj.type}:${obj.schema}.${obj.name}`, obj])
+  const current: SchemaObject[] = currentResult.value;
+  const currentMap = new Map<string, SchemaObject>(
+    current.map((obj) => [`${obj.type}:${obj.schema}.${obj.name}`, obj] as [string, SchemaObject])
   );
-  const previousMap = new Map(
-    previousObjects.map((obj) => [`${obj.type}:${obj.schema}.${obj.name}`, obj])
+  const previousMap = new Map<string, SchemaObject>(
+    previousObjects.map((obj) => [`${obj.type}:${obj.schema}.${obj.name}`, obj] as [string, SchemaObject])
   );
 
   const added: SchemaObject[] = [];
@@ -309,7 +309,7 @@ export async function validateRequiredSchema(
     return objectsResult;
   }
 
-  const objects = objectsResult.value;
+  const objects: SchemaObject[] = objectsResult.value;
   const tableNames = new Set(
     objects.filter((o) => o.type === 'table').map((o) => `${o.schema}.${o.name}`)
   );

@@ -5,7 +5,7 @@
 import { serve } from '@hono/node-server';
 import { createApp } from './app.js';
 import { createLogger } from '@apexmail/lib';
-import { createDatabasePool } from '@apexmail/db';
+import { getDatabase } from '@apexmail/db';
 import { loadConfig } from './config.js';
 
 const logger = createLogger({ name: 'api' });
@@ -18,14 +18,8 @@ async function main(): Promise<void> {
     port: config.port,
   });
 
-  // Initialize database pool
-  const db = createDatabasePool('api', {
-    host: config.database.host,
-    port: config.database.port,
-    database: config.database.name,
-    user: config.database.user,
-    password: config.database.password,
-  });
+  // Initialize database pool (uses service-specific config for 'api' = 20 connections)
+  const db = getDatabase('api');
 
   // Create the application
   const app = createApp({ db, config, logger });
@@ -48,10 +42,7 @@ async function main(): Promise<void> {
     server.close(async () => {
       logger.info('HTTP server closed');
       
-      const closeResult = await db.close();
-      if (!closeResult.ok) {
-        logger.error('Error closing database pool', { error: closeResult.error });
-      }
+      await db.disconnect();
       
       logger.info('Shutdown complete');
       process.exit(0);

@@ -52,6 +52,8 @@ export class ApiError extends Error {
 }
 
 export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
+  const isProduction = process.env.NODE_ENV === 'production';
+  
   return (err, c) => {
     const requestId = c.get('requestId') ?? 'unknown';
 
@@ -62,7 +64,8 @@ export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
           requestId,
           error: err.message,
           code: err.code,
-          stack: err.stack,
+          // SECURITY FIX: Only log stack traces, never expose in response
+          ...(isProduction ? {} : { stack: err.stack }),
         });
       } else {
         logger.warn('Client error', {
@@ -104,17 +107,20 @@ export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
     }
 
     // Handle unknown errors
+    // SECURITY FIX: Only log stack traces internally, never expose in response
     logger.error('Unhandled error', {
       requestId,
       error: err.message,
-      stack: err.stack,
       name: err.name,
+      ...(isProduction ? {} : { stack: err.stack }),
     });
 
     return c.json({
       error: {
         code: 'INTERNAL_ERROR',
         message: 'An unexpected error occurred',
+        // SECURITY FIX: Never expose stack traces in responses
+        // Stack traces are logged server-side for debugging
       },
     }, 500);
   };

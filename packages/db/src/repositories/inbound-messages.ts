@@ -137,7 +137,11 @@ export class InboundMessagesRepository {
                 ]
             );
 
-            return ok(this.mapInboundRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create inbound message'));
+            }
+            return ok(this.mapInboundRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -202,7 +206,7 @@ export class InboundMessagesRepository {
 
         return {
             messages: dataResult.rows.map(row => this.mapInboundRow(row)),
-            total: parseInt(countResult.rows[0].count, 10)
+            total: parseInt(countResult.rows[0]?.count ?? '0', 10)
         };
     }
 
@@ -241,7 +245,11 @@ export class InboundMessagesRepository {
                 ]
             );
 
-            return ok(this.mapBounceRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create unmatched bounce'));
+            }
+            return ok(this.mapBounceRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -300,7 +308,11 @@ export class InboundMessagesRepository {
                 ]
             );
 
-            return ok(this.mapComplaintRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create unmatched complaint'));
+            }
+            return ok(this.mapComplaintRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }

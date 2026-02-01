@@ -36,7 +36,7 @@ interface ChainValidationResult {
 export class AuditLogger {
     private db: Pool;
     private redis: Redis;
-    private config = complianceConfig.auditLog;
+    private _config = complianceConfig.auditLog;
     private signingKey: string;
     private lastHash: Map<string, string> = new Map();
 

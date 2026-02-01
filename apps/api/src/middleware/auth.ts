@@ -35,8 +35,9 @@ export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
       }
 
       c.set('tenantId', result.tenantId!);
-      c.set('userId', result.userId);
+      c.set('userId', result.userId ?? null);
       c.set('apiKeyId', result.apiKeyId!);
+      c.set('scopes', result.scopes ?? ['*']);
       
       logger.info('Authenticated via API key', {
         tenantId: result.tenantId,
@@ -59,6 +60,7 @@ export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
       c.set('tenantId', result.payload!.tid);
       c.set('userId', result.payload!.sub);
       c.set('apiKeyId', null);
+      c.set('scopes', result.payload!.scopes ?? ['*']);
       
       logger.info('Authenticated via JWT', {
         tenantId: result.payload!.tid,
@@ -123,6 +125,11 @@ async function verifyJwt(token: string, secret: string): Promise<JwtVerifyResult
     }
 
     const [headerB64, payloadB64, signatureB64] = parts;
+    
+    // Ensure all parts exist after split
+    if (!headerB64 || !payloadB64 || !signatureB64) {
+      return { valid: false, reason: 'malformed_token' };
+    }
 
     // Verify signature
     const signatureInput = `${headerB64}.${payloadB64}`;
@@ -186,7 +193,7 @@ export function createJwt(
 
 function parseExpiry(expiry: string): number {
   const match = expiry.match(/^(\d+)([smhd])$/);
-  if (!match) {
+  if (!match || !match[1] || !match[2]) {
     return 3600; // Default 1 hour
   }
 
@@ -217,16 +224,30 @@ function getClientIp(c: { req: { header: (name: string) => string | undefined } 
 export function requireScopes(...requiredScopes: string[]): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const apiKeyId = c.get('apiKeyId');
+    const logger = c.get('logger');
     
     // JWT users have all scopes (managed by RBAC at user level)
     if (!apiKeyId) {
       return next();
     }
 
-    // For API keys, check scopes
-    // The scopes are stored with the API key validation result
-    // In a full implementation, we'd pass scopes through context
-    // For now, proceed - scope checking happens at route level
+    // For API keys, check scopes from context
+    const userScopes = c.get('scopes');
+    
+    if (userScopes && requiredScopes.length > 0) {
+      // Check if user has wildcard scope or all required scopes
+      const hasWildcard = userScopes.includes('*');
+      const hasAllScopes = requiredScopes.every(scope => userScopes.includes(scope));
+      
+      if (!hasWildcard && !hasAllScopes) {
+        logger.warn('Insufficient scopes', {
+          required: requiredScopes,
+          actual: userScopes,
+        });
+        throw ApiError.forbidden('Insufficient permissions', 'INSUFFICIENT_SCOPE');
+      }
+    }
+    
     return next();
   };
 }

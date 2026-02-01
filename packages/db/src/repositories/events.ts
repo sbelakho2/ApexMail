@@ -422,20 +422,26 @@ export class EventsRepository {
     options: {
       startDate?: Date;
       endDate?: Date;
+      since?: Date;
+      until?: Date;
       campaignId?: string;
     } = {}
   ): Promise<Result<EventStats, Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
     const conditions = ['e.tenant_id = $1'];
     const values: unknown[] = [tenantId];
     let paramIndex = 2;
 
-    if (options.startDate) {
+    if (startDate) {
       conditions.push(`e.timestamp >= $${paramIndex++}`);
-      values.push(options.startDate);
+      values.push(startDate);
     }
-    if (options.endDate) {
+    if (endDate) {
       conditions.push(`e.timestamp <= $${paramIndex++}`);
-      values.push(options.endDate);
+      values.push(endDate);
     }
 
     let joinClause = '';
@@ -669,5 +675,446 @@ export class EventsRepository {
         ? JSON.parse(row.metadata) as Record<string, unknown>
         : row.metadata as unknown as Record<string, unknown>,
     };
+  }
+
+  /**
+   * Get time series data for events aggregated per time bucket
+   */
+  async getTimeSeries(
+    tenantId: string,
+    options: {
+      since?: Date;
+      until?: Date;
+      startDate?: Date;
+      endDate?: Date;
+      interval: 'minute' | 'hour' | 'day' | 'week' | 'month';
+      domainId?: string;
+      campaignId?: string;
+      eventTypes?: EventType[];
+    }
+  ): Promise<Result<{
+    timestamp: Date;
+    delivered?: number;
+    opened?: number;
+    clicked?: number;
+    unsubscribed?: number;
+    complained?: number;
+    bounced?: number;
+    sent?: number;
+  }[], Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['e.tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`e.timestamp >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`e.timestamp <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+
+    let joinClause = '';
+    if (options.domainId) {
+      joinClause = 'JOIN domains d ON e.tenant_id = d.tenant_id';
+      conditions.push(`d.id = $${paramIndex++}`);
+      values.push(options.domainId);
+    }
+    if (options.campaignId) {
+      joinClause += joinClause ? ' ' : '';
+      joinClause += 'JOIN messages m ON e.message_id = m.id';
+      conditions.push(`m.campaign_id = $${paramIndex++}`);
+      values.push(options.campaignId);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    // Map interval to PostgreSQL date_trunc format
+    const truncInterval = options.interval === 'minute' ? 'hour' : options.interval;
+
+    const result = await this.db.query<{
+      bucket: Date;
+      event_type: EventType;
+      count: string;
+    }>(
+      `SELECT 
+        DATE_TRUNC('${truncInterval}', e.timestamp) as bucket,
+        e.event_type,
+        COUNT(*) as count
+       FROM events e
+       ${joinClause}
+       ${whereClause}
+       GROUP BY bucket, e.event_type
+       ORDER BY bucket ASC`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    // Aggregate by timestamp
+    const byTimestamp = new Map<string, {
+      timestamp: Date;
+      delivered: number;
+      opened: number;
+      clicked: number;
+      unsubscribed: number;
+      complained: number;
+      bounced: number;
+      sent: number;
+    }>();
+
+    for (const row of result.value.rows) {
+      const key = row.bucket.toISOString();
+      const existing = byTimestamp.get(key) ?? {
+        timestamp: row.bucket,
+        delivered: 0,
+        opened: 0,
+        clicked: 0,
+        unsubscribed: 0,
+        complained: 0,
+        bounced: 0,
+        sent: 0,
+      };
+      const count = parseInt(row.count, 10);
+
+      switch (row.event_type) {
+        case 'delivered':
+          existing.delivered += count;
+          break;
+        case 'opened':
+          existing.opened += count;
+          break;
+        case 'clicked':
+          existing.clicked += count;
+          break;
+        case 'unsubscribed':
+        case 'list_unsubscribe':
+          existing.unsubscribed += count;
+          break;
+        case 'complained':
+          existing.complained += count;
+          break;
+        case 'bounced':
+          existing.bounced += count;
+          break;
+        case 'sent':
+          existing.sent += count;
+          break;
+      }
+
+      byTimestamp.set(key, existing);
+    }
+
+    return Result.ok(Array.from(byTimestamp.values()));
+  }
+
+  /**
+   * Get event statistics grouped by domain
+   */
+  async getStatsByDomain(
+    tenantId: string,
+    options: { startDate?: Date; endDate?: Date; since?: Date; until?: Date } = {}
+  ): Promise<Result<{
+    domainId: string;
+    domainName: string;
+    domain: string;
+    sent: number;
+    delivered: number;
+    bounced: number;
+    opened: number;
+    clicked: number;
+    complained: number;
+  }[], Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['e.tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`e.timestamp >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`e.timestamp <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const result = await this.db.query<{
+      domain: string;
+      event_type: EventType;
+      count: string;
+    }>(
+      `SELECT 
+        SPLIT_PART(e.recipient_email, '@', 2) as domain,
+        e.event_type,
+        COUNT(*) as count
+       FROM events e
+       ${whereClause}
+       GROUP BY domain, e.event_type
+       ORDER BY domain`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    // Aggregate by domain
+    const byDomain = new Map<string, {
+      sent: number;
+      delivered: number;
+      bounced: number;
+      opened: number;
+      clicked: number;
+      complained: number;
+    }>();
+
+    for (const row of result.value.rows) {
+      const domain = row.domain || 'unknown';
+      const existing = byDomain.get(domain) ?? {
+        sent: 0, delivered: 0, bounced: 0, opened: 0, clicked: 0, complained: 0,
+      };
+      const count = parseInt(row.count, 10);
+
+      switch (row.event_type) {
+        case 'sent':
+          existing.sent += count;
+          break;
+        case 'delivered':
+          existing.delivered += count;
+          break;
+        case 'bounced':
+          existing.bounced += count;
+          break;
+        case 'opened':
+          existing.opened += count;
+          break;
+        case 'clicked':
+          existing.clicked += count;
+          break;
+        case 'complained':
+          existing.complained += count;
+          break;
+      }
+
+      byDomain.set(domain, existing);
+    }
+
+    return Result.ok(
+      Array.from(byDomain.entries()).map(([domain, stats]) => ({
+        domainId: domain, // Use domain as ID since we don't have a proper domain table join
+        domainName: domain,
+        domain,
+        ...stats,
+      }))
+    );
+  }
+
+  /**
+   * Get event statistics grouped by campaign
+   */
+  async getStatsByCampaign(
+    tenantId: string,
+    options: { startDate?: Date; endDate?: Date; since?: Date; until?: Date; limit?: number } = {}
+  ): Promise<Result<{
+    campaignId: string;
+    sent: number;
+    delivered: number;
+    bounced: number;
+    opened: number;
+    clicked: number;
+    unsubscribed: number;
+    complained: number;
+    openRate: number;
+    clickRate: number;
+    firstEvent: Date | null;
+    lastEvent: Date | null;
+  }[], Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['e.tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`e.timestamp >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`e.timestamp <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const result = await this.db.query<{
+      campaign_id: string;
+      event_type: EventType;
+      count: string;
+      first_event: Date;
+      last_event: Date;
+    }>(
+      `SELECT 
+        m.campaign_id,
+        e.event_type,
+        COUNT(*) as count,
+        MIN(e.timestamp) as first_event,
+        MAX(e.timestamp) as last_event
+       FROM events e
+       JOIN messages m ON e.message_id = m.id
+       ${whereClause}
+         AND m.campaign_id IS NOT NULL
+       GROUP BY m.campaign_id, e.event_type
+       ORDER BY m.campaign_id`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    // Aggregate by campaign
+    const byCampaign = new Map<string, {
+      sent: number;
+      delivered: number;
+      bounced: number;
+      opened: number;
+      clicked: number;
+      unsubscribed: number;
+      complained: number;
+      firstEvent: Date | null;
+      lastEvent: Date | null;
+    }>();
+
+    for (const row of result.value.rows) {
+      const campaignId = row.campaign_id;
+      const existing = byCampaign.get(campaignId) ?? {
+        sent: 0, delivered: 0, bounced: 0, opened: 0, clicked: 0, unsubscribed: 0, complained: 0,
+        firstEvent: null, lastEvent: null,
+      };
+      const count = parseInt(row.count, 10);
+
+      // Update first/last event times
+      if (!existing.firstEvent || row.first_event < existing.firstEvent) {
+        existing.firstEvent = row.first_event;
+      }
+      if (!existing.lastEvent || row.last_event > existing.lastEvent) {
+        existing.lastEvent = row.last_event;
+      }
+
+      switch (row.event_type) {
+        case 'sent':
+          existing.sent += count;
+          break;
+        case 'delivered':
+          existing.delivered += count;
+          break;
+        case 'bounced':
+          existing.bounced += count;
+          break;
+        case 'opened':
+          existing.opened += count;
+          break;
+        case 'clicked':
+          existing.clicked += count;
+          break;
+        case 'unsubscribed':
+        case 'list_unsubscribe':
+          existing.unsubscribed += count;
+          break;
+        case 'complained':
+          existing.complained += count;
+          break;
+      }
+
+      byCampaign.set(campaignId, existing);
+    }
+
+    let campaigns = Array.from(byCampaign.entries()).map(([campaignId, stats]) => ({
+      campaignId,
+      ...stats,
+      openRate: stats.delivered > 0 ? (stats.opened / stats.delivered) * 100 : 0,
+      clickRate: stats.opened > 0 ? (stats.clicked / stats.opened) * 100 : 0,
+    }));
+
+    // Apply limit if specified
+    if (options.limit && campaigns.length > options.limit) {
+      campaigns = campaigns.slice(0, options.limit);
+    }
+
+    return Result.ok(campaigns);
+  }
+
+  /**
+   * Get bounce breakdown statistics
+   */
+  async getBounceBreakdown(
+    tenantId: string,
+    options: { startDate?: Date; endDate?: Date; since?: Date; until?: Date; domainId?: string } = {}
+  ): Promise<Result<{
+    bounceType: 'hard' | 'soft';
+    bounceSubtype: string;
+    bounceCode: string;
+    count: number;
+    percentage: number;
+  }[], Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['tenant_id = $1', "event_type = 'bounced'"];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`timestamp >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`timestamp <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const result = await this.db.query<{
+      bounce_type: 'hard' | 'soft';
+      bounce_code: string;
+      bounce_reason: string | null;
+      count: string;
+    }>(
+      `SELECT 
+        COALESCE(bounce_type, 'soft') as bounce_type,
+        COALESCE(bounce_code, 'unknown') as bounce_code,
+        COALESCE(bounce_reason, 'unknown') as bounce_reason,
+        COUNT(*) as count
+       FROM events
+       ${whereClause}
+       GROUP BY bounce_type, bounce_code, bounce_reason
+       ORDER BY count DESC`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    const total = result.value.rows.reduce((sum, row) => sum + parseInt(row.count, 10), 0);
+
+    return Result.ok(
+      result.value.rows.map((row) => ({
+        bounceType: row.bounce_type,
+        bounceSubtype: row.bounce_reason ?? 'unknown',
+        bounceCode: row.bounce_code,
+        count: parseInt(row.count, 10),
+        percentage: total > 0 ? (parseInt(row.count, 10) / total) * 100 : 0,
+      }))
+    );
   }
 }

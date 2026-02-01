@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { DomainsRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
-import { generateDkimKeyPair } from '@apexmail/lib/crypto';
+import { generateDKIMKeyPair } from '@apexmail/lib/crypto';
 
 const addDomainSchema = z.object({
   domain: z.string()
@@ -52,7 +52,8 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domainRecord = result.value;
 
     // Generate DKIM keys for the domain
-    const dkimKeyPair = await generateDkimKeyPair();
+    const selector = `apexmail${new Date().getFullYear()}`;
+    const dkimKeyPair = generateDKIMKeyPair(selector, domain);
     
     // Update domain with DNS records
     await domainsRepo.update(domainRecord.id, {
@@ -62,7 +63,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
           verified: false,
         },
         dkim: {
-          selector: `apexmail${new Date().getFullYear()}`,
+          selector,
           value: dkimKeyPair.publicKey,
           verified: false,
         },
@@ -504,7 +505,7 @@ async function checkDnsHealth(domain: DomainData): Promise<{
           issues.push('SPF record not found');
         } else if (spfRecords.length > 1) {
           issues.push('Multiple SPF records found (should have exactly one)');
-        } else if (!spfRecords[0].includes('apexmail')) {
+        } else if (spfRecords[0] && !spfRecords[0].includes('apexmail')) {
           issues.push('SPF record does not include ApexMail');
         }
       } catch {

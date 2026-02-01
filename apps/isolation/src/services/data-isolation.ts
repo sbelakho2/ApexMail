@@ -187,23 +187,61 @@ export class DataIsolationService {
   }
 
   /**
+   * Validate and sanitize SQL identifier (table/schema name)
+   * Prevents SQL injection by only allowing alphanumeric chars and underscores
+   */
+  private sanitizeIdentifier(identifier: string): string {
+    // Only allow alphanumeric characters and underscores
+    const sanitized = identifier.replace(/[^a-zA-Z0-9_]/g, '');
+    
+    // Ensure it doesn't start with a number
+    if (/^\d/.test(sanitized)) {
+      throw new Error(`Invalid identifier: ${identifier} - cannot start with a number`);
+    }
+    
+    // Ensure it's not empty after sanitization
+    if (sanitized.length === 0) {
+      throw new Error(`Invalid identifier: ${identifier} - contains no valid characters`);
+    }
+    
+    // Limit length to prevent abuse
+    if (sanitized.length > 63) {
+      throw new Error(`Invalid identifier: ${identifier} - exceeds maximum length of 63 characters`);
+    }
+    
+    return sanitized;
+  }
+
+  /**
    * Create row-level security policies for a table
    */
   async setupRLS(tableName: string, schemaName: string = 'public'): Promise<Result<void>> {
     try {
+      // SECURITY: Sanitize identifiers to prevent SQL injection
+      const safeTableName = this.sanitizeIdentifier(tableName);
+      const safeSchemaName = this.sanitizeIdentifier(schemaName);
+      
+      // Validate the identifiers match (no characters were stripped)
+      if (safeTableName !== tableName || safeSchemaName !== schemaName) {
+        return { 
+          ok: false, 
+          error: new Error(`Invalid table or schema name: contains disallowed characters`) 
+        };
+      }
+
       // Enable RLS
       await this.db.query(`
-        ALTER TABLE "${schemaName}"."${tableName}" ENABLE ROW LEVEL SECURITY
+        ALTER TABLE "${safeSchemaName}"."${safeTableName}" ENABLE ROW LEVEL SECURITY
       `);
 
       // Force RLS for table owner
       await this.db.query(`
-        ALTER TABLE "${schemaName}"."${tableName}" FORCE ROW LEVEL SECURITY
+        ALTER TABLE "${safeSchemaName}"."${safeTableName}" FORCE ROW LEVEL SECURITY
       `);
 
       // Create select policy
       await this.db.query(`
-        CREATE POLICY "${tableName}_select_policy" ON "${schemaName}"."${tableName}"
+        CREATE POLICY "${safeTableName}_select_policy" ON "${safeSchemaName}"."${safeTableName}"
         FOR SELECT
         USING (
           workspace_id = current_setting('app.current_workspace_id', true)::VARCHAR
@@ -213,7 +251,7 @@ export class DataIsolationService {
 
       // Create insert policy
       await this.db.query(`
-        CREATE POLICY "${tableName}_insert_policy" ON "${schemaName}"."${tableName}"
+        CREATE POLICY "${safeTableName}_insert_policy" ON "${safeSchemaName}"."${safeTableName}"
         FOR INSERT
         WITH CHECK (
           workspace_id = current_setting('app.current_workspace_id', true)::VARCHAR
@@ -222,7 +260,7 @@ export class DataIsolationService {
 
       // Create update policy
       await this.db.query(`
-        CREATE POLICY "${tableName}_update_policy" ON "${schemaName}"."${tableName}"
+        CREATE POLICY "${safeTableName}_update_policy" ON "${safeSchemaName}"."${safeTableName}"
         FOR UPDATE
         USING (
           workspace_id = current_setting('app.current_workspace_id', true)::VARCHAR
@@ -231,14 +269,14 @@ export class DataIsolationService {
 
       // Create delete policy
       await this.db.query(`
-        CREATE POLICY "${tableName}_delete_policy" ON "${schemaName}"."${tableName}"
+        CREATE POLICY "${safeTableName}_delete_policy" ON "${safeSchemaName}"."${safeTableName}"
         FOR DELETE
         USING (
           workspace_id = current_setting('app.current_workspace_id', true)::VARCHAR
         )
       `);
 
-      console.log(`[Isolation] Set up RLS for ${schemaName}.${tableName}`);
+      console.log(`[Isolation] Set up RLS for ${safeSchemaName}.${safeTableName}`);
 
       return { ok: true, value: undefined };
     } catch (error) {

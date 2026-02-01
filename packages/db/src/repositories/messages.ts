@@ -830,4 +830,188 @@ export class MessagesRepository {
       updatedAt: row.updated_at,
     };
   }
+
+  /**
+   * Get message statistics for a tenant
+   */
+  async getStats(
+    tenantId: string,
+    options: { startDate?: Date; endDate?: Date; since?: Date; until?: Date; campaignId?: string } = {}
+  ): Promise<Result<{
+    total: number;
+    queued: number;
+    sent: number;
+    delivered: number;
+    failed: number;
+    bounced: number;
+  }, Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const conditions = ['tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`created_at >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`created_at <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+    if (options.campaignId) {
+      conditions.push(`campaign_id = $${paramIndex++}`);
+      values.push(options.campaignId);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const result = await this.db.query<{
+      status: string;
+      count: string;
+    }>(
+      `SELECT status, COUNT(*) as count
+       FROM messages
+       ${whereClause}
+       GROUP BY status`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    const stats = {
+      total: 0,
+      queued: 0,
+      sent: 0,
+      delivered: 0,
+      failed: 0,
+      bounced: 0,
+    };
+
+    for (const row of result.value.rows) {
+      const count = parseInt(row.count, 10);
+      stats.total += count;
+      switch (row.status) {
+        case 'pending':
+        case 'queued':
+          stats.queued += count;
+          break;
+        case 'sent':
+        case 'sending':
+          stats.sent += count;
+          break;
+        case 'delivered':
+          stats.delivered += count;
+          break;
+        case 'failed':
+        case 'deferred':
+          stats.failed += count;
+          break;
+        case 'bounced':
+          stats.bounced += count;
+          break;
+      }
+    }
+
+    return Result.ok(stats);
+  }
+
+  /**
+   * Get message volume time series data
+   */
+  async getVolumeTimeSeries(
+    tenantId: string,
+    options: {
+      startDate?: Date;
+      endDate?: Date;
+      since?: Date;
+      until?: Date;
+      interval: 'minute' | 'hour' | 'day' | 'week' | 'month';
+      domainId?: string;
+    }
+  ): Promise<Result<{ timestamp: Date; sent: number; delivered: number; bounced: number; failed: number }[], Error>> {
+    // Support both since/until and startDate/endDate
+    const startDate = options.startDate ?? options.since;
+    const endDate = options.endDate ?? options.until;
+
+    const truncFn = options.interval === 'minute' ? 'hour'
+      : options.interval === 'hour' ? 'hour'
+      : options.interval === 'day' ? 'day'
+      : options.interval === 'week' ? 'week'
+      : 'month';
+
+    const conditions = ['tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (startDate) {
+      conditions.push(`created_at >= $${paramIndex++}`);
+      values.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`created_at <= $${paramIndex++}`);
+      values.push(endDate);
+    }
+    if (options.domainId) {
+      conditions.push(`sending_domain = (SELECT domain FROM domains WHERE id = $${paramIndex++})`);
+      values.push(options.domainId);
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const result = await this.db.query<{
+      bucket: Date;
+      status: string;
+      count: string;
+    }>(
+      `SELECT 
+        DATE_TRUNC('${truncFn}', created_at) as bucket,
+        status,
+        COUNT(*) as count
+       FROM messages
+       ${whereClause}
+       GROUP BY bucket, status
+       ORDER BY bucket`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    // Aggregate by timestamp
+    const byTimestamp = new Map<string, { sent: number; delivered: number; bounced: number; failed: number }>();
+    
+    for (const row of result.value.rows) {
+      const key = row.bucket.toISOString();
+      const existing = byTimestamp.get(key) ?? { sent: 0, delivered: 0, bounced: 0, failed: 0 };
+      const count = parseInt(row.count, 10);
+      
+      switch (row.status) {
+        case 'sent':
+        case 'sending':
+          existing.sent += count;
+          break;
+        case 'delivered':
+          existing.delivered += count;
+          break;
+        case 'bounced':
+          existing.bounced += count;
+          break;
+        case 'failed':
+        case 'deferred':
+          existing.failed += count;
+          break;
+      }
+      
+      byTimestamp.set(key, existing);
+    }
+
+    return Result.ok(
+      Array.from(byTimestamp.entries()).map(([timestamp, data]) => ({
+        timestamp: new Date(timestamp),
+        ...data,
+      }))
+    );
+  }
 }

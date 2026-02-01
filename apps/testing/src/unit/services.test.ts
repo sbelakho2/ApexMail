@@ -485,6 +485,7 @@ describe('RateLimiter', () => {
     });
     
     it('should reset after window expires', () => {
+        vi.useFakeTimers();
         const limiter = createRateLimiter({ limit: 5, windowMs: 60000 });
         
         for (let i = 0; i < 5; i++) {
@@ -496,6 +497,7 @@ describe('RateLimiter', () => {
         vi.advanceTimersByTime(60001);
         
         expect(limiter.check('user-1')).toBe(true);
+        vi.useRealTimers();
     });
     
     it('should track different users separately', () => {

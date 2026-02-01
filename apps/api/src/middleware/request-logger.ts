@@ -2,7 +2,7 @@
  * Request Logger Middleware
  */
 
-import type { MiddlewareHandler } from 'hono';
+import type { MiddlewareHandler, Context } from 'hono';
 import type { Logger } from '@apexmail/lib';
 import type { AppEnv } from '../app.js';
 import { generateShortId } from '@apexmail/lib/id';
@@ -49,12 +49,11 @@ export function requestLogger(baseLogger: Logger): MiddlewareHandler<AppEnv> {
   };
 }
 
-function getClientIp(c: { req: { header: (name: string) => string | undefined; raw: { socket?: { remoteAddress?: string } } } }): string {
+function getClientIp(c: Context): string {
   return (
     c.req.header('CF-Connecting-IP') ??
     c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ??
     c.req.header('X-Real-IP') ??
-    c.req.raw.socket?.remoteAddress ??
     'unknown'
   );
 }

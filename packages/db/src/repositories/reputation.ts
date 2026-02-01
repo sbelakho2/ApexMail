@@ -106,7 +106,21 @@ export class ReputationRepository {
             [tenantId, days]
         );
 
-        return this.mapStatsRow(result.rows[0]);
+        const row = result.rows[0];
+        if (!row) {
+            return this.mapStatsRow({
+                tenant_id: tenantId,
+                date: new Date().toISOString(),
+                sent: '0',
+                delivered: '0',
+                bounces: '0',
+                complaints: '0',
+                opens: '0',
+                clicks: '0',
+                unsubscribes: '0'
+            });
+        }
+        return this.mapStatsRow(row);
     }
 
     /**
@@ -152,8 +166,8 @@ export class ReputationRepository {
             : 0;
 
         // Calculate trend based on delivery rate change
-        const prevSent = parseInt(previousStats.sent as string, 10) || 0;
-        const prevDelivered = parseInt(previousStats.delivered as string, 10) || 0;
+        const prevSent = parseInt(previousStats?.sent as string ?? '0', 10) || 0;
+        const prevDelivered = parseInt(previousStats?.delivered as string ?? '0', 10) || 0;
         const prevDeliveryRate = prevSent > 0 ? (prevDelivered / prevSent) * 100 : 100;
 
         let trend: 'improving' | 'stable' | 'declining' = 'stable';
@@ -200,7 +214,7 @@ export class ReputationRepository {
                 [tenantId, data.alertType]
             );
 
-            if (parseInt(existing.rows[0].count, 10) > 0) {
+            if (parseInt(existing.rows[0]?.count ?? '0', 10) > 0) {
                 return err(new Error('Duplicate alert already exists'));
             }
 
@@ -211,7 +225,11 @@ export class ReputationRepository {
                 [id, tenantId, data.alertType, data.value, data.threshold]
             );
 
-            return ok(this.mapAlertRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create alert'));
+            }
+            return ok(this.mapAlertRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -265,7 +283,7 @@ export class ReputationRepository {
 
         return {
             alerts: dataResult.rows.map(row => this.mapAlertRow(row)),
-            total: parseInt(countResult.rows[0].count, 10)
+            total: parseInt(countResult.rows[0]?.count ?? '0', 10)
         };
     }
 
@@ -327,7 +345,7 @@ export class ReputationRepository {
                 value: summary.bounceRate,
                 threshold: bounceThreshold
             });
-            if (result.isOk) {
+            if (result.ok) {
                 alerts.push(result.value);
             }
         }
@@ -338,7 +356,7 @@ export class ReputationRepository {
                 value: summary.complaintRate,
                 threshold: complaintThreshold
             });
-            if (result.isOk) {
+            if (result.ok) {
                 alerts.push(result.value);
             }
         }
@@ -349,7 +367,7 @@ export class ReputationRepository {
                 value: summary.deliveryRate,
                 threshold: deliveryThreshold
             });
-            if (result.isOk) {
+            if (result.ok) {
                 alerts.push(result.value);
             }
         }

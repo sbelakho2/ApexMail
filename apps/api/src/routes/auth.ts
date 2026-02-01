@@ -64,7 +64,7 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify password
-    const verifyResult = await usersRepo.verifyCredentials(email, password, tenantId);
+    const verifyResult = await usersRepo.verifyCredentials(email, password);
     if (!verifyResult.ok || !verifyResult.value) {
       logger.warn('Invalid password for user', { userId: user.id });
       await auditRepo.create({

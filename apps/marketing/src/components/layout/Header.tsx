@@ -80,7 +80,7 @@ export function Header() {
                         transition={{ duration: 0.15 }}
                         className="absolute top-full left-0 mt-2 w-72 glass-card p-2"
                       >
-                        {item.items.map((subItem) => (
+                        {item.items?.map((subItem) => (
                           <Link
                             key={subItem.name}
                             href={subItem.href}
@@ -141,7 +141,7 @@ export function Header() {
                 'items' in item ? (
                   <div key={item.name} className="space-y-2">
                     <div className="text-sm font-medium text-surface-400 uppercase tracking-wider">{item.name}</div>
-                    {item.items.map((subItem) => (
+                    {item.items?.map((subItem) => (
                       <Link
                         key={subItem.name}
                         href={subItem.href}

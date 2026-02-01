@@ -23,10 +23,14 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
   const getCache = async () => {
     if (!cache) {
       cache = createCache({
-        host: ctx.config.redis.host,
-        port: ctx.config.redis.port,
-        password: ctx.config.redis.password,
-        db: ctx.config.redis.db,
+        type: 'redis',
+        prefix: 'apexmail:idempotency:',
+        redisOptions: {
+          host: ctx.config.redis.host,
+          port: ctx.config.redis.port,
+          password: ctx.config.redis.password,
+          db: ctx.config.redis.db,
+        },
       });
     }
     return cache;
@@ -68,11 +72,9 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
       .digest('hex');
 
     // Check for existing response
-    const existingResult = await redisCache.get<IdempotentResponse>(cacheKey);
+    const existing = await redisCache.get<IdempotentResponse>(cacheKey);
 
-    if (existingResult.ok && existingResult.value) {
-      const existing = existingResult.value;
-
+    if (existing) {
       // Verify request fingerprint matches
       if (existing.fingerprint !== fingerprint) {
         logger.warn('Idempotency key reused with different request body', {
@@ -103,29 +105,19 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
     }
 
     // Lock to prevent concurrent requests with same idempotency key
+    // SECURITY FIX: Use atomic SETNX operation to prevent TOCTOU race condition
     const lockKey = `${cacheKey}:lock`;
-    const lockResult = await redisCache.get<{ locked: boolean }>(lockKey);
+    const lockAcquired = await redisCache.setNX(lockKey, { locked: true, timestamp: Date.now() }, { ttlSeconds: 60 });
 
-    if (lockResult.ok && lockResult.value?.locked) {
+    if (!lockAcquired) {
       throw ApiError.conflict(
         'A request with this idempotency key is currently being processed',
         'IDEMPOTENCY_KEY_IN_PROGRESS'
       );
     }
 
-    // Set lock
-    await redisCache.set(lockKey, { locked: true }, 60); // 60 second lock timeout
-
     try {
       // Reconstruct request body for downstream handlers
-      // Create a new Request with the same body
-      const originalRequest = c.req.raw;
-      const newRequest = new Request(originalRequest.url, {
-        method: originalRequest.method,
-        headers: originalRequest.headers,
-        body: bodyText,
-      });
-      
       // Store body in context for handlers to access
       (c.req as { _body?: string })._body = bodyText;
 
@@ -155,13 +147,20 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
         };
 
         // Store response
-        await redisCache.set(cacheKey, idempotentResponse, ctx.config.idempotency.ttlSeconds);
+        await redisCache.set(cacheKey, idempotentResponse, { ttlSeconds: ctx.config.idempotency.ttlSeconds });
         
         logger.info('Stored idempotent response', {
           idempotencyKey,
           status: response.status,
         });
       }
+    } catch (error) {
+      // FIX: Properly catch and re-throw errors to ensure lock is released
+      logger.error('Idempotent request failed', {
+        idempotencyKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
     } finally {
       // Release lock
       await redisCache.delete(lockKey);

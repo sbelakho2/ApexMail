@@ -63,8 +63,12 @@ export class SmtpCredentialsRepository {
                 [id, tenantId, finalUsername, passwordHash]
             );
 
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create credentials'));
+            }
             return ok({
-                ...this.mapRow(result.rows[0]),
+                ...this.mapRow(row),
                 password
             });
         } catch (error) {
@@ -92,6 +96,9 @@ export class SmtpCredentialsRepository {
             }
 
             const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Invalid credentials'));
+            }
             const isActive = row.is_active as boolean;
 
             if (!isActive) {
@@ -168,7 +175,11 @@ export class SmtpCredentialsRepository {
                 return err(new Error('Credential not found'));
             }
 
-            return ok(this.mapRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Credential not found'));
+            }
+            return ok(this.mapRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -221,7 +232,7 @@ export class SmtpCredentialsRepository {
             [tenantId]
         );
 
-        return parseInt(result.rows[0].count, 10);
+        return parseInt(result.rows[0]?.count ?? '0', 10);
     }
 
     // -------------------------------------------------------------------------
@@ -239,7 +250,10 @@ export class SmtpCredentialsRepository {
         
         let password = '';
         for (let i = 0; i < 32; i++) {
-            password += charset[bytes[i] % charset.length];
+            const byte = bytes[i];
+            if (byte !== undefined) {
+                password += charset[byte % charset.length];
+            }
         }
         
         return password;

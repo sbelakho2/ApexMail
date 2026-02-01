@@ -85,8 +85,7 @@ export class ApiKeysRepository {
     const { key: secretKey, prefix } = generateApiKey();
     
     // Hash the key for storage
-    const keyHashResult = await hashPassword(secretKey);
-    if (!keyHashResult.ok) return keyHashResult;
+    const keyHash = await hashPassword(secretKey);
     
     const now = new Date();
 
@@ -122,7 +121,7 @@ export class ApiKeysRepository {
         input.userId ?? null,
         input.name,
         prefix,
-        keyHashResult.value,
+        keyHash,
         input.scopes,
         input.rateLimit ?? 1000,
         input.allowedIps ?? null,
@@ -227,10 +226,9 @@ export class ApiKeysRepository {
     }
 
     // Verify the key hash
-    const verifyResult = await verifyPassword(key, row.key_hash);
-    if (!verifyResult.ok) return verifyResult;
+    const isValid = await verifyPassword(key, row.key_hash);
 
-    if (!verifyResult.value) {
+    if (!isValid) {
       return Result.ok({
         valid: false,
         apiKey: null,
@@ -275,7 +273,7 @@ export class ApiKeysRepository {
 
   private isIpInCidr(ip: string, cidr: string): boolean {
     const [range, bits] = cidr.split('/');
-    if (!bits) return ip === range;
+    if (!bits || !range) return ip === range;
 
     const mask = parseInt(bits, 10);
     if (isNaN(mask) || mask < 0 || mask > 32) return false;
@@ -413,8 +411,7 @@ export class ApiKeysRepository {
     // Generate new key
     const { key: newSecretKey, prefix: newPrefix } = generateApiKey();
     
-    const keyHashResult = await hashPassword(newSecretKey);
-    if (!keyHashResult.ok) return keyHashResult;
+    const keyHash = await hashPassword(newSecretKey);
 
     const result = await this.db.query<{
       id: string;
@@ -440,7 +437,7 @@ export class ApiKeysRepository {
        SET prefix = $1, key_hash = $2, updated_at = NOW()
        WHERE id = $3
        RETURNING *`,
-      [newPrefix, keyHashResult.value, id]
+      [newPrefix, keyHash, id]
     );
 
     if (!result.ok) return result;

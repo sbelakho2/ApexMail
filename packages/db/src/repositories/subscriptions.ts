@@ -67,7 +67,11 @@ export class SubscriptionsRepository {
                 [id, tenantId, data.name, data.description, data.displayOrder ?? 0]
             );
 
-            return ok(this.mapCategoryRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to create category'));
+            }
+            return ok(this.mapCategoryRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -140,7 +144,11 @@ export class SubscriptionsRepository {
                 return err(new Error('Category not found'));
             }
 
-            return ok(this.mapCategoryRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Category not found'));
+            }
+            return ok(this.mapCategoryRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -186,7 +194,7 @@ export class SubscriptionsRepository {
              WHERE tenant_id = $1 AND email = $2 AND reason = 'unsubscribe'`,
             [tenantId, normalizedEmail]
         );
-        const globalUnsubscribe = parseInt(suppressionResult.rows[0].count, 10) > 0;
+        const globalUnsubscribe = parseInt(suppressionResult.rows[0]?.count ?? '0', 10) > 0;
 
         return {
             email: normalizedEmail,
@@ -213,7 +221,11 @@ export class SubscriptionsRepository {
                 [id, tenantId, normalizedEmail, category, subscribed]
             );
 
-            return ok(this.mapPreferenceRow(result.rows[0]));
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Failed to set preference'));
+            }
+            return ok(this.mapPreferenceRow(row));
         } catch (error) {
             return err(error instanceof Error ? error : new Error(String(error)));
         }
@@ -237,7 +249,10 @@ export class SubscriptionsRepository {
                      RETURNING *`,
                     [id, tenantId, normalizedEmail, category, subscribed]
                 );
-                results.push(this.mapPreferenceRow(result.rows[0]));
+                const row = result.rows[0];
+                if (row) {
+                    results.push(this.mapPreferenceRow(row));
+                }
             }
 
             await client.query('COMMIT');
@@ -251,11 +266,13 @@ export class SubscriptionsRepository {
     }
 
     async unsubscribeFromCategory(tenantId: string, email: string, category: string): Promise<Result<void, Error>> {
-        return this.setPreference(tenantId, email, category, false).then(r => r.isOk ? ok(undefined) : err(r.error));
+        const result = await this.setPreference(tenantId, email, category, false);
+        return result.ok ? ok(undefined) : err(result.error);
     }
 
     async resubscribeToCategory(tenantId: string, email: string, category: string): Promise<Result<void, Error>> {
-        return this.setPreference(tenantId, email, category, true).then(r => r.isOk ? ok(undefined) : err(r.error));
+        const result = await this.setPreference(tenantId, email, category, true);
+        return result.ok ? ok(undefined) : err(result.error);
     }
 
     async isSubscribedToCategory(tenantId: string, email: string, category: string): Promise<boolean> {
@@ -267,7 +284,7 @@ export class SubscriptionsRepository {
              WHERE tenant_id = $1 AND email = $2 AND reason = 'unsubscribe'`,
             [tenantId, normalizedEmail]
         );
-        if (parseInt(suppressionResult.rows[0].count, 10) > 0) {
+        if (parseInt(suppressionResult.rows[0]?.count ?? '0', 10) > 0) {
             return false;
         }
 
