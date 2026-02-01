@@ -1,0 +1,39 @@
+{
+  "name": "@apexmail/lib",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./logger": "./dist/logger/index.js",
+    "./crypto": "./dist/crypto/index.js",
+    "./storage": "./dist/storage/index.js",
+    "./http": "./dist/http/index.js",
+    "./cache": "./dist/cache/index.js",
+    "./queue": "./dist/queue/index.js",
+    "./time": "./dist/time/index.js",
+    "./id": "./dist/id/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pino": "^8.17.0",
+    "pino-pretty": "^10.3.0",
+    "ioredis": "^5.3.0",
+    "undici": "^6.4.0",
+    "uuid": "^9.0.0",
+    "nanoid": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/uuid": "^9.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}

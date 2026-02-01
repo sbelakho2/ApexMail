@@ -535,13 +535,13 @@
 
 ---
 
-## Phase 6: Sales Autopilot & CRM (New Phase)
+## Phase 6: Sales Autopilot & CRM (For Control Plane)
 
 *Goal: Automated growth using the platform itself. Inspired by Ad-Project "Autopilot".*
 
 ### 6.1 Lead Generation & Enrichment
 
-- [ ] **Implement "SaaS Hunter" Scraper**
+- [ ] **Implement "SaaS Hunter" Scraper for Control Plane**
   - **Implementation:** Worker that scans **publicly listed** SaaS directories (e.g., ProductHunt, G2 public pages) and checks DNS for `spf.protection.outlook.com` or `_spf.google.com`. Respects `robots.txt`. No private data scraped. Internal use only (lead gen for Owner, not exposed to customers).
 
   - **Evidence Required:** Sample CSV export of 100 potential leads with verified MX records; Log confirms `robots.txt` was checked before each domain scan.
@@ -811,55 +811,949 @@
 
 ---
 
-## Phase 8: AI Mailbot (Support & Ops)
+## Phase 8: AI-Powered Intelligence Suite (Production-Grade)
 
-*Goal: CPU-only, deterministic, safe support agent.*
+*Goal: State-of-the-art AI running entirely on CPU (Hetzner ARM64), using ONNX Runtime for maximum performance, fine-tuned for email operations, with zero external API dependencies.*
 
-### 8.1 Agent Architecture
+**Hardware Target:** Hetzner CAX41 (16 ARM64 cores, 32GB RAM) or equivalent. All models must achieve <300ms p95 latency for interactive use cases.
 
-- [ ] **Implement RAG Pipeline**
-  - **Implementation:** Ingest docs/runbooks -> Embeddings (local model) -> Vector Store (Postgres `pgvector`).
+**Runtime:** ONNX Runtime 1.17+ with ARM64 optimizations (MLAS backend). All models quantized to INT8/INT4 with ONNX Runtime quantization tools.
 
-  - **Evidence Required:** Retrieval accuracy test: Query "How to setup DKIM" returns the exact documentation chunk.
+### 8.1 ONNX Runtime Infrastructure & Model Serving
 
-- [ ] **Implement CPU-Only Inference Service**
-  - **Implementation:** `llama.cpp` serving a quantized 7B model (e.g., Mistral or Llama-3).
+- [ ] **Deploy ONNX Runtime GenAI Inference Server (ARM64-Optimized)**
+  - **Implementation:** Deploy `onnxruntime-genai` server with ARM64 MLAS optimizations:
+    - Build with `--use_mlas --enable_lto --minimal_build`
+    - Thread pool: 12 threads (reserve 4 cores for system)
+    - Memory arena: Pre-allocated 16GB, prevent fragmentation
+    - Session options: `graph_optimization_level=ORT_ENABLE_ALL`, `enable_mem_pattern=True`
+    - Execution provider priority: `[CPUExecutionProvider]` with ARM NEON
+  - **Primary Model:** Microsoft Phi-3.5-mini-instruct-onnx (3.8B params, INT4 AWQ, ~2.1GB)
+    - Source: `huggingface.co/microsoft/Phi-3.5-mini-instruct-onnx`
+    - Why: State-of-the-art instruction following at <4B, 128K context, native ONNX support, MIT license
+    - Quality: Outperforms Llama-3-8B on most benchmarks despite smaller size
+  - **Evidence Required:**
+    - Benchmark: >25 tokens/sec generation on CAX41 (faster than llama.cpp due to ONNX optimizations)
+    - Load test: 15 concurrent requests, p95 latency <600ms, 0 OOM errors over 24h
+    - Memory profile: RSS stable at <8GB under sustained load
 
-  - **Evidence Required:** Performance metrics showing inference latency < 2s on target CPU hardware.
+- [ ] **Deploy Phi-3-medium-128k-instruct (Fallback for Complex Tasks)**
+  - **Implementation:** Secondary model for complex reasoning tasks requiring higher quality:
+    - Model: `microsoft/Phi-3-medium-128k-instruct-onnx` (14B params, INT4 quantized, ~7.5GB)
+    - Use case: Complex email analysis, multi-step reasoning, detailed explanations
+    - Routing: Intent classifier routes complex queries to medium model
+  - **Evidence Required:**
+    - Quality benchmark: >90% accuracy on ApexMail reasoning test suite (vs 82% for mini)
+    - Latency: <2s for typical response (acceptable for async/complex tasks)
 
-### 8.2 Safety & Evaluation
+- [ ] **Implement Model Router with Quality-Latency Tradeoff**
+  - **Implementation:** Intelligent routing based on query complexity:
+    - **Simple queries** (FAQ, status checks): Phi-3.5-mini (<300ms)
+    - **Medium queries** (troubleshooting, explanations): Phi-3.5-mini with longer context
+    - **Complex queries** (debugging, multi-step analysis): Phi-3-medium (<2s)
+    - Complexity detection via lightweight DeBERTa classifier (<10ms overhead)
+  - **Evidence Required:**
+    - Routing accuracy: 95%+ queries correctly routed (validated on 1K labeled samples)
+    - Latency budget met: 90%+ of responses within target latency for their complexity tier
 
-- [ ] **Implement Hard Safety Gates**
-  - **Implementation:** Classifier to reject prompt injection or off-topic queries.
+- [ ] **Implement ONNX Model Hot-Swap & A/B Versioning**
+  - **Implementation:** Zero-downtime model updates:
+    - Model registry in Postgres: version, sha256, ONNX opset, quantization method, benchmark scores
+    - Warm model loading: Pre-load new model in separate session before swap
+    - Traffic splitting: Gradual rollout 5% → 25% → 50% → 100% with automatic rollback on quality regression
+    - Health checks: Latency p99, error rate, output quality score (via small eval set)
+  - **Evidence Required:**
+    - Swap latency: <100ms to switch traffic (no dropped requests)
+    - Automatic rollback triggers within 60s if error rate >1% or latency >2x baseline
 
-  - **Evidence Required:** Red-team report showing 100% blockage of known jailbreak prompts.
+- [ ] **Implement Continuous Batching with ONNX Runtime**
+  - **Implementation:** Custom batching layer for throughput optimization:
+    - Dynamic batching: Accumulate requests for 10ms, batch inference
+    - KV-cache reuse: Share computed attention across similar prompt prefixes
+    - Async generation: Stream tokens via Server-Sent Events
+  - **Evidence Required:**
+    - Throughput: 3x improvement over sequential processing at 50%+ utilization
+    - First-token latency: <150ms p95 (streaming responsiveness)
 
-- [ ] **Implement "Deterministic Mode"**
-  - **Implementation:** Fallback to template/tool responses for sensitive topics (billing, legal).
+### 8.2 Fine-Tuned Email Domain Expert (ONNX Native)
 
-  - **Evidence Required:** Test case showing bot refuses to "invent" a refund policy and quotes the official text instead.
+- [ ] **Create ApexMail Expert Training Dataset (100K+ Examples)**
+  - **Implementation:** Curate high-quality training dataset:
+    - **Public Technical Sources:**
+      - Stack Overflow: `[email-deliverability]`, `[dkim]`, `[spf]`, `[dmarc]`, `[smtp]` tags (~20K Q&A pairs)
+      - Postfix/Exim/Sendmail mailing lists (public archives, ~60K threads → 30K high-quality pairs)
+      - RFC documentation converted to Q&A (RFC 5321, 5322, 6376, 7208, 7489) (~2K pairs)
+      - Email-on-Acid, Litmus blog technical articles (~3K examples)
+    - **Synthetic High-Quality Examples:**
+      - GPT-4 Turbo generated edge cases with human verification (~10K)
+      - Claude-3 generated troubleshooting scenarios (~10K)
+      - Multi-turn conversation synthesis for support flows (~15K)
+    - **ApexMail Proprietary:**
+      - Internal runbooks and documentation (~1K)
+      - Anonymized support ticket resolutions (~5K)
+  - **Dataset Format:** ShareGPT/OpenAI format with `messages` array, supports multi-turn
+  - **Quality Control:**
+    - Deduplication via MinHash (Jaccard >0.8 = duplicate)
+    - Quality filtering via perplexity scoring (remove outliers)
+    - Human audit: 1K random samples, >97% accuracy requirement
+  - **Evidence Required:**
+    - Final dataset: >100K examples, <5% duplicate rate
+    - Topic distribution: Balanced across DKIM/SPF/DMARC/Bounce/Deliverability/SMTP
+    - Quality audit report with inter-annotator agreement >0.9 (Cohen's kappa)
 
-- [ ] **Implement Human Escalation Path**
-  - **Implementation:** Confidence threshold trigger. Low confidence or explicit "talk to human" -> Create support ticket + notify on-call.
+- [ ] **Fine-Tune Phi-3.5-mini on Email Domain (LoRA → ONNX Export)**
+  - **Implementation:** Domain adaptation with LoRA, export to ONNX:
+    - **Base Model:** `microsoft/Phi-3.5-mini-instruct`
+    - **LoRA Config:** r=128, alpha=256, dropout=0.05, target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    - **Training:**
+      - Epochs: 2 (avoid overfitting on domain data)
+      - Batch size: 8, gradient accumulation: 4
+      - Learning rate: 1e-4 (cosine decay with warmup)
+      - Hardware: Single A100 80GB or 2x A100 40GB (cloud burst)
+    - **Export Pipeline:**
+      1. Merge LoRA weights into base model
+      2. Export to ONNX via `optimum` library
+      3. Quantize to INT4 AWQ using ONNX Runtime quantization tools
+      4. Validate: Output quality matches FP16 within 2% on eval set
+  - **Evidence Required:**
+    - Training loss: Smooth convergence, final loss <0.8
+    - Eval metrics: ROUGE-L >0.78, BERTScore >0.88 on holdout (improvement over base)
+    - Human eval: Blind A/B test, fine-tuned preferred 85%+ (n=200 comparisons)
+    - ONNX export validation: Bit-exact outputs for 100 test prompts
 
-  - **Evidence Required:** Ask complex billing dispute -> Bot responds "I'm escalating this to our team" -> Ticket created in <30s.
+- [ ] **Implement Structured Output via Guided Generation (ONNX)**
+  - **Implementation:** Constrained decoding using `outlines` library with ONNX backend:
+    - **JSON Schema Enforcement:** Define Pydantic models, compile to FSM for constrained generation
+    - **Schemas:**
+      ```python
+      class IntentClassification(BaseModel):
+          intent: Literal["setup_help", "troubleshoot", "billing", "feature_request", "escalate"]
+          confidence: float = Field(ge=0, le=1)
+          entities: dict[str, str]
+      
+      class SupportResponse(BaseModel):
+          thinking: str  # Chain-of-thought (hidden from user)
+          answer: str
+          sources: list[str]
+          escalate: bool
+          follow_up_questions: list[str]
+      ```
+    - **Inference:** Compile schema once, reuse FSM for all requests (zero overhead after warmup)
+  - **Evidence Required:**
+    - Schema compliance: 100% valid JSON across 50K test queries (guaranteed by FSM)
+    - Quality: No degradation vs unconstrained generation (same eval scores)
+    - Latency overhead: <5% vs unconstrained generation
 
-- [ ] **Implement Conversation Handoff**
-  - **Implementation:** Full context transfer to human agent. Include conversation history, detected intent, and suggested resolution.
+### 8.3 Intelligent Customer Support Chatbot (Production-Grade)
 
-  - **Evidence Required:** Human agent receives ticket with "Summary: User asking about DKIM setup for 3rd domain" + full transcript.
+*The core conversational AI for real-time customer support via web widget, API, and dashboard.*
 
-### 8.3 AI Optimization Suite (High ROI)
+- [ ] **Implement Multi-Turn Conversation Engine**
+  - **Implementation:** Stateful conversation manager with context windowing:
+    - **Conversation State:**
+      ```typescript
+      interface ConversationState {
+        id: string;
+        tenant_id: string;
+        user_id?: string;
+        turns: Turn[];           // Full conversation history
+        context_window: Turn[];  // Last N turns sent to model
+        detected_intents: Intent[];
+        entities: Map<string, string>;
+        sentiment_score: number;
+        escalation_risk: number;
+        created_at: Date;
+        last_activity: Date;
+      }
+      ```
+    - **Context Management:**
+      - Sliding window: Last 8 turns (user + assistant) + system prompt
+      - Long-term memory: Key facts extracted and persisted (e.g., "User has 3 domains configured")
+      - Context compression: Summarize older turns when approaching token limit
+    - **Session Handling:**
+      - Redis-backed sessions (TTL: 30 minutes of inactivity)
+      - Seamless resume: User returns → full context restored
+      - Cross-device: Session linked to user_id if authenticated
+  - **Evidence Required:**
+    - Context coherence: Bot correctly references information from 5+ turns ago in 95%+ of cases
+    - Session resume: 100% of resumed sessions have full context
+    - Latency: Session lookup <5ms (Redis)
 
-- [ ] **Implement "Send Time Optimization" (STO)**
-  - **Implementation:** Store "Hourly Open Probability" per recipient. Hold non-urgent mail in "Predictive Queue" until window.
+- [ ] **Implement Intent-Aware Response Generation Pipeline**
+  - **Implementation:** Multi-stage pipeline for high-quality responses:
+    - **Stage 1: Intent Classification (DeBERTa, <15ms)**
+      - 25 intent categories specific to email platform support
+      - Multi-label (user can have multiple intents)
+      - Confidence threshold: >0.7 for primary intent
+    - **Stage 2: Entity Extraction (NER, <10ms)**
+      - Domain names, email addresses, error codes, timestamps
+      - Template variables, API endpoints
+      - Custom entities: "bounce type", "DKIM selector", "SPF mechanism"
+    - **Stage 3: Knowledge Retrieval (if needed, <50ms)**
+      - Query internal documentation based on intent + entities
+      - Return top 3 relevant passages for grounding
+    - **Stage 4: Response Generation (Phi-3.5, <400ms)**
+      - System prompt with retrieved context
+      - User query with conversation history
+      - Structured output (answer + follow-ups + confidence)
+    - **Stage 5: Post-Processing (<30ms)**
+      - Safety validation (already covered in 8.4)
+      - Formatting (markdown, code blocks)
+      - Action extraction (if bot suggests actions)
+  - **Evidence Required:**
+    - End-to-end latency: <600ms p95 for typical query
+    - Intent accuracy: >94% on held-out test set
+    - Response relevance: >90% rated "relevant" by human evaluators
 
-  - **Evidence Required:** AB Test: STO group shows +15% open rate vs control group.
+- [ ] **Implement Proactive Assistance System**
+  - **Implementation:** Bot initiates helpful suggestions based on context:
+    - **Triggers:**
+      - User views error page → "I see you're looking at a bounce report. Need help understanding it?"
+      - DKIM setup incomplete → "Your domain setup is 80% complete. Want me to guide you through DKIM?"
+      - High bounce rate detected → Proactive alert with diagnosis
+      - New feature released → Contextual introduction
+    - **Personalization:**
+      - Track user expertise level (beginner/intermediate/expert)
+      - Adjust explanation depth accordingly
+      - Remember past interactions ("Last time you asked about SPF...")
+    - **Timing:**
+      - Debounce: Max 1 proactive message per 10 minutes
+      - Relevance scoring: Only trigger if confidence >0.8
+      - User preference: "Don't show tips" option
+  - **Evidence Required:**
+    - Engagement: 40%+ of proactive messages receive a response
+    - Helpfulness: 75%+ rated helpful (thumbs up)
+    - Non-intrusive: <5% of users disable proactive tips
 
-- [ ] **Implement Subject Line Scorer**
-  - **Implementation:** Pre-send check mechanism using local LLM to score subject lines and suggest 3 variants.
+- [ ] **Implement Tool-Augmented Responses (Function Calling)**
+  - **Implementation:** Bot can execute actions on behalf of user (with confirmation):
+    - **Available Tools:**
+      ```python
+      class BotTools:
+          async def check_domain_dns(self, domain: str) -> DNSCheckResult
+          async def validate_dkim_record(self, domain: str, selector: str) -> DKIMResult
+          async def check_spf_record(self, domain: str) -> SPFResult
+          async def analyze_bounce(self, message_id: str) -> BounceAnalysis
+          async def get_sending_stats(self, domain: str, days: int) -> Stats
+          async def check_blacklist_status(self, ip_or_domain: str) -> BlacklistResult
+          async def generate_dns_records(self, domain: str) -> DNSRecords
+          async def test_email_rendering(self, template_id: str) -> RenderResult
+          async def create_support_ticket(self, summary: str, priority: str) -> Ticket
+      ```
+    - **Execution Flow:**
+      1. Model decides tool is needed (structured output)
+      2. Display tool call to user with explanation
+      3. Execute tool (with rate limiting)
+      4. Stream result back to model
+      5. Model generates final response incorporating result
+    - **Safety:**
+      - Read-only tools: No confirmation needed
+      - Write tools (create ticket): Require explicit user confirmation
+      - Rate limiting: Max 5 tool calls per conversation
+  - **Evidence Required:**
+    - Tool accuracy: Correct tool selected 95%+ of the time
+    - Execution success: 99%+ of tool calls complete successfully
+    - User satisfaction: Tool-assisted responses rated higher than non-tool
 
-  - **Evidence Required:** User types "Newsletter" -> System suggests "📅 Your Weekly Update (Inside: X, Y, Z)".
+- [ ] **Implement Real-Time Typing Indicators & Streaming**
+  - **Implementation:** Responsive UX with streaming responses:
+    - **Typing Indicator:** Show while model is generating
+    - **Token Streaming:** Stream tokens via WebSocket/SSE as generated
+    - **Chunked Display:** Group tokens into words before display (smoother)
+    - **Cancellation:** User can interrupt generation (stop button)
+    - **Partial Recovery:** If generation fails mid-stream, show partial + error
+  - **Evidence Required:**
+    - Time to first token: <200ms p95
+    - Stream reliability: <0.1% dropped connections
+    - Perceived latency: User survey shows "fast" rating >85%
+
+- [ ] **Implement Chatbot Widget (Embeddable)**
+  - **Implementation:** Lightweight, customizable chat widget:
+    - **Technical:**
+      - Bundle size: <50KB gzipped (lazy load conversation history)
+      - Framework-agnostic: Vanilla JS, works with React/Vue/Angular
+      - Shadow DOM: Isolated styles, no conflicts
+      - Accessibility: WCAG 2.1 AA compliant
+    - **Features:**
+      - Persistent position (bottom-right, configurable)
+      - Minimize/maximize with animation
+      - Unread message badge
+      - File upload (screenshots, logs)
+      - Code block rendering with syntax highlighting
+      - Link previews for documentation
+    - **Customization:**
+      - Brand colors, logo, welcome message
+      - Custom CSS injection
+      - Position and size
+      - Business hours display
+  - **Evidence Required:**
+    - Lighthouse performance: >90
+    - Load time: <500ms to interactive
+    - Cross-browser: Chrome, Firefox, Safari, Edge (latest 2 versions)
+
+### 8.4 Intelligent Email Mailbot (Automated Email Support)
+
+*AI-powered email responder for support@, help@, and inbound ticket emails.*
+
+- [ ] **Implement Inbound Email Processing Pipeline**
+  - **Implementation:** Process incoming support emails automatically:
+    - **Ingestion:**
+      - Webhook from email provider (SendGrid, Postmark inbound)
+      - Parse: Subject, body (plain + HTML), attachments, headers
+      - Extract: Sender, in-reply-to (threading), references
+    - **Preprocessing:**
+      - Strip signatures (ML-based signature detection)
+      - Remove quoted replies (keep only new content)
+      - Extract inline images, attachments metadata
+      - Language detection (support EN, ES, FR, DE, PT)
+    - **Threading:**
+      - Match to existing conversation via Message-ID/References
+      - Create new conversation if no match
+      - Link to user account if sender email matches
+  - **Evidence Required:**
+    - Parsing accuracy: 99%+ of emails correctly parsed
+    - Threading accuracy: 98%+ correctly threaded
+    - Processing latency: <2s from receipt to processed
+
+- [ ] **Implement Email-Specific Intent Classification**
+  - **Implementation:** Fine-tuned classifier for email support intents:
+    - **Email-Specific Intents:**
+      - `auto_reply_ooo`: Out of office (don't respond)
+      - `auto_reply_receipt`: Delivery receipt (don't respond)
+      - `unsubscribe_request`: Handle via unsubscribe system
+      - `spam_report`: Log and suppress sender
+      - `forwarded_bounce`: Extract original bounce, analyze
+      - `question_technical`: Technical support question
+      - `question_billing`: Billing inquiry
+      - `bug_report`: Product bug report
+      - `feature_request`: Feature suggestion
+      - `complaint`: Unhappy customer (escalate)
+      - `praise`: Positive feedback (log, respond warmly)
+      - `vendor_pitch`: Sales email (ignore)
+    - **Routing:**
+      - `auto_reply_*`, `vendor_pitch` → No response, log only
+      - `unsubscribe_request` → Automated unsubscribe flow
+      - `complaint` → Immediate escalation to human
+      - Others → AI response with confidence check
+  - **Evidence Required:**
+    - Classification accuracy: >97% on email-specific intents
+    - False positive rate for "no response" categories: <0.5%
+    - Complaint detection: 100% (never miss unhappy customer)
+
+- [ ] **Implement AI Email Response Generator**
+  - **Implementation:** Generate professional email responses:
+    - **Tone Calibration:**
+      - Analyze sender's tone (formal/casual/frustrated)
+      - Match response formality level
+      - Extra empathy for frustrated senders
+    - **Response Structure:**
+      ```
+      Subject: Re: {original_subject}
+      
+      Hi {first_name},
+      
+      {acknowledgment of their question}
+      
+      {detailed answer with steps if applicable}
+      
+      {offer for follow-up}
+      
+      Best regards,
+      {bot_name} (AI Assistant)
+      ApexMail Support Team
+      
+      ---
+      This response was generated by AI. Reply to continue the conversation 
+      or request human support at any time.
+      ```
+    - **Quality Checks:**
+      - Minimum response length (no one-liners for complex questions)
+      - Maximum length (respect inbox, <500 words)
+      - No hallucinated links or features
+      - Spell check + grammar validation
+  - **Evidence Required:**
+    - Response quality: 85%+ rated "helpful" by recipients
+    - Tone matching: 90%+ appropriate formality level
+    - Grammar/spelling: 0 errors in 1000 responses
+
+- [ ] **Implement Smart Auto-Reply Policies**
+  - **Implementation:** Configurable automation levels:
+    - **Level 1 - Draft Only:**
+      - AI generates draft, human reviews before send
+      - For: New customers, high-value accounts, complex issues
+    - **Level 2 - Send with Delay:**
+      - AI response sent after 5-minute delay (allow human override)
+      - For: Standard questions with high confidence
+    - **Level 3 - Instant Reply:**
+      - Immediate AI response for simple questions
+      - For: FAQ-type questions, status checks
+    - **Confidence Thresholds:**
+      - >0.9 confidence: Level 3 eligible
+      - 0.7-0.9: Level 2 eligible
+      - <0.7: Level 1 only (human review required)
+    - **Tenant Configuration:**
+      - Per-tenant automation level preference
+      - Business hours vs after-hours policies
+      - VIP customer overrides
+  - **Evidence Required:**
+    - Automation rate: 60%+ of emails handled without human intervention
+    - Accuracy at each level: Level 3 >95%, Level 2 >90%, Level 1 N/A
+    - Response time: Level 3 <30s, Level 2 <5min, Level 1 <1hr (SLA)
+
+- [ ] **Implement Email Conversation Threading & History**
+  - **Implementation:** Full email thread management:
+    - **Thread View:**
+      - Chronological display of all emails in thread
+      - AI responses clearly marked
+      - Human agent responses distinguished
+      - Internal notes (not sent to customer)
+    - **Context Passing:**
+      - Full thread context passed to AI (with summarization for long threads)
+      - Previous resolution attempts noted
+      - Related tickets linked
+    - **Handoff:**
+      - Seamless handoff to human agent with full context
+      - Agent can take over mid-thread
+      - AI can resume if agent marks resolved
+  - **Evidence Required:**
+    - Thread accuracy: 99%+ emails correctly grouped
+    - Context quality: Agents rate context "complete" in 95%+ of handoffs
+    - Handoff latency: <30s from escalation to agent notification
+
+- [ ] **Implement Mailbot Performance Analytics**
+  - **Implementation:** Comprehensive metrics for email AI:
+    - **Volume Metrics:**
+      - Emails received, processed, responded (by AI vs human)
+      - Automation rate by category
+      - Response time distribution
+    - **Quality Metrics:**
+      - Customer reply rate (follow-up = potentially unresolved)
+      - Escalation rate
+      - Resolution rate (thread closed after AI response)
+      - Customer satisfaction (survey after resolution)
+    - **Operational Metrics:**
+      - Processing latency
+      - Model confidence distribution
+      - Error rates
+    - **Improvement Signals:**
+      - Low-confidence categories (need more training data)
+      - High-escalation intents (need better responses)
+      - Common follow-up questions (improve initial response)
+  - **Evidence Required:**
+    - Dashboard with all metrics, filterable by time/tenant/category
+    - Automated weekly report with trends
+    - Alert on anomalies (e.g., escalation rate spike)
+
+### 8.5 Multi-Stage Safety & Guardrails (ONNX-Optimized Pipeline)
+
+- [ ] **Deploy ONNX-Optimized Safety Model Stack**
+  - **Implementation:** All safety models run via ONNX Runtime for consistent, fast inference:
+    - **Model 1:** `microsoft/deberta-v3-large` (304M params, INT8) - Intent & injection detection
+    - **Model 2:** `unitary/toxic-bert` (110M params, INT8) - Toxicity detection
+    - **Model 3:** `BAAI/bge-base-en-v1.5` (110M params, INT8) - Semantic similarity for OOD detection
+    - All models: Quantized to INT8 via ONNX Runtime quantization, ARM64 optimized
+    - Session sharing: Single ONNX session pool, models loaded at startup
+  - **Evidence Required:**
+    - Combined safety pipeline latency: <50ms p95 for all checks
+    - Memory footprint: <2GB for entire safety stack
+
+- [ ] **Implement Input Sanitization Layer (Pre-LLM)**
+  - **Implementation:** Fast regex + classifier pipeline before LLM invocation:
+    1. **Unicode Normalization:** NFC normalization, strip zero-width chars, confusable detection (ICU)
+    2. **Injection Pattern Detection:** Compiled regex for known patterns + ML classifier backup
+    3. **Content Policy Filter:** PII detection (email, phone, SSN, credit card patterns)
+    4. **Length Guards:** Reject inputs >4K tokens (DoS prevention)
+  - **Evidence Required:**
+    - Latency: <3ms p99 for sanitization layer
+    - Detection rate: 100% on OWASP LLM Top 10 injection patterns
+    - False positive rate: <0.05% on legitimate support queries
+
+- [ ] **Deploy DeBERTa-v3-large Prompt Injection Classifier (ONNX)**
+  - **Implementation:** Fine-tuned on comprehensive injection dataset:
+    - **Base:** `microsoft/deberta-v3-large` (304M params) - highest quality encoder
+    - **Training Data:**
+      - [Lakera Gandalf dataset](https://huggingface.co/datasets/Lakera/gandalf_ignore_instructions) (~10K examples)
+      - [PromptInject](https://github.com/agencyenterprise/PromptInject) (~5K examples)
+      - [JailbreakBench](https://jailbreakbench.github.io/) (~2K examples)
+      - Custom ApexMail adversarial examples (~3K, red-team generated)
+      - Negative examples: Clean support queries (~50K)
+    - **Output:** Binary `safe` / `injection_attempt` with calibrated probability
+    - **Export:** ONNX INT8 quantized (~150MB)
+  - **Evidence Required:**
+    - Accuracy: >99.5% on held-out test set (higher than smaller models)
+    - Latency: <15ms p95 (ONNX INT8 optimized)
+    - Red team: 0 bypasses in 2000 novel adversarial attempts (documented vectors)
+    - False positive rate: <0.01% on clean queries
+
+- [ ] **Implement Multi-Layer Output Validation (Post-LLM)**
+  - **Implementation:** Comprehensive output checking pipeline:
+    1. **Factual Grounding Check:**
+       - Extract claims via lightweight NER
+       - Verify against ApexMail knowledge base (exact + fuzzy match)
+       - Flag ungrounded claims with confidence <0.8
+    2. **Confidence Calibration:**
+       - Analyze token logprobs from ONNX GenAI
+       - Flag responses with mean probability <0.6 or high variance
+       - Trigger human review for low-confidence responses
+    3. **Toxicity Filter (ONNX):**
+       - `unitary/toxic-bert` INT8 model
+       - Block if any toxicity category >0.7
+       - Log near-misses (0.5-0.7) for review
+    4. **PII Leakage Scanner:**
+       - Regex patterns for emails, API keys, internal URLs, customer data
+       - Named entity recognition for person/org names
+       - Redact or block based on sensitivity
+    5. **Consistency Check:**
+       - Compare response to previous turns for contradictions
+       - Flag if semantic similarity to contradictory statement >0.8
+  - **Evidence Required:**
+    - Hallucination detection: 97%+ catch rate on synthetic test set (500 fabricated facts)
+    - Toxicity: 0 toxic responses in 25K adversarial test queries
+    - PII leakage: 0 internal data exposed in 100K response audit
+    - Latency: <30ms for full output validation pipeline
+
+- [ ] **Implement Intent-Based Deterministic Responses**
+  - **Implementation:** Route sensitive topics to hard-coded templates (zero LLM involvement):
+    - **Detection:** DeBERTa-v3-large multi-class intent classifier (fine-tuned)
+    - **Sensitive Intents:**
+      - `billing_dispute` → Template: "I understand billing concerns are important. I'm connecting you with our billing specialist who can review your account. Ticket #{{id}} created."
+      - `legal_request` → Template: "For legal matters, please contact legal@apexmail.ee or visit our Legal page at /legal. I cannot provide legal advice."
+      - `account_deletion` → Template: "You can delete your account via Settings → Account → Delete Account, or visit our GDPR portal at /gdpr. This action is irreversible."
+      - `refund_request` → Template: [Exact refund policy from docs, no generation]
+      - `security_concern` → Template: Immediate escalation + security team notification
+    - **Fallback:** If intent confidence <0.9, use LLM but with extra guardrails
+  - **Evidence Required:**
+    - Intent classifier accuracy: >98% on sensitive categories
+    - 100% template usage for high-confidence sensitive intents
+    - Audit log: Template ID + intent confidence for every templated response
+
+- [ ] **Implement Adaptive Human Escalation System**
+  - **Implementation:** Multi-signal escalation with configurable thresholds:
+    - **Automatic Escalation Triggers:**
+      - Model confidence <0.5 on response tokens
+      - User sentiment score <-0.5 (tracked across conversation)
+      - Explicit keywords: "human", "agent", "manager", "supervisor", "speak to someone"
+      - Conversation loop: Same intent detected 3+ times
+      - Safety filter near-miss: Any safety score in 0.6-0.8 range
+      - Out-of-distribution: Query embedding >2σ from training distribution centroid
+    - **Escalation Quality:**
+      - Full conversation transcript with timestamps
+      - AI's understanding summary (generated by model)
+      - Detected intent history
+      - Suggested resolution (if available)
+      - Confidence scores for each turn
+    - **Routing:** Priority queue based on sentiment + wait time
+  - **Evidence Required:**
+    - Escalation latency: Ticket created in <5s with full context
+    - Human agent satisfaction: >92% find AI context "helpful" (survey)
+    - Escalation rate: 8-12% of conversations (calibrated to balance coverage vs efficiency)
+
+### 8.6 Send Time Optimization (Production ML Pipeline)
+
+- [ ] **Build Real-Time Recipient Engagement Feature Store**
+  - **Implementation:** High-performance feature store with Postgres + Redis:
+    - **Per-Recipient Features (Redis, hot):**
+      - `hourly_open_prob[24]`: Open probability by hour (UTC), exponential decay (τ=30 days)
+      - `dow_multiplier[7]`: Day-of-week engagement modifier
+      - `timezone`: Inferred from open IP geolocation (MaxMind), confidence score
+      - `last_engagement`: Timestamp + type (open/click/reply)
+      - `engagement_velocity`: 7-day trend (improving/declining/stable)
+      - `device_preference`: Mobile vs desktop ratio
+      - `avg_response_time`: Mean time to open after delivery
+    - **Aggregate Features (Postgres, materialized views):**
+      - Sender reputation by domain
+      - Template performance by category
+      - Industry benchmarks
+    - **Update Pipeline:**
+      - Streaming via Postgres NOTIFY on `event_log` inserts
+      - Redis update latency: <500ms from event
+      - Batch refresh: Hourly for aggregate features
+  - **Evidence Required:**
+    - Feature freshness: <1s from event to Redis update
+    - Coverage: >85% of active recipients with 14+ days of engagement data
+    - Storage: <150 bytes per recipient (Redis), <1KB with history (Postgres)
+
+- [ ] **Train XGBoost Send Time Prediction Model (ONNX Export)**
+  - **Implementation:** Gradient boosting model for optimal send time:
+    - **Model:** XGBoost with ONNX export via `onnxmltools`
+    - **Features (40+):**
+      - Recipient: All engagement features from store
+      - Email: template_id, subject_length, has_emoji, personalization_count, attachment_count, is_transactional
+      - Temporal: Current hour, day_of_week, is_holiday, days_since_last_send
+      - Sender: Historical open rate, domain reputation score
+    - **Target:** Binary open within 24h
+    - **Training:**
+      - Data: 90-day rolling window, ~10M send records
+      - Split: Time-based 80/10/10 (train on older, test on recent)
+      - Hyperparameters: Optuna with 200 trials, optimizing AUC-PR (handles class imbalance)
+    - **Export:** ONNX format, quantized to FP16 (~2MB)
+  - **Evidence Required:**
+    - Offline: AUC-ROC >0.74, AUC-PR >0.45, lift@10% >2.5x vs random
+    - Online A/B: +15% open rate vs immediate send (p<0.01, n>100K per arm, 4-week test)
+    - Calibration: Brier score <0.18, reliability diagram shows good calibration
+    - Inference: <5ms per prediction (ONNX optimized)
+
+- [ ] **Implement Multi-Armed Bandit for Exploration-Exploitation**
+  - **Implementation:** Thompson Sampling for continuous learning:
+    - **Problem:** Pure exploitation misses changing preferences
+    - **Solution:** Thompson Sampling with Beta posteriors per (recipient_cluster, hour) pair
+    - **Exploration rate:** 10% of sends explore non-optimal times
+    - **Clustering:** K-means on engagement patterns (K=50 clusters)
+    - **Update:** Posterior updated on each open/no-open observation
+  - **Evidence Required:**
+    - Regret analysis: Cumulative regret grows sub-linearly (√T)
+    - Adaptation: Model detects preference shifts within 2 weeks
+    - A/B: Bandit outperforms static model by >3% after 8 weeks
+
+- [ ] **Implement Predictive Send Queue with Guarantees**
+  - **Implementation:** Distributed queue for optimized delivery:
+    - **Flow:**
+      1. Email received with `optimize_send_time: true`
+      2. Query XGBoost model for optimal hour (returns probability distribution)
+      3. Sample send time from distribution (respects uncertainty)
+      4. Store in `scheduled_sends` table with `optimal_send_at`
+      5. Worker polls for due emails, sends with ±10min jitter
+    - **Constraints:**
+      - Tenant blackout windows (configurable)
+      - Max delay: 24h (configurable per tenant)
+      - Recipient timezone awareness
+      - Volume smoothing: Spread sends to avoid spike detection
+    - **Reliability:**
+      - Exactly-once delivery guarantee (idempotency keys)
+      - Dead letter queue for failed predictions
+      - Fallback: Immediate send if model unavailable
+  - **Evidence Required:**
+    - Queue latency: <50ms to enqueue
+    - Delivery accuracy: 97% within ±15min of predicted optimal
+    - Throughput: 500K scheduled sends/hour per worker
+    - Reliability: 0 dropped emails in 30-day soak test
+
+- [ ] **Implement Automated Model Retraining Pipeline (MLOps)**
+  - **Implementation:** Weekly retraining with quality gates:
+    - **Schedule:** Every Sunday 02:00 UTC
+    - **Pipeline:**
+      1. Export features + labels for past 90 days
+      2. Train new XGBoost model (same hyperparameters)
+      3. Evaluate on held-out week (most recent)
+      4. Compare to production model on same eval set
+      5. If AUC improves >0.3%, promote to shadow
+      6. Shadow serves 5% traffic for 48h
+      7. If shadow metrics match/exceed, promote to primary
+    - **Monitoring:**
+      - Model staleness alert: >14 days without successful update
+      - Performance degradation: AUC drops >3% → alert + auto-rollback
+      - Data drift detection: Feature distribution shifts (PSI >0.1)
+  - **Evidence Required:**
+    - Retraining success rate: >98% of weekly runs complete
+    - Auto-rollback: Triggered 0 times in 6-month period (good model quality)
+    - Continuous improvement: AUC trending upward over 6 months
+
+### 8.7 Subject Line Intelligence (ONNX-Powered)
+
+- [ ] **Train DeBERTa-v3-large Subject Line Effectiveness Model (ONNX)**
+  - **Implementation:** State-of-the-art transformer for subject line scoring:
+    - **Base:** `microsoft/deberta-v3-large` (304M params) - best encoder quality
+    - **Training Data (1M+ examples):**
+      - [Mailchimp benchmark data](https://mailchimp.com/resources/email-marketing-benchmarks/) (industry rates by sector)
+      - [Kaggle Email Campaign datasets](https://www.kaggle.com/) (~200K labeled examples)
+      - Public newsletter archives with engagement metrics (~300K)
+      - Synthetic augmentation: GPT-4 paraphrasing + back-translation (~500K)
+    - **Architecture:**
+      - DeBERTa encoder → Mean pooling → MLP head (256 → 128 → 4)
+      - Multi-task: Regression (open rate) + Classification (quartile bucket)
+    - **Labels:** Normalized open rates (0-100 scale, industry-adjusted)
+    - **Export:** ONNX INT8 quantized (~150MB), <40ms inference
+  - **Evidence Required:**
+    - Correlation: Spearman ρ >0.55 with actual open rates (holdout)
+    - Classification accuracy: >70% quartile prediction
+    - Cross-industry generalization: Tested on 5 different industries
+    - Latency: <35ms p95 (ONNX INT8)
+
+- [ ] **Implement Subject Line Feature Analyzer**
+  - **Implementation:** Comprehensive analysis beyond ML score:
+    - **Structural Features:**
+      - Length score (optimal: 30-50 chars for mobile)
+      - Word count (optimal: 4-8 words)
+      - Preview text alignment
+    - **Engagement Signals:**
+      - Personalization detection (`{{name}}`, `{{company}}`)
+      - Urgency indicators (deadline words, numbers)
+      - Curiosity gap patterns (questions, incomplete statements)
+      - Emoji presence + sentiment match
+    - **Risk Factors:**
+      - Spam trigger words (weighted by severity)
+      - ALL CAPS percentage
+      - Excessive punctuation
+      - Misleading patterns (RE:, FW: when not reply)
+    - **Competitive Intelligence:**
+      - Compare to top-performing subjects in same category
+      - Industry benchmark percentile
+  - **Evidence Required:**
+    - Feature accuracy: Manual validation of 500 subjects, >95% correct feature detection
+    - Actionable feedback: Each feature has specific improvement suggestion
+
+- [ ] **Implement Phi-3.5 Subject Line Generator (ONNX)**
+  - **Implementation:** High-quality variant generation with constraints:
+    - **Model:** Fine-tuned Phi-3.5-mini on subject line generation task
+    - **Training Data:**
+      - High-performing subject lines (top 10% open rates) paired with email context
+      - Style variations: urgency, curiosity, benefit, social proof
+      - ~50K examples with human-validated quality
+    - **Generation Pipeline:**
+      1. Analyze original subject + email body context
+      2. Generate 5 variants using different strategies:
+         - `urgency`: Time-sensitive framing
+         - `curiosity`: Open loop / question
+         - `benefit`: Clear value proposition
+         - `social_proof`: Numbers, testimonials
+         - `personalized`: Heavy personalization
+      3. Score all variants with effectiveness model
+      4. Return top 3 that score higher than original
+    - **Constraints:**
+      - Max 60 chars (mobile-friendly)
+      - Preserve key entities from original
+      - No clickbait (trained to avoid)
+      - Brand voice consistency (configurable tone)
+  - **Evidence Required:**
+    - Quality: 80%+ of variants score higher than original
+    - Diversity: Cosine similarity <0.7 between variant pairs
+    - Speed: <800ms for 5 variants (ONNX Phi-3.5-mini)
+    - Human eval: 75%+ of variants rated "as good or better" than original
+
+- [ ] **Implement Real-Time Subject Line API**
+  - **Implementation:** API endpoint `POST /v1/subject/analyze`:
+    - **Request:**
+      ```json
+      {
+        "subject": "Your weekly newsletter",
+        "body_preview": "First 500 chars of email body...",
+        "industry": "saas",
+        "generate_variants": true
+      }
+      ```
+    - **Response:**
+      ```json
+      {
+        "score": 68,
+        "percentile": 45,
+        "grade": "C+",
+        "factors": {
+          "length": {"score": 90, "value": 22, "feedback": "Good length for mobile"},
+          "personalization": {"score": 40, "feedback": "Add {{name}} for +8% open rate"},
+          "urgency": {"score": 30, "feedback": "No time-sensitive elements detected"},
+          "curiosity": {"score": 55, "feedback": "Moderate curiosity appeal"},
+          "spam_risk": {"score": 95, "feedback": "Low spam trigger risk"}
+        },
+        "variants": [
+          {"text": "{{name}}, your weekly insights (3 trends inside)", "score": 82, "strategy": "curiosity"},
+          {"text": "📊 This week's must-see metrics for {{company}}", "score": 79, "strategy": "benefit"},
+          {"text": "{{name}}: Don't miss these updates (expires Friday)", "score": 77, "strategy": "urgency"}
+        ],
+        "benchmark": {
+          "industry_avg": 62,
+          "top_10_pct": 78
+        }
+      }
+      ```
+  - **Evidence Required:**
+    - API latency: <150ms p95 without variants, <500ms with variants
+    - Availability: 99.9% uptime
+    - Usage: 50%+ of marketing emails analyzed before send (tracked)
+
+### 8.8 Intelligent Bounce & Deliverability Analysis (ONNX)
+
+- [ ] **Train BGE-large Bounce Classifier (ONNX)**
+  - **Implementation:** High-accuracy bounce classification:
+    - **Base:** `BAAI/bge-large-en-v1.5` (335M params) - best embedding quality
+    - **Architecture:** BGE encoder → Classification head (10 classes)
+    - **Training Data:**
+      - 500K+ labeled SMTP responses (anonymized production data)
+      - Public bounce message datasets
+      - Synthetic examples for rare categories
+    - **Classes (hierarchical):**
+      - `hard.invalid_mailbox`: Mailbox doesn't exist (550 5.1.1)
+      - `hard.invalid_domain`: Domain doesn't exist (550 5.1.2)
+      - `hard.policy_permanent`: Permanent policy rejection
+      - `soft.mailbox_full`: Over quota (452 4.2.2)
+      - `soft.temp_failure`: Temporary failure, retry later
+      - `soft.greylisting`: Initial rejection, retry expected
+      - `block.spam`: Classified as spam
+      - `block.reputation`: IP/domain blacklisted
+      - `block.dmarc`: DMARC policy failure
+      - `block.content`: Content-based rejection
+    - **Export:** ONNX INT8 (~170MB)
+  - **Evidence Required:**
+    - Accuracy: >99% on held-out test (5K manually labeled)
+    - Per-class F1: >0.95 for all classes
+    - Latency: <8ms per classification
+    - Coverage: 99.99% of bounces classified (fallback: regex patterns)
+
+- [ ] **Implement Real-Time Deliverability Health Score**
+  - **Implementation:** Composite score tracking sender health:
+    - **Components:**
+      - Bounce rate (weighted by type)
+      - Complaint rate (FBL data)
+      - Engagement metrics (opens, clicks, replies)
+      - Authentication pass rate (SPF, DKIM, DMARC)
+      - Blacklist presence check
+    - **Calculation:** Weighted moving average, updated per-send
+    - **Alerts:**
+      - Score <70: Warning notification
+      - Score <50: Automatic sending pause (configurable)
+      - Sudden drop >15 points: Immediate alert
+  - **Evidence Required:**
+    - Score correlation: >0.7 with actual inbox placement rate (seed testing)
+    - Alert accuracy: 95%+ of alerts correspond to real deliverability issues
+
+- [ ] **Implement Isolation Forest Anomaly Detection (ONNX)**
+  - **Implementation:** Detect unusual bounce patterns:
+    - **Model:** Isolation Forest with ONNX export
+    - **Features:**
+      - Bounce rate by category (10-element vector)
+      - Bounce rate by receiving domain (top 50)
+      - Hourly pattern deviation
+      - Template-specific bounce rates
+    - **Training:** Fit on 60 days of "normal" patterns
+    - **Detection:** Anomaly score >0.85 triggers alert
+  - **Evidence Required:**
+    - Detection: 98%+ of simulated incidents caught within 15 minutes
+    - False positive rate: <2 false alerts per week
+    - Root cause suggestions: 80%+ accuracy in identifying cause
+
+### 8.9 Email Content Intelligence Suite
+
+- [ ] **Implement Ensemble Spam Score Predictor**
+  - **Implementation:** Multi-model ensemble for pre-send spam prediction:
+    - **Component 1:** SpamAssassin rules (local, rule-based)
+    - **Component 2:** Fine-tuned DeBERTa-v3-base spam classifier (ONNX)
+      - Trained on SpamAssassin corpus + Enron ham
+      - Binary classification with probability
+    - **Component 3:** Heuristic analyzer
+      - Link-to-text ratio
+      - Image-to-text ratio
+      - HTML complexity score
+      - Suspicious phrase dictionary
+    - **Ensemble:** Stacked model (XGBoost) combining all scores
+  - **Evidence Required:**
+    - Correlation: >0.75 with actual Gmail/Outlook spam placement
+    - Latency: <150ms for full content analysis
+    - Actionable: Top 3 specific improvement recommendations
+
+- [ ] **Implement Content Quality Analyzer**
+  - **Implementation:** Comprehensive content checking:
+    - **Personalization Validation:**
+      - All `{{tokens}}` have corresponding data
+      - Fallback values for missing data
+      - Offensive combination detection (gender/name mismatch)
+    - **Link Validation (async):**
+      - All URLs reachable (cached, async check)
+      - No broken redirect chains
+      - UTM parameter validation
+    - **Accessibility Check:**
+      - Alt text for images
+      - Sufficient color contrast
+      - Screen reader compatibility
+    - **Mobile Rendering Preview:**
+      - Width compatibility
+      - Font size adequacy
+      - Touch target sizes
+  - **Evidence Required:**
+    - Error catch rate: 100% of missing tokens detected
+    - False positive rate: <0.05%
+    - Link check latency: <2s for typical email (cached)
+
+### 8.10 AI System Observability & MLOps
+
+- [ ] **Implement Comprehensive Model Monitoring Dashboard**
+  - **Implementation:** Grafana + Prometheus for full observability:
+    - **Inference Metrics:**
+      - Latency histograms (p50, p95, p99) by model
+      - Throughput (requests/sec)
+      - Token generation rate (for generative models)
+      - Batch size distribution
+    - **Resource Metrics:**
+      - Memory usage by model session
+      - CPU utilization per model
+      - ONNX Runtime thread pool saturation
+    - **Quality Metrics:**
+      - Prediction distribution drift
+      - Confidence score distribution
+      - Safety filter trigger rates
+      - User feedback scores (rolling 7-day)
+    - **Business Metrics:**
+      - STO lift (open rate improvement)
+      - Subject line adoption rate
+      - Escalation rate trend
+  - **Evidence Required:**
+    - Dashboard with all metrics, 30-day retention
+    - Alert rules for anomalies (documented thresholds)
+
+- [ ] **Implement Feature Store Monitoring**
+  - **Implementation:** Track feature freshness and quality:
+    - Feature staleness alerts (>1h without update)
+    - Feature distribution monitoring (PSI alerts)
+    - Missing value rates
+    - Join failure rates (feature lookup misses)
+  - **Evidence Required:**
+    - 99.9% feature availability
+    - <0.1% staleness rate during normal operation
+
+- [ ] **Implement Model A/B Testing Framework**
+  - **Implementation:** Rigorous experimentation system:
+    - **Traffic Splitting:** Deterministic hash on tenant_id + experiment_id
+    - **Metrics Collection:** All relevant metrics per variant
+    - **Statistical Analysis:**
+      - Bayesian inference for early stopping
+      - Power analysis for sample size
+      - Novelty effect detection (time-series analysis)
+    - **Guardrails:** Auto-stop if degradation >threshold
+    - **Documentation:** Auto-generated experiment report
+  - **Evidence Required:**
+    - Run 5+ experiments with documented outcomes
+    - Decision framework: Clear criteria for winner selection
+
+- [ ] **Implement Human-in-the-Loop Feedback System**
+  - **Implementation:** Continuous learning from user feedback:
+    - **Collection:**
+      - 👍/👎 on AI support responses
+      - Subject line A/B test results
+      - Escalation reasons (human agent input)
+      - Correction submissions
+    - **Processing:**
+      - Weekly aggregation of feedback
+      - Automated dataset curation (positive examples → training)
+      - Negative examples → error analysis
+    - **Reporting:**
+      - Weekly feedback summary
+      - Low-performing response categories
+      - Improvement recommendations
+  - **Evidence Required:**
+    - >25% feedback rate on AI interactions
+    - Positive rating trend: >88% after 6 months
+    - Monthly model improvements based on feedback
+
+- [ ] **Implement Comprehensive AI Audit Trail**
+  - **Implementation:** Full traceability for compliance + debugging:
+    - **Logged per Request:**
+      - Request ID, timestamp, user/tenant ID
+      - Model version + ONNX session ID
+      - Full prompt (PII redacted via NER)
+      - Inference parameters (temperature, max_tokens, etc.)
+      - Raw model output
+      - Safety filter decisions (with scores)
+      - Final response (post-processing)
+      - Latency breakdown (queue, inference, post-processing)
+    - **Storage:**
+      - Hot: 30 days in Postgres (indexed on request_id, tenant_id, timestamp)
+      - Cold: 2 years in S3 (Parquet, partitioned by date)
+    - **Query Interface:**
+      - Full-text search on prompts/responses
+      - Filter by safety flags, latency, model version
+      - Replay capability (re-run with current model)
+  - **Evidence Required:**
+    - Query any request by ID in <1s
+    - GDPR Article 22 compliance: Explain any automated decision
+    - Replay accuracy: Re-run produces consistent results
 
 ---
 
@@ -1497,9 +2391,9 @@
 ### 5. Privacy-First "Local" AI (Phase 8)
 
 - **Status Quo:** "AI Writing Assistants" send your customer drafts to OpenAI. Privacy nightmare.
-- **ApexMail Advantage:** CPU-only 7B LLM (Mistral/Llama) running locally.
-- **The Killer Feature:** **Air-Gapped Intelligence**. Smart features without the data leak risk.
-- **Quality Gate:** Network-isolated inference test: support answers work with outbound network disabled.
+- **ApexMail Advantage:** CPU-only ONNX Runtime models running locally on ARM64. Deeply optimized for privacy and latency.
+- **The Killer Feature:** **Air-Gapped Intelligence**. Smart features (Chatbot, Mailbot, STO) without the data leak risk.
+- **Quality Gate:** Network-isolated inference test: support answers, STO predictions, and content checks work with outbound network disabled.
 
 ### 6. "Priority Pass" Traffic Shaping (Phase 3.2.1)
 
@@ -1560,7 +2454,7 @@
 
 | 17. Enterprise Infra | 🟢 Medium | High | $$$$ | Phase 15 |
 
-| 8. AI Mailbot | 🔵 Low | High | Differentiation | Phase 5 |
+| 8. AI Intelligence Suite | 🟡 High | High | Differentiation | Phase 5 |
 
 | 15. Multi-Tenant | 🟡 High | High | Enterprise | Phase 6.5 |
 

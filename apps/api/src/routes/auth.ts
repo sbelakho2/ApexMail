@@ -1,0 +1,335 @@
+/**
+ * Authentication Routes
+ */
+
+import { Hono } from 'hono';
+import { z } from 'zod';
+import type { AppEnv, AppContext } from '../app.js';
+import { UsersRepository, ApiKeysRepository, AuditLogsRepository } from '@apexmail/db';
+import { ApiError } from '../middleware/error-handler.js';
+import { createJwt } from '../middleware/auth.js';
+
+const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+  tenantId: z.string().uuid().optional(),
+});
+
+const createApiKeySchema = z.object({
+  name: z.string().min(1).max(100),
+  scopes: z.array(z.string()).min(1),
+  rateLimit: z.number().int().positive().optional(),
+  allowedIps: z.array(z.string()).optional(),
+  expiresAt: z.string().datetime().optional(),
+});
+
+export function authRoutes(ctx: AppContext): Hono<AppEnv> {
+  const router = new Hono<AppEnv>();
+  const usersRepo = new UsersRepository(ctx.db);
+  const apiKeysRepo = new ApiKeysRepository(ctx.db);
+  const auditRepo = new AuditLogsRepository(ctx.db);
+
+  // Login - Get JWT token
+  router.post('/login', async (c) => {
+    const body = await c.req.json();
+    const { email, password, tenantId } = loginSchema.parse(body);
+    const logger = c.get('logger');
+
+    // Find user
+    const userResult = await usersRepo.findByEmail(email, tenantId);
+    if (!userResult.ok) {
+      throw ApiError.internal('Failed to fetch user');
+    }
+
+    if (!userResult.value) {
+      logger.warn('Login attempt for non-existent user', { email });
+      throw ApiError.unauthorized('Invalid credentials', 'INVALID_CREDENTIALS');
+    }
+
+    const user = userResult.value;
+
+    // Check if user is active
+    if (user.status !== 'active') {
+      logger.warn('Login attempt for inactive user', { userId: user.id, status: user.status });
+      await auditRepo.create({
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: 'user.login_failed',
+        resourceType: 'user',
+        resourceId: user.id,
+        ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+        metadata: { reason: 'inactive_user' },
+      });
+      throw ApiError.unauthorized('Account is not active', 'ACCOUNT_INACTIVE');
+    }
+
+    // Verify password
+    const verifyResult = await usersRepo.verifyCredentials(email, password, tenantId);
+    if (!verifyResult.ok || !verifyResult.value) {
+      logger.warn('Invalid password for user', { userId: user.id });
+      await auditRepo.create({
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: 'user.login_failed',
+        resourceType: 'user',
+        resourceId: user.id,
+        ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+        metadata: { reason: 'invalid_password' },
+      });
+      throw ApiError.unauthorized('Invalid credentials', 'INVALID_CREDENTIALS');
+    }
+
+    // Generate JWT
+    const token = createJwt(
+      {
+        sub: user.id,
+        tid: user.tenantId,
+        scopes: [user.role],
+      },
+      ctx.config.auth.jwtSecret,
+      ctx.config.auth.jwtExpiry
+    );
+
+    // Update last login
+    await usersRepo.update(user.id, { lastLoginAt: new Date() });
+
+    // Audit log
+    await auditRepo.create({
+      tenantId: user.tenantId,
+      userId: user.id,
+      action: 'user.login',
+      resourceType: 'user',
+      resourceId: user.id,
+      ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+      userAgent: c.req.header('User-Agent') ?? undefined,
+    });
+
+    logger.info('User logged in', { userId: user.id });
+
+    return c.json({
+      token,
+      expiresIn: ctx.config.auth.jwtExpiry,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        tenantId: user.tenantId,
+      },
+    });
+  });
+
+  // Get current user
+  router.get('/me', async (c) => {
+    const userId = c.get('userId');
+    const tenantId = c.get('tenantId');
+
+    if (!userId) {
+      // API key authentication - return minimal info
+      return c.json({
+        authenticated: true,
+        authType: 'api_key',
+        tenantId,
+        apiKeyId: c.get('apiKeyId'),
+      });
+    }
+
+    const userResult = await usersRepo.findById(userId);
+    if (!userResult.ok || !userResult.value) {
+      throw ApiError.notFound('User');
+    }
+
+    const user = userResult.value;
+
+    return c.json({
+      authenticated: true,
+      authType: 'jwt',
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        tenantId: user.tenantId,
+        preferences: user.preferences,
+        mfaEnabled: user.mfaEnabled,
+        lastLoginAt: user.lastLoginAt,
+        createdAt: user.createdAt,
+      },
+    });
+  });
+
+  // List API keys for current user/tenant
+  router.get('/api-keys', async (c) => {
+    const tenantId = c.get('tenantId');
+    const userId = c.get('userId');
+    
+    let result;
+    if (userId) {
+      result = await apiKeysRepo.listByUser(userId);
+    } else {
+      result = await apiKeysRepo.listByTenant(tenantId);
+    }
+
+    if (!result.ok) {
+      throw ApiError.internal('Failed to fetch API keys');
+    }
+
+    const apiKeys = result.ok && 'apiKeys' in result.value
+      ? result.value.apiKeys
+      : result.value;
+
+    return c.json({
+      apiKeys: (apiKeys as Array<{ id: string; name: string; prefix: string; scopes: string[]; rateLimit: number; createdAt: Date; lastUsedAt: Date | null; expiresAt: Date | null; isActive: boolean }>).map((key) => ({
+        id: key.id,
+        name: key.name,
+        prefix: key.prefix,
+        scopes: key.scopes,
+        rateLimit: key.rateLimit,
+        createdAt: key.createdAt,
+        lastUsedAt: key.lastUsedAt,
+        expiresAt: key.expiresAt,
+        isActive: key.isActive,
+      })),
+    });
+  });
+
+  // Create new API key
+  router.post('/api-keys', async (c) => {
+    const tenantId = c.get('tenantId');
+    const userId = c.get('userId');
+    const logger = c.get('logger');
+
+    const body = await c.req.json();
+    const { name, scopes, rateLimit, allowedIps, expiresAt } = createApiKeySchema.parse(body);
+
+    const result = await apiKeysRepo.create({
+      tenantId,
+      userId: userId ?? undefined,
+      name,
+      scopes: scopes as Array<'messages:send' | 'messages:read' | 'messages:write' | 'domains:read' | 'domains:write' | 'suppressions:read' | 'suppressions:write' | 'events:read' | 'templates:read' | 'templates:write' | 'analytics:read' | 'webhooks:read' | 'webhooks:write' | 'admin'>,
+      rateLimit,
+      allowedIps,
+      expiresAt: expiresAt ? new Date(expiresAt) : undefined,
+    });
+
+    if (!result.ok) {
+      throw ApiError.internal('Failed to create API key');
+    }
+
+    const apiKey = result.value;
+
+    // Audit log
+    await auditRepo.create({
+      tenantId,
+      userId: userId ?? undefined,
+      action: 'api_key.created',
+      resourceType: 'api_key',
+      resourceId: apiKey.id,
+      ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+      metadata: { name, scopes },
+    });
+
+    logger.info('API key created', { apiKeyId: apiKey.id, name });
+
+    return c.json({
+      apiKey: {
+        id: apiKey.id,
+        name: apiKey.name,
+        prefix: apiKey.prefix,
+        secretKey: apiKey.secretKey, // Only returned once!
+        scopes: apiKey.scopes,
+        rateLimit: apiKey.rateLimit,
+        createdAt: apiKey.createdAt,
+        expiresAt: apiKey.expiresAt,
+      },
+      warning: 'Store the secret key securely. It will not be shown again.',
+    }, 201);
+  });
+
+  // Rotate API key
+  router.post('/api-keys/:id/rotate', async (c) => {
+    const tenantId = c.get('tenantId');
+    const userId = c.get('userId');
+    const apiKeyId = c.req.param('id');
+    const logger = c.get('logger');
+
+    // Verify ownership
+    const existing = await apiKeysRepo.findById(apiKeyId);
+    if (!existing.ok || !existing.value) {
+      throw ApiError.notFound('API key');
+    }
+
+    if (existing.value.tenantId !== tenantId) {
+      throw ApiError.forbidden();
+    }
+
+    const result = await apiKeysRepo.rotate(apiKeyId);
+    if (!result.ok) {
+      throw ApiError.internal('Failed to rotate API key');
+    }
+
+    const apiKey = result.value;
+
+    // Audit log
+    await auditRepo.create({
+      tenantId,
+      userId: userId ?? undefined,
+      action: 'api_key.rotated',
+      resourceType: 'api_key',
+      resourceId: apiKey.id,
+      ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+    });
+
+    logger.info('API key rotated', { apiKeyId: apiKey.id });
+
+    return c.json({
+      apiKey: {
+        id: apiKey.id,
+        name: apiKey.name,
+        prefix: apiKey.prefix,
+        secretKey: apiKey.secretKey, // Only returned once!
+        scopes: apiKey.scopes,
+      },
+      warning: 'Store the new secret key securely. The old key has been invalidated.',
+    });
+  });
+
+  // Revoke API key
+  router.delete('/api-keys/:id', async (c) => {
+    const tenantId = c.get('tenantId');
+    const userId = c.get('userId');
+    const apiKeyId = c.req.param('id');
+    const logger = c.get('logger');
+
+    // Verify ownership
+    const existing = await apiKeysRepo.findById(apiKeyId);
+    if (!existing.ok || !existing.value) {
+      throw ApiError.notFound('API key');
+    }
+
+    if (existing.value.tenantId !== tenantId) {
+      throw ApiError.forbidden();
+    }
+
+    const result = await apiKeysRepo.revoke(apiKeyId);
+    if (!result.ok) {
+      throw ApiError.internal('Failed to revoke API key');
+    }
+
+    // Audit log
+    await auditRepo.create({
+      tenantId,
+      userId: userId ?? undefined,
+      action: 'api_key.revoked',
+      resourceType: 'api_key',
+      resourceId: apiKeyId,
+      ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+    });
+
+    logger.info('API key revoked', { apiKeyId });
+
+    return c.json({ success: true });
+  });
+
+  return router;
+}

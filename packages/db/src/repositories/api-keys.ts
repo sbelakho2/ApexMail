@@ -1,0 +1,623 @@
+/**
+ * API Keys Repository - Scoped API keys with rotation support
+ */
+
+import { Result } from '@apexmail/lib';
+import { generateUuid, generateApiKey, parseApiKey } from '@apexmail/lib/id';
+import { hashPassword, verifyPassword } from '@apexmail/lib/crypto';
+import type { DatabasePool } from '../pool.js';
+
+export type ApiKeyScope =
+  | 'messages:send'
+  | 'messages:read'
+  | 'messages:write'
+  | 'domains:read'
+  | 'domains:write'
+  | 'suppressions:read'
+  | 'suppressions:write'
+  | 'events:read'
+  | 'templates:read'
+  | 'templates:write'
+  | 'analytics:read'
+  | 'webhooks:read'
+  | 'webhooks:write'
+  | 'admin';
+
+export interface ApiKey {
+  id: string;
+  tenantId: string;
+  userId: string | null;
+  name: string;
+  prefix: string; // First 8 chars for display/lookup
+  keyHash: string;
+  scopes: ApiKeyScope[];
+  rateLimit: number; // requests per minute
+  allowedIps: string[] | null;
+  allowedDomains: string[] | null;
+  expiresAt: Date | null;
+  lastUsedAt: Date | null;
+  lastUsedIp: string | null;
+  usageCount: number;
+  isActive: boolean;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateApiKeyInput {
+  tenantId: string;
+  userId?: string;
+  name: string;
+  scopes: ApiKeyScope[];
+  rateLimit?: number;
+  allowedIps?: string[];
+  allowedDomains?: string[];
+  expiresAt?: Date;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateApiKeyInput {
+  name?: string;
+  scopes?: ApiKeyScope[];
+  rateLimit?: number;
+  allowedIps?: string[] | null;
+  allowedDomains?: string[] | null;
+  expiresAt?: Date | null;
+  isActive?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ApiKeyWithSecret extends ApiKey {
+  secretKey: string; // Only returned on creation
+}
+
+export interface VerifyApiKeyResult {
+  valid: boolean;
+  apiKey: ApiKey | null;
+  reason?: 'not_found' | 'inactive' | 'expired' | 'ip_blocked' | 'invalid_hash';
+}
+
+export class ApiKeysRepository {
+  constructor(private readonly db: DatabasePool) {}
+
+  async create(input: CreateApiKeyInput): Promise<Result<ApiKeyWithSecret, Error>> {
+    const id = generateUuid();
+    const { key: secretKey, prefix } = generateApiKey();
+    
+    // Hash the key for storage
+    const keyHashResult = await hashPassword(secretKey);
+    if (!keyHashResult.ok) return keyHashResult;
+    
+    const now = new Date();
+
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `INSERT INTO api_keys (
+        id, tenant_id, user_id, name, prefix, key_hash, scopes,
+        rate_limit, allowed_ips, allowed_domains, expires_at,
+        is_active, metadata, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      RETURNING *`,
+      [
+        id,
+        input.tenantId,
+        input.userId ?? null,
+        input.name,
+        prefix,
+        keyHashResult.value,
+        input.scopes,
+        input.rateLimit ?? 1000,
+        input.allowedIps ?? null,
+        input.allowedDomains ?? null,
+        input.expiresAt ?? null,
+        true,
+        JSON.stringify(input.metadata ?? {}),
+        now,
+        now,
+      ]
+    );
+
+    if (!result.ok) return result;
+
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('Failed to create API key'));
+    }
+
+    const apiKey = this.mapRow(row);
+    return Result.ok({
+      ...apiKey,
+      secretKey, // Only returned once during creation
+    });
+  }
+
+  async verify(key: string, clientIp?: string): Promise<Result<VerifyApiKeyResult, Error>> {
+    const parsed = parseApiKey(key);
+    if (!parsed) {
+      return Result.ok({
+        valid: false,
+        apiKey: null,
+        reason: 'not_found',
+      });
+    }
+
+    // Look up by prefix for efficient retrieval
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      'SELECT * FROM api_keys WHERE prefix = $1',
+      [parsed.prefix]
+    );
+
+    if (!result.ok) return result;
+
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.ok({
+        valid: false,
+        apiKey: null,
+        reason: 'not_found',
+      });
+    }
+
+    const apiKey = this.mapRow(row);
+
+    // Check if active
+    if (!apiKey.isActive) {
+      return Result.ok({
+        valid: false,
+        apiKey,
+        reason: 'inactive',
+      });
+    }
+
+    // Check expiration
+    if (apiKey.expiresAt && apiKey.expiresAt < new Date()) {
+      return Result.ok({
+        valid: false,
+        apiKey,
+        reason: 'expired',
+      });
+    }
+
+    // Check IP whitelist
+    if (clientIp && apiKey.allowedIps && apiKey.allowedIps.length > 0) {
+      if (!this.isIpAllowed(clientIp, apiKey.allowedIps)) {
+        return Result.ok({
+          valid: false,
+          apiKey,
+          reason: 'ip_blocked',
+        });
+      }
+    }
+
+    // Verify the key hash
+    const verifyResult = await verifyPassword(key, row.key_hash);
+    if (!verifyResult.ok) return verifyResult;
+
+    if (!verifyResult.value) {
+      return Result.ok({
+        valid: false,
+        apiKey: null,
+        reason: 'invalid_hash',
+      });
+    }
+
+    // Update last used (fire and forget)
+    this.updateLastUsed(apiKey.id, clientIp).catch(() => {
+      // Ignore errors in updating last used
+    });
+
+    return Result.ok({
+      valid: true,
+      apiKey,
+    });
+  }
+
+  private async updateLastUsed(id: string, ip?: string): Promise<void> {
+    await this.db.query(
+      `UPDATE api_keys 
+       SET last_used_at = NOW(), 
+           last_used_ip = COALESCE($2, last_used_ip),
+           usage_count = usage_count + 1,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [id, ip ?? null]
+    );
+  }
+
+  private isIpAllowed(clientIp: string, allowedIps: string[]): boolean {
+    for (const allowed of allowedIps) {
+      if (allowed === clientIp) return true;
+      
+      // CIDR notation support
+      if (allowed.includes('/')) {
+        if (this.isIpInCidr(clientIp, allowed)) return true;
+      }
+    }
+    return false;
+  }
+
+  private isIpInCidr(ip: string, cidr: string): boolean {
+    const [range, bits] = cidr.split('/');
+    if (!bits) return ip === range;
+
+    const mask = parseInt(bits, 10);
+    if (isNaN(mask) || mask < 0 || mask > 32) return false;
+
+    const ipNum = this.ipToNumber(ip);
+    const rangeNum = this.ipToNumber(range);
+    if (ipNum === null || rangeNum === null) return false;
+
+    const maskNum = ~((1 << (32 - mask)) - 1);
+    return (ipNum & maskNum) === (rangeNum & maskNum);
+  }
+
+  private ipToNumber(ip: string): number | null {
+    const parts = ip.split('.');
+    if (parts.length !== 4) return null;
+
+    let num = 0;
+    for (const part of parts) {
+      const n = parseInt(part, 10);
+      if (isNaN(n) || n < 0 || n > 255) return null;
+      num = (num << 8) | n;
+    }
+    return num >>> 0; // Convert to unsigned
+  }
+
+  async findById(id: string): Promise<Result<ApiKey | null, Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      'SELECT * FROM api_keys WHERE id = $1',
+      [id]
+    );
+
+    if (!result.ok) return result;
+
+    const row = result.value.rows[0];
+    return Result.ok(row ? this.mapRow(row) : null);
+  }
+
+  async update(id: string, input: UpdateApiKeyInput): Promise<Result<ApiKey, Error>> {
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let paramIndex = 1;
+
+    if (input.name !== undefined) {
+      updates.push(`name = $${paramIndex++}`);
+      values.push(input.name);
+    }
+    if (input.scopes !== undefined) {
+      updates.push(`scopes = $${paramIndex++}`);
+      values.push(input.scopes);
+    }
+    if (input.rateLimit !== undefined) {
+      updates.push(`rate_limit = $${paramIndex++}`);
+      values.push(input.rateLimit);
+    }
+    if (input.allowedIps !== undefined) {
+      updates.push(`allowed_ips = $${paramIndex++}`);
+      values.push(input.allowedIps);
+    }
+    if (input.allowedDomains !== undefined) {
+      updates.push(`allowed_domains = $${paramIndex++}`);
+      values.push(input.allowedDomains);
+    }
+    if (input.expiresAt !== undefined) {
+      updates.push(`expires_at = $${paramIndex++}`);
+      values.push(input.expiresAt);
+    }
+    if (input.isActive !== undefined) {
+      updates.push(`is_active = $${paramIndex++}`);
+      values.push(input.isActive);
+    }
+    if (input.metadata !== undefined) {
+      updates.push(`metadata = metadata || $${paramIndex++}::jsonb`);
+      values.push(JSON.stringify(input.metadata));
+    }
+
+    updates.push(`updated_at = $${paramIndex++}`);
+    values.push(new Date());
+
+    values.push(id);
+
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE api_keys SET ${updates.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('API key not found'));
+    }
+
+    return Result.ok(this.mapRow(row));
+  }
+
+  async rotate(id: string): Promise<Result<ApiKeyWithSecret, Error>> {
+    // Generate new key
+    const { key: newSecretKey, prefix: newPrefix } = generateApiKey();
+    
+    const keyHashResult = await hashPassword(newSecretKey);
+    if (!keyHashResult.ok) return keyHashResult;
+
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE api_keys 
+       SET prefix = $1, key_hash = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [newPrefix, keyHashResult.value, id]
+    );
+
+    if (!result.ok) return result;
+
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('API key not found'));
+    }
+
+    return Result.ok({
+      ...this.mapRow(row),
+      secretKey: newSecretKey,
+    });
+  }
+
+  async revoke(id: string): Promise<Result<void, Error>> {
+    const result = await this.db.query(
+      `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+    return result.ok ? Result.ok(undefined) : result;
+  }
+
+  async delete(id: string): Promise<Result<void, Error>> {
+    const result = await this.db.query(
+      'DELETE FROM api_keys WHERE id = $1',
+      [id]
+    );
+    return result.ok ? Result.ok(undefined) : result;
+  }
+
+  async listByTenant(
+    tenantId: string,
+    options: { includeInactive?: boolean; limit?: number; offset?: number } = {}
+  ): Promise<Result<{ apiKeys: ApiKey[]; total: number }, Error>> {
+    const conditions = ['tenant_id = $1'];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
+
+    if (!options.includeInactive) {
+      conditions.push('is_active = true');
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const countResult = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*) as count FROM api_keys ${whereClause}`,
+      values
+    );
+
+    if (!countResult.ok) return countResult;
+
+    const limit = options.limit ?? 50;
+    const offset = options.offset ?? 0;
+    values.push(limit, offset);
+
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT * FROM api_keys ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex++} OFFSET $${paramIndex}`,
+      values
+    );
+
+    if (!result.ok) return result;
+
+    return Result.ok({
+      apiKeys: result.value.rows.map((row) => this.mapRow(row)),
+      total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
+    });
+  }
+
+  async listByUser(userId: string): Promise<Result<ApiKey[], Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      name: string;
+      prefix: string;
+      key_hash: string;
+      scopes: ApiKeyScope[];
+      rate_limit: number;
+      allowed_ips: string[] | null;
+      allowed_domains: string[] | null;
+      expires_at: Date | null;
+      last_used_at: Date | null;
+      last_used_ip: string | null;
+      usage_count: number;
+      is_active: boolean;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT * FROM api_keys WHERE user_id = $1 AND is_active = true ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    if (!result.ok) return result;
+
+    return Result.ok(result.value.rows.map((row) => this.mapRow(row)));
+  }
+
+  async cleanupExpired(): Promise<Result<number, Error>> {
+    // Don't delete, just deactivate expired keys
+    const result = await this.db.query<{ count: string }>(
+      `WITH updated AS (
+        UPDATE api_keys 
+        SET is_active = false, updated_at = NOW()
+        WHERE expires_at < NOW() AND is_active = true
+        RETURNING 1
+      ) SELECT COUNT(*) as count FROM updated`
+    );
+
+    if (!result.ok) return result;
+
+    return Result.ok(parseInt(result.value.rows[0]?.count ?? '0', 10));
+  }
+
+  private mapRow(row: {
+    id: string;
+    tenant_id: string;
+    user_id: string | null;
+    name: string;
+    prefix: string;
+    key_hash: string;
+    scopes: ApiKeyScope[];
+    rate_limit: number;
+    allowed_ips: string[] | null;
+    allowed_domains: string[] | null;
+    expires_at: Date | null;
+    last_used_at: Date | null;
+    last_used_ip: string | null;
+    usage_count: number;
+    is_active: boolean;
+    metadata: string;
+    created_at: Date;
+    updated_at: Date;
+  }): ApiKey {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      userId: row.user_id,
+      name: row.name,
+      prefix: row.prefix,
+      keyHash: row.key_hash,
+      scopes: row.scopes,
+      rateLimit: row.rate_limit,
+      allowedIps: row.allowed_ips,
+      allowedDomains: row.allowed_domains,
+      expiresAt: row.expires_at,
+      lastUsedAt: row.last_used_at,
+      lastUsedIp: row.last_used_ip,
+      usageCount: row.usage_count,
+      isActive: row.is_active,
+      metadata: typeof row.metadata === 'string'
+        ? JSON.parse(row.metadata) as Record<string, unknown>
+        : row.metadata as unknown as Record<string, unknown>,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+}

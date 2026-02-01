@@ -1,0 +1,26 @@
+{
+  "name": "@apexmail/analytics",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@apexmail/lib": "workspace:*",
+    "@apexmail/db": "workspace:*",
+    "duckdb": "^1.0.0",
+    "ioredis": "^5.3.2",
+    "parquet-wasm": "^0.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
