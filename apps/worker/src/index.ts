@@ -9,7 +9,7 @@ import { EmailProcessor } from './processors/email.js';
 import { WebhookProcessor } from './processors/webhook.js';
 import { AnalyticsProcessor } from './processors/analytics.js';
 import { MetricsServer } from './metrics.js';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 const logger = createLogger({ name: 'worker' });
 const config = loadConfig();
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
     const client = await db.connect();
     const result = await client.query('SELECT NOW()');
     client.release();
-    logger.info('Database connected', { serverTime: result.rows[0].now });
+    logger.info('Database connected', { serverTime: result.rows[0]?.now ?? 'unknown' });
   } catch (error) {
     logger.fatal('Failed to connect to database', { error });
     process.exit(1);
@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   const redis = new Redis(config.redis.url, {
     keyPrefix: config.redis.keyPrefix,
     maxRetriesPerRequest: 3,
-    retryStrategy: (times) => {
+    retryStrategy: (times: number) => {
       if (times > 10) return null;
       return Math.min(times * 100, 3000);
     },
@@ -68,12 +68,14 @@ async function main(): Promise<void> {
   // Initialize processors
   const emailProcessor = new EmailProcessor({
     db,
+    dbPool,
     redis,
     config: config.queues.email,
     smtp: config.smtp,
     dkim: config.dkim,
     tracking: config.tracking,
     warmup: config.warmup,
+    ipRateLimiting: config.ipRateLimiting,
     logger: logger.child({ processor: 'email' }),
   });
 
@@ -93,14 +95,40 @@ async function main(): Promise<void> {
 
   processors.push(emailProcessor, webhookProcessor, analyticsProcessor);
 
-  // Start processors
-  await Promise.all([
+  // Start processors with isolation - one failure doesn't prevent others from starting
+  const startResults = await Promise.allSettled([
     emailProcessor.start(),
     webhookProcessor.start(),
     analyticsProcessor.start(),
   ]);
 
-  logger.info('All processors started', {
+  // Check for failures and log them
+  const failures = startResults.filter(r => r.status === 'rejected');
+  const successes = startResults.filter(r => r.status === 'fulfilled');
+
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      logger.error('Processor failed to start', { 
+        error: (failure as PromiseRejectedResult).reason 
+      });
+    }
+    
+    // If all processors failed, exit
+    if (successes.length === 0) {
+      logger.fatal('All processors failed to start, exiting');
+      process.exit(1);
+    }
+    
+    logger.warn('Some processors failed to start, continuing with healthy ones', {
+      failed: failures.length,
+      succeeded: successes.length,
+    });
+  }
+
+  logger.info('Processors started', {
+    total: startResults.length,
+    succeeded: successes.length,
+    failed: failures.length,
     emailConcurrency: config.queues.email.concurrency,
     webhookConcurrency: config.queues.webhook.concurrency,
     analyticsConcurrency: config.queues.analytics.concurrency,
@@ -127,8 +155,17 @@ async function shutdown(signal: string): Promise<void> {
       await metricsServer.stop();
     }
 
-    // Stop all processors
-    await Promise.all(processors.map(p => p.stop()));
+    // Stop all processors with isolation - one failure doesn't prevent others from stopping
+    const stopResults = await Promise.allSettled(processors.map(p => p.stop()));
+    
+    const stopFailures = stopResults.filter(r => r.status === 'rejected');
+    if (stopFailures.length > 0) {
+      for (const failure of stopFailures) {
+        logger.error('Processor failed to stop cleanly', {
+          error: (failure as PromiseRejectedResult).reason,
+        });
+      }
+    }
 
     logger.info('All processors stopped');
     clearTimeout(timeout);

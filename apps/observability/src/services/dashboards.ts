@@ -9,7 +9,8 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
 
 export interface Dashboard {
   id: string;
@@ -149,8 +150,6 @@ export interface DashboardPermission {
   teamId?: string;
   permission: 'view' | 'edit' | 'admin';
 }
-
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class DashboardService {
   private db: Pool;
@@ -367,7 +366,7 @@ export class DashboardService {
         ok: true,
         value: {
           dashboards,
-          total: parseInt(countResult.rows[0].total),
+          total: parseInt(countResult.rows[0]?.total ?? '0', 10),
         },
       };
     } catch (error) {
@@ -397,10 +396,10 @@ export class DashboardService {
   /**
    * Create a snapshot
    */
-  async createSnapshot(dashboardId: string, expiresInDays?: number): Promise<Result<DashboardSnapshot>> {
+  async createSnapshot(dashboardId: string, expiresInDays?: number): Promise<Result<DashboardSnapshot, Error>> {
     const dashboardResult = await this.getDashboard(dashboardId);
     if (!dashboardResult.ok) {
-      return { ok: false, error: dashboardResult.error };
+      return { ok: false, error: (dashboardResult as { ok: false; error: Error }).error };
     }
 
     const id = `snap_${Date.now()}`;
@@ -476,7 +475,10 @@ export class DashboardService {
       dashboard.layout.rows.push({ height: 8, panels: [] });
     }
 
-    dashboard.layout.rows[rowIndex].panels.push(panel);
+    const row = dashboard.layout.rows[rowIndex];
+    if (row) {
+      row.panels.push(panel);
+    }
 
     return this.updateDashboard(dashboardId, { layout: dashboard.layout });
   }
@@ -1012,8 +1014,8 @@ export class DashboardService {
       if (!match) return now;
       if (!match[1]) return now;
 
-      const value = parseInt(match[2]);
-      const unit = match[3];
+      const value = parseInt(match[2] ?? '0');
+      const unit = match[3] ?? 'd';
       const date = new Date(now);
 
       switch (unit) {

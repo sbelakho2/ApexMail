@@ -3,12 +3,9 @@
  * Pre-paid balance management with ledger
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
-import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
-
-const logger = createLogger('wallet');
 
 export interface WalletBalance {
   tenantId: string;
@@ -47,15 +44,20 @@ export class WalletService {
     // Try cache first
     const cachedBalance = await this.redis.get(`wallet:balance:${tenantId}`);
     if (cachedBalance) {
-      const cached = JSON.parse(cachedBalance);
-      return Result.ok({
-        tenantId,
-        balance: cached.balance,
-        reservedBalance: cached.reserved,
-        availableBalance: cached.balance - cached.reserved,
-        currency: 'EUR',
-        updatedAt: new Date(cached.updatedAt),
-      });
+      try {
+        const cached = JSON.parse(cachedBalance);
+        return Result.ok({
+          tenantId,
+          balance: cached.balance,
+          reservedBalance: cached.reserved,
+          availableBalance: cached.balance - cached.reserved,
+          currency: 'EUR',
+          updatedAt: new Date(cached.updatedAt),
+        });
+      } catch {
+        // Invalid cache, delete and fall through to database
+        await this.redis.del(`wallet:balance:${tenantId}`);
+      }
     }
 
     // Query database
@@ -145,6 +147,7 @@ export class WalletService {
 
   /**
    * Deduct funds from wallet
+   * SECURITY: Uses atomic check-and-update to prevent race conditions
    */
   async debit(
     tenantId: string,
@@ -157,19 +160,50 @@ export class WalletService {
       return Result.err(new Error('Amount must be positive'));
     }
 
-    // Check available balance
-    const balanceResult = await this.getBalance(tenantId);
-    if (!balanceResult.ok) return Result.err(balanceResult.error);
+    // Atomic check-and-debit in a single query to prevent race conditions
+    // Uses a conditional update that only succeeds if sufficient funds exist
+    const updateResult = await this.db.query<{
+      balance: number;
+      updated: boolean;
+    }>(
+      `WITH balance_check AS (
+        SELECT tenant_id, balance, reserved_balance,
+               (balance - reserved_balance) >= $1 AS has_funds
+        FROM wallets
+        WHERE tenant_id = $2
+        FOR UPDATE
+      ),
+      do_update AS (
+        UPDATE wallets
+        SET balance = balance - $1, updated_at = NOW()
+        WHERE tenant_id = $2
+          AND EXISTS (SELECT 1 FROM balance_check WHERE has_funds = true)
+        RETURNING balance
+      )
+      SELECT 
+        COALESCE((SELECT balance FROM do_update), 0) as balance,
+        EXISTS (SELECT 1 FROM do_update) as updated`,
+      [amount, tenantId]
+    );
 
-    if (balanceResult.value.availableBalance < amount) {
+    if (!updateResult.ok) return Result.err(updateResult.error);
+
+    const row = updateResult.value.rows[0];
+    if (!row || !row.updated) {
       return Result.err(new Error('Insufficient balance'));
     }
 
-    return this.executeTransaction(tenantId, 'debit', -amount, description, reference, metadata);
+    const newBalance = row.balance;
+
+    // Invalidate cache
+    await this.redis.del(`wallet:balance:${tenantId}`);
+
+    return this.recordTransaction(tenantId, 'debit', -amount, description, reference, metadata, newBalance);
   }
 
   /**
    * Reserve funds for pending charge
+   * SECURITY: Uses atomic operation to prevent race conditions and double-spending
    */
   async reserve(
     tenantId: string,
@@ -181,30 +215,60 @@ export class WalletService {
       return Result.err(new Error('Amount must be positive'));
     }
 
-    // Check available balance
-    const balanceResult = await this.getBalance(tenantId);
-    if (!balanceResult.ok) return Result.err(balanceResult.error);
-
-    if (balanceResult.value.availableBalance < amount) {
-      return Result.err(new Error('Insufficient balance'));
-    }
-
-    const result = await this.db.query<{ id: string }>(
-      `INSERT INTO wallet_reservations (id, tenant_id, amount, description, reference, status, created_at, expires_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, 'pending', NOW(), NOW() + INTERVAL '24 hours')
-       RETURNING id`,
+    // Use a single atomic transaction with row-level locking to prevent race conditions
+    // This SELECT FOR UPDATE locks the row until the transaction completes
+    const result = await this.db.query<{ 
+      reservation_id: string;
+      success: boolean;
+    }>(
+      `WITH locked_wallet AS (
+        SELECT tenant_id, balance, reserved_balance 
+        FROM wallets 
+        WHERE tenant_id = $1 
+        FOR UPDATE
+      ),
+      balance_check AS (
+        SELECT 
+          tenant_id,
+          (balance - reserved_balance) >= $2 AS has_funds
+        FROM locked_wallet
+      ),
+      new_reservation AS (
+        INSERT INTO wallet_reservations (id, tenant_id, amount, description, reference, status, created_at, expires_at)
+        SELECT 
+          gen_random_uuid(), 
+          $1, 
+          $2, 
+          $3, 
+          $4, 
+          'pending', 
+          NOW(), 
+          NOW() + INTERVAL '24 hours'
+        FROM balance_check
+        WHERE has_funds = true
+        RETURNING id
+      ),
+      wallet_update AS (
+        UPDATE wallets 
+        SET reserved_balance = reserved_balance + $2, updated_at = NOW() 
+        WHERE tenant_id = $1 
+          AND EXISTS (SELECT 1 FROM new_reservation)
+        RETURNING tenant_id
+      )
+      SELECT 
+        (SELECT id FROM new_reservation) as reservation_id,
+        EXISTS (SELECT 1 FROM new_reservation) as success`,
       [tenantId, amount, description, reference ?? null]
     );
 
     if (!result.ok) return Result.err(result.error);
 
-    const reservationId = result.value.rows[0]!.id;
+    const row = result.value.rows[0];
+    if (!row || !row.success || !row.reservation_id) {
+      return Result.err(new Error('Insufficient balance'));
+    }
 
-    // Update reserved balance
-    await this.db.query(
-      `UPDATE wallets SET reserved_balance = reserved_balance + $1, updated_at = NOW() WHERE tenant_id = $2`,
-      [amount, tenantId]
-    );
+    const reservationId = row.reservation_id;
 
     // Invalidate cache
     await this.redis.del(`wallet:balance:${tenantId}`);
@@ -216,101 +280,140 @@ export class WalletService {
 
   /**
    * Capture reserved funds
+   * CRITICAL: Uses atomic transaction to prevent data inconsistency
    */
   async captureReservation(reservationId: string): Promise<Result<WalletTransaction, Error>> {
-    const reservationResult = await this.db.query<{
+    // Use a single atomic query with CTE to capture reservation
+    // This ensures both the reservation update and wallet deduction happen atomically
+    const result = await this.db.query<{
       tenant_id: string;
       amount: number;
       description: string;
       reference: string | null;
-      status: string;
+      new_balance: number;
+      success: boolean;
     }>(
-      `SELECT * FROM wallet_reservations WHERE id = $1`,
+      `WITH reservation_check AS (
+        SELECT tenant_id, amount, description, reference, status
+        FROM wallet_reservations
+        WHERE id = $1
+        FOR UPDATE
+      ),
+      valid_reservation AS (
+        SELECT * FROM reservation_check WHERE status = 'pending'
+      ),
+      update_reservation AS (
+        UPDATE wallet_reservations
+        SET status = 'captured', captured_at = NOW()
+        WHERE id = $1 AND EXISTS (SELECT 1 FROM valid_reservation)
+        RETURNING id
+      ),
+      update_wallet AS (
+        UPDATE wallets
+        SET balance = balance - (SELECT amount FROM valid_reservation),
+            reserved_balance = reserved_balance - (SELECT amount FROM valid_reservation),
+            updated_at = NOW()
+        WHERE tenant_id = (SELECT tenant_id FROM valid_reservation)
+          AND EXISTS (SELECT 1 FROM update_reservation)
+        RETURNING balance
+      )
+      SELECT 
+        (SELECT tenant_id FROM valid_reservation) as tenant_id,
+        (SELECT amount FROM valid_reservation) as amount,
+        (SELECT description FROM valid_reservation) as description,
+        (SELECT reference FROM valid_reservation) as reference,
+        (SELECT balance FROM update_wallet) as new_balance,
+        EXISTS (SELECT 1 FROM update_wallet) as success`,
       [reservationId]
     );
 
-    if (!reservationResult.ok) return Result.err(reservationResult.error);
+    if (!result.ok) return Result.err(result.error);
 
-    const reservation = reservationResult.value.rows[0];
-    if (!reservation) return Result.err(new Error('Reservation not found'));
-
-    if (reservation.status !== 'pending') {
-      return Result.err(new Error('Reservation already processed'));
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('Reservation not found'));
+    }
+    
+    if (!row.success) {
+      return Result.err(new Error('Reservation already processed or invalid'));
     }
 
-    // Update reservation status
-    await this.db.query(
-      `UPDATE wallet_reservations SET status = 'captured', captured_at = NOW() WHERE id = $1`,
-      [reservationId]
-    );
-
-    // Deduct from balance and reserved
-    await this.db.query(
-      `UPDATE wallets 
-       SET balance = balance - $1, 
-           reserved_balance = reserved_balance - $1,
-           updated_at = NOW()
-       WHERE tenant_id = $2`,
-      [reservation.amount, reservation.tenant_id]
-    );
-
     // Invalidate cache
-    await this.redis.del(`wallet:balance:${reservation.tenant_id}`);
+    await this.redis.del(`wallet:balance:${row.tenant_id}`);
 
     return this.recordTransaction(
-      reservation.tenant_id,
+      row.tenant_id,
       'debit',
-      -reservation.amount,
-      `Captured: ${reservation.description}`,
+      -row.amount,
+      `Captured: ${row.description}`,
       reservationId,
-      { reservationId }
+      { reservationId },
+      row.new_balance
     );
   }
 
   /**
    * Release reserved funds
+   * CRITICAL: Uses atomic transaction to prevent data inconsistency
    */
   async releaseReservation(reservationId: string): Promise<Result<void, Error>> {
-    const reservationResult = await this.db.query<{
+    // Use a single atomic query with CTE to release reservation
+    const result = await this.db.query<{
       tenant_id: string;
       amount: number;
-      status: string;
+      success: boolean;
     }>(
-      `SELECT * FROM wallet_reservations WHERE id = $1`,
+      `WITH reservation_check AS (
+        SELECT tenant_id, amount, status
+        FROM wallet_reservations
+        WHERE id = $1
+        FOR UPDATE
+      ),
+      valid_reservation AS (
+        SELECT * FROM reservation_check WHERE status = 'pending'
+      ),
+      update_reservation AS (
+        UPDATE wallet_reservations
+        SET status = 'released', released_at = NOW()
+        WHERE id = $1 AND EXISTS (SELECT 1 FROM valid_reservation)
+        RETURNING id
+      ),
+      update_wallet AS (
+        UPDATE wallets
+        SET reserved_balance = reserved_balance - (SELECT amount FROM valid_reservation),
+            updated_at = NOW()
+        WHERE tenant_id = (SELECT tenant_id FROM valid_reservation)
+          AND EXISTS (SELECT 1 FROM update_reservation)
+        RETURNING tenant_id
+      )
+      SELECT 
+        (SELECT tenant_id FROM valid_reservation) as tenant_id,
+        (SELECT amount FROM valid_reservation) as amount,
+        EXISTS (SELECT 1 FROM update_wallet) as success`,
       [reservationId]
     );
 
-    if (!reservationResult.ok) return Result.err(reservationResult.error);
+    if (!result.ok) return Result.err(result.error);
 
-    const reservation = reservationResult.value.rows[0];
-    if (!reservation) return Result.err(new Error('Reservation not found'));
-
-    if (reservation.status !== 'pending') {
-      return Result.err(new Error('Reservation already processed'));
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('Reservation not found'));
+    }
+    
+    if (!row.success) {
+      return Result.err(new Error('Reservation already processed or invalid'));
     }
 
-    // Update reservation status
-    await this.db.query(
-      `UPDATE wallet_reservations SET status = 'released', released_at = NOW() WHERE id = $1`,
-      [reservationId]
-    );
-
-    // Release reserved balance
-    await this.db.query(
-      `UPDATE wallets SET reserved_balance = reserved_balance - $1, updated_at = NOW() WHERE tenant_id = $2`,
-      [reservation.amount, reservation.tenant_id]
-    );
-
     // Invalidate cache
-    await this.redis.del(`wallet:balance:${reservation.tenant_id}`);
+    await this.redis.del(`wallet:balance:${row.tenant_id}`);
 
     await this.recordTransaction(
-      reservation.tenant_id,
+      row.tenant_id,
       'release',
       0,
       'Released reservation',
       reservationId,
-      { reservationId, amount: reservation.amount }
+      { reservationId, amount: row.amount }
     );
 
     return Result.ok(undefined);
@@ -369,17 +472,25 @@ export class WalletService {
 
     if (!result.ok) return Result.err(result.error);
 
-    return Result.ok(result.value.rows.map(row => ({
-      id: row.id,
-      tenantId: row.tenant_id,
-      type: row.type,
-      amount: row.amount,
-      balance: row.balance,
-      description: row.description,
-      reference: row.reference,
-      metadata: JSON.parse(row.metadata || '{}'),
-      createdAt: row.created_at,
-    })));
+    return Result.ok(result.value.rows.map(row => {
+      let metadata: Record<string, unknown> = {};
+      try {
+        metadata = JSON.parse(row.metadata || '{}');
+      } catch {
+        metadata = {};
+      }
+      return {
+        id: row.id,
+        tenantId: row.tenant_id,
+        type: row.type,
+        amount: row.amount,
+        balance: row.balance,
+        description: row.description,
+        reference: row.reference,
+        metadata,
+        createdAt: row.created_at,
+      };
+    }));
   }
 
   /**
@@ -470,6 +581,13 @@ export class WalletService {
     if (!result.ok) return Result.err(result.error);
 
     const row = result.value.rows[0]!;
+    let parsedMetadata: Record<string, unknown> = {};
+    try {
+      parsedMetadata = JSON.parse(row.metadata || '{}');
+    } catch {
+      parsedMetadata = {};
+    }
+    
     return Result.ok({
       id: row.id,
       tenantId: row.tenant_id,
@@ -478,7 +596,7 @@ export class WalletService {
       balance: row.balance,
       description: row.description,
       reference: row.reference,
-      metadata: JSON.parse(row.metadata || '{}'),
+      metadata: parsedMetadata,
       createdAt: row.created_at,
     });
   }

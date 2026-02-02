@@ -10,7 +10,8 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum LogLevel {
@@ -61,8 +62,6 @@ export interface LogStats {
   logsPerMinute: number;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class LoggingService {
   private db: Pool;
   private redis: Redis;
@@ -82,9 +81,11 @@ export class LoggingService {
    * Initialize logging service
    */
   async initialize(): Promise<void> {
-    // Start flush interval
-    this.flushInterval = setInterval(async () => {
-      await this.flushBuffer();
+    // Start flush interval with error handling
+    this.flushInterval = setInterval(() => {
+      this.flushBuffer().catch(err => {
+        console.error('[Logging] Buffer flush failed:', err instanceof Error ? err.message : err);
+      });
     }, 5000);
 
     console.log('[Logging] Service initialized');
@@ -135,7 +136,7 @@ export class LoggingService {
   /**
    * Create a child logger with additional context
    */
-  child(context: Record<string, unknown>): LoggingService {
+  child(_context: Record<string, unknown>): LoggingService {
     const childLogger = new LoggingService(this.db, this.redis);
     childLogger.currentLevel = this.currentLevel;
     childLogger.serviceName = this.serviceName;
@@ -256,7 +257,7 @@ export class LoggingService {
         ok: true,
         value: {
           logs,
-          total: parseInt(countResult.rows[0].total),
+          total: parseInt(countResult.rows[0]?.total ?? '0', 10),
         },
       };
     } catch (error) {
@@ -267,12 +268,69 @@ export class LoggingService {
   /**
    * Get logs for a specific trace
    */
-  async getLogsByTrace(traceId: string): Promise<Result<LogEntry[]>> {
+  async getLogsByTrace(traceId: string): Promise<Result<LogEntry[], Error>> {
     const result = await this.queryLogs({ traceId, limit: 1000 });
     if (!result.ok) {
       return result;
     }
     return { ok: true, value: result.value.logs };
+  }
+
+  /**
+   * Get log context (surrounding logs)
+   */
+  async getLogContext(logId: string, lines: number = 10): Promise<Result<{ before: LogEntry[]; after: LogEntry[] }, Error>> {
+    try {
+      // Get the target log first
+      const targetResult = await this.db.query(
+        'SELECT * FROM obs_logs WHERE id = $1',
+        [logId]
+      );
+      
+      if (targetResult.rows.length === 0) {
+        return { ok: false, error: new Error('Log not found') };
+      }
+      
+      const target = targetResult.rows[0];
+      
+      // Get logs before
+      const beforeResult = await this.db.query(
+        `SELECT * FROM obs_logs 
+         WHERE service = $1 AND logged_at < $2 
+         ORDER BY logged_at DESC LIMIT $3`,
+        [target.service, target.logged_at, lines]
+      );
+      
+      // Get logs after
+      const afterResult = await this.db.query(
+        `SELECT * FROM obs_logs 
+         WHERE service = $1 AND logged_at > $2 
+         ORDER BY logged_at ASC LIMIT $3`,
+        [target.service, target.logged_at, lines]
+      );
+      
+      const mapRow = (row: Record<string, unknown>): LogEntry => ({
+        id: row.id as string,
+        level: row.level as LogLevel,
+        levelName: LogLevel[row.level as LogLevel] || 'UNKNOWN',
+        message: row.message as string,
+        timestamp: new Date(row.logged_at as string),
+        service: row.service as string,
+        context: row.context as Record<string, unknown>,
+        traceId: row.trace_id as string | undefined,
+        spanId: row.span_id as string | undefined,
+      });
+      
+      return {
+        ok: true,
+        value: {
+          before: beforeResult.rows.reverse().map(mapRow),
+          after: afterResult.rows.map(mapRow),
+        },
+      };
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
   }
 
   /**

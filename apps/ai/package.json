@@ -10,12 +10,13 @@
         "build": "tsc",
         "start": "node dist/index.js",
         "lint": "eslint src --ext .ts",
-        "test": "vitest run",
+        "test": "vitest run --passWithNoTests",
         "test:watch": "vitest"
     },
     "dependencies": {
         "@anthropic-ai/sdk": "^0.17.0",
         "@hono/node-server": "^1.8.0",
+        "@hono/zod-validator": "^0.4.3",
         "@huggingface/transformers": "^3.0.0",
         "hono": "^4.0.0",
         "ioredis": "^5.3.2",

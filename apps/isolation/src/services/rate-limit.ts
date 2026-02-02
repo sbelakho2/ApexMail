@@ -8,7 +8,8 @@
  * - Burst handling
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { QuotaConfig } from '../config.js';
 
 export interface RateLimitConfig {
@@ -32,8 +33,6 @@ export interface TokenBucketConfig {
   refillIntervalMs: number;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class RateLimitService {
   private redis: Redis;
 
@@ -51,6 +50,7 @@ export class RateLimitService {
     const now = Date.now();
     const windowStart = now - config.windowMs;
     const fullKey = `${config.keyPrefix || 'ratelimit'}:${key}`;
+    const requestId = `${now}:${Math.random().toString(36).substring(2)}`;
 
     try {
       // Use Redis sorted set for sliding window
@@ -62,8 +62,8 @@ export class RateLimitService {
       // Count current requests in window
       multi.zcard(fullKey);
 
-      // Add current request
-      multi.zadd(fullKey, now, `${now}:${Math.random()}`);
+      // Add current request with stable ID
+      multi.zadd(fullKey, now, requestId);
 
       // Set expiry
       multi.pexpire(fullKey, config.windowMs);
@@ -82,8 +82,8 @@ export class RateLimitService {
       const retryAfter = allowed ? undefined : Math.ceil((config.windowMs - (now - windowStart)) / 1000);
 
       if (!allowed) {
-        // Remove the request we just added
-        await this.redis.zrem(fullKey, `${now}:${Math.random()}`);
+        // Remove the request we just added using the same requestId
+        await this.redis.zrem(fullKey, requestId);
       }
 
       return {
@@ -121,7 +121,7 @@ export class RateLimitService {
 
       if (bucketData.tokens) {
         tokens = parseFloat(bucketData.tokens);
-        lastRefill = parseInt(bucketData.lastRefill);
+        lastRefill = parseInt(bucketData.lastRefill ?? String(now));
 
         // Calculate tokens to add since last refill
         const timePassed = now - lastRefill;
@@ -171,7 +171,7 @@ export class RateLimitService {
     workspaceId: string,
     metric: keyof QuotaConfig,
     quota: QuotaConfig,
-    increment: number = 1
+    _increment: number = 1
   ): Promise<Result<RateLimitResult>> {
     const limit = quota[metric];
     const key = `quota:${workspaceId}:${metric}`;

@@ -87,7 +87,7 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
     }
 
     c.set('tenantId', tenantId);
-    await next();
+    return next();
   });
 
   // Mount DevEx routes
@@ -130,7 +130,7 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
   });
 
   // Metrics endpoint
-  app.get('/metrics', async (c) => {
+  app.get('/metrics', async (_c) => {
     // Prometheus-style metrics
     const metrics = [
       `# HELP devex_requests_total Total number of requests`,
@@ -260,7 +260,7 @@ function extractTenantFromKey(apiKey: string): string | null {
   // In production, this would validate against the database
   // For now, extract what looks like a tenant ID
   const parts = apiKey.split('_');
-  if (parts.length < 3) {
+  if (parts.length < 3 || !parts[2]) {
     return null;
   }
 

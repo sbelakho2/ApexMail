@@ -7,18 +7,18 @@ const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
 
 export const metadata: Metadata = {
     title: {
-        default: 'ApexMail - Email Marketing Platform',
+        default: 'ApexMail - Enterprise Email Infrastructure',
         template: '%s | ApexMail',
     },
     description:
-        'Enterprise-grade email marketing platform with AI-powered automation, advanced analytics, and seamless integrations.',
+        'Enterprise email infrastructure with cryptographic proof of delivery, EU-compliance, and advanced analytics for mission-critical communications.',
     keywords: [
-        'email marketing',
-        'marketing automation',
-        'email campaigns',
-        'newsletter',
-        'CRM',
-        'lead generation',
+        'email API',
+        'email infrastructure',
+        'GDPR compliant email',
+        'HIPAA email',
+        'transactional email',
+        'verifiable delivery',
     ],
     authors: [{ name: 'ApexMail' }],
     creator: 'ApexMail',
@@ -27,15 +27,15 @@ export const metadata: Metadata = {
         locale: 'en_US',
         url: 'https://apexmail.io',
         siteName: 'ApexMail',
-        title: 'ApexMail - Email Marketing Platform',
+        title: 'ApexMail - Enterprise Email Infrastructure',
         description:
-            'Enterprise-grade email marketing platform with AI-powered automation, advanced analytics, and seamless integrations.',
+            'Enterprise email infrastructure with cryptographic proof of delivery and EU-compliance.',
     },
     twitter: {
         card: 'summary_large_image',
-        title: 'ApexMail - Email Marketing Platform',
+        title: 'ApexMail - Enterprise Email Infrastructure',
         description:
-            'Enterprise-grade email marketing platform with AI-powered automation.',
+            'Enterprise email infrastructure with cryptographic proof of delivery.',
         creator: '@apexmail',
     },
     robots: {
@@ -58,12 +58,12 @@ export default function RootLayout({
     return (
         <html lang="en" suppressHydrationWarning>
             <head>
-                <meta name="theme-color" content="#6366f1" />
+                <meta name="theme-color" content="#2563EB" />
                 <meta name="color-scheme" content="light dark" />
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
             </head>
-            <body className={`${inter.variable} font-sans antialiased`}>
+            <body className={`${inter.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
                 <main className="min-h-screen bg-background">{children}</main>
                 <Toaster />
             </body>

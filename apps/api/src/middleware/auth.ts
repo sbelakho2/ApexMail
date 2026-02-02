@@ -7,7 +7,7 @@ import type { MiddlewareHandler } from 'hono';
 import type { AppEnv, AppContext } from '../app.js';
 import { ApiKeysRepository } from '@apexmail/db';
 import { ApiError } from './error-handler.js';
-import crypto from 'crypto';
+import { createHmacSignature, timingSafeCompare } from '@apexmail/lib/crypto';
 
 interface JwtPayload {
   sub: string;       // User ID
@@ -131,20 +131,45 @@ async function verifyJwt(token: string, secret: string): Promise<JwtVerifyResult
       return { valid: false, reason: 'malformed_token' };
     }
 
-    // Verify signature
-    const signatureInput = `${headerB64}.${payloadB64}`;
-    const expectedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(signatureInput)
-      .digest('base64url');
+    // SECURITY FIX: Validate algorithm header to prevent algorithm confusion attacks
+    // Attackers can:
+    // 1. Set alg: 'none' to bypass signature verification entirely
+    // 2. Use algorithm confusion (RS256 -> HS256) to forge signatures
+    // We MUST verify the algorithm matches what we expect before verifying the signature
+    try {
+      const headerJson = Buffer.from(headerB64, 'base64url').toString('utf8');
+      const header = JSON.parse(headerJson) as { alg?: string; typ?: string };
+      
+      // Only accept HS256 algorithm - reject 'none', RS256, or any other algorithm
+      if (header.alg !== 'HS256') {
+        return { valid: false, reason: 'invalid_algorithm' };
+      }
+      
+      // Verify type is JWT
+      if (header.typ && header.typ !== 'JWT') {
+        return { valid: false, reason: 'invalid_token_type' };
+      }
+    } catch {
+      return { valid: false, reason: 'invalid_header' };
+    }
 
-    if (signatureB64 !== expectedSignature) {
+    // Verify signature using constant-time comparison
+    const signatureInput = `${headerB64}.${payloadB64}`;
+    const expectedSignature = createHmacSignature(secret, signatureInput, 'sha256', 'base64url');
+
+    // SECURITY FIX: Use timing-safe comparison to prevent timing attacks
+    if (!timingSafeCompare(signatureB64, expectedSignature)) {
       return { valid: false, reason: 'invalid_signature' };
     }
 
-    // Parse payload
-    const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
-    const payload = JSON.parse(payloadJson) as JwtPayload;
+    // Parse payload with safety wrapper
+    let payload: JwtPayload;
+    try {
+      const payloadJson = Buffer.from(payloadB64, 'base64url').toString('utf8');
+      payload = JSON.parse(payloadJson) as JwtPayload;
+    } catch {
+      return { valid: false, reason: 'invalid_payload' };
+    }
 
     // Check expiration
     const now = Math.floor(Date.now() / 1000);
@@ -183,10 +208,7 @@ export function createJwt(
   const payloadB64 = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
   
   const signatureInput = `${headerB64}.${payloadB64}`;
-  const signature = crypto
-    .createHmac('sha256', secret)
-    .update(signatureInput)
-    .digest('base64url');
+  const signature = createHmacSignature(secret, signatureInput, 'sha256', 'base64url');
 
   return `${headerB64}.${payloadB64}.${signature}`;
 }

@@ -6,7 +6,7 @@
 
 import { serve } from '@hono/node-server';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import IORedis from 'ioredis';
 import { createApp, BackgroundJobScheduler } from './app.js';
 import { config } from './config.js';
 
@@ -23,12 +23,12 @@ const pool = new Pool({
 });
 
 // Initialize Redis client
-const redis = new Redis({
+const redis = new IORedis.default({
   host: config.redis.host,
   port: config.redis.port,
   password: config.redis.password || undefined,
   db: config.redis.db,
-  retryStrategy: (times) => Math.min(times * 50, 2000),
+  retryStrategy: (times: number) => Math.min(times * 50, 2000),
   maxRetriesPerRequest: 3,
   lazyConnect: true,
 });

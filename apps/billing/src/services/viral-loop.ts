@@ -3,12 +3,12 @@
  * "Powered by ApexMail" footer injection and attribution tracking
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 
-const logger = createLogger('viral-loop');
+const logger = createLogger();
 
 export interface Attribution {
   id: string;
@@ -127,51 +127,41 @@ export class ViralLoopService {
     // Update click count
     await this.incrementCounter(sourceTenantId, 'clicks');
 
-    logger.info({ sourceTenantId, attributionId }, 'Footer click recorded');
+    logger.info('Footer click recorded', { sourceTenantId, attributionId });
 
     return Result.ok({ attributionId, cookieValue });
   }
 
   /**
    * Record conversion (signup from attribution)
+   * CRITICAL: Uses atomic CTE to ensure consistency
    */
   async recordConversion(
     attributionId: string,
     newTenantId: string
   ): Promise<Result<void, Error>> {
-    // Get attribution details
-    const cached = await this.redis.get(`viral:attr:${attributionId}`);
-    if (!cached) {
-      // Try database
-      const result = await this.db.query<{ source_tenant_id: string }>(
-        `SELECT source_tenant_id FROM viral_attributions WHERE id = $1`,
-        [attributionId]
-      );
-
-      if (!result.ok || !result.value.rows[0]) {
-        return Result.err(new Error('Attribution not found'));
-      }
-    }
-
-    // Update attribution with conversion
-    await this.db.query(
-      `UPDATE viral_attributions
-       SET converted_at = NOW(), new_tenant_id = $1
-       WHERE id = $2`,
+    // Use atomic CTE to update attribution and return source tenant
+    const result = await this.db.query<{ source_tenant_id: string }>(
+      `WITH update_attribution AS (
+        UPDATE viral_attributions
+        SET converted_at = NOW(), new_tenant_id = $1
+        WHERE id = $2
+        RETURNING source_tenant_id
+      )
+      SELECT source_tenant_id FROM update_attribution`,
       [newTenantId, attributionId]
     );
 
-    // Get source tenant for counter update
-    const attrResult = await this.db.query<{ source_tenant_id: string }>(
-      `SELECT source_tenant_id FROM viral_attributions WHERE id = $1`,
-      [attributionId]
-    );
-
-    if (attrResult.ok && attrResult.value.rows[0]) {
-      await this.incrementCounter(attrResult.value.rows[0].source_tenant_id, 'conversions');
+    if (!result.ok) return Result.err(result.error);
+    
+    if (!result.value.rows[0]) {
+      return Result.err(new Error('Attribution not found'));
     }
 
-    logger.info({ attributionId, newTenantId }, 'Viral conversion recorded');
+    // Update Redis counter (non-critical, can be eventually consistent)
+    await this.incrementCounter(result.value.rows[0].source_tenant_id, 'conversions');
+
+    logger.info('Viral conversion recorded', { attributionId, newTenantId });
 
     return Result.ok(undefined);
   }
@@ -180,7 +170,12 @@ export class ViralLoopService {
    * Record footer impression (for emails sent)
    */
   async recordImpression(tenantId: string): Promise<void> {
-    await this.incrementCounter(tenantId, 'impressions');
+    try {
+      await this.incrementCounter(tenantId, 'impressions');
+    } catch (error) {
+      console.error(`[ViralLoop] Failed to record impression for tenant ${tenantId}:`, error);
+      // Don't throw - analytics failures shouldn't block email delivery
+    }
   }
 
   /**
@@ -272,7 +267,19 @@ export class ViralLoopService {
     const row = result.value.rows[0];
     if (!row) return Result.ok(true); // Default to showing footer
 
-    const features = JSON.parse(row.features);
+    // Safe JSON parsing for features
+    let features: Record<string, unknown> = {};
+    try {
+      try {
+        features = JSON.parse(row.features || '{}');
+      } catch {
+        features = {};
+      }
+    } catch {
+      console.warn(`[ViralLoop] Failed to parse plan features for tenant ${tenantId}`);
+      return Result.ok(true); // Default to showing footer on parse error
+    }
+    
     return Result.ok(features.poweredByFooter === true);
   }
 

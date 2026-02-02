@@ -3,7 +3,7 @@
  * Idempotent event counting with exactly-once semantics
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib/id';
 import type { DatabasePool } from '@apexmail/db';
@@ -55,6 +55,7 @@ export interface MeteringConfig {
 export class MeteringService {
   private buffer: MeterEvent[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
+  private isFlushInProgress = false; // Prevents concurrent flushes
   private readonly config: MeteringConfig;
 
   constructor(
@@ -98,6 +99,11 @@ export class MeteringService {
       timestamp: new Date(),
       metadata,
     };
+
+    // CRITICAL: Persist to Redis immediately for crash recovery
+    // This ensures events survive process crashes before DB flush
+    const pendingKey = `meter:pending:${id}`;
+    await this.redis.setex(pendingKey, 3600, JSON.stringify(event)); // 1 hour TTL
 
     // Add to buffer
     this.buffer.push(event);
@@ -201,7 +207,8 @@ export class MeteringService {
         emailsLimit,
         apiCalls,
         apiCallsLimit,
-        percentUsed: Math.round((emailsSent / emailsLimit) * 100),
+        // Guard against division by zero
+        percentUsed: emailsLimit > 0 ? Math.round((emailsSent / emailsLimit) * 100) : 0,
       },
     });
   }
@@ -225,60 +232,78 @@ export class MeteringService {
 
   /**
    * Flush buffered events to database
+   * Events are backed by Redis for crash recovery
+   * Uses a lock to prevent concurrent flushes
    */
   async flush(): Promise<Result<number, Error>> {
+    // Prevent concurrent flushes to avoid race conditions
+    if (this.isFlushInProgress) {
+      return Result.ok(0);
+    }
+
     if (this.buffer.length === 0) {
       return Result.ok(0);
     }
 
-    const eventsToFlush = [...this.buffer];
-    this.buffer = [];
+    this.isFlushInProgress = true;
+    
+    try {
+      const eventsToFlush = [...this.buffer];
+      this.buffer = [];
 
-    // Build bulk insert
-    const values: unknown[] = [];
-    const placeholders: string[] = [];
-    let paramIndex = 1;
+      // Build bulk insert
+      const values: unknown[] = [];
+      const placeholders: string[] = [];
+      let paramIndex = 1;
 
-    for (const event of eventsToFlush) {
-      placeholders.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`
+      for (const event of eventsToFlush) {
+        placeholders.push(
+          `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`
+        );
+        values.push(
+          event.id,
+          event.tenantId,
+          event.eventType,
+          event.quantity,
+          event.timestamp,
+          JSON.stringify(event.metadata)
+        );
+      }
+
+      const result = await this.db.query(
+        `INSERT INTO usage_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+         VALUES ${placeholders.join(', ')}
+         ON CONFLICT (id) DO NOTHING`,
+        values
       );
-      values.push(
-        event.id,
-        event.tenantId,
-        event.eventType,
-        event.quantity,
-        event.timestamp,
-        JSON.stringify(event.metadata)
-      );
+
+      if (!result.ok) {
+        // Re-add failed events to buffer
+        this.buffer.unshift(...eventsToFlush);
+        return Result.err(result.error);
+      }
+
+      // Clean up Redis pending keys after successful DB write
+      const pipeline = this.redis.pipeline();
+      for (const event of eventsToFlush) {
+        pipeline.del(`meter:pending:${event.id}`);
+      }
+
+      // Update Redis counters
+      const periodKey = this.getPeriodKey(new Date());
+
+      for (const event of eventsToFlush) {
+        const counterKey = `meter:counter:${event.tenantId}:${event.eventType}:${periodKey}`;
+        pipeline.incrby(counterKey, event.quantity);
+        pipeline.expire(counterKey, 86400 * 35); // 35 days TTL
+      }
+
+      await pipeline.exec();
+
+      return Result.ok(eventsToFlush.length);
+    } finally {
+      this.isFlushInProgress = false;
     }
-
-    const result = await this.db.query(
-      `INSERT INTO usage_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-       VALUES ${placeholders.join(', ')}
-       ON CONFLICT (id) DO NOTHING`,
-      values
-    );
-
-    if (!result.ok) {
-      // Re-add failed events to buffer
-      this.buffer.unshift(...eventsToFlush);
-      return Result.err(result.error);
-    }
-
-    // Update Redis counters
-    const pipeline = this.redis.pipeline();
-    const periodKey = this.getPeriodKey(new Date());
-
-    for (const event of eventsToFlush) {
-      const counterKey = `meter:counter:${event.tenantId}:${event.eventType}:${periodKey}`;
-      pipeline.incrby(counterKey, event.quantity);
-      pipeline.expire(counterKey, 86400 * 35); // 35 days TTL
-    }
-
-    await pipeline.exec();
-
-    return Result.ok(eventsToFlush.length);
   }
 
   /**
@@ -348,9 +373,65 @@ export class MeteringService {
   }
 
   private startFlushTimer(): void {
-    this.flushTimer = setInterval(async () => {
-      await this.flush();
+    this.flushTimer = setInterval(() => {
+      this.flush().catch(err => {
+        console.error('[Metering] Flush failed:', err instanceof Error ? err.message : err);
+      });
     }, this.config.flushIntervalMs);
+  }
+
+  /**
+   * Recover pending events from Redis after crash/restart
+   * CRITICAL: Call this on startup to prevent data loss
+   */
+  async recoverPendingEvents(): Promise<Result<number, Error>> {
+    try {
+      // Scan for all pending events
+      const pendingKeys: string[] = [];
+      let cursor = '0';
+      
+      do {
+        const [newCursor, keys] = await this.redis.scan(
+          cursor,
+          'MATCH', 'meter:pending:*',
+          'COUNT', 100
+        );
+        cursor = newCursor;
+        pendingKeys.push(...keys);
+      } while (cursor !== '0');
+
+      if (pendingKeys.length === 0) {
+        return Result.ok(0);
+      }
+
+      // Recover events
+      const events: MeterEvent[] = [];
+      for (const key of pendingKeys) {
+        const data = await this.redis.get(key);
+        if (data) {
+          try {
+            const event = JSON.parse(data) as MeterEvent;
+            event.timestamp = new Date(event.timestamp); // Restore Date object
+            events.push(event);
+          } catch {
+            // Invalid data, delete the key
+            await this.redis.del(key);
+          }
+        }
+      }
+
+      if (events.length > 0) {
+        // Add recovered events to buffer and flush immediately
+        this.buffer.push(...events);
+        console.log(`[Metering] Recovered ${events.length} pending events from Redis`);
+        await this.flush();
+      }
+
+      return Result.ok(events.length);
+    } catch (error) {
+      console.error('[Metering] Failed to recover pending events:', error);
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   /**

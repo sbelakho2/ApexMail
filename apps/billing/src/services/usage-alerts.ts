@@ -3,13 +3,13 @@
  * Sends notifications at configurable usage thresholds
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 import { MeteringService } from './metering.js';
 
-const logger = createLogger('usage-alerts');
+const logger = createLogger();
 
 export interface UsageThreshold {
   id: string;
@@ -144,12 +144,14 @@ export class UsageAlertsService {
 
       switch (threshold.metric_type) {
         case 'emails':
-          currentPercent = (emailsSent / emailsLimit) * 100;
+          // Guard against division by zero
+          currentPercent = emailsLimit > 0 ? (emailsSent / emailsLimit) * 100 : 0;
           currentValue = emailsSent;
           limitValue = emailsLimit;
           break;
         case 'api_calls':
-          currentPercent = (apiCalls / apiCallsLimit) * 100;
+          // Guard against division by zero
+          currentPercent = apiCallsLimit > 0 ? (apiCalls / apiCallsLimit) * 100 : 0;
           currentValue = apiCalls;
           limitValue = apiCallsLimit;
           break;
@@ -178,12 +180,12 @@ export class UsageAlertsService {
         );
 
         alertsTriggered++;
-        logger.info({
+        logger.info('Usage alert triggered', {
           tenantId,
           metricType: threshold.metric_type,
           threshold: threshold.threshold_percent,
           current: currentPercent,
-        }, 'Usage alert triggered');
+        });
       }
     }
 
@@ -195,6 +197,7 @@ export class UsageAlertsService {
 
   /**
    * Send alert notification
+   * CRITICAL: Uses atomic CTE to queue notifications together
    */
   private async sendAlert(
     tenantId: string,
@@ -207,81 +210,118 @@ export class UsageAlertsService {
       channel: UsageThreshold['notificationChannel'];
     }
   ): Promise<void> {
-    // Get tenant email
-    const tenantResult = await this.db.query<{
-      name: string;
-      settings: string;
-    }>(
-      `SELECT name, settings FROM tenants WHERE id = $1`,
-      [tenantId]
-    );
+    try {
+      // Get tenant email
+      const tenantResult = await this.db.query<{
+        name: string;
+        settings: string;
+      }>(
+        `SELECT name, settings FROM tenants WHERE id = $1`,
+        [tenantId]
+      );
 
-    if (!tenantResult.ok || !tenantResult.value.rows[0]) return;
+      if (!tenantResult.ok || !tenantResult.value.rows[0]) return;
 
-    const tenant = tenantResult.value.rows[0];
-    const settings = JSON.parse(tenant.settings || '{}');
-    const webhookUrl = settings.webhookUrl;
+      const tenant = tenantResult.value.rows[0];
+      let settings: { webhookUrl?: string } = {};
+      try {
+        settings = JSON.parse(tenant.settings || '{}');
+      } catch {
+        settings = {};
+      }
+      const webhookUrl = settings.webhookUrl;
 
-    // Queue email notification
-    if (alert.channel === 'email' || alert.channel === 'both') {
-      await this.db.query(
-        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-         VALUES (gen_random_uuid(), $1, 'usage_alert', $2, 'pending', NOW())`,
-        [tenantId, JSON.stringify({
-          type: 'usage_alert',
+      const emailPayload = JSON.stringify({
+        type: 'usage_alert',
+        metricType: alert.metricType,
+        thresholdPercent: alert.thresholdPercent,
+        currentPercent: alert.currentPercent,
+        currentValue: alert.currentValue,
+        limitValue: alert.limitValue,
+      });
+
+      const webhookPayload = JSON.stringify({
+        event: 'usage.threshold_reached',
+        data: {
           metricType: alert.metricType,
           thresholdPercent: alert.thresholdPercent,
           currentPercent: alert.currentPercent,
           currentValue: alert.currentValue,
           limitValue: alert.limitValue,
-        })]
-      );
-    }
+        },
+        timestamp: new Date().toISOString(),
+      });
 
-    // Send webhook notification
-    if ((alert.channel === 'webhook' || alert.channel === 'both') && webhookUrl) {
+      const shouldEmail = alert.channel === 'email' || alert.channel === 'both';
+      const shouldWebhook = (alert.channel === 'webhook' || alert.channel === 'both') && webhookUrl;
+
+      // Use atomic CTE to queue both notifications together
       await this.db.query(
-        `INSERT INTO webhook_deliveries (id, tenant_id, event_type, payload, status, created_at)
-         VALUES (gen_random_uuid(), $1, 'usage.threshold_reached', $2, 'pending', NOW())`,
-        [tenantId, JSON.stringify({
-          event: 'usage.threshold_reached',
-          data: {
-            metricType: alert.metricType,
-            thresholdPercent: alert.thresholdPercent,
-            currentPercent: alert.currentPercent,
-            currentValue: alert.currentValue,
-            limitValue: alert.limitValue,
-          },
-          timestamp: new Date().toISOString(),
-        })]
-      );
+        `WITH queue_email AS (
+          INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+          SELECT gen_random_uuid(), $1, 'usage_alert', $2, 'pending', NOW()
+          WHERE $4 = true
+          RETURNING id
+        ),
+        queue_webhook AS (
+          INSERT INTO webhook_deliveries (id, tenant_id, event_type, payload, status, created_at)
+          SELECT gen_random_uuid(), $1, 'usage.threshold_reached', $3, 'pending', NOW()
+          WHERE $5 = true
+          RETURNING id
+        )
+      SELECT 
+        EXISTS (SELECT 1 FROM queue_email) as email_queued,
+        EXISTS (SELECT 1 FROM queue_webhook) as webhook_queued`,
+      [tenantId, emailPayload, webhookPayload, shouldEmail, shouldWebhook]
+    );
+    } catch (error) {
+      console.error(`[UsageAlerts] Failed to send alert for tenant ${tenantId}:`, error);
+      // Don't throw - alert failures shouldn't block other processing
     }
   }
 
   /**
    * Run batch check for all tenants (cron job)
+   * Processes in batches to prevent memory exhaustion
    */
   async checkAllTenants(): Promise<Result<{
     tenantsChecked: number;
     totalAlerts: number;
   }, Error>> {
-    const tenantsResult = await this.db.query<{ id: string }>(
-      `SELECT DISTINCT tenant_id as id FROM usage_thresholds WHERE is_enabled = true`
-    );
-
-    if (!tenantsResult.ok) return Result.err(tenantsResult.error);
-
+    const BATCH_SIZE = 100;
+    let offset = 0;
+    let totalChecked = 0;
     let totalAlerts = 0;
 
-    for (const row of tenantsResult.value.rows) {
-      const result = await this.checkAndAlert(row.id);
-      if (result.ok) {
-        totalAlerts += result.value.alertsTriggered;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const tenantsResult = await this.db.query<{ id: string }>(
+        `SELECT DISTINCT tenant_id as id FROM usage_thresholds 
+         WHERE is_enabled = true 
+         ORDER BY tenant_id 
+         LIMIT $1 OFFSET $2`,
+        [BATCH_SIZE, offset]
+      );
+
+      if (!tenantsResult.ok) return Result.err(tenantsResult.error);
+
+      const rows = tenantsResult.value.rows;
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        const result = await this.checkAndAlert(row.id);
+        if (result.ok) {
+          totalAlerts += result.value.alertsTriggered;
+        }
+        totalChecked++;
       }
+
+      if (rows.length < BATCH_SIZE) break;
+      offset += BATCH_SIZE;
     }
 
     return Result.ok({
-      tenantsChecked: tenantsResult.value.rows.length,
+      tenantsChecked: totalChecked,
       totalAlerts,
     });
   }

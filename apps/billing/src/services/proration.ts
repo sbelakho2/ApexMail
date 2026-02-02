@@ -52,7 +52,12 @@ export class ProrationEngine {
 
     const { daysInPeriod, daysRemaining } = currentPeriod;
 
-    // Calculate daily rates
+    // Guard against division by zero
+    if (daysInPeriod <= 0) {
+      throw new Error('Invalid period: daysInPeriod must be greater than 0');
+    }
+
+    // Calculate daily rates (safe: daysInPeriod > 0)
     const currentDailyRate = currentPrice / daysInPeriod;
     const newDailyRate = newPrice / daysInPeriod;
 

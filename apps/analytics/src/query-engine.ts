@@ -3,6 +3,7 @@
  */
 
 import type { Pool } from 'pg';
+import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { config } from './config.js';
 import { readdir } from 'fs/promises';
@@ -10,6 +11,7 @@ import { join } from 'path';
 
 interface QueryEngineConfig {
   db: Pool;
+  redis: Redis;
   logger: Logger;
 }
 
@@ -36,10 +38,12 @@ interface AnalyticsQuery {
 
 export class QueryEngine {
   private readonly db: Pool;
+  private readonly redis: Redis;
   private readonly logger: Logger;
 
   constructor(options: QueryEngineConfig) {
     this.db = options.db;
+    this.redis = options.redis;
     this.logger = options.logger;
   }
 
@@ -218,7 +222,7 @@ export class QueryEngine {
     }
 
     const sent = counts.sent || 1;
-    const delivered = counts.delivered || 0;
+    const delivered = counts.delivered || 1; // Avoid division by zero
 
     return {
       deliveryRate: Math.round((delivered / sent) * 100),
@@ -326,29 +330,64 @@ export class QueryEngine {
 
   /**
    * Get real-time stats from Redis
+   * 
+   * Redis key structure:
+   * - stats:{tenantId}:today:{eventType} -> count
+   * - stats:{tenantId}:hour:{eventType} -> count
    */
-  async getRealtimeStats(_tenantId: string): Promise<{
+  async getRealtimeStats(tenantId: string): Promise<{
     today: Record<string, number>;
     thisHour: Record<string, number>;
   }> {
-    // This would query Redis for real-time counters
-    // Placeholder implementation
-    // TODO: Use _tenantId to query Redis for tenant-specific stats
+    const eventTypes = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'];
+    
+    // Get today's date key (UTC)
+    const now = new Date();
+    const todayKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+    const hourKey = `${todayKey}:${String(now.getUTCHours()).padStart(2, '0')}`;
+    
+    // Build Redis multi-get pipeline for efficiency
+    const pipeline = this.redis.pipeline();
+    
+    // Get today's stats
+    for (const eventType of eventTypes) {
+      pipeline.get(`stats:${tenantId}:day:${todayKey}:${eventType}`);
+    }
+    
+    // Get this hour's stats
+    for (const eventType of eventTypes) {
+      pipeline.get(`stats:${tenantId}:hour:${hourKey}:${eventType}`);
+    }
+    
+    const results = await pipeline.exec();
+    
+    // Parse results
+    const today: Record<string, number> = {};
+    const thisHour: Record<string, number> = {};
+    
+    if (results) {
+      // First half: today's stats
+      for (let i = 0; i < eventTypes.length; i++) {
+        const result = results[i];
+        const eventType = eventTypes[i];
+        if (result && eventType) {
+          const [err, value] = result;
+          today[eventType] = err ? 0 : parseInt(String(value ?? '0'), 10);
+        }
+      }
+      
+      // Second half: this hour's stats
+      for (let i = 0; i < eventTypes.length; i++) {
+        const result = results[eventTypes.length + i];
+        const eventType = eventTypes[i];
+        if (result && eventType) {
+          const [err, value] = result;
+          thisHour[eventType] = err ? 0 : parseInt(String(value ?? '0'), 10);
+        }
+      }
+    }
 
-    return {
-      today: {
-        sent: 0,
-        delivered: 0,
-        opened: 0,
-        clicked: 0,
-      },
-      thisHour: {
-        sent: 0,
-        delivered: 0,
-        opened: 0,
-        clicked: 0,
-      },
-    };
+    return { today, thisHour };
   }
 
   private getTimeTruncExpression(groupBy: 'hour' | 'day' | 'week' | 'month'): string {

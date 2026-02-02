@@ -2,7 +2,7 @@
  * Feedback Loop Server - Processes ARF complaint reports
  */
 
-import type { Pool } from 'pg';
+import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
@@ -99,7 +99,7 @@ export class FeedbackLoopServer {
 
   private onMailFrom(
     address: SMTPServerAddress,
-    session: SMTPServerSession,
+    _session: SMTPServerSession,
     callback: (err?: Error) => void
   ): void {
     this.logger.debug('FBL MAIL FROM', { from: address.address });
@@ -108,7 +108,7 @@ export class FeedbackLoopServer {
 
   private onRcptTo(
     address: SMTPServerAddress,
-    session: SMTPServerSession,
+    _session: SMTPServerSession,
     callback: (err?: Error) => void
   ): void {
     // Accept mail to FBL addresses
@@ -176,7 +176,7 @@ export class FeedbackLoopServer {
 
     this.logger.info('Processing complaint', {
       complaintId,
-      from: session.envelope.mailFrom?.address,
+      from: session.envelope.mailFrom ? session.envelope.mailFrom.address : undefined,
       to: session.envelope.rcptTo[0]?.address,
     });
 
@@ -389,14 +389,14 @@ export class FeedbackLoopServer {
     
     // Extract Message-ID
     const messageIdMatch = content.match(/^message-id:\s*(<[^>]+>|[^\r\n]+)/im);
-    if (messageIdMatch) {
+    if (messageIdMatch?.[1]) {
       result.originalMessageId = messageIdMatch[1].replace(/[<>]/g, '').trim();
     }
 
     // Extract To address if not already set
     if (!result.originalRecipient) {
       const toMatch = content.match(/^to:\s*([^\r\n]+)/im);
-      if (toMatch) {
+      if (toMatch?.[1]) {
         result.originalRecipient = this.extractEmail(toMatch[1]);
       }
     }
@@ -411,7 +411,7 @@ export class FeedbackLoopServer {
   private async storeUnmatchedComplaint(
     complaintId: string,
     session: SMTPServerSession,
-    parsed: ParsedMail,
+    _parsed: ParsedMail,
     rawMessage: Buffer,
     complaintInfo: ComplaintInfo
   ): Promise<void> {
@@ -423,7 +423,7 @@ export class FeedbackLoopServer {
     `, [
       complaintId,
       session.envelope.rcptTo[0]?.address,
-      session.envelope.mailFrom?.address,
+      session.envelope.mailFrom ? session.envelope.mailFrom.address : undefined,
       complaintInfo.feedbackType,
       complaintInfo.userAgent,
       complaintInfo.originalMessageId,

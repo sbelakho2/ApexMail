@@ -5,85 +5,73 @@ import { useInView } from 'react-intersection-observer';
 import { Shield, Lock, Key, Eye, Server, FileCheck, AlertTriangle, Fingerprint } from 'lucide-react';
 
 const securityFeatures = [
-  {
-    icon: Lock,
-    title: 'End-to-End Encryption',
-    description: 'TLS 1.3 in transit, AES-256 at rest. Your email content is encrypted at every stage.',
-    color: 'from-blue-500 to-cyan-500',
-  },
-  {
-    icon: Fingerprint,
-    title: 'Cryptographic Signing',
-    description: 'Every delivery event is cryptographically signed in an immutable hash chain. Tamper-evident by design.',
-    color: 'from-purple-500 to-pink-500',
-  },
-  {
-    icon: AlertTriangle,
-    title: 'Active Threat Detection',
-    description: 'Built-in honeytokens and canary tokens alert you instantly when attackers probe your system.',
-    color: 'from-orange-500 to-red-500',
-  },
-  {
-    icon: Eye,
-    title: 'Zero-Knowledge Architecture',
-    description: 'With zero-retention mode enabled, we process your emails without ever storing content.',
-    color: 'from-green-500 to-teal-500',
-  },
-  {
-    icon: Server,
-    title: 'SOC 2 Type II Certified',
-    description: 'Annual third-party audits verify our security controls meet the highest standards.',
-    color: 'from-indigo-500 to-blue-500',
-  },
-  {
-    icon: Key,
-    title: 'API Key Security',
-    description: 'Scoped API keys, automatic rotation, IP allowlists, and real-time usage monitoring.',
-    color: 'from-yellow-500 to-orange-500',
-  },
+ {
+ icon: Lock,
+ title: 'End-to-End Encryption',
+ description: 'TLS 1.3 in transit, AES-256 at rest. Your email content is encrypted at every stage.',
+ },
+ {
+ icon: Fingerprint,
+ title: 'Cryptographic Signing',
+ description: 'Every delivery event is cryptographically signed in an immutable hash chain. Tamper-evident by design.',
+ },
+ {
+ icon: AlertTriangle,
+ title: 'Active Threat Detection',
+ description: 'Built-in honeytokens and canary tokens alert you instantly when attackers probe your system.',
+ },
+ {
+ icon: Eye,
+ title: 'Zero-Knowledge Architecture',
+ description: 'With zero-retention mode enabled, we process your emails without ever storing content.',
+ },
+ {
+ icon: Server,
+ title: 'SOC 2 Type II Certified',
+ description: 'Annual third-party audits verify our security controls meet the highest standards.',
+ },
+ {
+ icon: Key,
+ title: 'API Key Security',
+ description: 'Scoped API keys, automatic rotation, IP allowlists, and real-time usage monitoring.',
+ },
 ];
 
 const complianceLogos = [
-  { name: 'GDPR', description: 'EU Data Protection' },
-  { name: 'HIPAA', description: 'Healthcare Ready' },
-  { name: 'SOC 2', description: 'Type II Certified' },
-  { name: 'CCPA', description: 'California Privacy' },
-  { name: 'ISO 27001', description: 'Security Standard' },
+ { name: 'GDPR', description: 'EU Data Protection' },
+ { name: 'HIPAA', description: 'Healthcare Ready' },
+ { name: 'SOC 2', description: 'Type II Certified' },
+ { name: 'CCPA', description: 'California Privacy' },
+ { name: 'ISO 27001', description: 'Security Standard' },
 ];
 
 export function SecuritySection() {
-  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
+ const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
-  return (
-    <section ref={ref} className="py-20 lg:py-32 relative">
-      {/* Background */}
-      <div className="absolute inset-0">
-        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-surface-900/50 to-transparent" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-gradient-to-r from-primary-600/5 to-accent-600/5 blur-3xl" />
-      </div>
+ return (
+ <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+ <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+ {/* Header */}
+ <motion.div
+ initial={{ opacity: 0, y: 20 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
+ className="text-center mb-16"
+ >
+ <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-md bg-primary-50 border border-primary-100 text-sm text-primary-700 mb-6 font-medium">
+          <Shield className="w-4 h-4" />
+          Enterprise-Grade Security
+        </div>
+ <h2 className="section-title mb-4">
+ <span className="text-surface-900">Security That</span>{' '}
+ <span className="text-primary-500">Actually Works</span>
+ </h2>
+ <p className="text-surface-600 text-[17px] max-w-2xl mx-auto leading-relaxed">
+ We don&apos;t just check compliance boxes. We built security into the foundation, 
+ not as an afterthought.
+ </p>
+ </motion.div>
 
-      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="text-center mb-16"
-        >
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full glass border border-primary-500/30 text-sm text-primary-400 mb-6">
-            <Shield className="w-4 h-4" />
-            Enterprise-Grade Security
-          </div>
-          <h2 className="section-title mb-4">
-            <span className="text-white">Security That</span>{' '}
-            <span className="gradient-text">Actually Works</span>
-          </h2>
-          <p className="section-subtitle">
-            We don&apos;t just check compliance boxes. We built security into the foundation, 
-            not as an afterthought.
-          </p>
-        </motion.div>
-
-        {/* Security Features Grid */}
+ {/* Security Features Grid */}
         <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
           {securityFeatures.map((feature, index) => (
             <motion.div
@@ -91,66 +79,64 @@ export function SecuritySection() {
               initial={{ opacity: 0, y: 20 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: index * 0.1 }}
-              className="feature-card group"
+              className="premium-card p-6 group bg-white hover:bg-surface-50"
             >
-              <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${feature.color} p-0.5 mb-4`}>
-                <div className="w-full h-full rounded-[10px] bg-surface-900 flex items-center justify-center">
-                  <feature.icon className="w-6 h-6 text-white" />
-                </div>
+              <div className="w-12 h-12 rounded-lg bg-primary-50 flex items-center justify-center border border-primary-100 mb-6 group-hover:scale-110 transition-transform duration-300">
+                <feature.icon className="w-6 h-6 text-primary-600" />
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2 group-hover:text-primary-400 transition-colors">
+              <h3 className="text-lg font-bold text-surface-900 mb-3 group-hover:text-primary-600 transition-colors">
                 {feature.title}
               </h3>
-              <p className="text-surface-400 text-sm leading-relaxed">
+              <p className="text-surface-600 text-[14px] leading-relaxed">
                 {feature.description}
               </p>
             </motion.div>
           ))}
         </div>
 
-        {/* Compliance Badges */}
+ {/* Compliance Badges */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.6 }}
-          className="glass-card p-8"
+          className="premium-card p-10 bg-surface-50 border-surface-200/50"
         >
-          <div className="flex items-center justify-between flex-wrap gap-6">
-            <div>
-              <h3 className="text-lg font-semibold text-white mb-1">Compliance Certifications</h3>
-              <p className="text-sm text-surface-400">
-                Verified by independent auditors and regularly renewed.
+          <div className="flex flex-col lg:flex-row items-center justify-between gap-10">
+            <div className="text-center lg:text-left">
+              <h3 className="text-xl font-bold text-surface-900 mb-2">Compliance Certifications</h3>
+              <p className="text-surface-600 leading-relaxed max-w-md">
+                Verified by independent auditors and regularly renewed to ensure your data remains protected.
               </p>
             </div>
-            <div className="flex items-center gap-6 flex-wrap">
+            <div className="flex flex-wrap items-center justify-center gap-8">
               {complianceLogos.map((logo) => (
-                <div key={logo.name} className="text-center">
-                  <div className="w-16 h-16 rounded-xl bg-surface-800 border border-surface-700 flex items-center justify-center mb-2">
-                    <span className="text-xl font-bold text-primary-400">{logo.name}</span>
+                <div key={logo.name} className="flex flex-col items-center group">
+                  <div className="w-20 h-20 rounded-xl bg-white border border-surface-200 flex items-center justify-center mb-3 shadow-sm group-hover:shadow-md group-hover:-translate-y-1 transition-all duration-300">
+                    <span className="text-xl font-bold text-primary-600 tracking-tighter">{logo.name}</span>
                   </div>
-                  <div className="text-xs text-surface-500">{logo.description}</div>
+                  <div className="text-[10px] text-surface-400 font-bold uppercase tracking-widest whitespace-nowrap">{logo.description}</div>
                 </div>
               ))}
             </div>
           </div>
         </motion.div>
 
-        {/* Security Promise */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.8 }}
-          className="mt-12 text-center"
-        >
-          <div className="inline-flex items-center gap-3 glass-card px-6 py-4">
-            <FileCheck className="w-6 h-6 text-accent-400" />
-            <div className="text-left">
-              <div className="text-sm font-medium text-white">Security Audit Reports Available</div>
-              <div className="text-xs text-surface-400">Enterprise customers receive full penetration test results</div>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-    </section>
-  );
+ {/* Security Promise */}
+ <motion.div
+ initial={{ opacity: 0, y: 20 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
+ transition={{ delay: 0.8 }}
+ className="mt-12 text-center"
+ >
+ <div className="inline-flex items-center gap-3 premium-card px-6 py-4 bg-white">
+ <FileCheck className="w-6 h-6 text-primary-600" />
+ <div className="text-left">
+ <div className="text-sm font-bold text-surface-900">Security Audit Reports Available</div>
+ <div className="text-xs text-surface-500 font-medium">Enterprise customers receive full penetration test results</div>
+ </div>
+ </div>
+ </motion.div>
+ </div>
+ </section>
+ );
 }

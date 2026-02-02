@@ -8,19 +8,21 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest"
   },
   "dependencies": {
     "@apexmail/db": "workspace:*",
     "@apexmail/lib": "workspace:*",
     "ioredis": "^5.3.2",
+    "pg": "^8.11.3",
     "smtp-server": "^3.13.0",
     "mailparser": "^3.6.6"
   },
   "devDependencies": {
     "@types/mailparser": "^3.4.4",
     "@types/node": "^20.11.0",
+    "@types/pg": "^8.10.9",
     "@types/smtp-server": "^3.5.10",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",

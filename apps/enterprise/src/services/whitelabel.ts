@@ -5,10 +5,10 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import * as crypto from 'crypto';
-import { config } from '../config.js';
+import { randomToken } from '@apexmail/lib/crypto';
+// import { config } from '../config.js';
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -299,7 +299,7 @@ export class WhiteLabelService {
       }
 
       const id = uuidv4();
-      const verificationToken = crypto.randomBytes(32).toString('hex');
+      const verificationToken = randomToken(32);
 
       await this.pool.query(`
         INSERT INTO ent_whitelabel_domains (
@@ -351,6 +351,7 @@ export class WhiteLabelService {
 
       if (domainRecord.verificationMethod === 'dns_txt') {
         // Check for TXT record
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const dns = require('dns').promises;
         try {
           const records = await dns.resolveTxt(domainRecord.domain);
@@ -366,6 +367,7 @@ export class WhiteLabelService {
         }
       } else if (domainRecord.verificationMethod === 'dns_cname') {
         // Check for CNAME record
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const dns = require('dns').promises;
         try {
           const records = await dns.resolveCname(domainRecord.domain);
@@ -669,7 +671,7 @@ ${config.customCss || ''}
         return { ok: false, error: new Error('Domain not found') };
       }
 
-      const domain = domainResult.rows[0].domain;
+      // Domain found - proceed with certificate creation
       const certId = uuidv4();
 
       // In production, this would call AWS ACM or Let's Encrypt
@@ -708,7 +710,10 @@ ${config.customCss || ''}
     const variables: Set<string> = new Set();
     let match;
     while ((match = regex.exec(content)) !== null) {
-      variables.add(match[1]);
+      const varName = match[1];
+      if (varName) {
+        variables.add(varName);
+      }
     }
     return Array.from(variables);
   }

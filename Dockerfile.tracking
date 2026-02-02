@@ -1,0 +1,72 @@
+# =============================================================================
+# ApexMail Tracking Service Dockerfile
+# =============================================================================
+# Handles email open/click tracking
+# Build: docker build -t apexmail-tracking -f Dockerfile.tracking .
+# =============================================================================
+
+# Stage 1: Builder
+FROM node:20-alpine AS builder
+
+# Install pnpm
+RUN npm install -g pnpm@9
+
+WORKDIR /app
+
+# Copy package files for dependency installation
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY tsconfig.base.json turbo.json ./
+
+# Copy package.json files for all workspaces
+COPY packages/lib/package.json packages/lib/
+COPY packages/db/package.json packages/db/
+COPY apps/tracking/package.json apps/tracking/
+
+# Install all dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source files
+COPY packages/lib packages/lib/
+COPY packages/db packages/db/
+COPY apps/tracking apps/tracking/
+
+# Build packages in dependency order
+RUN pnpm --filter @apexmail/lib build && \
+    pnpm --filter @apexmail/db build && \
+    pnpm --filter @apexmail/tracking build
+
+# Prune dev dependencies for production
+RUN pnpm prune --prod
+
+# Stage 2: Production
+FROM node:20-alpine AS production
+
+# Security: Don't run as root
+RUN addgroup -g 1001 apexmail && \
+    adduser -u 1001 -G apexmail -s /bin/sh -D apexmail
+
+WORKDIR /app
+
+# Copy production dependencies and built files
+COPY --from=builder --chown=apexmail:apexmail /app/node_modules ./node_modules
+COPY --from=builder --chown=apexmail:apexmail /app/packages/lib/dist ./packages/lib/dist
+COPY --from=builder --chown=apexmail:apexmail /app/packages/lib/package.json ./packages/lib/
+COPY --from=builder --chown=apexmail:apexmail /app/packages/db/dist ./packages/db/dist
+COPY --from=builder --chown=apexmail:apexmail /app/packages/db/package.json ./packages/db/
+COPY --from=builder --chown=apexmail:apexmail /app/apps/tracking/dist ./apps/tracking/dist
+COPY --from=builder --chown=apexmail:apexmail /app/apps/tracking/package.json ./apps/tracking/
+
+USER apexmail
+
+# Expose tracking port
+EXPOSE 3001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
+
+# Set environment
+ENV NODE_ENV=production
+
+# Start the Tracking service
+CMD ["node", "apps/tracking/dist/index.js"]

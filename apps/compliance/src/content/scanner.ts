@@ -23,7 +23,7 @@ import {
     ScanVerdict,
 } from '../types';
 import { complianceConfig } from '../config';
-import { randomUUID } from 'crypto';
+import { generateUUID } from '@apexmail/lib/crypto';
 
 interface EmailContent {
     messageId: string;
@@ -123,7 +123,7 @@ export class ContentScanner {
         );
 
         const result: ContentScanResult = {
-            id: randomUUID(),
+            id: generateUUID(),
             tenantId: content.tenantId,
             messageId: content.messageId,
             scannedAt: new Date(),
@@ -807,6 +807,7 @@ export class ContentScanner {
                 const hostname = parsed.hostname;
 
                 // Check for non-ASCII characters
+                // eslint-disable-next-line no-control-regex
                 if (/[^\x00-\x7F]/.test(hostname)) {
                     // Check if it contains known homoglyphs
                     for (const [ascii, glyphs] of Object.entries(homoglyphs)) {

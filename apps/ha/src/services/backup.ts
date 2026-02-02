@@ -13,10 +13,16 @@
 import { Pool } from 'pg';
 import Redis from 'ioredis';
 import { createReadStream, createWriteStream, promises as fs } from 'fs';
-import { join, dirname } from 'path';
+import { join } from 'path';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
+import { Result } from '@apexmail/lib';
+import {
+  createAES256GCMCipher,
+  encryptBufferAES256GCM,
+  decryptBufferAES256GCM,
+  createSHA256Hash,
+} from '@apexmail/lib/crypto';
 import { config } from '../config.js';
 
 export enum BackupType {
@@ -77,8 +83,6 @@ export interface RestoreResult {
   walFilesApplied: number;
   error?: string;
 }
-
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class BackupService {
   private db: Pool;
@@ -336,8 +340,7 @@ export class BackupService {
       const gzip = createGzip({ level: 9 });
 
       if (this.encryptionKey) {
-        const iv = randomBytes(16);
-        const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, iv);
+        const { cipher, iv } = createAES256GCMCipher(this.encryptionKey);
         
         // Write IV at the beginning of the file
         writeStream.write(iv);
@@ -552,7 +555,7 @@ export class BackupService {
         `SELECT COUNT(*) as total FROM (${query}) subq`,
         params
       );
-      const total = parseInt(countResult.rows[0].total);
+      const total = parseInt(countResult.rows[0]?.total ?? '0', 10);
 
       // Add ordering and pagination
       query += ' ORDER BY started_at DESC';
@@ -603,7 +606,7 @@ export class BackupService {
           [backup.id]
         );
         
-        if (parseInt(dependents.rows[0].count) > 0) {
+        if (parseInt(dependents.rows[0]?.count ?? '0', 10) > 0) {
           console.log(`[Backup] Skipping ${backup.id} - has dependent incrementals`);
           continue;
         }
@@ -747,11 +750,8 @@ export class BackupService {
         let result = Buffer.concat(chunks);
         
         if (this.encryptionKey) {
-          const iv = randomBytes(16);
-          const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, iv);
-          const encrypted = Buffer.concat([cipher.update(result), cipher.final()]);
-          const authTag = cipher.getAuthTag();
-          result = Buffer.concat([iv, authTag, encrypted]);
+          const encrypted = encryptBufferAES256GCM(result, this.encryptionKey);
+          result = encrypted;
         }
         
         resolve(result);
@@ -765,13 +765,11 @@ export class BackupService {
     let input = data;
 
     if (this.encryptionKey) {
-      const iv = data.subarray(0, 16);
-      const authTag = data.subarray(16, 32);
-      const encrypted = data.subarray(32);
-      
-      const decipher = createDecipheriv('aes-256-gcm', this.encryptionKey, iv);
-      decipher.setAuthTag(authTag);
-      input = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+      const decryptResult = decryptBufferAES256GCM(data, this.encryptionKey);
+      if (!decryptResult.ok) {
+        throw decryptResult.error;
+      }
+      input = decryptResult.value;
     }
 
     return new Promise((resolve, reject) => {
@@ -787,7 +785,7 @@ export class BackupService {
   }
 
   private async calculateDirectoryChecksum(dirPath: string): Promise<string> {
-    const hash = createHash('sha256');
+    const hash = createSHA256Hash();
     const files = (await fs.readdir(dirPath)).sort();
 
     for (const file of files) {

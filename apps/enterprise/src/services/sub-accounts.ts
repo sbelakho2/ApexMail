@@ -5,12 +5,10 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { config, EnterprisePlan } from '../config.js';
-
-// Result type for error handling
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+import { Result } from '@apexmail/lib';
+import { config } from '../config.js';
 
 export enum SubAccountStatus {
   ACTIVE = 'active',
@@ -237,7 +235,7 @@ export class SubAccountService {
     try {
       // Get current sub-account
       const current = await this.getSubAccount(id);
-      if (!current.ok) return { ok: false, error: current.error };
+      if (current.ok === false) return { ok: false, error: current.error };
       if (!current.value) {
         return { ok: false, error: new Error('Sub-account not found') };
       }
@@ -447,7 +445,7 @@ export class SubAccountService {
       `, [subAccountId, count]);
 
       // Update Redis counter
-      const dateKey = new Date().toISOString().split('T')[0];
+      const dateKey = new Date().toISOString().split('T')[0] || '';
       await this.redis.hincrby(`subaccount:volume:${subAccountId}`, dateKey, count);
 
       return { ok: true, value: undefined };
@@ -509,6 +507,7 @@ export class SubAccountService {
       const id = uuidv4();
       const rawKey = `sak_${uuidv4().replace(/-/g, '')}`;
       const keyPrefix = rawKey.substring(0, 12);
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const keyHash = require('crypto').createHash('sha256').update(rawKey).digest('hex');
 
       await this.pool.query(`
@@ -549,6 +548,7 @@ export class SubAccountService {
    */
   async validateAPIKey(key: string): Promise<Result<{ subAccountId: string; scopes: string[] } | null>> {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const keyHash = require('crypto').createHash('sha256').update(key).digest('hex');
 
       const result = await this.pool.query(`

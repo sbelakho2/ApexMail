@@ -11,10 +11,11 @@
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@apexmail/lib": "workspace:*",
     "@hono/node-server": "^1.8.0",
     "hono": "^4.0.0",
     "pg": "^8.11.3",

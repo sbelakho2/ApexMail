@@ -9,8 +9,9 @@
  */
 
 import { Pool, PoolClient } from 'pg';
-import Redis from 'ioredis';
-import { config, IsolationLevel } from '../config.js';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
+import { IsolationLevel } from '../config.js';
 
 export interface IsolationContext {
   organizationId: string;
@@ -42,18 +43,25 @@ export interface PolicyCondition {
   value: unknown;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class DataIsolationService {
   private db: Pool;
   private redis: Redis;
   private policies: Map<string, DataAccessPolicy[]> = new Map();
-  private schemaConnections: Map<string, Pool> = new Map();
+  // @ts-expect-error - reserved for future schema isolation
+  private _schemaConnections: Map<string, Pool> = new Map();
 
   constructor(db: Pool, redis: Redis) {
     this.db = db;
     this.redis = redis;
     this.loadPolicies();
+  }
+
+  /**
+   * Validate schema name to prevent SQL injection
+   */
+  private validateSchemaName(schemaName: string): boolean {
+    // Only allow alphanumeric, underscores, and must start with a letter or underscore
+    return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(schemaName);
   }
 
   /**
@@ -70,6 +78,11 @@ export class DataIsolationService {
 
       // Set schema search path if using schema isolation
       if (context.isolationLevel === IsolationLevel.DEDICATED_SCHEMA && context.schemaName) {
+        // Validate schema name to prevent SQL injection
+        if (!this.validateSchemaName(context.schemaName)) {
+          client.release();
+          return { ok: false, error: new Error('Invalid schema name') };
+        }
         await client.query(`SET search_path TO "${context.schemaName}", public`);
       }
 
@@ -109,7 +122,7 @@ export class DataIsolationService {
   /**
    * Validate that a query doesn't access other tenants' data
    */
-  validateQueryAccess(query: string, context: IsolationContext): Result<boolean> {
+  validateQueryAccess(query: string, _context: IsolationContext): Result<boolean> {
     const normalizedQuery = query.toLowerCase();
 
     // Check for dangerous patterns
@@ -136,7 +149,7 @@ export class DataIsolationService {
     const tenantedTables = ['emails', 'contacts', 'templates', 'campaigns', 'webhooks', 'api_keys'];
     
     for (const table of tables) {
-      if (tenantedTables.includes(table)) {
+      if (table && tenantedTables.includes(table)) {
         // Check if query includes workspace_id or organization_id filter
         const hasFilter = normalizedQuery.includes('workspace_id') || 
                          normalizedQuery.includes('organization_id');

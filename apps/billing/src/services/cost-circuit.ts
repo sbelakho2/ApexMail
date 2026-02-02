@@ -3,12 +3,12 @@
  * Real-time margin protection and cost monitoring
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 
-const logger = createLogger('cost-circuit');
+const logger = createLogger();
 
 export interface TenantCosts {
   tenantId: string;
@@ -214,7 +214,7 @@ export class CostCircuitService {
       await this.applyThrottling(tenantId);
       actions.push('Throttling applied: reduced sending rate');
 
-      logger.warn({ tenantId, margin, costs, revenue }, 'Critical margin - throttling applied');
+      logger.warn('Critical margin - throttling applied', { tenantId, margin, costs, revenue });
 
     } else if (margin < this.config.marginWarningThreshold) {
       status = 'warning';
@@ -229,7 +229,7 @@ export class CostCircuitService {
 
       actions.push('Warning notification sent');
 
-      logger.info({ tenantId, margin }, 'Low margin warning');
+      logger.info('Low margin warning', { tenantId, margin });
     }
 
     // Cache status
@@ -279,12 +279,12 @@ export class CostCircuitService {
         revenue: todayCosts.value.revenue,
       });
 
-      logger.warn({
+      logger.warn('Cost spike detected', {
         tenantId,
         todayTotal,
         yesterdayTotal,
         increasePercent,
-      }, 'Cost spike detected');
+      });
 
       return Result.ok(true);
     }
@@ -313,13 +313,24 @@ export class CostCircuitService {
       });
     }
 
-    const data = JSON.parse(cached);
-    return Result.ok({
-      status: data.status === 'critical' ? 'open' : 'closed',
-      throttled: throttled === 1,
-      margin: data.margin,
-      lastChecked: new Date(data.checkedAt),
-    });
+    try {
+      const data = JSON.parse(cached);
+      return Result.ok({
+        status: data.status === 'critical' ? 'open' : 'closed',
+        throttled: throttled === 1,
+        margin: data.margin,
+        lastChecked: new Date(data.checkedAt),
+      });
+    } catch {
+      // Invalid cached data, return default
+      await this.redis.del(`cost:status:${tenantId}`);
+      return Result.ok({
+        status: 'closed',
+        throttled: throttled === 1,
+        margin: null,
+        lastChecked: null,
+      });
+    }
   }
 
   /**
@@ -377,31 +388,46 @@ export class CostCircuitService {
 
   /**
    * Run margin check for all tenants (scheduled job)
+   * Processes in batches to prevent memory exhaustion
    */
   async runMarginChecks(): Promise<Result<{
     checked: number;
     warnings: number;
     critical: number;
   }, Error>> {
-    const tenantsResult = await this.db.query<{ id: string }>(
-      `SELECT id FROM tenants WHERE status = 'active'`
-    );
-
-    if (!tenantsResult.ok) return Result.err(tenantsResult.error);
-
+    const BATCH_SIZE = 100;
+    let offset = 0;
+    let totalChecked = 0;
     let warnings = 0;
     let critical = 0;
 
-    for (const row of tenantsResult.value.rows) {
-      const result = await this.checkMargin(row.id);
-      if (result.ok) {
-        if (result.value.status === 'warning') warnings++;
-        if (result.value.status === 'critical') critical++;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const tenantsResult = await this.db.query<{ id: string }>(
+        `SELECT id FROM tenants WHERE status = 'active' ORDER BY id LIMIT $1 OFFSET $2`,
+        [BATCH_SIZE, offset]
+      );
+
+      if (!tenantsResult.ok) return Result.err(tenantsResult.error);
+      
+      const rows = tenantsResult.value.rows;
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        const result = await this.checkMargin(row.id);
+        if (result.ok) {
+          if (result.value.status === 'warning') warnings++;
+          if (result.value.status === 'critical') critical++;
+        }
+        totalChecked++;
       }
+
+      if (rows.length < BATCH_SIZE) break;
+      offset += BATCH_SIZE;
     }
 
     return Result.ok({
-      checked: tenantsResult.value.rows.length,
+      checked: totalChecked,
       warnings,
       critical,
     });
@@ -417,27 +443,32 @@ export class CostCircuitService {
       revenue: number;
     }
   ): Promise<void> {
-    // Check for existing unresolved alert
-    const existingResult = await this.db.query<{ id: string }>(
-      `SELECT id FROM cost_alerts
-       WHERE tenant_id = $1 
-         AND alert_type = $2
-         AND resolved_at IS NULL`,
-      [tenantId, params.alertType]
-    );
-
-    if (existingResult.ok && existingResult.value.rows.length > 0) {
-      return; // Alert already exists
-    }
-
+    // Use atomic CTE to: check existing, insert alert if none exists, queue notification
     await this.db.query(
-      `INSERT INTO cost_alerts (
-        id, tenant_id, alert_type, threshold, actual,
-        costs, revenue, triggered_at, created_at
+      `WITH existing_alert AS (
+        SELECT id FROM cost_alerts
+        WHERE tenant_id = $1 
+          AND alert_type = $2
+          AND resolved_at IS NULL
+        LIMIT 1
+      ),
+      insert_alert AS (
+        INSERT INTO cost_alerts (
+          id, tenant_id, alert_type, threshold, actual,
+          costs, revenue, triggered_at, created_at
+        )
+        SELECT 
+          gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW(), NOW()
+        WHERE NOT EXISTS (SELECT 1 FROM existing_alert)
+        RETURNING id
+      ),
+      queue_notification AS (
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        SELECT gen_random_uuid(), $1, 'cost_alert', $7, 'pending', NOW()
+        WHERE EXISTS (SELECT 1 FROM insert_alert)
+        RETURNING id
       )
-      VALUES (
-        gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW(), NOW()
-      )`,
+      SELECT EXISTS (SELECT 1 FROM insert_alert) as created`,
       [
         tenantId,
         params.alertType,
@@ -445,28 +476,29 @@ export class CostCircuitService {
         params.actual,
         JSON.stringify(params.costs),
         params.revenue,
+        JSON.stringify(params),
       ]
-    );
-
-    // Queue notification
-    await this.db.query(
-      `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-       VALUES (gen_random_uuid(), $1, 'cost_alert', $2, 'pending', NOW())`,
-      [tenantId, JSON.stringify(params)]
     );
   }
 
   private async applyThrottling(tenantId: string): Promise<void> {
-    // Set throttle flag in Redis (24 hour TTL)
-    await this.redis.setex(
-      `cost:throttle:${tenantId}`,
-      24 * 60 * 60,
-      JSON.stringify({ appliedAt: new Date(), reason: 'low_margin' })
-    );
+    try {
+      // Set throttle flag in Redis (24 hour TTL)
+      await this.redis.setex(
+        `cost:throttle:${tenantId}`,
+        24 * 60 * 60,
+        JSON.stringify({ appliedAt: new Date(), reason: 'low_margin' })
+      );
 
-    // Reduce rate limit to 50% of normal
-    const currentLimit = await this.redis.get(`rate:limit:${tenantId}`);
-    const newLimit = currentLimit ? Math.floor(parseInt(currentLimit, 10) / 2) : 50;
-    await this.redis.setex(`rate:limit:${tenantId}:throttled`, 24 * 60 * 60, newLimit.toString());
+      // Reduce rate limit to 50% of normal
+      const currentLimit = await this.redis.get(`rate:limit:${tenantId}`);
+      const newLimit = currentLimit ? Math.floor(parseInt(currentLimit, 10) / 2) : 50;
+      await this.redis.setex(`rate:limit:${tenantId}:throttled`, 24 * 60 * 60, newLimit.toString());
+    } catch (error) {
+      // Log throttling failure but don't throw - degraded operation is acceptable
+      console.error(`[CostCircuit] Failed to apply throttling for tenant ${tenantId}:`, error);
+      // Re-throw if throttling is critical for cost protection
+      throw new Error(`Throttling failed for tenant ${tenantId}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 }

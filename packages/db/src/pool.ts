@@ -41,6 +41,38 @@ const DEFAULT_CONFIG: Partial<DatabaseConfig> = {
   statementTimeoutMs: 30000, // 30 seconds
 };
 
+/**
+ * Safely parse an integer from string with validation
+ * Throws an error if the value is invalid
+ */
+function parseIntSafe(value: string | undefined, defaultValue: number, name: string): number {
+  if (value === undefined || value === '') {
+    return defaultValue;
+  }
+  
+  const parsed = parseInt(value, 10);
+  
+  if (isNaN(parsed)) {
+    throw new Error(`Invalid ${name}: "${value}" is not a valid integer`);
+  }
+  
+  if (parsed < 0) {
+    throw new Error(`Invalid ${name}: "${value}" must be a non-negative integer`);
+  }
+  
+  return parsed;
+}
+
+/**
+ * Validate port number is within valid range
+ */
+function validatePort(port: number, name: string): number {
+  if (port < 1 || port > 65535) {
+    throw new Error(`Invalid ${name}: port must be between 1 and 65535, got ${port}`);
+  }
+  return port;
+}
+
 class DatabasePool {
   private pool: Pool | null = null;
   private readonly config: DatabaseConfig;
@@ -48,13 +80,26 @@ class DatabasePool {
   private isShuttingDown = false;
 
   constructor(config: Partial<DatabaseConfig> = {}) {
+    // Parse and validate port
+    const portFromEnv = process.env['DB_PORT'];
+    const portValue = config.port ?? parseIntSafe(portFromEnv, DEFAULT_CONFIG.port!, 'DB_PORT');
+    const validatedPort = validatePort(portValue, 'DB_PORT');
+
+    // Parse and validate max connections
+    const maxConnFromEnv = process.env['DB_MAX_CONNECTIONS'];
+    const maxConnValue = config.maxConnections ?? parseIntSafe(maxConnFromEnv, DEFAULT_CONFIG.maxConnections!, 'DB_MAX_CONNECTIONS');
+    
+    if (maxConnValue < 1 || maxConnValue > 1000) {
+      throw new Error(`Invalid DB_MAX_CONNECTIONS: must be between 1 and 1000, got ${maxConnValue}`);
+    }
+
     this.config = {
       host: config.host ?? process.env['DB_HOST'] ?? DEFAULT_CONFIG.host!,
-      port: config.port ?? parseInt(process.env['DB_PORT'] ?? String(DEFAULT_CONFIG.port), 10),
+      port: validatedPort,
       database: config.database ?? process.env['DB_NAME'] ?? DEFAULT_CONFIG.database!,
       user: config.user ?? process.env['DB_USER'] ?? 'postgres',
       password: config.password ?? process.env['DB_PASSWORD'] ?? '',
-      maxConnections: config.maxConnections ?? parseInt(process.env['DB_MAX_CONNECTIONS'] ?? String(DEFAULT_CONFIG.maxConnections), 10),
+      maxConnections: maxConnValue,
       idleTimeoutMs: config.idleTimeoutMs ?? DEFAULT_CONFIG.idleTimeoutMs!,
       connectionTimeoutMs: config.connectionTimeoutMs ?? DEFAULT_CONFIG.connectionTimeoutMs!,
       statementTimeoutMs: config.statementTimeoutMs ?? DEFAULT_CONFIG.statementTimeoutMs!,
@@ -212,21 +257,48 @@ const POOL_CONFIGS: Record<string, Partial<DatabaseConfig>> = {
   api: { maxConnections: 20 },
   worker: { maxConnections: 30 },
   mta: { maxConnections: 10 },
+  default: { maxConnections: 20 },
 };
 
-// Singleton pool instance
-let dbPool: DatabasePool | null = null;
+// Map of service name to pool instance for proper isolation
+const dbPools: Map<string, DatabasePool> = new Map();
 
-export function getDatabase(service?: string): DatabasePool {
-  if (!dbPool) {
-    const poolConfig = service ? POOL_CONFIGS[service] : {};
-    dbPool = new DatabasePool(poolConfig);
+/**
+ * Get a database pool for a specific service.
+ * Each service gets its own pool with appropriate connection limits.
+ * @param service - Service name ('api', 'worker', 'mta'). Defaults to 'default'.
+ * @returns DatabasePool instance for the service
+ */
+export function getDatabase(service: string = 'default'): DatabasePool {
+  const serviceName = service in POOL_CONFIGS ? service : 'default';
+  
+  let pool = dbPools.get(serviceName);
+  if (!pool) {
+    const poolConfig = POOL_CONFIGS[serviceName] ?? {};
+    pool = new DatabasePool(poolConfig);
+    dbPools.set(serviceName, pool);
   }
-  return dbPool;
+  return pool;
 }
 
+/**
+ * Create a new database pool with custom configuration.
+ * Use this when you need a pool with specific settings not covered by service defaults.
+ */
 export function createDatabase(config?: Partial<DatabaseConfig>): DatabasePool {
   return new DatabasePool(config);
+}
+
+/**
+ * Disconnect all database pools. Call during graceful shutdown.
+ */
+export async function disconnectAllPools(): Promise<void> {
+  const disconnectPromises: Promise<void>[] = [];
+  for (const pool of dbPools.values()) {
+    disconnectPromises.push(pool.disconnect());
+  }
+  await Promise.all(disconnectPromises);
+  dbPools.clear();
 }
 
 export { DatabasePool };

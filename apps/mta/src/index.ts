@@ -2,19 +2,23 @@
  * MTA Entry Point - Inbound mail, bounce, and feedback loop handling
  */
 
+import { createServer, type Server } from 'http';
 import { createLogger } from '@apexmail/lib';
-import { createPool } from '@apexmail/db';
+import { Pool } from 'pg';
 import { loadConfig } from './config.js';
 import { InboundServer } from './servers/inbound.js';
 import { BounceServer } from './servers/bounce.js';
 import { FeedbackLoopServer } from './servers/feedback-loop.js';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 const logger = createLogger({ name: 'mta' });
 const config = loadConfig();
 
 let isShuttingDown = false;
 const servers: Array<{ stop: () => Promise<void> }> = [];
+let healthServer: Server | null = null;
+let dbPool: Pool | null = null;
+let redisClient: Redis | null = null;
 
 async function main(): Promise<void> {
   logger.info('Starting ApexMail MTA', {
@@ -23,7 +27,7 @@ async function main(): Promise<void> {
   });
 
   // Create database pool
-  const db = createPool({
+  dbPool = new Pool({
     connectionString: config.database.connectionString,
     max: config.database.maxConnections,
     idleTimeoutMillis: 30000,
@@ -32,20 +36,20 @@ async function main(): Promise<void> {
 
   // Test database connection
   try {
-    const client = await db.connect();
+    const client = await dbPool.connect();
     const result = await client.query('SELECT NOW()');
     client.release();
-    logger.info('Database connected', { serverTime: result.rows[0].now });
+    logger.info('Database connected', { serverTime: result.rows[0]?.now ?? 'unknown' });
   } catch (error) {
     logger.fatal('Failed to connect to database', { error });
     process.exit(1);
   }
 
   // Create Redis client
-  const redis = new Redis(config.redis.url, {
+  redisClient = new Redis(config.redis.url, {
     keyPrefix: config.redis.keyPrefix,
     maxRetriesPerRequest: 3,
-    retryStrategy: (times) => {
+    retryStrategy: (times: number) => {
       if (times > 10) return null;
       return Math.min(times * 100, 3000);
     },
@@ -53,18 +57,21 @@ async function main(): Promise<void> {
   });
 
   try {
-    await redis.connect();
+    await redisClient.connect();
     logger.info('Redis connected');
   } catch (error) {
     logger.fatal('Failed to connect to Redis', { error });
     process.exit(1);
   }
 
+  // Start health check HTTP server for Kubernetes probes
+  await startHealthServer(config.healthPort);
+
   // Start inbound mail server
   if (config.inbound.enabled) {
     const inboundServer = new InboundServer({
-      db,
-      redis,
+      db: dbPool,
+      redis: redisClient,
       config: config.inbound,
       rateLimit: config.rateLimit,
       logger: logger.child({ server: 'inbound' }),
@@ -77,9 +84,12 @@ async function main(): Promise<void> {
   // Start bounce handling server
   if (config.bounce.enabled) {
     const bounceServer = new BounceServer({
-      db,
-      redis,
-      config: config.bounce,
+      db: dbPool,
+      redis: redisClient,
+      config: {
+        ...config.bounce,
+        maxMessageSize: config.inbound.maxMessageSize,
+      },
       logger: logger.child({ server: 'bounce' }),
     });
 
@@ -90,9 +100,12 @@ async function main(): Promise<void> {
   // Start feedback loop server
   if (config.feedback.enabled) {
     const feedbackServer = new FeedbackLoopServer({
-      db,
-      redis,
-      config: config.feedback,
+      db: dbPool,
+      redis: redisClient,
+      config: {
+        ...config.feedback,
+        maxMessageSize: config.inbound.maxMessageSize,
+      },
       logger: logger.child({ server: 'feedback' }),
     });
 
@@ -104,6 +117,67 @@ async function main(): Promise<void> {
     inbound: config.inbound.enabled,
     bounce: config.bounce.enabled,
     feedback: config.feedback.enabled,
+  });
+}
+
+/**
+ * Start HTTP health check server for Kubernetes liveness/readiness probes
+ */
+async function startHealthServer(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    healthServer = createServer(async (req, res) => {
+      if (req.url === '/health' && req.method === 'GET') {
+        // Basic liveness check
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+      } else if (req.url === '/ready' && req.method === 'GET') {
+        // Readiness check - verify DB and Redis are accessible
+        try {
+          const checks: Record<string, boolean> = {};
+          
+          // Check database
+          if (dbPool) {
+            const client = await dbPool.connect();
+            await client.query('SELECT 1');
+            client.release();
+            checks.database = true;
+          } else {
+            checks.database = false;
+          }
+          
+          // Check Redis
+          if (redisClient && redisClient.status === 'ready') {
+            await redisClient.ping();
+            checks.redis = true;
+          } else {
+            checks.redis = false;
+          }
+          
+          const allReady = Object.values(checks).every(Boolean);
+          res.writeHead(allReady ? 200 : 503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: allReady ? 'ready' : 'not_ready', checks }));
+        } catch (error) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            status: 'error', 
+            error: error instanceof Error ? error.message : 'Unknown error' 
+          }));
+        }
+      } else {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    });
+
+    healthServer.on('error', (error) => {
+      logger.error('Health server error', { error });
+      reject(error);
+    });
+
+    healthServer.listen(port, () => {
+      logger.info('Health server started', { port });
+      resolve();
+    });
   });
 }
 
@@ -122,6 +196,13 @@ async function shutdown(signal: string): Promise<void> {
   }, config.gracefulShutdownTimeout);
 
   try {
+    // Stop health server first
+    if (healthServer) {
+      await new Promise<void>((resolve) => {
+        healthServer!.close(() => resolve());
+      });
+    }
+
     // Stop all servers
     await Promise.all(servers.map(s => s.stop()));
 

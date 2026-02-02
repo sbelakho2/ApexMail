@@ -6,8 +6,8 @@
 
 import { Hono } from 'hono';
 import { TracingService } from '../services/tracing.js';
-import { MetricsService } from '../services/metrics.js';
-import { LoggingService, LogLevel } from '../services/logging.js';
+import { MetricsService, MetricType } from '../services/metrics.js';
+import { LoggingService, LogLevel, type LogEntry } from '../services/logging.js';
 import { AlertingService, AlertSeverity, AlertStatus } from '../services/alerting.js';
 import { DashboardService } from '../services/dashboards.js';
 
@@ -45,15 +45,15 @@ export function createObservabilityRoutes(
     const result = await tracing.searchTraces({
       startTime,
       endTime,
-      serviceName: service,
-      operationName: operation,
+      service,
+      operation,
       minDuration,
       tags,
       limit,
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -67,7 +67,7 @@ export function createObservabilityRoutes(
     const result = await tracing.getTrace(traceId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -87,7 +87,7 @@ export function createObservabilityRoutes(
     const result = await tracing.getTraceStats({ startTime, endTime });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -127,7 +127,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -162,7 +162,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -175,7 +175,7 @@ export function createObservabilityRoutes(
     const result = await metrics.listMetrics();
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -193,13 +193,14 @@ export function createObservabilityRoutes(
 
     const result = await metrics.recordMetric({
       name: body.name,
+      type: body.type || MetricType.GAUGE,
       value: body.value,
-      labels: body.labels,
+      labels: body.labels || {},
       timestamp: body.timestamp ? new Date(body.timestamp) : new Date(),
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json({ success: true });
@@ -234,7 +235,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -254,7 +255,7 @@ export function createObservabilityRoutes(
     const result = await logging.getLogStats({ startTime, endTime });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -270,7 +271,7 @@ export function createObservabilityRoutes(
     const result = await logging.getLogContext(logId, lines);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -282,7 +283,7 @@ export function createObservabilityRoutes(
   app.get('/logs/stream', async (c) => {
     const level = c.req.query('level') as LogLevel | undefined;
     const service = c.req.query('service');
-    const filter = c.req.query('filter');
+    void c.req.query('filter'); // Reserved for future text filtering
 
     // Set up SSE
     c.header('Content-Type', 'text/event-stream');
@@ -293,17 +294,17 @@ export function createObservabilityRoutes(
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        const unsubscribe = await logging.streamLogs(
-          { level, service, filter },
-          (log) => {
+        const subscription = await logging.streamLogs(
+          (log: LogEntry) => {
             const data = `data: ${JSON.stringify(log)}\n\n`;
             controller.enqueue(encoder.encode(data));
-          }
+          },
+          { service, minLevel: level }
         );
 
         // Clean up on close
         c.req.raw.signal.addEventListener('abort', () => {
-          unsubscribe();
+          subscription.unsubscribe();
           controller.close();
         });
       },
@@ -348,7 +349,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value, 201);
@@ -364,7 +365,7 @@ export function createObservabilityRoutes(
     const result = await alerting.updateRule(ruleId, body);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -379,7 +380,7 @@ export function createObservabilityRoutes(
     const result = await alerting.deleteRule(ruleId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json({ success: true });
@@ -396,7 +397,7 @@ export function createObservabilityRoutes(
     const result = await alerting.getActiveAlerts({ severity, status, ruleId });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -418,7 +419,7 @@ export function createObservabilityRoutes(
     const result = await alerting.getAlertHistory({ startTime, endTime, limit, offset });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -438,7 +439,7 @@ export function createObservabilityRoutes(
     const result = await alerting.getAlertStats({ startTime, endTime });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -461,7 +462,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value, 201);
@@ -477,7 +478,7 @@ export function createObservabilityRoutes(
     const result = await alerting.acknowledgeAlert(alertId, body.userId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -492,7 +493,7 @@ export function createObservabilityRoutes(
     const result = await alerting.resolveAlert(alertId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -513,7 +514,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value, 201);
@@ -533,7 +534,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value, 201);
@@ -554,7 +555,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.listDashboards({ ownerId, tags, search, limit, offset });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -591,7 +592,7 @@ export function createObservabilityRoutes(
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value, 201);
@@ -610,7 +611,7 @@ export function createObservabilityRoutes(
     );
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 400);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 400);
     }
 
     return c.json(result.value, 201);
@@ -625,7 +626,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.getDashboard(dashboardId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -641,7 +642,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.updateDashboard(dashboardId, body);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -656,7 +657,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.deleteDashboard(dashboardId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json({ success: true });
@@ -672,7 +673,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.addPanel(dashboardId, body.rowIndex || 0, body.panel);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -688,7 +689,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.removePanel(dashboardId, panelId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -726,7 +727,7 @@ export function createObservabilityRoutes(
     );
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value);
@@ -742,7 +743,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.createSnapshot(dashboardId, body.expiresInDays);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
     }
 
     return c.json(result.value, 201);
@@ -757,7 +758,7 @@ export function createObservabilityRoutes(
     const result = await dashboards.getSnapshotByKey(key);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 404);
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);

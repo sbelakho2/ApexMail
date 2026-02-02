@@ -11,7 +11,7 @@ import { prettyJSON } from 'hono/pretty-json';
 import { compress } from 'hono/compress';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 import { config } from './config.js';
 import { EAIService } from './services/eai.js';

@@ -21,11 +21,11 @@ export * from './slo/index.js';
 export * from './metrics/index.js';
 export * from './alerts/index.js';
 export * from './incidents/index.js';
-export * from './status/index.js';
+export { StatusPageService } from './status/index.js';
 export * from './trust/index.js';
 export * from './health/index.js';
 export * from './tracing/index.js';
-export * from './routes.js';
+export { createOpsRoutes, type OpsServices } from './routes.js';
 
 // Import for initialization
 import { SLOManager } from './slo/manager.js';
@@ -59,13 +59,7 @@ export interface OpsConfig {
  * Creates and configures all ops services
  */
 export function createOpsServices(config: OpsConfig): OpsServices {
-    // SLO Manager
-    const slo = new SLOManager({
-        evaluationInterval: 60000, // 1 minute
-        historyRetention: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
-
-    // Metrics Collector
+    // Metrics Collector (needs to be created first for SLOManager)
     const metrics = new MetricsCollector({
         prefix: 'apexmail',
         defaultLabels: {
@@ -74,6 +68,11 @@ export function createOpsServices(config: OpsConfig): OpsServices {
             environment: config.environment,
         },
         collectDefaultMetrics: true,
+    });
+
+    // SLO Manager
+    const slo = new SLOManager(metrics, {
+        refreshIntervalMs: 60000, // 1 minute
     });
 
     // Alert Manager
@@ -235,7 +234,7 @@ export function startOpsServer(
     services.health.start();
 
     // Start SLO evaluation
-    services.slo.startEvaluation();
+    services.slo.start();
 
     serve({
         fetch: app.fetch,
@@ -273,7 +272,7 @@ export async function main(): Promise<void> {
     process.on('SIGTERM', async () => {
         logger.info('Received SIGTERM, shutting down');
         services.health.stop();
-        services.slo.stopEvaluation();
+        services.slo.stop();
         await services.tracing.shutdown();
         process.exit(0);
     });
@@ -281,7 +280,7 @@ export async function main(): Promise<void> {
     process.on('SIGINT', async () => {
         logger.info('Received SIGINT, shutting down');
         services.health.stop();
-        services.slo.stopEvaluation();
+        services.slo.stop();
         await services.tracing.shutdown();
         process.exit(0);
     });

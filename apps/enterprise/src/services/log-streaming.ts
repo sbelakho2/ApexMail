@@ -5,9 +5,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import * as crypto from 'crypto';
+import { encryptAES256CBC, decryptAES256CBC, hmacSign } from '@apexmail/lib/crypto';
 import { config } from '../config.js';
 
 // Result type for error handling
@@ -165,13 +165,12 @@ export interface StreamBatch {
  */
 export class LogStreamingService {
   private pool: Pool;
-  private redis: Redis;
   private streamBuffers: Map<string, LogEvent[]> = new Map();
   private flushTimers: Map<string, NodeJS.Timeout> = new Map();
 
-  constructor(pool: Pool, redis: Redis) {
+  constructor(pool: Pool, _redis: Redis) {
     this.pool = pool;
-    this.redis = redis;
+    void _redis; // Reserved for future pub/sub streaming
   }
 
   /**
@@ -306,7 +305,7 @@ export class LogStreamingService {
   async verifyDestination(id: string): Promise<Result<{ success: boolean; message: string }>> {
     try {
       const streamResult = await this.getStream(id);
-      if (!streamResult.ok) return { ok: false, error: streamResult.error };
+      if (streamResult.ok === false) return { ok: false, error: streamResult.error };
 
       const stream = streamResult.value;
       const decryptedConfig = await this.decryptDestinationConfig(stream.destinationConfig);
@@ -315,29 +314,33 @@ export class LogStreamingService {
       let message = '';
 
       switch (stream.destinationType) {
-        case StreamDestinationType.S3:
+        case StreamDestinationType.S3: {
           const s3Result = await this.verifyS3(decryptedConfig as S3DestinationConfig);
           success = s3Result.success;
           message = s3Result.message;
           break;
+        }
 
-        case StreamDestinationType.WEBHOOK:
+        case StreamDestinationType.WEBHOOK: {
           const webhookResult = await this.verifyWebhook(decryptedConfig as WebhookConfig);
           success = webhookResult.success;
           message = webhookResult.message;
           break;
+        }
 
-        case StreamDestinationType.SPLUNK:
+        case StreamDestinationType.SPLUNK: {
           const splunkResult = await this.verifySplunk(decryptedConfig as SplunkConfig);
           success = splunkResult.success;
           message = splunkResult.message;
           break;
+        }
 
-        case StreamDestinationType.DATADOG:
+        case StreamDestinationType.DATADOG: {
           const datadogResult = await this.verifyDatadog(decryptedConfig as DatadogConfig);
           success = datadogResult.success;
           message = datadogResult.message;
           break;
+        }
 
         default:
           message = 'Verification not implemented for this destination type';
@@ -504,18 +507,25 @@ export class LogStreamingService {
       }
 
       const streamResult = await this.getStream(streamId);
-      if (!streamResult.ok) return { ok: false, error: streamResult.error };
+      if (streamResult.ok === false) return { ok: false, error: streamResult.error };
 
       const stream = streamResult.value;
       const events = [...buffer];
       this.streamBuffers.set(streamId, []);
 
+      const firstEvent = events[0];
+      const lastEvent = events[events.length - 1];
+      
+      if (!firstEvent || !lastEvent) {
+        return { ok: false, error: new Error('Empty batch') };
+      }
+
       const batch: StreamBatch = {
         streamId,
         batchId: uuidv4(),
         events,
-        startTime: events[0].timestamp,
-        endTime: events[events.length - 1].timestamp,
+        startTime: firstEvent.timestamp,
+        endTime: lastEvent.timestamp,
         size: JSON.stringify(events).length,
       };
 
@@ -525,29 +535,33 @@ export class LogStreamingService {
       let errorMessage: string | undefined;
 
       switch (stream.destinationType) {
-        case StreamDestinationType.S3:
+        case StreamDestinationType.S3: {
           const s3Result = await this.sendToS3(batch, decryptedConfig as S3DestinationConfig, stream.batchConfig);
           success = s3Result.success;
           errorMessage = s3Result.error;
           break;
+        }
 
-        case StreamDestinationType.WEBHOOK:
+        case StreamDestinationType.WEBHOOK: {
           const webhookResult = await this.sendToWebhook(batch, decryptedConfig as WebhookConfig);
           success = webhookResult.success;
           errorMessage = webhookResult.error;
           break;
+        }
 
-        case StreamDestinationType.SPLUNK:
+        case StreamDestinationType.SPLUNK: {
           const splunkResult = await this.sendToSplunk(batch, decryptedConfig as SplunkConfig);
           success = splunkResult.success;
           errorMessage = splunkResult.error;
           break;
+        }
 
-        case StreamDestinationType.DATADOG:
+        case StreamDestinationType.DATADOG: {
           const datadogResult = await this.sendToDatadog(batch, decryptedConfig as DatadogConfig);
           success = datadogResult.success;
           errorMessage = datadogResult.error;
           break;
+        }
 
         default:
           errorMessage = 'Unsupported destination type';
@@ -599,7 +613,7 @@ export class LogStreamingService {
   }>> {
     try {
       const stream = await this.getStream(streamId);
-      if (!stream.ok) return { ok: false, error: stream.error };
+      if (stream.ok === false) return { ok: false, error: stream.error };
 
       const batchResult = await this.pool.query(`
         SELECT
@@ -852,10 +866,7 @@ export class LogStreamingService {
 
       // Add signature if secret is configured
       if (config.secret) {
-        const signature = crypto
-          .createHmac('sha256', config.secret)
-          .update(payload)
-          .digest('hex');
+        const signature = hmacSign(config.secret, payload, 'sha256');
         headers['X-Apex-Signature'] = `sha256=${signature}`;
       }
 
@@ -987,47 +998,44 @@ export class LogStreamingService {
 
   private async encryptDestinationConfig(config: DestinationConfig): Promise<DestinationConfig> {
     const sensitiveFields = ['secretAccessKey', 'serviceAccountKey', 'connectionString', 'hecToken', 'apiKey', 'secret'];
-    const encrypted = { ...config } as any;
+    const encrypted = { ...config } as Record<string, unknown>;
 
     for (const field of sensitiveFields) {
-      if (encrypted[field]) {
-        encrypted[field] = this.encrypt(encrypted[field]);
+      const fieldValue = encrypted[field];
+      if (fieldValue && typeof fieldValue === 'string') {
+        encrypted[field] = this.encrypt(fieldValue);
       }
     }
 
-    return encrypted;
+    // Return with proper type assertion - we know the structure matches DestinationConfig
+    return encrypted as unknown as DestinationConfig;
   }
 
   private async decryptDestinationConfig(config: DestinationConfig): Promise<DestinationConfig> {
     const sensitiveFields = ['secretAccessKey', 'serviceAccountKey', 'connectionString', 'hecToken', 'apiKey', 'secret'];
-    const decrypted = { ...config } as any;
+    const decrypted = { ...config } as Record<string, unknown>;
 
     for (const field of sensitiveFields) {
-      if (decrypted[field]) {
-        decrypted[field] = this.decrypt(decrypted[field]);
+      const fieldValue = decrypted[field];
+      if (fieldValue && typeof fieldValue === 'string') {
+        decrypted[field] = this.decrypt(fieldValue);
       }
     }
 
-    return decrypted;
+    // Return with proper type assertion - we know the structure matches DestinationConfig
+    return decrypted as unknown as DestinationConfig;
   }
 
   private encrypt(text: string): string {
-    const key = crypto.scryptSync(config.logStreaming.encryptionKey, 'salt', 32);
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
-    let encrypted = cipher.update(text, 'utf8', 'hex');
-    encrypted += cipher.final('hex');
-    return iv.toString('hex') + ':' + encrypted;
+    return encryptAES256CBC(text, config.logStreaming.encryptionKey, 'salt');
   }
 
   private decrypt(text: string): string {
-    const [ivHex, encrypted] = text.split(':');
-    const key = crypto.scryptSync(config.logStreaming.encryptionKey, 'salt', 32);
-    const iv = Buffer.from(ivHex, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-    decrypted += decipher.final('utf8');
-    return decrypted;
+    const result = decryptAES256CBC(text, config.logStreaming.encryptionKey, 'salt');
+    if (!result.ok) {
+      throw result.error;
+    }
+    return result.value;
   }
 
   /**

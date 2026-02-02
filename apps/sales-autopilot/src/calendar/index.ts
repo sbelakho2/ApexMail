@@ -17,3 +17,5 @@ export {
     generateIcsFile,
     parseTimeRequest,
 } from './scheduler.js';
+
+export type { IcsSlotData } from './scheduler.js';

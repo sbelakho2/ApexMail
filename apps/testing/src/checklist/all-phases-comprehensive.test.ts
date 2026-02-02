@@ -682,7 +682,9 @@ describe('Phase 12: Developer Experience', () => {
 
         it('should implement HMAC-SHA256 signature', () => {
             const content = readFile('apps/devex/src/services/webhooks.ts');
-            expect(content).toContain('createHmac');
+            // Uses either raw createHmac or hmacSign wrapper
+            const usesHmac = content.includes('createHmac') || content.includes('hmacSign');
+            expect(usesHmac).toBe(true);
             expect(content).toContain('sha256');
         });
 

@@ -145,14 +145,14 @@ export const useCampaignStore = create<CampaignState>()(
                 }),
             updateCampaign: (id, updates) =>
                 set((state) => {
-                    const index = state.campaigns.findIndex((c) => c.id === id);
+                    const index = state.campaigns.findIndex((c: Campaign) => c.id === id);
                     if (index !== -1) {
                         state.campaigns[index] = { ...state.campaigns[index], ...updates };
                     }
                 }),
             deleteCampaign: (id) =>
                 set((state) => {
-                    state.campaigns = state.campaigns.filter((c) => c.id !== id);
+                    state.campaigns = state.campaigns.filter((c: Campaign) => c.id !== id);
                 }),
             setCurrentCampaign: (campaign) =>
                 set((state) => {
@@ -231,17 +231,17 @@ export const useContactStore = create<ContactState>()(
                 }),
             updateContact: (id, updates) =>
                 set((state) => {
-                    const index = state.contacts.findIndex((c) => c.id === id);
+                    const index = state.contacts.findIndex((c: Contact) => c.id === id);
                     if (index !== -1) {
                         state.contacts[index] = { ...state.contacts[index], ...updates };
                     }
                 }),
             deleteContacts: (ids) =>
                 set((state) => {
-                    state.contacts = state.contacts.filter((c) => !ids.includes(c.id));
+                    state.contacts = state.contacts.filter((c: Contact) => !ids.includes(c.id));
                     state.totalCount -= ids.length;
                     state.selectedContactIds = state.selectedContactIds.filter(
-                        (id) => !ids.includes(id)
+                        (id: string) => !ids.includes(id)
                     );
                 }),
             setCurrentPage: (page) =>
@@ -269,11 +269,11 @@ export const useContactStore = create<ContactState>()(
                 }),
             deselectContact: (id) =>
                 set((state) => {
-                    state.selectedContactIds = state.selectedContactIds.filter((i) => i !== id);
+                    state.selectedContactIds = state.selectedContactIds.filter((i: string) => i !== id);
                 }),
             selectAll: () =>
                 set((state) => {
-                    state.selectedContactIds = state.contacts.map((c) => c.id);
+                    state.selectedContactIds = state.contacts.map((c: Contact) => c.id);
                 }),
             deselectAll: () =>
                 set((state) => {
@@ -323,7 +323,7 @@ export const useNotificationStore = create<NotificationState>()(
                 }),
             markAsRead: (id) =>
                 set((state) => {
-                    const notification = state.notifications.find((n) => n.id === id);
+                    const notification = state.notifications.find((n: Notification) => n.id === id);
                     if (notification && !notification.read) {
                         notification.read = true;
                         state.unreadCount -= 1;
@@ -331,14 +331,14 @@ export const useNotificationStore = create<NotificationState>()(
                 }),
             markAllAsRead: () =>
                 set((state) => {
-                    state.notifications.forEach((n) => {
+                    state.notifications.forEach((n: Notification) => {
                         n.read = true;
                     });
                     state.unreadCount = 0;
                 }),
             removeNotification: (id) =>
                 set((state) => {
-                    const index = state.notifications.findIndex((n) => n.id === id);
+                    const index = state.notifications.findIndex((n: Notification) => n.id === id);
                     if (index !== -1) {
                         if (!state.notifications[index].read) {
                             state.unreadCount -= 1;

@@ -5,15 +5,12 @@ import {
     Send,
     Users,
     Mail,
-    TrendingUp,
     ArrowUpRight,
     ArrowDownRight,
     MoreHorizontal,
     Eye,
     MousePointer,
-    AlertCircle,
     Calendar,
-    Target,
     Zap,
 } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
@@ -21,7 +18,6 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { Avatar, AvatarFallback, AvatarImage, AvatarGroup } from '@/components/ui/avatar';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -187,12 +183,12 @@ export default function DashboardPage() {
                     <Card key={stat.title}>
                         <CardContent className="p-6">
                             <div className="flex items-center justify-between">
-                                <div className={cn('rounded-lg p-2', stat.bgColor)}>
+                                <div className={cn('rounded-sm p-2', stat.bgColor)}>
                                     <stat.icon className={cn('h-5 w-5', stat.color)} />
                                 </div>
                                 <div
                                     className={cn(
-                                        'flex items-center text-sm font-medium',
+                                        'flex items-center text-sm font-bold tabular-nums',
                                         stat.changeType === 'positive'
                                             ? 'text-success'
                                             : 'text-destructive'
@@ -208,7 +204,7 @@ export default function DashboardPage() {
                             </div>
                             <div className="mt-4">
                                 <p className="text-sm text-muted-foreground">{stat.title}</p>
-                                <p className="text-2xl font-bold">
+                                <p className="text-2xl font-bold tabular-nums">
                                     {stat.isPercent
                                         ? formatPercent(stat.value / 100)
                                         : formatNumber(stat.value)}
@@ -225,8 +221,8 @@ export default function DashboardPage() {
                     data={engagementData}
                     xKey="date"
                     areas={[
-                        { key: 'opens', name: 'Opens', color: '#6366f1' },
-                        { key: 'clicks', name: 'Clicks', color: '#22c55e' },
+                        { key: 'opens', name: 'Opens', color: '#2563EB' },
+                        { key: 'clicks', name: 'Clicks', color: '#10B981' },
                     ]}
                     title="Engagement This Week"
                     description="Opens and clicks over the past 7 days"
@@ -236,7 +232,7 @@ export default function DashboardPage() {
                 <ApexBarChart
                     data={subscriberGrowth}
                     xKey="month"
-                    bars={[{ key: 'subscribers', name: 'Subscribers', color: '#6366f1' }]}
+                    bars={[{ key: 'subscribers', name: 'Subscribers', color: '#2563EB' }]}
                     title="Subscriber Growth"
                     description="Total subscribers over the past 6 months"
                     height={300}
@@ -338,7 +334,7 @@ export default function DashboardPage() {
                                     <div className="flex items-center gap-3">
                                         <div
                                             className={cn(
-                                                'flex h-8 w-8 items-center justify-center rounded-lg text-sm font-bold text-white',
+                                                'flex h-8 w-8 items-center justify-center rounded-sm text-sm font-bold text-white',
                                                 index === 0
                                                     ? 'bg-primary'
                                                     : index === 1

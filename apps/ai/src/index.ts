@@ -23,7 +23,8 @@ export * from './analytics/index.js';
 export { app } from './routes.js';
 
 // Start server if running directly
-const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+// Check if this module is the entry point
+const isMainModule = typeof require !== 'undefined' && require.main === module;
 
 if (isMainModule) {
     console.log(`

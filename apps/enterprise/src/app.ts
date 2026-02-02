@@ -10,7 +10,7 @@ import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { createEnterpriseRoutes } from './routes/enterprise.js';
 import { config } from './config.js';
 
@@ -19,13 +19,25 @@ import { LogStreamingService } from './services/log-streaming.js';
 import { SupportService } from './services/support.js';
 import { TemplateApprovalService } from './services/template-approval.js';
 
+// Define Hono environment types for c.set/c.get
+type Variables = {
+  requestId: string;
+  accountId: string;
+  userId: string;
+  scopes: string[];
+};
+
+type Env = {
+  Variables: Variables;
+};
+
 export interface AppDependencies {
   pool: Pool;
   redis: Redis;
 }
 
 export function createApp(deps: AppDependencies) {
-  const app = new Hono();
+  const app = new Hono<Env>();
   const { pool, redis } = deps;
 
   // Middleware
@@ -294,7 +306,8 @@ export class BackgroundJobScheduler {
       },
     };
 
-    return configs[plan]?.[priority] || configs.starter[priority] || configs.starter.low;
+    const starterConfig = configs['starter']!;
+    return configs[plan]?.[priority] || starterConfig[priority] || starterConfig['low']!;
   }
 
   private async notifySLABreach(ticketId: string, breachType: string) {

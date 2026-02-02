@@ -7,20 +7,19 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
-import { Pool } from 'pg';
-import Redis from 'ioredis';
-import { config } from './config.js';
-import { getStripeClient } from './lib/stripe-client.js';
+import { createDatabase, DatabasePool } from '@apexmail/db';
+import { Redis } from 'ioredis';
+import { config, loadConfig } from './config.js';
 import {
   MeteringService,
   UsageAlertsService,
   PlansService,
-  ProrationService,
+  ProrationEngine,
   InvoiceService,
-  StripeIntegrationService,
+  StripeService,
   DunningService,
   SlaCreditsService,
-  EnterpriseContractsService,
+  EnterpriseContractService,
   WalletService,
   ViralLoopService,
   CostCircuitService,
@@ -43,40 +42,42 @@ export interface BillingEnv {
 }
 
 export interface BillingContext {
-  db: Pool;
+  db: DatabasePool;
   redis: Redis;
   metering: MeteringService;
   usageAlerts: UsageAlertsService;
   plans: PlansService;
-  proration: ProrationService;
+  proration: ProrationEngine;
   invoices: InvoiceService;
-  stripe: StripeIntegrationService;
+  stripe: StripeService;
   dunning: DunningService;
   slaCredits: SlaCreditsService;
-  contracts: EnterpriseContractsService;
+  contracts: EnterpriseContractService;
   wallet: WalletService;
   viralLoop: ViralLoopService;
   costCircuit: CostCircuitService;
 }
 
 export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
+  // Load config first
+  loadConfig();
+
   // Initialize connections
-  const db = new Pool({ connectionString: config.databaseUrl });
+  const db = createDatabase();
   const redis = new Redis(config.redisUrl);
-  const stripe = getStripeClient();
 
   // Initialize services
   const metering = new MeteringService(db, redis);
-  const usageAlerts = new UsageAlertsService(db, redis);
+  const usageAlerts = new UsageAlertsService(db, redis, metering);
   const plans = new PlansService(db);
-  const proration = new ProrationService(db);
+  const proration = new ProrationEngine(db, plans);
   const invoices = new InvoiceService(db);
-  const stripeIntegration = new StripeIntegrationService(db, stripe);
+  const stripeIntegration = new StripeService(db);
   const dunning = new DunningService(db, redis);
   const slaCredits = new SlaCreditsService(db);
-  const contracts = new EnterpriseContractsService(db);
-  const wallet = new WalletService(db);
-  const viralLoop = new ViralLoopService(db);
+  const contracts = new EnterpriseContractService(db);
+  const wallet = new WalletService(db, redis);
+  const viralLoop = new ViralLoopService(db, redis);
   const costCircuit = new CostCircuitService(db, redis);
 
   const ctx: BillingContext = {
@@ -167,7 +168,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
 
     c.set('tenantId', tenantId);
 
-    await next();
+    return next();
   });
 
   // API routes
@@ -206,7 +207,13 @@ interface TokenResult {
 async function verifyToken(ctx: BillingContext, token: string): Promise<TokenResult> {
   // Check if it's an API key
   if (token.startsWith('apx_')) {
-    const result = await ctx.db.query(
+    const result = await ctx.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string;
+      scopes: string[];
+      admin_access: boolean;
+    }>(
       `SELECT ak.id, ak.tenant_id, ak.user_id, ak.scopes, t.admin_access
        FROM api_keys ak
        JOIN tenants t ON ak.tenant_id = t.id
@@ -214,11 +221,11 @@ async function verifyToken(ctx: BillingContext, token: string): Promise<TokenRes
       [hashApiKey(token)]
     );
 
-    if (result.rows.length === 0) {
+    if (!result.ok || result.value.rows.length === 0) {
       return { valid: false, userId: '', isAdmin: false };
     }
 
-    const row = result.rows[0];
+    const row = result.value.rows[0]!;
     return {
       valid: true,
       userId: row.user_id,
@@ -228,11 +235,11 @@ async function verifyToken(ctx: BillingContext, token: string): Promise<TokenRes
     };
   }
 
-  // Otherwise, treat as JWT
+  // Otherwise, treat as JWT - SECURITY: Now properly verifies signature
   try {
-    const decoded = decodeJwt(token);
+    const decoded = verifyJwt(token);
 
-    if (!decoded || decoded.exp < Date.now() / 1000) {
+    if (!decoded) {
       return { valid: false, userId: '', isAdmin: false };
     }
 
@@ -249,6 +256,7 @@ async function verifyToken(ctx: BillingContext, token: string): Promise<TokenRes
 }
 
 function hashApiKey(key: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const crypto = require('crypto');
   return crypto.createHash('sha256').update(key).digest('hex');
 }
@@ -260,14 +268,61 @@ interface JwtPayload {
   exp: number;
 }
 
-function decodeJwt(token: string): JwtPayload | null {
+/**
+ * SECURITY: Properly verify JWT signature to prevent token forgery
+ * The signature is verified using HMAC-SHA256 with timing-safe comparison
+ */
+function verifyJwt(token: string): JwtPayload | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
 
-    const payload = Buffer.from(parts[1], 'base64url').toString('utf-8');
-    return JSON.parse(payload);
-  } catch {
+    const [headerB64, payloadB64, signatureB64] = parts;
+    if (!headerB64 || !payloadB64 || !signatureB64) return null;
+
+    // Decode and validate header - prevent algorithm confusion attack
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8'));
+    if (header.alg !== 'HS256') {
+      console.error('[JWT] Invalid algorithm:', header.alg);
+      return null;
+    }
+
+    // Get JWT secret from config - MUST be set in production
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) {
+      console.error('[JWT] JWT_SECRET not configured');
+      return null;
+    }
+
+    // Compute expected signature
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const crypto = require('crypto');
+    const expectedSignature = crypto
+      .createHmac('sha256', jwtSecret)
+      .update(`${headerB64}.${payloadB64}`)
+      .digest('base64url');
+
+    // Timing-safe comparison to prevent timing attacks
+    const sigBuffer = Buffer.from(signatureB64);
+    const expectedBuffer = Buffer.from(expectedSignature);
+    
+    if (sigBuffer.length !== expectedBuffer.length || 
+        !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+      console.error('[JWT] Signature verification failed');
+      return null;
+    }
+
+    // Decode and validate payload
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+    
+    // Validate expiration
+    if (!payload.exp || payload.exp < Date.now() / 1000) {
+      return null;
+    }
+
+    return payload as JwtPayload;
+  } catch (error) {
+    console.error('[JWT] Verification error:', error instanceof Error ? error.message : 'Unknown');
     return null;
   }
 }

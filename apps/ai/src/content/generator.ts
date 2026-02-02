@@ -10,7 +10,6 @@ import type {
     ContentGenerationRequest,
     ContentGenerationResult,
     ContentType,
-    ContentStyle,
     ContentAnalysis,
     SubjectLineRequest,
     SubjectLineResult,
@@ -26,7 +25,7 @@ import type {
  * Content generation configuration
  */
 export interface ContentGeneratorConfig {
-    defaultStyle: ContentStyle;
+    defaultStyle: string;
     maxSubjectLength: number;
     maxPreheaderLength: number;
     enableEmoji: boolean;
@@ -138,17 +137,18 @@ export class ContentGenerator {
             let analysis: ContentAnalysis;
 
             switch (request.type) {
-                case 'subject_line':
+                case 'subject_line': {
                     const subjectResult = await this.generateSubjectLines({
-                        topic: request.topic,
-                        tone: request.style || this.config.defaultStyle,
+                        topic: request.topic ?? '',
+                        tone: typeof request.style === 'string' ? request.style : this.config.defaultStyle,
                         industry: request.industry || this.config.industryContext,
                         keywords: request.keywords,
                         count: request.variants || 5,
                     });
-                    content = subjectResult.variants.map((v) => v.text).join('\n');
+                    content = subjectResult.variants.map((v) => v.text ?? '').join('\n');
                     analysis = this.buildAnalysis(content, request.type);
                     break;
+                }
 
                 case 'preheader':
                     content = await this.generatePreheader(request);
@@ -203,12 +203,13 @@ export class ContentGenerator {
     async generateSubjectLines(request: SubjectLineRequest): Promise<SubjectLineResult> {
         const startTime = Date.now();
         const variants: SubjectLineVariant[] = [];
+        const requestCount = request.count ?? 5;
 
         // Select appropriate patterns based on tone
-        const selectedPatterns = this.selectPatterns(request.tone);
+        const selectedPatterns = this.selectPatterns(request.tone ?? 'professional');
 
         // Generate variants from patterns
-        for (let i = 0; i < request.count && i < selectedPatterns.length; i++) {
+        for (let i = 0; i < requestCount && i < selectedPatterns.length; i++) {
             const pattern = selectedPatterns[i];
             const text = this.fillPattern(pattern, request);
 
@@ -217,14 +218,14 @@ export class ContentGenerator {
 
             variants.push({
                 text: this.trimToLength(text, this.config.maxSubjectLength),
-                score: analysis.score,
+                score: analysis.score ?? 0,
                 analysis,
             });
         }
 
         // Generate AI-powered variants if needed
-        if (variants.length < request.count) {
-            const aiVariants = await this.generateAISubjectLines(request, request.count - variants.length);
+        if (variants.length < requestCount) {
+            const aiVariants = await this.generateAISubjectLines(request, requestCount - variants.length);
             variants.push(...aiVariants);
         }
 
@@ -341,7 +342,7 @@ export class ContentGenerator {
             if (content.length > 60) {
                 suggestions.push('Subject line is too long - keep under 60 characters');
             }
-            if (!content.match(/[?!🔥⏰🎉]/)) {
+            if (!content.match(/[?!🔥⏰🎉]/u)) {
                 suggestions.push('Consider adding urgency or emotion with punctuation or emoji');
             }
         }
@@ -512,7 +513,7 @@ Return only the subject lines, one per line.`;
                 const analysis = this.analyzeSubjectLine(text);
                 return {
                     text: this.trimToLength(text, this.config.maxSubjectLength),
-                    score: analysis.score,
+                    score: analysis.score ?? 0,
                     analysis,
                 };
             });
@@ -646,7 +647,6 @@ Write only the P.S. line (including "P.S.").`;
     private buildAnalysis(content: string, type: ContentType): ContentAnalysis {
         const words = content.split(/\s+/).filter(Boolean);
         const sentences = content.split(/[.!?]+/).filter(Boolean);
-        const avgWordsPerSentence = words.length / (sentences.length || 1);
 
         // Flesch-Kincaid readability approximation
         const syllables = this.countSyllables(content);

@@ -1,16 +1,14 @@
 /**
  * Rate Limiter Middleware using Redis
+ * 
+ * SECURITY: Uses atomic Redis INCR operations to prevent TOCTOU race conditions
+ * that could allow rate limit bypass under concurrent requests.
  */
 
 import type { MiddlewareHandler } from 'hono';
 import type { AppEnv, AppContext } from '../app.js';
 import { createCache } from '@apexmail/lib/cache';
 import { ApiError } from './error-handler.js';
-
-interface RateLimitState {
-  count: number;
-  resetAt: number;
-}
 
 export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
   let cache: ReturnType<typeof createCache> | null = null;
@@ -51,18 +49,16 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
       const windowEnd = windowStart + windowMs;
       const key = `${limitKey}:${windowStart}`;
 
-      // Get current count (returns null if not found)
-      const current = await redisCache.get<RateLimitState>(key);
-
-      let count: number;
-      if (current) {
-        count = current.count + 1;
-      } else {
-        count = 1;
+      // SECURITY FIX: Use atomic INCR operation to prevent race conditions
+      // Previous implementation used GET + SET which allowed concurrent requests
+      // to read the same count and bypass the rate limit (TOCTOU vulnerability)
+      const count = await redisCache.incr(key);
+      
+      // Set TTL only on first increment (when count is 1)
+      // This ensures the key expires after the window ends
+      if (count === 1) {
+        await redisCache.expire(key, Math.ceil(windowMs / 1000) + 1);
       }
-
-      // Update count with TTL
-      await redisCache.set(key, { count, resetAt: windowEnd }, { ttlSeconds: Math.ceil(windowMs / 1000) + 1 });
 
       // Set rate limit headers
       const remaining = Math.max(0, maxRequests - count);
@@ -164,21 +160,23 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
       const currentKey = `${key}:${currentWindow}`;
       const previousKey = `${key}:${previousWindow}`;
 
-      const [currentCountData, previousCountData] = await Promise.all([
-        redisCache.get<{ count: number }>(currentKey),
-        redisCache.get<{ count: number }>(previousKey),
-      ]);
-
-      const currentCount = currentCountData?.count ?? 0;
+      // SECURITY FIX: Get previous count first, then atomically increment current
+      // This ensures we don't have a race condition on the current window count
+      const previousCountData = await redisCache.get<{ count: number }>(previousKey);
       const previousCount = previousCountData?.count ?? 0;
+
+      // Atomic increment for current window count
+      const currentCount = await redisCache.incr(currentKey);
+      
+      // Set TTL only on first increment
+      if (currentCount === 1) {
+        await redisCache.expire(currentKey, Math.ceil(windowMs * 2 / 1000));
+      }
 
       // Calculate weighted count based on time into current window
       const windowProgress = (now % windowMs) / windowMs;
       const weightedPreviousCount = previousCount * (1 - windowProgress);
       const totalCount = currentCount + weightedPreviousCount;
-
-      // Update current window count
-      await redisCache.set(currentKey, { count: currentCount + 1 }, { ttlSeconds: Math.ceil(windowMs * 2 / 1000) });
 
       // Set headers
       const remaining = Math.max(0, Math.floor(maxRequests - totalCount));

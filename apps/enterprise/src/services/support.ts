@@ -5,12 +5,10 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { config, TicketPriority, EnterprisePlan } from '../config.js';
-
-// Result type for error handling
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+import { Result } from '@apexmail/lib';
+import { TicketPriority, EnterprisePlan } from '../config.js';
 
 export enum TicketStatus {
   OPEN = 'open',
@@ -557,7 +555,7 @@ export class SupportService {
   ): Promise<Result<SupportTicket>> {
     try {
       const ticketResult = await this.getTicket(ticketId);
-      if (!ticketResult.ok) return { ok: false, error: ticketResult.error };
+      if (ticketResult.ok === false) return { ok: false, error: ticketResult.error };
 
       const ticket = ticketResult.value;
 
@@ -851,34 +849,39 @@ export class SupportService {
   }
 
   private getSLAConfig(plan: EnterprisePlan, priority: TicketPriority): SLAConfig {
-    const slaConfigs: Record<EnterprisePlan, Record<TicketPriority, { firstResponse: number; resolution: number; escalation: number }>> = {
-      [EnterprisePlan.STARTER]: {
-        [TicketPriority.CRITICAL]: { firstResponse: 240, resolution: 1440, escalation: 480 },
-        [TicketPriority.HIGH]: { firstResponse: 480, resolution: 2880, escalation: 960 },
-        [TicketPriority.NORMAL]: { firstResponse: 1440, resolution: 5760, escalation: 2880 },
-        [TicketPriority.LOW]: { firstResponse: 2880, resolution: 10080, escalation: 5760 },
-      },
-      [EnterprisePlan.BUSINESS]: {
-        [TicketPriority.CRITICAL]: { firstResponse: 60, resolution: 480, escalation: 120 },
-        [TicketPriority.HIGH]: { firstResponse: 120, resolution: 960, escalation: 240 },
-        [TicketPriority.NORMAL]: { firstResponse: 480, resolution: 2880, escalation: 960 },
-        [TicketPriority.LOW]: { firstResponse: 1440, resolution: 5760, escalation: 2880 },
-      },
-      [EnterprisePlan.ENTERPRISE]: {
-        [TicketPriority.CRITICAL]: { firstResponse: 15, resolution: 120, escalation: 30 },
-        [TicketPriority.HIGH]: { firstResponse: 30, resolution: 240, escalation: 60 },
-        [TicketPriority.NORMAL]: { firstResponse: 120, resolution: 960, escalation: 240 },
-        [TicketPriority.LOW]: { firstResponse: 480, resolution: 2880, escalation: 960 },
-      },
-      [EnterprisePlan.CUSTOM]: {
-        [TicketPriority.CRITICAL]: { firstResponse: 10, resolution: 60, escalation: 15 },
-        [TicketPriority.HIGH]: { firstResponse: 15, resolution: 120, escalation: 30 },
-        [TicketPriority.NORMAL]: { firstResponse: 60, resolution: 480, escalation: 120 },
-        [TicketPriority.LOW]: { firstResponse: 240, resolution: 1440, escalation: 480 },
-      },
+    // SLA response times based on plan and priority (in minutes)
+    type SLATimes = { firstResponse: number; resolution: number; escalation: number };
+    
+    // Default SLA times for each priority level
+    const defaultSLA: Record<string, SLATimes> = {
+      critical: { firstResponse: 240, resolution: 1440, escalation: 480 },
+      high: { firstResponse: 480, resolution: 2880, escalation: 960 },
+      normal: { firstResponse: 1440, resolution: 5760, escalation: 2880 },
+      low: { firstResponse: 2880, resolution: 10080, escalation: 5760 },
+      p1: { firstResponse: 60, resolution: 240, escalation: 120 },
+      p2: { firstResponse: 240, resolution: 960, escalation: 480 },
+      p3: { firstResponse: 1440, resolution: 4320, escalation: 2160 },
+      p4: { firstResponse: 2880, resolution: 10080, escalation: 5760 },
     };
 
-    const cfg = slaConfigs[plan][priority];
+    // Plan-specific multipliers (lower = faster response)
+    const planMultipliers: Record<string, number> = {
+      starter: 1.0,
+      scale: 0.75,
+      business: 0.5,
+      enterprise: 0.125,
+      private: 0.125,
+      custom: 0.1,
+    };
+
+    const multiplier = planMultipliers[plan] || 1.0;
+    const baseSLA = defaultSLA[priority] || defaultSLA['normal']!;
+
+    const cfg = {
+      firstResponse: Math.round(baseSLA!.firstResponse * multiplier),
+      resolution: Math.round(baseSLA!.resolution * multiplier),
+      escalation: Math.round(baseSLA!.escalation * multiplier),
+    };
 
     return {
       firstResponseMinutes: cfg.firstResponse,
@@ -905,6 +908,9 @@ export class SupportService {
     category: TicketCategory,
     priority: TicketPriority
   ): Promise<void> {
+    // Priority used for future intelligent routing
+    void priority;
+    
     // Find available agent with matching specialization and capacity
     const result = await this.pool.query(`
       SELECT a.id FROM ent_support_agents a

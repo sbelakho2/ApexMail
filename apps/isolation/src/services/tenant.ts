@@ -9,8 +9,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
+import { Result } from '@apexmail/lib';
 import { config, IsolationLevel, QuotaConfig } from '../config.js';
 
 export enum TenantStatus {
@@ -102,17 +103,16 @@ export enum TenantRole {
   VIEWER = 'viewer',
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class TenantService {
   private db: Pool;
-  private redis: Redis;
+  // @ts-expect-error - reserved for future caching
+  private _redis: Redis;
   private orgCache: Map<string, Organization> = new Map();
   private workspaceCache: Map<string, Workspace> = new Map();
 
   constructor(db: Pool, redis: Redis) {
     this.db = db;
-    this.redis = redis;
+    this._redis = redis;
   }
 
   // ==================== Organization Management ====================
@@ -341,7 +341,7 @@ export class TenantService {
       'SELECT COUNT(*) as count FROM iso_workspaces WHERE organization_id = $1',
       [data.organizationId]
     );
-    const currentCount = parseInt(countResult.rows[0].count);
+    const currentCount = parseInt(countResult.rows[0]?.count ?? '0', 10);
     if (currentCount >= config.tenant.maxWorkspacesPerOrg) {
       return { ok: false, error: new Error('Maximum workspace limit reached') };
     }
@@ -654,7 +654,7 @@ export class TenantService {
       'SELECT COUNT(*) as count FROM iso_workspace_members WHERE workspace_id = $1',
       [workspaceId]
     );
-    const currentCount = parseInt(countResult.rows[0].count);
+    const currentCount = parseInt(countResult.rows[0]?.count ?? '0', 10);
     if (currentCount >= config.tenant.maxUsersPerWorkspace) {
       return { ok: false, error: new Error('Maximum member limit reached') };
     }

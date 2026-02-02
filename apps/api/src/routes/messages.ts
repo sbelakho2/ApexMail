@@ -129,6 +129,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
       tenantId,
       userId: userId ?? undefined,
       idempotencyKey: idempotencyKey ?? undefined,
+      domainId: domainResult.value.id,
       fromEmail: input.from.email,
       fromName: input.from.name,
       replyTo: input.replyTo,
@@ -259,6 +260,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
         const createResult = await messagesRepo.create({
           tenantId,
           userId: userId ?? undefined,
+          domainId: domainResult.value.id,
           fromEmail: input.from.email,
           fromName: input.from.name,
           replyTo: input.replyTo,

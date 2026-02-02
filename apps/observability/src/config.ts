@@ -40,18 +40,43 @@ export interface AlertConfig {
   cooldownMinutes: number;
 }
 
+// Validate required environment variables in production
+function getRequiredEnv(name: string, defaultValue?: string): string {
+  const value = process.env[name] || defaultValue;
+  if (!value && process.env.NODE_ENV === 'production') {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value || '';
+}
+
+// Check for insecure default credentials in production
+function validateProductionSecurity(): void {
+  if (process.env.NODE_ENV === 'production') {
+    const dbPassword = process.env.DB_PASSWORD;
+    if (!dbPassword) {
+      throw new Error('DB_PASSWORD must be set in production');
+    }
+    if (dbPassword === 'apexmail' || dbPassword === 'password' || dbPassword.length < 8) {
+      throw new Error('DB_PASSWORD appears to be a weak/default password. Use a strong password in production.');
+    }
+  }
+}
+
+// Run security validation on module load
+validateProductionSecurity();
+
 export const config = {
   // Server config
   port: parseInt(process.env.OBSERVABILITY_PORT || '4400'),
   environment: process.env.NODE_ENV || 'development',
   version: process.env.APP_VERSION || '1.0.0',
   
-  // Database
+  // Database - require password in production, allow defaults only in dev
   dbHost: process.env.DB_HOST || 'localhost',
   dbPort: parseInt(process.env.DB_PORT || '5432'),
   database: process.env.DB_NAME || 'apexmail',
   dbUser: process.env.DB_USER || 'apexmail',
-  dbPassword: process.env.DB_PASSWORD || 'apexmail',
+  dbPassword: getRequiredEnv('DB_PASSWORD', process.env.NODE_ENV === 'production' ? undefined : 'apexmail'),
   dbPoolMax: parseInt(process.env.DB_POOL_MAX || '20'),
   
   // Redis

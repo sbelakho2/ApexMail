@@ -16,6 +16,7 @@ import { StatusPageService } from './status/page.js';
 import { TrustCenterService } from './trust/center.js';
 import { HealthChecker } from './health/checker.js';
 import { TracingService } from './tracing/tracer.js';
+import { WarmupManager } from './warmup/manager.js';
 
 export interface OpsServices {
     slo: SLOManager;
@@ -26,6 +27,7 @@ export interface OpsServices {
     trustCenter: TrustCenterService;
     health: HealthChecker;
     tracing: TracingService;
+    warmup?: WarmupManager;
 }
 
 export function createOpsRoutes(services: OpsServices): Hono {
@@ -77,12 +79,12 @@ export function createOpsRoutes(services: OpsServices): Hono {
 
     // SLO endpoints
     app.get('/slo', (c) => {
-        const slos = services.slo.getSLOStatuses();
+        const slos = services.slo.getAllStatuses();
         return c.json({ slos });
     });
 
     app.get('/slo/:id', (c) => {
-        const status = services.slo.getSLOStatus(c.req.param('id'));
+        const status = services.slo.getStatus(c.req.param('id'));
         if (!status) {
             return c.json({ error: 'SLO not found' }, 404);
         }
@@ -90,17 +92,17 @@ export function createOpsRoutes(services: OpsServices): Hono {
     });
 
     app.get('/slo/:id/history', (c) => {
-        const slo = services.slo.getSLO(c.req.param('id'));
-        if (!slo) {
+        const status = services.slo.getStatus(c.req.param('id'));
+        if (!status) {
             return c.json({ error: 'SLO not found' }, 404);
         }
-        const history = services.slo.getErrorBudgetHistory(c.req.param('id'));
-        return c.json({ sloId: c.req.param('id'), history });
+        const report = services.slo.getErrorBudgetReport(c.req.param('id'));
+        return c.json({ sloId: c.req.param('id'), history: report });
     });
 
     app.get('/slo/report/summary', (c) => {
-        const report = services.slo.generateReport();
-        return c.json(report);
+        const statuses = services.slo.getAllStatuses();
+        return c.json({ statuses });
     });
 
     // Alert endpoints
@@ -182,7 +184,7 @@ export function createOpsRoutes(services: OpsServices): Hono {
         const body = await c.req.json<{
             title: string;
             description: string;
-            severity: 'critical' | 'high' | 'medium' | 'low';
+            severity: 'critical' | 'high' | 'medium' | 'low' | 'sev1' | 'sev2' | 'sev3' | 'sev4';
             affectedServices: string[];
             reportedBy: string;
         }>();
@@ -407,11 +409,90 @@ export function createOpsRoutes(services: OpsServices): Hono {
         return c.json(state);
     });
 
+    // ========================================
+    // IP WARMUP MANAGEMENT ENDPOINTS
+    // ========================================
+
+    // Get warmup schedule info
+    app.get('/warmup/schedules', (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        return c.json(services.warmup.getWarmupScheduleInfo());
+    });
+
+    // Get all IP pools status
+    app.get('/warmup/pools', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        const pools = await services.warmup.getAllPoolsStatus();
+        return c.json({ pools });
+    });
+
+    // Get warmup status for a specific pool
+    app.get('/warmup/pools/:poolId', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        const ips = await services.warmup.getPoolWarmupStatus(c.req.param('poolId'));
+        return c.json({ ips });
+    });
+
+    // Trigger daily warmup advancement (for cron job or manual run)
+    app.post('/warmup/advance', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        const result = await services.warmup.runDailyAdvancement();
+        return c.json(result);
+    });
+
+    // Start warmup for an IP
+    app.post('/warmup/ip/:ipAddress/start', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        await services.warmup.startIPWarmup(c.req.param('ipAddress'));
+        return c.json({ success: true, message: 'Warmup started' });
+    });
+
+    // Pause warmup for an IP
+    app.post('/warmup/ip/:ipAddress/pause', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        await services.warmup.pauseIPWarmup(c.req.param('ipAddress'));
+        return c.json({ success: true, message: 'Warmup paused' });
+    });
+
+    // Reset warmup for an IP
+    app.post('/warmup/ip/:ipAddress/reset', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        await services.warmup.resetIPWarmup(c.req.param('ipAddress'));
+        return c.json({ success: true, message: 'Warmup reset' });
+    });
+
+    // Set warmup day manually
+    app.post('/warmup/ip/:ipAddress/day', async (c) => {
+        if (!services.warmup) {
+            return c.json({ error: 'Warmup service not configured' }, 503);
+        }
+        const body = await c.req.json<{ day: number }>();
+        if (typeof body.day !== 'number' || body.day < 0) {
+            return c.json({ error: 'Invalid day value' }, 400);
+        }
+        await services.warmup.setWarmupDay(c.req.param('ipAddress'), body.day);
+        return c.json({ success: true, message: `Warmup day set to ${body.day}` });
+    });
+
     // Dashboard data endpoint
     app.get('/dashboard', async (c) => {
         const [healthReport, sloStatuses, activeAlerts, activeIncidents, statusData] = await Promise.all([
             services.health.deepHealthCheck(),
-            Promise.resolve(services.slo.getSLOStatuses()),
+            Promise.resolve(services.slo.getAllStatuses()),
             Promise.resolve(services.alerts.getActiveAlerts()),
             Promise.resolve(services.incidents.getActiveIncidents()),
             Promise.resolve(services.statusPage.getStatusPageData()),
@@ -421,8 +502,8 @@ export function createOpsRoutes(services: OpsServices): Hono {
             health: healthReport,
             slos: {
                 statuses: sloStatuses,
-                atRisk: sloStatuses.filter((s) => s.status === 'at_risk').length,
-                breached: sloStatuses.filter((s) => s.status === 'breached').length,
+                atRisk: sloStatuses.filter((s: { status: string }) => s.status === 'at_risk').length,
+                breached: sloStatuses.filter((s: { status: string }) => s.status === 'breached').length,
             },
             alerts: {
                 active: activeAlerts.length,

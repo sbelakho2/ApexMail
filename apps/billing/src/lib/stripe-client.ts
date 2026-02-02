@@ -31,3 +31,8 @@ export function getStripe(): Stripe {
 export function resetStripeClient(): void {
   stripeClient = null;
 }
+
+/**
+ * Alias for getStripe for backward compatibility
+ */
+export const getStripeClient = getStripe;

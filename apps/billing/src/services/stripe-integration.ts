@@ -10,7 +10,7 @@ import type { DatabasePool } from '@apexmail/db';
 import { getStripe } from '../lib/stripe-client.js';
 import { getConfig } from '../config.js';
 
-const logger = createLogger('stripe-integration');
+const logger = createLogger();
 
 export interface StripeCustomer {
   id: string;
@@ -111,9 +111,11 @@ export class StripeService {
         },
       });
 
-      // Store in database
+      // Store in database using ON CONFLICT to handle race conditions
+      // CRITICAL: Another request may have created the customer between our SELECT and INSERT
       const insertResult = await this.db.query<{
         id: string;
+        stripe_customer_id: string;
         created_at: Date;
         updated_at: Date;
       }>(
@@ -121,17 +123,31 @@ export class StripeService {
           id, tenant_id, stripe_customer_id, email, name, created_at, updated_at
         )
         VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW())
-        RETURNING id, created_at, updated_at`,
+        ON CONFLICT (tenant_id) DO UPDATE SET updated_at = NOW()
+        RETURNING id, stripe_customer_id, created_at, updated_at`,
         [tenantId, stripeCustomer.id, email, name]
       );
 
       if (!insertResult.ok) return Result.err(insertResult.error);
 
       const row = insertResult.value.rows[0]!;
+      
+      // If we hit ON CONFLICT, the returned stripe_customer_id is the existing one
+      // We should delete the Stripe customer we just created if it was a duplicate
+      if (row.stripe_customer_id !== stripeCustomer.id) {
+        // Another request won the race - delete the duplicate Stripe customer
+        try {
+          await this.stripe.customers.del(stripeCustomer.id);
+          logger.info('Deleted duplicate Stripe customer', { duplicateId: stripeCustomer.id, existingId: row.stripe_customer_id });
+        } catch (deleteError) {
+          logger.error('Failed to delete duplicate Stripe customer', { error: deleteError, customerId: stripeCustomer.id });
+        }
+      }
+      
       return Result.ok({
         id: row.id,
         tenantId,
-        stripeCustomerId: stripeCustomer.id,
+        stripeCustomerId: row.stripe_customer_id,
         email,
         name,
         defaultPaymentMethodId: null,
@@ -139,7 +155,7 @@ export class StripeService {
         updatedAt: row.updated_at,
       });
     } catch (error) {
-      logger.error({ error, tenantId }, 'Failed to create Stripe customer');
+      logger.error('Failed to create Stripe customer', { error, tenantId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -167,7 +183,12 @@ export class StripeService {
     const tenant = tenantResult.value.rows[0];
     if (!tenant) return Result.err(new Error('Tenant not found'));
 
-    const settings = JSON.parse(tenant.settings || '{}');
+    let settings: { billingEmail?: string; defaultFromEmail?: string } = {};
+    try {
+      settings = JSON.parse(tenant.settings || '{}');
+    } catch {
+      settings = {};
+    }
     const email = settings.billingEmail || settings.defaultFromEmail;
 
     if (!email) {
@@ -207,7 +228,7 @@ export class StripeService {
         url: session.url!,
       });
     } catch (error) {
-      logger.error({ error, tenantId, priceId }, 'Failed to create checkout session');
+      logger.error('Failed to create checkout session', { error, tenantId, priceId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -239,7 +260,7 @@ export class StripeService {
 
       return Result.ok({ url: session.url });
     } catch (error) {
-      logger.error({ error, tenantId }, 'Failed to create portal session');
+      logger.error('Failed to create portal session', { error, tenantId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -261,7 +282,7 @@ export class StripeService {
         config.STRIPE_WEBHOOK_SECRET
       );
     } catch (error) {
-      logger.warn({ error }, 'Invalid webhook signature');
+      logger.warn('Invalid webhook signature', { error });
       return Result.err(new Error('Invalid webhook signature'));
     }
 
@@ -274,7 +295,7 @@ export class StripeService {
     if (!idempotencyResult.ok) return Result.err(idempotencyResult.error);
 
     if (idempotencyResult.value.rows.length > 0) {
-      logger.info({ eventId: event.id }, 'Duplicate webhook event, skipping');
+      logger.info('Duplicate webhook event, skipping', { eventId: event.id });
       return Result.ok({ eventType: event.type, processed: false });
     }
 
@@ -290,7 +311,7 @@ export class StripeService {
       await this.handleStripeEvent(event);
       return Result.ok({ eventType: event.type, processed: true });
     } catch (error) {
-      logger.error({ error, eventType: event.type }, 'Failed to process webhook');
+      logger.error('Failed to process webhook', { error, eventType: event.type });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -326,18 +347,18 @@ export class StripeService {
         break;
 
       default:
-        logger.debug({ eventType: event.type }, 'Unhandled event type');
+        logger.debug('Unhandled event type', { eventType: event.type });
     }
   }
 
   private async handleCheckoutCompleted(session: Stripe.Checkout.Session): Promise<void> {
     const tenantId = session.metadata?.tenant_id;
     if (!tenantId) {
-      logger.warn({ sessionId: session.id }, 'No tenant_id in checkout session');
+      logger.warn('No tenant_id in checkout session', { sessionId: session.id });
       return;
     }
 
-    logger.info({ tenantId, sessionId: session.id }, 'Checkout completed');
+    logger.info('Checkout completed', { tenantId, sessionId: session.id });
 
     // Update tenant billing status
     await this.db.query(
@@ -349,33 +370,50 @@ export class StripeService {
   private async handleSubscriptionChange(subscription: Stripe.Subscription): Promise<void> {
     const tenantId = subscription.metadata?.tenant_id;
     if (!tenantId) {
-      logger.warn({ subscriptionId: subscription.id }, 'No tenant_id in subscription');
+      logger.warn('No tenant_id in subscription', { subscriptionId: subscription.id });
       return;
     }
 
     const priceId = subscription.items.data[0]?.price.id;
     const interval = subscription.items.data[0]?.price.recurring?.interval;
 
-    // Upsert subscription record
+    // CRITICAL: Use atomic CTE to upsert subscription and update tenant plan in one transaction
     await this.db.query(
-      `INSERT INTO subscriptions (
-        id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
-        status, billing_interval, billing_cycle_start, billing_cycle_end,
-        cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
+      `WITH upsert_subscription AS (
+        INSERT INTO subscriptions (
+          id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+          status, billing_interval, billing_cycle_start, billing_cycle_end,
+          cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
+        )
+        VALUES (
+          gen_random_uuid(), $1, $2, $3, $4, $5, $6, 
+          to_timestamp($7), to_timestamp($8), $9, $10, $11, NOW(), NOW()
+        )
+        ON CONFLICT (stripe_subscription_id) DO UPDATE SET
+          status = $5,
+          billing_interval = $6,
+          billing_cycle_start = to_timestamp($7),
+          billing_cycle_end = to_timestamp($8),
+          cancel_at_period_end = $9,
+          canceled_at = $10,
+          trial_end = $11,
+          updated_at = NOW()
+        RETURNING tenant_id
+      ),
+      plan_lookup AS (
+        SELECT name FROM plans 
+        WHERE stripe_price_id_monthly = $4 OR stripe_price_id_yearly = $4
+        LIMIT 1
+      ),
+      update_tenant AS (
+        UPDATE tenants 
+        SET plan = COALESCE((SELECT name FROM plan_lookup), plan), updated_at = NOW()
+        WHERE id = $1
+        RETURNING id
       )
-      VALUES (
-        gen_random_uuid(), $1, $2, $3, $4, $5, $6, 
-        to_timestamp($7), to_timestamp($8), $9, $10, $11, NOW(), NOW()
-      )
-      ON CONFLICT (stripe_subscription_id) DO UPDATE SET
-        status = $5,
-        billing_interval = $6,
-        billing_cycle_start = to_timestamp($7),
-        billing_cycle_end = to_timestamp($8),
-        cancel_at_period_end = $9,
-        canceled_at = $10,
-        trial_end = $11,
-        updated_at = NOW()`,
+      SELECT 
+        EXISTS (SELECT 1 FROM upsert_subscription) as subscription_updated,
+        EXISTS (SELECT 1 FROM update_tenant) as tenant_updated`,
       [
         tenantId,
         subscription.id,
@@ -391,87 +429,96 @@ export class StripeService {
       ]
     );
 
-    // Update tenant plan based on price
-    const planResult = await this.db.query<{ name: string }>(
-      `SELECT name FROM plans WHERE stripe_price_id_monthly = $1 OR stripe_price_id_yearly = $1`,
-      [priceId]
-    );
-
-    if (planResult.ok && planResult.value.rows[0]) {
-      await this.db.query(
-        `UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2`,
-        [planResult.value.rows[0].name, tenantId]
-      );
-    }
-
-    logger.info({ tenantId, subscriptionId: subscription.id, status: subscription.status }, 'Subscription updated');
+    logger.info('Subscription updated', { tenantId, subscriptionId: subscription.id, status: subscription.status });
   }
 
   private async handleSubscriptionDeleted(subscription: Stripe.Subscription): Promise<void> {
     const tenantId = subscription.metadata?.tenant_id;
     if (!tenantId) return;
 
+    // CRITICAL: Atomically cancel subscription and downgrade tenant
     await this.db.query(
-      `UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE stripe_subscription_id = $1`,
-      [subscription.id]
+      `WITH cancel_subscription AS (
+        UPDATE subscriptions SET status = 'canceled', updated_at = NOW() 
+        WHERE stripe_subscription_id = $1
+        RETURNING tenant_id
+      ),
+      downgrade_tenant AS (
+        UPDATE tenants SET plan = 'free', updated_at = NOW() 
+        WHERE id = $2
+        RETURNING id
+      )
+      SELECT 
+        EXISTS (SELECT 1 FROM cancel_subscription) as subscription_canceled,
+        EXISTS (SELECT 1 FROM downgrade_tenant) as tenant_downgraded`,
+      [subscription.id, tenantId]
     );
 
-    // Downgrade to free plan
-    await this.db.query(
-      `UPDATE tenants SET plan = 'free', updated_at = NOW() WHERE id = $1`,
-      [tenantId]
-    );
-
-    logger.info({ tenantId, subscriptionId: subscription.id }, 'Subscription canceled');
+    logger.info('Subscription canceled', { tenantId, subscriptionId: subscription.id });
   }
 
   private async handleInvoicePaid(invoice: Stripe.Invoice): Promise<void> {
-    const tenantId = invoice.subscription_details?.metadata?.tenant_id;
-    if (!tenantId) return;
+    try {
+      const tenantId = invoice.subscription_details?.metadata?.tenant_id;
+      if (!tenantId) return;
 
-    // Sync invoice to our database
-    await this.db.query(
-      `UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
-       WHERE stripe_invoice_id = $1`,
-      [invoice.id]
-    );
+      // Sync invoice to our database
+      await this.db.query(
+        `UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
+         WHERE stripe_invoice_id = $1`,
+        [invoice.id]
+      );
 
-    logger.info({ tenantId, invoiceId: invoice.id }, 'Invoice paid');
+      logger.info('Invoice paid', { tenantId, invoiceId: invoice.id });
+    } catch (error) {
+      logger.error('Failed to handle invoice paid event', { error, invoiceId: invoice.id });
+      throw error; // Re-throw so webhook handler can retry
+    }
   }
 
   private async handlePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
-    const tenantId = invoice.subscription_details?.metadata?.tenant_id;
-    if (!tenantId) return;
+    try {
+      const tenantId = invoice.subscription_details?.metadata?.tenant_id;
+      if (!tenantId) return;
 
-    // Queue dunning notification
-    await this.db.query(
-      `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-       VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())`,
-      [tenantId, JSON.stringify({
-        invoiceId: invoice.id,
-        amount: invoice.amount_due,
-        attemptCount: invoice.attempt_count,
-      })]
-    );
+      // Queue dunning notification
+      await this.db.query(
+        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())`,
+        [tenantId, JSON.stringify({
+          invoiceId: invoice.id,
+          amount: invoice.amount_due,
+          attemptCount: invoice.attempt_count,
+        })]
+      );
 
-    logger.warn({ tenantId, invoiceId: invoice.id, attemptCount: invoice.attempt_count }, 'Payment failed');
+      logger.warn('Payment failed', { tenantId, invoiceId: invoice.id, attemptCount: invoice.attempt_count });
+    } catch (error) {
+      logger.error('Failed to handle payment failed event', { error, invoiceId: invoice.id });
+      throw error; // Re-throw so webhook handler can retry
+    }
   }
 
   private async handleTrialEnding(subscription: Stripe.Subscription): Promise<void> {
-    const tenantId = subscription.metadata?.tenant_id;
-    if (!tenantId) return;
+    try {
+      const tenantId = subscription.metadata?.tenant_id;
+      if (!tenantId) return;
 
-    // Queue trial ending notification
-    await this.db.query(
-      `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-       VALUES (gen_random_uuid(), $1, 'trial_ending', $2, 'pending', NOW())`,
-      [tenantId, JSON.stringify({
-        subscriptionId: subscription.id,
-        trialEnd: subscription.trial_end,
-      })]
-    );
+      // Queue trial ending notification
+      await this.db.query(
+        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, 'trial_ending', $2, 'pending', NOW())`,
+        [tenantId, JSON.stringify({
+          subscriptionId: subscription.id,
+          trialEnd: subscription.trial_end,
+        })]
+      );
 
-    logger.info({ tenantId, subscriptionId: subscription.id }, 'Trial ending soon');
+      logger.info('Trial ending soon', { tenantId, subscriptionId: subscription.id });
+    } catch (error) {
+      logger.error('Failed to handle trial ending event', { error, subscriptionId: subscription.id });
+      throw error; // Re-throw so webhook handler can retry
+    }
   }
 
   /**
@@ -491,7 +538,7 @@ export class StripeService {
 
       return Result.ok(refund);
     } catch (error) {
-      logger.error({ error, paymentIntentId }, 'Failed to create refund');
+      logger.error('Failed to create refund', { error, paymentIntentId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }

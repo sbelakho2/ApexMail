@@ -24,10 +24,9 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Get contract by ID
   router.get('/contracts/:contractId', async (c) => {
-    const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
 
-    const result = await ctx.contracts.getContract(tenantId, contractId);
+    const result = await ctx.contracts.getContract(contractId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -42,10 +41,9 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Get contract PDF
   router.get('/contracts/:contractId/pdf', async (c) => {
-    const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
 
-    const result = await ctx.contracts.getContract(tenantId, contractId);
+    const result = await ctx.contracts.getContract(contractId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -110,9 +108,13 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const parsed = schema.parse(body);
     const result = await ctx.contracts.createContract({
       tenantId,
-      ...parsed,
+      name: `Enterprise Contract - ${tenantId}`,
       startDate: new Date(parsed.startDate),
       endDate: new Date(parsed.endDate),
+      basePrice: parsed.baseFee,
+      committedVolume: parsed.committedVolume.emails,
+      overageRate: Math.round(parsed.overageRates.emailsPerThousand / 1000 * 100), // Convert to per-email cents
+      paymentTermsDays: parsed.paymentTerms === 'net30' ? 30 : 60,
     });
 
     if (!result.ok) {

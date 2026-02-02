@@ -10,6 +10,13 @@ export interface SSOConfig {
     singleLogoutServiceUrl: string;
     certificate: string;
     privateKey: string;
+    /** 
+     * Allow SHA-1 signature algorithm for legacy IdP compatibility.
+     * WARNING: SHA-1 is deprecated and should only be enabled for 
+     * backward compatibility with older identity providers.
+     * Defaults to false in production.
+     */
+    allowDeprecatedSha1: boolean;
   };
   oidc: {
     enabled: boolean;
@@ -42,6 +49,8 @@ export interface ComplianceConfig {
   zeroRetentionEnabled: boolean;
   dataResidencyRegions: string[];
   auditRetentionDays: number;
+  enableZeroRetention: boolean;
+  dataResidency: string;
 }
 
 export interface LogStreamConfig {
@@ -49,6 +58,13 @@ export interface LogStreamConfig {
   flushInterval: number;
   compressionEnabled: boolean;
   maxRetries: number;
+  encryptionKey: string;
+}
+
+export interface TemplateApprovalConfig {
+  maxSpamScore: number;
+  requireReviewForNewAccounts: boolean;
+  autoApproveThreshold: number;
 }
 
 export interface EnterpriseConfig {
@@ -57,10 +73,13 @@ export interface EnterpriseConfig {
   subAccounts: SubAccountConfig;
   compliance: ComplianceConfig;
   logStream: LogStreamConfig;
+  logStreaming: LogStreamConfig;
+  templateApproval: TemplateApprovalConfig;
   database: {
     host: string;
     port: number;
     database: string;
+    name: string;
     user: string;
     password: string;
     ssl: boolean;
@@ -74,6 +93,11 @@ export interface EnterpriseConfig {
   cors: {
     origins: string[];
   };
+  corsOrigins: string[];
+  server: {
+    port: number;
+    host: string;
+  };
 }
 
 export const config: EnterpriseConfig = {
@@ -85,6 +109,8 @@ export const config: EnterpriseConfig = {
       singleLogoutServiceUrl: process.env.SAML_SLO_URL || 'https://apexmail.ee/api/v1/sso/saml/slo',
       certificate: process.env.SAML_CERTIFICATE || '',
       privateKey: process.env.SAML_PRIVATE_KEY || '',
+      // SHA-1 is deprecated - only allow if explicitly enabled (for legacy IdP compatibility)
+      allowDeprecatedSha1: process.env.SAML_ALLOW_SHA1 === 'true' && process.env.NODE_ENV !== 'production',
     },
     oidc: {
       enabled: process.env.OIDC_ENABLED === 'true',
@@ -114,17 +140,33 @@ export const config: EnterpriseConfig = {
     zeroRetentionEnabled: process.env.ZERO_RETENTION_ENABLED === 'true',
     dataResidencyRegions: (process.env.DATA_RESIDENCY_REGIONS || 'eu-west-1,us-east-1').split(','),
     auditRetentionDays: parseInt(process.env.AUDIT_RETENTION_DAYS || '2555', 10), // 7 years default
+    enableZeroRetention: process.env.ZERO_RETENTION_ENABLED === 'true',
+    dataResidency: process.env.DATA_RESIDENCY || 'eu-west-1',
   },
   logStream: {
     bufferSize: parseInt(process.env.LOG_STREAM_BUFFER_SIZE || '1000', 10),
     flushInterval: parseInt(process.env.LOG_STREAM_FLUSH_INTERVAL || '60000', 10),
     compressionEnabled: process.env.LOG_STREAM_COMPRESSION !== 'false',
     maxRetries: parseInt(process.env.LOG_STREAM_MAX_RETRIES || '3', 10),
+    encryptionKey: process.env.LOG_STREAM_ENCRYPTION_KEY || 'default-encryption-key-change-in-production',
+  },
+  logStreaming: {
+    bufferSize: parseInt(process.env.LOG_STREAM_BUFFER_SIZE || '1000', 10),
+    flushInterval: parseInt(process.env.LOG_STREAM_FLUSH_INTERVAL || '60000', 10),
+    compressionEnabled: process.env.LOG_STREAM_COMPRESSION !== 'false',
+    maxRetries: parseInt(process.env.LOG_STREAM_MAX_RETRIES || '3', 10),
+    encryptionKey: process.env.LOG_STREAM_ENCRYPTION_KEY || 'default-encryption-key-change-in-production',
+  },
+  templateApproval: {
+    maxSpamScore: parseInt(process.env.TEMPLATE_MAX_SPAM_SCORE || '50', 10),
+    requireReviewForNewAccounts: process.env.TEMPLATE_REQUIRE_REVIEW_NEW !== 'false',
+    autoApproveThreshold: parseInt(process.env.TEMPLATE_AUTO_APPROVE_THRESHOLD || '10', 10),
   },
   database: {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT || '5432', 10),
     database: process.env.DB_NAME || 'apexmail',
+    name: process.env.DB_NAME || 'apexmail',
     user: process.env.DB_USER || 'apexmail',
     password: process.env.DB_PASSWORD || '',
     ssl: process.env.DB_SSL === 'true',
@@ -138,6 +180,11 @@ export const config: EnterpriseConfig = {
   cors: {
     origins: (process.env.CORS_ORIGINS || '*').split(','),
   },
+  corsOrigins: (process.env.CORS_ORIGINS || '*').split(','),
+  server: {
+    port: parseInt(process.env.PORT || '3000', 10),
+    host: process.env.HOST || '0.0.0.0',
+  },
 };
 
 // Enterprise plan tiers
@@ -145,6 +192,9 @@ export enum EnterprisePlan {
   SCALE = 'scale',
   ENTERPRISE = 'enterprise',
   PRIVATE = 'private',
+  STARTER = 'starter',
+  BUSINESS = 'business',
+  CUSTOM = 'custom',
 }
 
 // SSO provider types
@@ -162,6 +212,7 @@ export enum TemplateApprovalStatus {
   APPROVED = 'approved',
   REJECTED = 'rejected',
   DRAFT = 'draft',
+  CHANGES_REQUESTED = 'changes_requested',
 }
 
 // Support ticket priority
@@ -170,4 +221,8 @@ export enum TicketPriority {
   P2 = 'p2', // High - 4hr response, 24hr resolution
   P3 = 'p3', // Normal - 24hr response, 72hr resolution
   P4 = 'p4', // Low - 72hr response, 1 week resolution
+  CRITICAL = 'critical',
+  HIGH = 'high',
+  NORMAL = 'normal',
+  LOW = 'low',
 }

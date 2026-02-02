@@ -142,32 +142,53 @@ export interface MetricResult {
 // Alert Types
 // ============================================================================
 
-export type AlertSeverity = 'critical' | 'warning' | 'info';
-export type AlertStatus = 'firing' | 'pending' | 'resolved';
+export type AlertChannel = 'slack' | 'email' | 'pagerduty' | 'webhook' | 'sms';
+export type AlertSeverity = 'critical' | 'error' | 'warning' | 'info';
+export type AlertStatus = 'firing' | 'pending' | 'resolved' | 'acknowledged' | 'silenced';
+
+export interface NotificationPreferences {
+    channels: AlertChannel[];
+    quietHours?: { start: string; end: string };
+    escalationPolicy?: string;
+}
+
+export interface AlertCondition {
+    metric: string;
+    operator: 'greater_than' | 'less_than' | 'equals' | 'not_equals';
+    threshold: number;
+    duration: number;
+}
 
 export interface Alert {
     id: string;
+    ruleId?: string;
     name: string;
     severity: AlertSeverity;
     status: AlertStatus;
     sloId?: string;
-    service: string;
+    service?: string;
     description: string;
     startsAt: Date;
     endsAt?: Date;
     labels: Record<string, string>;
     annotations: Record<string, string>;
     generatorURL?: string;
+    acknowledgedBy?: string;
+    acknowledgedAt?: Date;
+    silencedUntil?: Date;
 }
 
 export interface AlertRule {
     id: string;
     name: string;
-    expression: string;
-    duration: string;
+    description?: string;
+    expression?: string;
+    condition?: AlertCondition;
+    duration?: string;
     severity: AlertSeverity;
+    channels?: AlertChannel[];
     labels: Record<string, string>;
-    annotations: Record<string, string>;
+    annotations?: Record<string, string>;
     enabled: boolean;
 }
 
@@ -184,7 +205,7 @@ export interface AlertNotification {
 // Incident Types
 // ============================================================================
 
-export type IncidentSeverity = 'sev1' | 'sev2' | 'sev3' | 'sev4';
+export type IncidentSeverity = 'critical' | 'high' | 'medium' | 'low' | 'sev1' | 'sev2' | 'sev3' | 'sev4';
 export type IncidentStatus = 'investigating' | 'identified' | 'monitoring' | 'resolved';
 
 export interface Incident {
@@ -193,23 +214,43 @@ export interface Incident {
     description: string;
     severity: IncidentSeverity;
     status: IncidentStatus;
-    service: string;
-    affectedSLOs: string[];
-    startTime: Date;
+    service?: string;
+    affectedServices?: string[];
+    affectedSLOs?: string[];
+    startTime?: Date;
     endTime?: Date;
-    timeline: IncidentTimelineEntry[];
-    responders: string[];
+    createdAt?: Date;
+    updatedAt?: Date;
+    resolvedAt?: Date;
+    resolvedBy?: string;
+    acknowledgedAt?: Date;
+    acknowledgedBy?: string;
+    reportedBy?: string;
+    timeline?: IncidentTimelineEntry[];
+    responders?: string[];
     commander?: string;
     postmortemId?: string;
-    metadata: Record<string, string>;
+    metadata?: Record<string, string>;
 }
 
 export interface IncidentTimelineEntry {
+    id?: string;
     timestamp: Date;
-    author: string;
-    type: 'status_change' | 'update' | 'action' | 'resolution';
-    content: string;
+    author?: string;
+    actor?: string;
+    type: 'status_change' | 'update' | 'action' | 'resolution' | 'created' | 'note' | 'severity_change' | 'role_assigned' | 'communication' | 'communication';
+    content?: string;
+    description?: string;
+    metadata?: Record<string, unknown>;
 }
+
+// Aliases for backwards compatibility
+export type IncidentTimeline = {
+    incidentId: string;
+    events: IncidentTimelineEntry[];
+};
+
+export type IncidentTimelineEvent = IncidentTimelineEntry;
 
 export interface IncidentSummary {
     totalIncidents: number;
@@ -323,20 +364,62 @@ export interface DataProcessingInfo {
 }
 
 export interface SubProcessor {
+    id?: string;
     name: string;
     purpose: string;
     location: string;
-    dataProcessed: string[];
+    dataProcessed?: string[];
+    dataCategories?: string[];
+    website?: string;
+    dpaUrl?: string;
+    addedAt?: Date;
 }
 
 export interface TrustCenterData {
-    certifications: ComplianceCertification[];
-    securityPractices: SecurityPractice[];
-    dataProcessing: DataProcessingInfo;
-    lastAuditDate: Date;
-    securityContact: string;
-    privacyPolicyUrl: string;
-    termsOfServiceUrl: string;
+    company?: {
+        name: string;
+        legalEntity: string;
+        supportEmail: string;
+        dpoEmail: string;
+    };
+    certifications: TrustCenterCertification[] | ComplianceCertification[];
+    documents?: TrustCenterDocument[];
+    securityControls?: Record<string, unknown[]>;
+    securityPractices?: SecurityPractice[];
+    subProcessors?: SubProcessor[];
+    dataPractices?: unknown[];
+    dataProcessing?: DataProcessingInfo;
+    faq?: { question: string; answer: string; category: string }[];
+    lastAuditDate?: Date;
+    lastUpdated?: Date;
+    securityContact?: string;
+    privacyPolicyUrl?: string;
+    termsOfServiceUrl?: string;
+}
+
+export interface TrustCenterCertification {
+    id: string;
+    name: string;
+    issuer: string;
+    issuedAt?: Date;
+    validFrom?: Date;
+    validUntil?: Date;
+    expiresAt?: Date;
+    documentUrl?: string;
+    status: 'valid' | 'expiring' | 'expired';
+    description?: string;
+}
+
+export interface TrustCenterDocument {
+    id: string;
+    name: string;
+    type?: string;
+    description?: string;
+    category?: string;
+    version?: string;
+    url?: string;
+    lastUpdated?: Date;
+    requiresNda?: boolean;
 }
 
 // ============================================================================
@@ -388,6 +471,13 @@ export interface LogEntry {
 
 export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy';
 
+export interface HealthCheckResult {
+    healthy: boolean;
+    latency?: number;
+    error?: string;
+    details?: Record<string, unknown>;
+}
+
 export interface HealthCheck {
     name: string;
     status: HealthStatus;
@@ -399,10 +489,13 @@ export interface HealthCheck {
 export interface ServiceHealth {
     service: string;
     status: HealthStatus;
-    version: string;
-    uptime: number;
-    checks: HealthCheck[];
-    dependencies: DependencyHealth[];
+    version?: string;
+    uptime?: number;
+    checks?: HealthCheck[];
+    dependencies?: DependencyHealth[];
+    latency?: number;
+    lastCheck?: Date;
+    details?: Record<string, unknown>;
 }
 
 export interface DependencyHealth {

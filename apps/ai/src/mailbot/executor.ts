@@ -5,8 +5,6 @@
  * Translates user intent into API actions with confirmation flows.
  */
 
-import { IntentDetector } from '../chatbot/assistant.js';
-import { InferenceEngine } from '../inference/engine.js';
 import type {
     MailbotRequest,
     MailbotResponse,
@@ -52,14 +50,10 @@ interface CommandDefinition {
  * structured API actions with proper validation and confirmation.
  */
 export class MailbotExecutor {
-    private intentDetector: IntentDetector;
-    private engine: InferenceEngine;
     private commands: CommandDefinition[];
     private pendingActions: Map<string, MailbotAction> = new Map();
 
     constructor() {
-        this.intentDetector = new IntentDetector();
-        this.engine = new InferenceEngine();
         this.commands = this.initializeCommands();
     }
 
@@ -67,12 +61,12 @@ export class MailbotExecutor {
      * Process a natural language command
      */
     async process(request: MailbotRequest): Promise<MailbotResponse> {
-        const { command, context, userId } = request;
+        const { command, context, userId: _userId } = request;
         const startTime = Date.now();
 
         try {
             // Parse the command
-            const parsedCommand = this.parseCommand(command);
+            const parsedCommand = this.parseCommand(command ?? '');
 
             if (!parsedCommand) {
                 return {
@@ -435,20 +429,27 @@ export class MailbotExecutor {
     }
 
     private buildConfirmationMessage(action: MailbotAction): string {
-        const messages: Record<MailbotActionType, (params: ExtractedParams) => string> = {
-            create_campaign: (p) => `Create campaign "${p.campaignName}"?`,
-            send_campaign: (p) => `⚠️ Send campaign "${p.campaignName}"${p.listName ? ` to list "${p.listName}"` : ''}? This action cannot be undone.`,
-            schedule_campaign: (p) => `Schedule campaign "${p.campaignName}" for ${p.scheduledTime || 'the specified time'}?`,
-            pause_campaign: (p) => `Pause campaign "${p.campaignName}"?`,
-            delete_campaign: (p) => `⚠️ Delete campaign "${p.campaignName}"? This action cannot be undone.`,
-            add_contact: (p) => `Add contact "${p.email}"${p.listName ? ` to list "${p.listName}"` : ''}?`,
-            remove_contact: (p) => `⚠️ Remove contact "${p.email}"${p.listName ? ` from list "${p.listName}"` : ''}?`,
+        const messages: Record<MailbotActionType, (p: ExtractedParams) => string> = {
+            create_campaign: (p: ExtractedParams) => `Create campaign "${p.campaignName}"?`,
+            send_campaign: (p: ExtractedParams) => `⚠️ Send campaign "${p.campaignName}"${p.listName ? ` to list "${p.listName}"` : ''}? This action cannot be undone.`,
+            schedule_campaign: (p: ExtractedParams) => `Schedule campaign "${p.campaignName}" for ${p.scheduledTime || 'the specified time'}?`,
+            pause_campaign: (p: ExtractedParams) => `Pause campaign "${p.campaignName}"?`,
+            delete_campaign: (p: ExtractedParams) => `⚠️ Delete campaign "${p.campaignName}"? This action cannot be undone.`,
+            add_contact: (p: ExtractedParams) => `Add contact "${p.email}"${p.listName ? ` to list "${p.listName}"` : ''}?`,
+            remove_contact: (p: ExtractedParams) => `⚠️ Remove contact "${p.email}"${p.listName ? ` from list "${p.listName}"` : ''}?`,
             import_contacts: () => `Import contacts from the specified file?`,
-            create_list: (p) => `Create list "${p.listName}"?`,
-            delete_list: (p) => `⚠️ Delete list "${p.listName}"? All contacts will be removed.`,
-            create_segment: (p) => `Create segment "${p.segmentName}"?`,
-            get_stats: (p) => `Get stats for "${p.campaignName}"?`,
-            export_report: (p) => `Export report for "${p.campaignName}"?`,
+            create_list: (p: ExtractedParams) => `Create list "${p.listName}"?`,
+            delete_list: (p: ExtractedParams) => `⚠️ Delete list "${p.listName}"? All contacts will be removed.`,
+            create_segment: (p: ExtractedParams) => `Create segment "${p.segmentName}"?`,
+            get_stats: (p: ExtractedParams) => `Get stats for "${p.campaignName}"?`,
+            export_report: (p: ExtractedParams) => `Export report for "${p.campaignName}"?`,
+            add_contacts: (p: ExtractedParams) => `Add contacts${p.listName ? ` to list "${p.listName}"` : ''}?`,
+            remove_contacts: (p: ExtractedParams) => `Remove contacts${p.listName ? ` from list "${p.listName}"` : ''}?`,
+            tag_contacts: (p: ExtractedParams) => `Tag contacts with "${p.tags?.join(', ')}"?`,
+            generate_content: () => `Generate content?`,
+            analyze_performance: (p: ExtractedParams) => `Analyze performance for "${p.campaignName}"?`,
+            export_data: () => `Export data?`,
+            set_automation: () => `Set automation?`,
         };
 
         const messageBuilder = messages[action.type];
@@ -458,20 +459,27 @@ export class MailbotExecutor {
     }
 
     private buildSuccessMessage(action: MailbotAction): string {
-        const messages: Record<MailbotActionType, (params: ExtractedParams) => string> = {
-            create_campaign: (p) => `✅ Campaign "${p.campaignName}" created successfully.`,
-            send_campaign: (p) => `✅ Campaign "${p.campaignName}" is now sending.`,
-            schedule_campaign: (p) => `✅ Campaign "${p.campaignName}" scheduled for ${p.scheduledTime}.`,
-            pause_campaign: (p) => `✅ Campaign "${p.campaignName}" has been paused.`,
-            delete_campaign: (p) => `✅ Campaign "${p.campaignName}" has been deleted.`,
-            add_contact: (p) => `✅ Contact "${p.email}" added${p.listName ? ` to "${p.listName}"` : ''}.`,
-            remove_contact: (p) => `✅ Contact "${p.email}" removed${p.listName ? ` from "${p.listName}"` : ''}.`,
+        const messages: Record<MailbotActionType, (p: ExtractedParams) => string> = {
+            create_campaign: (p: ExtractedParams) => `✅ Campaign "${p.campaignName}" created successfully.`,
+            send_campaign: (p: ExtractedParams) => `✅ Campaign "${p.campaignName}" is now sending.`,
+            schedule_campaign: (p: ExtractedParams) => `✅ Campaign "${p.campaignName}" scheduled for ${p.scheduledTime}.`,
+            pause_campaign: (p: ExtractedParams) => `✅ Campaign "${p.campaignName}" has been paused.`,
+            delete_campaign: (p: ExtractedParams) => `✅ Campaign "${p.campaignName}" has been deleted.`,
+            add_contact: (p: ExtractedParams) => `✅ Contact "${p.email}" added${p.listName ? ` to "${p.listName}"` : ''}.`,
+            remove_contact: (p: ExtractedParams) => `✅ Contact "${p.email}" removed${p.listName ? ` from "${p.listName}"` : ''}.`,
             import_contacts: () => `✅ Contacts imported successfully.`,
-            create_list: (p) => `✅ List "${p.listName}" created.`,
-            delete_list: (p) => `✅ List "${p.listName}" deleted.`,
-            create_segment: (p) => `✅ Segment "${p.segmentName}" created.`,
-            get_stats: (p) => `📊 Fetching stats for "${p.campaignName}"...`,
-            export_report: (p) => `📄 Exporting report for "${p.campaignName}"...`,
+            create_list: (p: ExtractedParams) => `✅ List "${p.listName}" created.`,
+            delete_list: (p: ExtractedParams) => `✅ List "${p.listName}" deleted.`,
+            create_segment: (p: ExtractedParams) => `✅ Segment "${p.segmentName}" created.`,
+            get_stats: (p: ExtractedParams) => `📊 Fetching stats for "${p.campaignName}"...`,
+            export_report: (p: ExtractedParams) => `📄 Exporting report for "${p.campaignName}"...`,
+            add_contacts: (p: ExtractedParams) => `✅ Contacts added${p.listName ? ` to "${p.listName}"` : ''}.`,
+            remove_contacts: (p: ExtractedParams) => `✅ Contacts removed${p.listName ? ` from "${p.listName}"` : ''}.`,
+            tag_contacts: (p: ExtractedParams) => `✅ Contacts tagged with "${p.tags?.join(', ')}".`,
+            generate_content: () => `✅ Content generated.`,
+            analyze_performance: (p: ExtractedParams) => `📊 Analyzing performance for "${p.campaignName}"...`,
+            export_data: () => `📄 Data exported.`,
+            set_automation: () => `✅ Automation set.`,
         };
 
         const messageBuilder = messages[action.type];
@@ -495,6 +503,13 @@ export class MailbotExecutor {
             create_segment: 'Create segment "Engaged Users" where opens > 50%',
             get_stats: 'Show me stats for campaign "Black Friday"',
             export_report: 'Export report for "Q4 Newsletter"',
+            add_contacts: 'Add contacts to list "VIP"',
+            remove_contacts: 'Remove contacts from list "Newsletter"',
+            tag_contacts: 'Tag contacts with "premium"',
+            generate_content: 'Generate content for campaign',
+            analyze_performance: 'Analyze performance for "Newsletter"',
+            export_data: 'Export data',
+            set_automation: 'Set up automation',
         };
 
         return examples[cmd.type] || cmd.description;

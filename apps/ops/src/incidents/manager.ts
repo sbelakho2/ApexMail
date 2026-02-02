@@ -9,7 +9,7 @@ import {
     IncidentSeverity,
     IncidentStatus,
     IncidentTimeline,
-    IncidentTimelineEvent,
+    IncidentTimelineEntry,
     Alert,
 } from '../types.js';
 import { EventEmitter } from 'events';
@@ -59,6 +59,8 @@ export class IncidentManager extends EventEmitter {
     private roles: Map<string, IncidentRole[]> = new Map();
     private postMortems: Map<string, PostMortem> = new Map();
     private relatedAlerts: Map<string, string[]> = new Map(); // incidentId -> alertIds
+    private static readonly MAX_INCIDENT_HISTORY_SIZE = 5000;
+    private static readonly MAX_POSTMORTEM_SIZE = 1000;
 
     constructor(config: IncidentManagerConfig) {
         super();
@@ -281,12 +283,12 @@ export class IncidentManager extends EventEmitter {
      */
     addTimelineEvent(
         incidentId: string,
-        event: Omit<IncidentTimelineEvent, 'id' | 'timestamp'>
+        event: Omit<IncidentTimelineEntry, 'id' | 'timestamp'>
     ): void {
         const timeline = this.timelines.get(incidentId);
         if (!timeline) return;
 
-        const fullEvent: IncidentTimelineEvent = {
+        const fullEvent: IncidentTimelineEntry = {
             id: `evt-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
             timestamp: new Date(),
             ...event,
@@ -348,7 +350,7 @@ export class IncidentManager extends EventEmitter {
      */
     private handleResolution(incident: Incident): void {
         // Calculate duration
-        const duration = incident.resolvedAt
+        const duration = incident.resolvedAt && incident.createdAt
             ? incident.resolvedAt.getTime() - incident.createdAt.getTime()
             : 0;
 
@@ -364,6 +366,12 @@ export class IncidentManager extends EventEmitter {
 
         // Move to history
         this.incidentHistory.push(incident);
+        
+        // Prevent unbounded growth of incident history
+        if (this.incidentHistory.length > IncidentManager.MAX_INCIDENT_HISTORY_SIZE) {
+            this.incidentHistory = this.incidentHistory.slice(-IncidentManager.MAX_INCIDENT_HISTORY_SIZE);
+        }
+        
         this.incidents.delete(incident.id);
     }
 
@@ -382,6 +390,19 @@ export class IncidentManager extends EventEmitter {
         };
 
         this.postMortems.set(postMortem.id, postMortem);
+        
+        // Prevent unbounded growth - remove oldest completed post-mortems
+        if (this.postMortems.size > IncidentManager.MAX_POSTMORTEM_SIZE) {
+            const completed = Array.from(this.postMortems.entries())
+                .filter(([, pm]) => pm.status === 'completed')
+                .sort((a, b) => (a[1].completedAt?.getTime() ?? 0) - (b[1].completedAt?.getTime() ?? 0));
+            
+            // Remove oldest completed ones until under limit
+            for (const [id] of completed.slice(0, this.postMortems.size - IncidentManager.MAX_POSTMORTEM_SIZE)) {
+                this.postMortems.delete(id);
+            }
+        }
+        
         this.emit('postmortem:created', postMortem);
 
         logger.info(
@@ -509,15 +530,15 @@ export class IncidentManager extends EventEmitter {
         }
 
         if (startDate) {
-            incidents = incidents.filter((i) => i.createdAt >= startDate);
+            incidents = incidents.filter((i) => i.createdAt! >= startDate);
         }
 
         if (endDate) {
-            incidents = incidents.filter((i) => i.createdAt <= endDate);
+            incidents = incidents.filter((i) => i.createdAt! <= endDate);
         }
 
         return incidents
-            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+            .sort((a, b) => b.createdAt!.getTime() - a.createdAt!.getTime())
             .slice(offset, offset + limit);
     }
 
@@ -533,8 +554,8 @@ export class IncidentManager extends EventEmitter {
     } {
         const relevantIncidents = this.incidentHistory.filter(
             (i) =>
-                i.createdAt >= period.start &&
-                i.createdAt <= period.end
+                i.createdAt! >= period.start &&
+                i.createdAt! <= period.end
         );
 
         const bySeverity: Record<IncidentSeverity, number> = {
@@ -542,6 +563,10 @@ export class IncidentManager extends EventEmitter {
             high: 0,
             medium: 0,
             low: 0,
+            sev1: 0,
+            sev2: 0,
+            sev3: 0,
+            sev4: 0,
         };
 
         const affectedServicesCount: Record<string, number> = {};
@@ -551,18 +576,18 @@ export class IncidentManager extends EventEmitter {
         for (const incident of relevantIncidents) {
             bySeverity[incident.severity]++;
 
-            for (const service of incident.affectedServices) {
+            for (const service of incident.affectedServices || []) {
                 affectedServicesCount[service] =
                     (affectedServicesCount[service] || 0) + 1;
             }
 
-            if (incident.resolvedAt) {
+            if (incident.resolvedAt && incident.createdAt) {
                 resolutionTimes.push(
                     incident.resolvedAt.getTime() - incident.createdAt.getTime()
                 );
             }
 
-            if (incident.acknowledgedAt) {
+            if (incident.acknowledgedAt && incident.createdAt) {
                 acknowledgeTimes.push(
                     incident.acknowledgedAt.getTime() - incident.createdAt.getTime()
                 );

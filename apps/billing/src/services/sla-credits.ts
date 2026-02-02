@@ -7,7 +7,7 @@ import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 
-const logger = createLogger('sla-credits');
+const logger = createLogger();
 
 export interface SloTarget {
   name: string;
@@ -151,7 +151,19 @@ export class SlaCreditsService {
     const row = planResult.value.rows[0];
     if (!row) return Result.ok(null);
 
-    const features = JSON.parse(row.features);
+    // Safe JSON parsing for features
+    let features: Record<string, unknown> = {};
+    try {
+      try {
+        features = JSON.parse(row.features || '{}');
+      } catch {
+        features = {};
+      }
+    } catch {
+      console.warn(`[SlaCredits] Failed to parse plan features for tenant ${tenantId}`);
+      return Result.ok(null);
+    }
+    
     if (!features.slaGuarantee) {
       return Result.ok(null); // No SLA guarantee on this plan
     }
@@ -225,14 +237,14 @@ export class SlaCreditsService {
     const inserted = insertResult.value.rows[0];
     if (!inserted) return Result.ok(null);
 
-    logger.info({
+    logger.info('SLO breach recorded', {
       tenantId,
       sloName: params.sloName,
       target: params.target,
       actual: params.actual,
       creditPercentage,
       creditAmount,
-    }, 'SLO breach recorded');
+    });
 
     return Result.ok({
       id: inserted.id,
@@ -250,13 +262,14 @@ export class SlaCreditsService {
 
   /**
    * Apply pending credits to next invoice
+   * CRITICAL: Uses atomic CTE to ensure consistency
    */
   async applyPendingCredits(tenantId: string): Promise<Result<{
     appliedCredits: SloBreach[];
     totalAmount: number;
   }, Error>> {
-    // Get unapplied breaches
-    const breachesResult = await this.db.query<{
+    // Use atomic CTE to: get breaches, mark applied, create credit memo, queue notification
+    const applyResult = await this.db.query<{
       id: string;
       tenant_id: string;
       slo_name: string;
@@ -268,58 +281,63 @@ export class SlaCreditsService {
       credit_amount: number;
       created_at: Date;
     }>(
-      `SELECT * FROM slo_breaches
-       WHERE tenant_id = $1 AND applied_at IS NULL
-       ORDER BY created_at ASC`,
+      `WITH unapplied_breaches AS (
+        SELECT * FROM slo_breaches
+        WHERE tenant_id = $1 AND applied_at IS NULL
+        ORDER BY created_at ASC
+        FOR UPDATE
+      ),
+      mark_applied AS (
+        UPDATE slo_breaches 
+        SET applied_at = NOW()
+        WHERE id IN (SELECT id FROM unapplied_breaches)
+        RETURNING id, tenant_id, slo_name, target, actual, period_start, period_end, credit_percentage, credit_amount, created_at
+      ),
+      total_credit AS (
+        SELECT COALESCE(SUM(credit_amount), 0) as amount, 
+               ARRAY_AGG(id) as breach_ids,
+               jsonb_agg(jsonb_build_object('id', id, 'amount', credit_amount)) as credit_details
+        FROM mark_applied
+      ),
+      create_memo AS (
+        INSERT INTO credit_memos (id, tenant_id, amount, reason, slo_breach_ids, created_at)
+        SELECT gen_random_uuid(), $1, amount, 'SLO Credit', breach_ids, NOW()
+        FROM total_credit
+        WHERE amount > 0
+        RETURNING id
+      ),
+      queue_notification AS (
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        SELECT gen_random_uuid(), $1, 'sla_credit_applied', 
+               jsonb_build_object('amount', amount, 'credits', credit_details), 
+               'pending', NOW()
+        FROM total_credit
+        WHERE amount > 0
+        RETURNING id
+      )
+      SELECT * FROM mark_applied`,
       [tenantId]
     );
 
-    if (!breachesResult.ok) return Result.err(breachesResult.error);
+    if (!applyResult.ok) return Result.err(applyResult.error);
 
-    const appliedCredits: SloBreach[] = [];
-    let totalAmount = 0;
+    const appliedCredits: SloBreach[] = applyResult.value.rows.map(row => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      sloName: row.slo_name,
+      target: row.target,
+      actual: row.actual,
+      period: { start: row.period_start, end: row.period_end },
+      creditPercentage: row.credit_percentage,
+      creditAmount: row.credit_amount,
+      appliedAt: new Date(),
+      createdAt: row.created_at,
+    }));
 
-    for (const row of breachesResult.value.rows) {
-      // Mark as applied
-      await this.db.query(
-        `UPDATE slo_breaches SET applied_at = NOW() WHERE id = $1`,
-        [row.id]
-      );
+    const totalAmount = appliedCredits.reduce((sum, c) => sum + c.creditAmount, 0);
 
-      appliedCredits.push({
-        id: row.id,
-        tenantId: row.tenant_id,
-        sloName: row.slo_name,
-        target: row.target,
-        actual: row.actual,
-        period: { start: row.period_start, end: row.period_end },
-        creditPercentage: row.credit_percentage,
-        creditAmount: row.credit_amount,
-        appliedAt: new Date(),
-        createdAt: row.created_at,
-      });
-
-      totalAmount += row.credit_amount;
-    }
-
-    // Create credit memo if any credits applied
     if (totalAmount > 0) {
-      await this.db.query(
-        `INSERT INTO credit_memos (
-          id, tenant_id, amount, reason, slo_breach_ids, created_at
-        )
-        VALUES (gen_random_uuid(), $1, $2, 'SLO Credit', $3, NOW())`,
-        [tenantId, totalAmount, appliedCredits.map(c => c.id)]
-      );
-
-      // Queue notification
-      await this.db.query(
-        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-         VALUES (gen_random_uuid(), $1, 'sla_credit_applied', $2, 'pending', NOW())`,
-        [tenantId, JSON.stringify({ amount: totalAmount, credits: appliedCredits })]
-      );
-
-      logger.info({ tenantId, totalAmount, creditCount: appliedCredits.length }, 'SLA credits applied');
+      logger.info('SLA credits applied', { tenantId, totalAmount, creditCount: appliedCredits.length });
     }
 
     return Result.ok({ appliedCredits, totalAmount });
@@ -374,7 +392,7 @@ export class SlaCreditsService {
    * Calculate availability for a period
    */
   private async calculateAvailability(
-    tenantId: string,
+    _tenantId: string,
     periodStart: Date,
     periodEnd: Date
   ): Promise<Result<{ actual: number }, Error>> {

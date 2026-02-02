@@ -77,6 +77,7 @@ const reconciliationWorker = new ReconciliationWorker({
 
 const queryEngine = new QueryEngine({
   db,
+  redis,
   logger,
 });
 
@@ -118,6 +119,7 @@ function scheduleTask(
 
 let compactionTimer: NodeJS.Timeout | null = null;
 let reconciliationTimer: NodeJS.Timeout | null = null;
+let healthCheckTimer: NodeJS.Timeout | null = null;
 
 // =============================================================================
 // GRACEFUL SHUTDOWN
@@ -134,6 +136,7 @@ async function shutdown(signal: string): Promise<void> {
   // Stop scheduled tasks
   if (compactionTimer) clearInterval(compactionTimer);
   if (reconciliationTimer) clearInterval(reconciliationTimer);
+  if (healthCheckTimer) clearInterval(healthCheckTimer);
 
   // Stop workers
   await Promise.all([
@@ -214,12 +217,17 @@ async function main(): Promise<void> {
       logger.info('Reconciliation worker started', { schedule: config.reconciliation.schedule });
     }
 
-    // Run health check periodically
-    setInterval(async () => {
-      const health = await reconciliationWorker.quickHealthCheck();
-      if (!health.healthy) {
-        logger.warn('Health check issues', { issues: health.issues });
-      }
+    // Run health check periodically with error handling
+    healthCheckTimer = setInterval(() => {
+      reconciliationWorker.quickHealthCheck()
+        .then(health => {
+          if (!health.healthy) {
+            logger.warn('Health check issues', { issues: health.issues });
+          }
+        })
+        .catch(err => {
+          logger.error('Health check failed', { error: err instanceof Error ? err.message : err });
+        });
     }, 60000); // Every minute
 
     logger.info('Analytics service started successfully');

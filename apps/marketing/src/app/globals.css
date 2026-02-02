@@ -3,9 +3,37 @@
 @tailwind utilities;
 
 :root {
-  --foreground-rgb: 255, 255, 255;
-  --background-start-rgb: 3, 7, 18;
-  --background-end-rgb: 17, 24, 39;
+  --brand-500: 37 99 235;
+  --brand-700: 23 66 180;
+  --gray-50: 248 250 252;
+  --gray-900: 15 23 42;
+  --gray-600: 71 85 105;
+  
+  --success: 22 163 74;
+  --warning: 217 119 6;
+  --danger: 220 38 38;
+  --info: 8 145 178;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --radius-sm: 10px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+}
+
+.dark {
+  --text: 229 231 235;
+  --muted: 203 213 225;
+  --surface: 15 23 42;
+  --card-dark: 18 26 42;
+  --divider-dark: 31 41 55;
 }
 
 @layer base {
@@ -16,78 +44,81 @@
   }
 
   body {
-    color: rgb(var(--foreground-rgb));
-    background: linear-gradient(
-      to bottom,
-      rgb(var(--background-start-rgb)),
-      rgb(var(--background-end-rgb))
-    );
+    @apply bg-surface-50 text-surface-900 font-sans text-[17px] leading-[1.6];
+    font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
     min-height: 100vh;
+  }
+  p {
+    @apply max-w-[65ch];
+  }
+  small {
+    @apply text-[14px] leading-[1.45];
+  }
+  code, kbd, pre, samp {
+    @apply font-mono text-[13px] leading-[1.45];
+  }
+
+  h1 {
+    @apply text-[40px] md:text-[56px] font-bold leading-[1.1] tracking-[-0.02em];
+  }
+
+  h2 {
+    @apply text-[28px] md:text-[36px] font-bold leading-[1.2] tracking-[-0.015em];
+  }
+
+  h3 {
+    @apply text-[20px] md:text-[24px] font-bold leading-[1.2] tracking-[-0.01em];
   }
 
   ::selection {
-    background: rgba(91, 115, 241, 0.3);
-    color: white;
+    @apply bg-primary-500/20 text-surface-900;
   }
 }
 
 @layer components {
-  .glass {
-    background: rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+  .container-marketing {
+    @apply max-w-[1200px] mx-auto px-4 md:px-6 lg:px-8;
   }
 
-  .glass-card {
-    @apply glass rounded-2xl p-6;
+  .honest-surface {
+    @apply bg-white border border-surface-200;
   }
 
-  .gradient-text {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary-400 via-accent-400 to-primary-500;
+  .premium-card {
+    @apply bg-white border border-surface-200 rounded-md transition-all duration-300;
+    box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06);
   }
-
-  .gradient-border {
-    position: relative;
-  }
-
-  .gradient-border::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    padding: 1px;
-    background: linear-gradient(135deg, #5b73f1, #10b981, #5b73f1);
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
+  .premium-card:hover {
+    @apply border-primary-500/30 bg-surface-50/50;
+    box-shadow: 0 14px 40px rgba(15,23,42,0.08);
   }
 
   .btn-primary {
-    @apply px-6 py-3 bg-primary-600 hover:bg-primary-500 text-white font-medium rounded-lg transition-all duration-200 shadow-lg hover:shadow-glow hover:scale-105;
+    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-medium rounded-md transition-all duration-200;
   }
 
   .btn-secondary {
-    @apply px-6 py-3 border border-surface-600 hover:border-primary-500 text-white font-medium rounded-lg transition-all duration-200 hover:bg-surface-800;
+    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-medium rounded-md transition-all duration-200;
   }
 
   .btn-accent {
-    @apply px-6 py-3 bg-accent-600 hover:bg-accent-500 text-white font-medium rounded-lg transition-all duration-200 shadow-lg hover:shadow-glow-accent hover:scale-105;
+    @apply px-6 py-3 bg-accent-500 hover:bg-accent-400 text-white font-medium rounded-md transition-all duration-200;
   }
 
   .section-title {
-    @apply text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight;
+    @apply text-[40px] md:text-[56px] font-bold tracking-tight leading-[1.1];
   }
 
   .section-subtitle {
-    @apply text-lg md:text-xl text-surface-400 max-w-3xl mx-auto;
+    @apply text-[17px] text-surface-600 max-w-3xl mx-auto leading-[1.6];
   }
 
   .code-block {
-    @apply font-mono text-sm bg-surface-900 rounded-lg border border-surface-700 overflow-x-auto;
+    @apply font-mono text-[13px] bg-surface-900 text-white rounded-sm border border-surface-700 overflow-x-auto p-4;
   }
 
   .feature-card {
-    @apply glass-card hover:border-primary-500/30 transition-all duration-300 hover:translate-y-[-4px] hover:shadow-glow/20;
+    @apply premium-card p-6;
   }
 
   .nav-link {
@@ -101,7 +132,7 @@
     left: 0;
     width: 0;
     height: 2px;
-    background: linear-gradient(to right, #5b73f1, #10b981);
+    background: theme('colors.primary.500');
     transition: width 0.3s ease;
   }
 
@@ -150,22 +181,21 @@
   }
 
   ::-webkit-scrollbar-track {
-    background: rgba(17, 24, 39, 0.5);
+    @apply bg-surface-100 rounded-full;
   }
 
   ::-webkit-scrollbar-thumb {
-    background: rgba(91, 115, 241, 0.5);
-    border-radius: 4px;
+    @apply bg-surface-300 rounded-full;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: rgba(91, 115, 241, 0.7);
+    @apply bg-surface-400;
   }
 }
 
 /* Prism/Code highlighting */
 .code-highlight {
-  @apply text-primary-400;
+  @apply text-primary-500 font-bold;
 }
 
 .code-string {
@@ -177,7 +207,7 @@
 }
 
 .code-comment {
-  @apply text-surface-500 italic;
+  @apply text-surface-400 italic;
 }
 
 /* Calculator slider */
@@ -194,7 +224,7 @@ input[type='range']::-webkit-slider-track {
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  @apply w-5 h-5 rounded-full bg-primary-500 cursor-pointer shadow-glow;
+  @apply w-5 h-5 rounded-full bg-primary-500 cursor-pointer;
   margin-top: -6px;
 }
 
@@ -203,7 +233,7 @@ input[type='range']::-moz-range-track {
 }
 
 input[type='range']::-moz-range-thumb {
-  @apply w-5 h-5 rounded-full bg-primary-500 cursor-pointer shadow-glow border-0;
+  @apply w-5 h-5 rounded-full bg-primary-500 cursor-pointer border-0;
 }
 
 /* Terminal animation */
@@ -216,15 +246,3 @@ input[type='range']::-moz-range-thumb {
   animation: blink 1s infinite;
 }
 
-/* Gradient mesh background */
-.mesh-gradient {
-  background-color: #030712;
-  background-image:
-    radial-gradient(at 27% 37%, rgba(91, 115, 241, 0.15) 0px, transparent 50%),
-    radial-gradient(at 97% 21%, rgba(16, 185, 129, 0.1) 0px, transparent 50%),
-    radial-gradient(at 52% 99%, rgba(139, 92, 246, 0.1) 0px, transparent 50%),
-    radial-gradient(at 10% 29%, rgba(91, 115, 241, 0.1) 0px, transparent 50%),
-    radial-gradient(at 97% 96%, rgba(16, 185, 129, 0.08) 0px, transparent 50%),
-    radial-gradient(at 33% 50%, rgba(91, 115, 241, 0.08) 0px, transparent 50%),
-    radial-gradient(at 79% 53%, rgba(245, 158, 11, 0.05) 0px, transparent 50%);
-}

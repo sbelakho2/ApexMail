@@ -2,7 +2,7 @@
  * Bounce Server - Processes bounce messages and DSN reports
  */
 
-import type { Pool } from 'pg';
+import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
@@ -34,7 +34,6 @@ interface BounceInfo {
 
 export class BounceServer {
   private readonly db: Pool;
-  private readonly redis: Redis;
   private readonly config: BounceServerConfig['config'];
   private readonly logger: Logger;
   
@@ -42,7 +41,6 @@ export class BounceServer {
 
   constructor(options: BounceServerConfig) {
     this.db = options.db;
-    this.redis = options.redis;
     this.config = options.config;
     this.logger = options.logger;
   }
@@ -96,7 +94,7 @@ export class BounceServer {
 
   private onMailFrom(
     address: SMTPServerAddress,
-    session: SMTPServerSession,
+    _session: SMTPServerSession,
     callback: (err?: Error) => void
   ): void {
     // Bounces typically come from empty MAIL FROM (<>)
@@ -106,7 +104,7 @@ export class BounceServer {
 
   private onRcptTo(
     address: SMTPServerAddress,
-    session: SMTPServerSession,
+    _session: SMTPServerSession,
     callback: (err?: Error) => void
   ): void {
     // Accept mail to VERP addresses or bounce addresses
@@ -186,7 +184,7 @@ export class BounceServer {
     this.logger.info('Processing bounce', {
       bounceId,
       to: recipient,
-      from: session.envelope.mailFrom?.address || '<>',
+      from: session.envelope.mailFrom ? session.envelope.mailFrom.address : '<>',
     });
 
     // Try to extract bounce info from VERP address
@@ -288,6 +286,7 @@ export class BounceServer {
   private parseVerpAddress(email: string): { tenantId?: string; messageId?: string; recipientHash?: string } {
     // Format: bounces+tenant_id-message_id-recipient_hash@verp.domain.com
     const localPart = email.split('@')[0];
+    if (!localPart) return {};
     const parts = localPart.replace('bounces+', '').split('-');
     
     if (parts.length >= 3) {
@@ -347,19 +346,16 @@ export class BounceServer {
 
   private parseDSN(dsn: string, result: BounceInfo): void {
     const lines = dsn.split(/\r?\n/);
-    let inRecipientBlock = false;
 
     for (const line of lines) {
       const lowerLine = line.toLowerCase();
       
       if (lowerLine.startsWith('original-recipient:')) {
         result.originalRecipient = this.extractAddress(line);
-        inRecipientBlock = true;
       } else if (lowerLine.startsWith('final-recipient:')) {
         if (!result.originalRecipient) {
           result.originalRecipient = this.extractAddress(line);
         }
-        inRecipientBlock = true;
       } else if (lowerLine.startsWith('action:')) {
         result.action = line.split(':')[1]?.trim().toLowerCase() ?? 'failed';
       } else if (lowerLine.startsWith('status:')) {
@@ -380,7 +376,7 @@ export class BounceServer {
 
   private extractOriginalMessageId(headers: string, result: BounceInfo): void {
     const match = headers.match(/^message-id:\s*(<[^>]+>|[^\s]+)/im);
-    if (match) {
+    if (match?.[1]) {
       result.originalMessageId = match[1].replace(/[<>]/g, '');
     }
   }
@@ -487,7 +483,7 @@ export class BounceServer {
   private async storeUnmatchedBounce(
     bounceId: string,
     session: SMTPServerSession,
-    parsed: ParsedMail,
+    _parsed: ParsedMail,
     rawMessage: Buffer,
     bounceInfo: BounceInfo
   ): Promise<void> {
@@ -499,7 +495,7 @@ export class BounceServer {
     `, [
       bounceId,
       session.envelope.rcptTo[0]?.address,
-      session.envelope.mailFrom?.address || '<>',
+      session.envelope.mailFrom ? session.envelope.mailFrom.address : '<>',
       bounceInfo.bounceType,
       bounceInfo.bounceSubtype,
       bounceInfo.diagnosticCode,

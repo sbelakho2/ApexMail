@@ -13,9 +13,10 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { z } from 'zod';
 import type { Pool } from 'pg';
+import type { Redis } from 'ioredis';
 import { ApiVersioningService, VersionStatus } from '../services/api-versioning.js';
 import { WebhookService, WebhookEventType } from '../services/webhooks.js';
-import { SdkGenerator, SdkLanguage } from '../services/sdk-generator.js';
+import { SdkGenerator, SDK_LANGUAGES, type SdkLanguage } from '../services/sdk-generator.js';
 import { SandboxService, SandboxMode } from '../services/sandbox.js';
 import { OpenApiGenerator } from '../services/openapi-generator.js';
 import { CliToolService } from '../services/cli-tool.js';
@@ -26,12 +27,12 @@ type Variables = {
   apiVersion: string;
 };
 
-export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
+export function createDevExRoutes(db: Pool, redis?: Redis): Hono<{ Variables: Variables }> {
   const app = new Hono<{ Variables: Variables }>();
 
   // Initialize services
   const versioningService = new ApiVersioningService(db);
-  const webhookService = new WebhookService(db);
+  const webhookService = redis ? new WebhookService(db, redis) : null;
   const sdkGenerator = new SdkGenerator(db);
   const sandboxService = new SandboxService(db);
   const openApiGenerator = new OpenApiGenerator(db);
@@ -128,6 +129,9 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * List webhooks
    */
   app.get('/webhooks', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
     const tenantId = c.get('tenantId');
     const result = await webhookService.listEndpoints(tenantId);
     if (!result.ok) {
@@ -141,6 +145,9 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Create webhook
    */
   app.post('/webhooks', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
     const tenantId = c.get('tenantId');
     const body = await c.req.json();
     
@@ -151,10 +158,12 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
 
     const result = await webhookService.createEndpoint(
       tenantId,
-      parsed.data.url,
-      parsed.data.events,
-      parsed.data.description,
-      parsed.data.headers
+      {
+        url: parsed.data.url,
+        events: parsed.data.events,
+        description: parsed.data.description,
+        metadata: parsed.data.headers ? { headers: parsed.data.headers } : undefined,
+      }
     );
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -167,8 +176,12 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Get webhook
    */
   app.get('/webhooks/:id', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
+    const tenantId = c.get('tenantId');
     const id = c.req.param('id');
-    const result = await webhookService.getEndpoint(id);
+    const result = await webhookService.getEndpoint(tenantId, id);
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -183,10 +196,14 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Update webhook
    */
   app.patch('/webhooks/:id', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
+    const tenantId = c.get('tenantId');
     const id = c.req.param('id');
     const body = await c.req.json();
 
-    const result = await webhookService.updateEndpoint(id, body);
+    const result = await webhookService.updateEndpoint(tenantId, id, body);
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -198,8 +215,12 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Delete webhook
    */
   app.delete('/webhooks/:id', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
+    const tenantId = c.get('tenantId');
     const id = c.req.param('id');
-    const result = await webhookService.deleteEndpoint(id);
+    const result = await webhookService.deleteEndpoint(tenantId, id);
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -211,11 +232,13 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Test webhook
    */
   app.post('/webhooks/:id/test', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
+    const tenantId = c.get('tenantId');
     const id = c.req.param('id');
-    const body = await c.req.json().catch(() => ({}));
-    const eventType = body.eventType ?? WebhookEventType.EMAIL_DELIVERED;
 
-    const result = await webhookService.testEndpoint(id, eventType);
+    const result = await webhookService.testEndpoint(tenantId, id);
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -227,11 +250,15 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Get webhook delivery logs
    */
   app.get('/webhooks/:id/logs', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
+    const tenantId = c.get('tenantId');
     const id = c.req.param('id');
     const limit = parseInt(c.req.query('limit') ?? '50');
     const offset = parseInt(c.req.query('offset') ?? '0');
 
-    const result = await webhookService.getDeliveryLogs(id, limit, offset);
+    const result = await webhookService.getDeliveries(tenantId, { endpointId: id, limit, offset });
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -255,8 +282,12 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Rotate webhook secret
    */
   app.post('/webhooks/:id/rotate-secret', async (c) => {
+    if (!webhookService) {
+      return c.json({ error: 'Webhook service unavailable' }, 503);
+    }
+    const tenantId = c.get('tenantId');
     const id = c.req.param('id');
-    const result = await webhookService.rotateSecret(id);
+    const result = await webhookService.rotateSecret(tenantId, id);
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -272,8 +303,9 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    * Get available SDK languages
    */
   app.get('/sdks', async (c) => {
+    const availableLanguages = sdkGenerator.getAvailableLanguages();
     return c.json({
-      languages: Object.values(SdkLanguage).map(lang => ({
+      languages: availableLanguages.map(lang => ({
         id: lang,
         name: getLanguageName(lang),
         packageManager: getPackageManager(lang),
@@ -286,14 +318,14 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    */
   app.post('/sdks/:language', async (c) => {
     const language = c.req.param('language') as SdkLanguage;
-    if (!Object.values(SdkLanguage).includes(language)) {
+    if (!Object.values(SDK_LANGUAGES).includes(language)) {
       return c.json({ error: 'Unsupported language' }, 400);
     }
 
     const body = await c.req.json().catch(() => ({}));
     const version = body.version ?? config.currentApiVersion;
 
-    const result = await sdkGenerator.generateSdk(language, version);
+    const result = await sdkGenerator.generateSdk({ language, version, apiVersion: config.currentApiVersion });
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
@@ -306,29 +338,26 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
    */
   app.get('/sdks/:language/download', async (c) => {
     const language = c.req.param('language') as SdkLanguage;
-    if (!Object.values(SdkLanguage).includes(language)) {
+    if (!Object.values(SDK_LANGUAGES).includes(language)) {
       return c.json({ error: 'Unsupported language' }, 400);
     }
 
     const version = c.req.query('version') ?? config.currentApiVersion;
 
     // Generate SDK
-    const result = await sdkGenerator.generateSdk(language, version);
+    const result = await sdkGenerator.generateSdk({ language, version, apiVersion: config.currentApiVersion });
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
 
-    // Create archive
-    const archiveResult = await sdkGenerator.createArchive(language, result.value.files);
-    if (!archiveResult.ok) {
-      return c.json({ error: archiveResult.error.message }, 500);
-    }
-
+    // For now, return the files as JSON since createArchive doesn't exist
+    // In production, this would create a zip archive
     const filename = `apexmail-${language}-sdk-${version}.zip`;
-    return new Response(archiveResult.value, {
+    const archiveContent = JSON.stringify(result.value.files, null, 2);
+    return new Response(archiveContent, {
       headers: {
-        'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Type': 'application/json',
+        'Content-Disposition': `attachment; filename="${filename.replace('.zip', '.json')}"`,
       },
     });
   });
@@ -674,54 +703,46 @@ export function createDevExRoutes(db: Pool): Hono<{ Variables: Variables }> {
 // Helper functions
 
 function getEventDescription(type: WebhookEventType): string {
-  const descriptions: Record<WebhookEventType, string> = {
+  const descriptions: Record<string, string> = {
     [WebhookEventType.EMAIL_SENT]: 'Email has been sent to the recipient server',
     [WebhookEventType.EMAIL_DELIVERED]: 'Email was successfully delivered',
     [WebhookEventType.EMAIL_BOUNCED]: 'Email bounced (hard or soft)',
     [WebhookEventType.EMAIL_DEFERRED]: 'Email delivery was deferred',
-    [WebhookEventType.EMAIL_DROPPED]: 'Email was dropped (suppression/spam)',
     [WebhookEventType.EMAIL_OPENED]: 'Recipient opened the email',
     [WebhookEventType.EMAIL_CLICKED]: 'Recipient clicked a link in the email',
     [WebhookEventType.EMAIL_UNSUBSCRIBED]: 'Recipient unsubscribed',
     [WebhookEventType.EMAIL_COMPLAINED]: 'Recipient marked as spam',
-    [WebhookEventType.EMAIL_DELAYED]: 'Email delivery is delayed',
-    [WebhookEventType.DOMAIN_VERIFIED]: 'Domain was verified',
-    [WebhookEventType.DOMAIN_VERIFICATION_FAILED]: 'Domain verification failed',
-    [WebhookEventType.ACCOUNT_SUSPENDED]: 'Account was suspended',
-    [WebhookEventType.ACCOUNT_UNSUSPENDED]: 'Account was unsuspended',
-    [WebhookEventType.API_KEY_CREATED]: 'New API key was created',
-    [WebhookEventType.API_KEY_REVOKED]: 'API key was revoked',
-    [WebhookEventType.QUOTA_WARNING]: 'Approaching usage quota',
-    [WebhookEventType.QUOTA_EXCEEDED]: 'Usage quota exceeded',
-    [WebhookEventType.INVOICE_CREATED]: 'New invoice was created',
-    [WebhookEventType.PAYMENT_SUCCEEDED]: 'Payment was successful',
-    [WebhookEventType.PAYMENT_FAILED]: 'Payment failed',
+    [WebhookEventType.CONTACT_CREATED]: 'Contact was created',
+    [WebhookEventType.CONTACT_UPDATED]: 'Contact was updated',
+    [WebhookEventType.CONTACT_DELETED]: 'Contact was deleted',
+    [WebhookEventType.LIST_SUBSCRIBED]: 'Subscribed to list',
+    [WebhookEventType.LIST_UNSUBSCRIBED]: 'Unsubscribed from list',
   };
   return descriptions[type] ?? 'Unknown event';
 }
 
 function getLanguageName(lang: SdkLanguage): string {
   const names: Record<SdkLanguage, string> = {
-    [SdkLanguage.TYPESCRIPT]: 'TypeScript/JavaScript',
-    [SdkLanguage.PYTHON]: 'Python',
-    [SdkLanguage.RUBY]: 'Ruby',
-    [SdkLanguage.GO]: 'Go',
-    [SdkLanguage.PHP]: 'PHP',
-    [SdkLanguage.JAVA]: 'Java',
-    [SdkLanguage.CSHARP]: 'C#/.NET',
+    [SDK_LANGUAGES.typescript]: 'TypeScript/JavaScript',
+    [SDK_LANGUAGES.python]: 'Python',
+    [SDK_LANGUAGES.ruby]: 'Ruby',
+    [SDK_LANGUAGES.go]: 'Go',
+    [SDK_LANGUAGES.php]: 'PHP',
+    [SDK_LANGUAGES.java]: 'Java',
+    [SDK_LANGUAGES.csharp]: 'C#/.NET',
   };
   return names[lang] ?? lang;
 }
 
 function getPackageManager(lang: SdkLanguage): string {
   const managers: Record<SdkLanguage, string> = {
-    [SdkLanguage.TYPESCRIPT]: 'npm',
-    [SdkLanguage.PYTHON]: 'pip',
-    [SdkLanguage.RUBY]: 'gem',
-    [SdkLanguage.GO]: 'go mod',
-    [SdkLanguage.PHP]: 'composer',
-    [SdkLanguage.JAVA]: 'maven',
-    [SdkLanguage.CSHARP]: 'nuget',
+    [SDK_LANGUAGES.typescript]: 'npm',
+    [SDK_LANGUAGES.python]: 'pip',
+    [SDK_LANGUAGES.ruby]: 'gem',
+    [SDK_LANGUAGES.go]: 'go mod',
+    [SDK_LANGUAGES.php]: 'composer',
+    [SDK_LANGUAGES.java]: 'maven',
+    [SDK_LANGUAGES.csharp]: 'nuget',
   };
   return managers[lang] ?? 'unknown';
 }

@@ -4,10 +4,7 @@
  */
 
 import { Result } from '@apexmail/lib';
-import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
-
-const logger = createLogger('invoice-generator');
 
 export interface InvoiceLineItem {
   description: string;
@@ -70,9 +67,10 @@ export class InvoiceService {
 
   /**
    * Generate invoice number (EE format: YYYY-NNNNNN)
+   * Uses UTC year to ensure consistency across timezones
    */
   async generateInvoiceNumber(): Promise<Result<string, Error>> {
-    const year = new Date().getFullYear();
+    const year = new Date().getUTCFullYear();
     
     const result = await this.db.query<{ next_val: string }>(
       `SELECT nextval('invoice_number_seq')::text as next_val`
@@ -80,7 +78,9 @@ export class InvoiceService {
 
     if (!result.ok) return Result.err(result.error);
 
-    const sequence = result.value.rows[0]?.next_val.padStart(6, '0') ?? '000001';
+    // Safe null handling for sequence value
+    const rawSequence = result.value.rows[0]?.next_val;
+    const sequence = (rawSequence ?? '').padStart(6, '0') || '000001';
     return Result.ok(`${year}-${sequence}`);
   }
 
@@ -283,8 +283,10 @@ export class InvoiceService {
     const formatCurrency = (cents: number): string => 
       `€${(cents / 100).toFixed(2)}`;
 
-    const formatDate = (date: Date): string =>
-      date.toISOString().split('T')[0];
+    const formatDate = (date: Date): string => {
+      const parts = date.toISOString().split('T');
+      return parts[0] ?? date.toISOString();
+    };
 
     // This generates a simple HTML template that can be converted to PDF
     return `
@@ -408,8 +410,10 @@ export class InvoiceService {
    * Generate Estonian e-Invoice XML (Estonian e-Invoice standard)
    */
   generateEInvoiceXml(invoice: Invoice): string {
-    const formatDate = (date: Date): string =>
-      date.toISOString().split('T')[0];
+    const formatDate = (date: Date): string => {
+      const parts = date.toISOString().split('T');
+      return parts[0] ?? date.toISOString();
+    };
 
     return `<?xml version="1.0" encoding="UTF-8"?>
 <E_Invoice xmlns="http://www.pangaliit.ee/e-arve/e-arve">
@@ -560,6 +564,32 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);
 
+    // Safe JSON parsing to prevent crashes from corrupted data
+    let lineItems: InvoiceLineItem[] = [];
+    let billingAddress: BillingAddress = { 
+      companyName: '', 
+      vatNumber: null, 
+      addressLine1: '', 
+      addressLine2: null, 
+      city: '', 
+      state: null, 
+      postalCode: '', 
+      country: '', 
+      email: '' 
+    };
+    
+    try {
+      lineItems = JSON.parse(row.line_items || '[]');
+    } catch {
+      console.warn(`[Invoices] Failed to parse line_items for invoice ${row.id}`);
+    }
+    
+    try {
+      billingAddress = JSON.parse(row.billing_address || '{}');
+    } catch {
+      console.warn(`[Invoices] Failed to parse billing_address for invoice ${row.id}`);
+    }
+
     return Result.ok({
       id: row.id,
       tenantId: row.tenant_id,
@@ -570,8 +600,8 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
       subtotal: row.subtotal,
       vatTotal: row.vat_total,
       total: row.total,
-      lineItems: JSON.parse(row.line_items),
-      billingAddress: JSON.parse(row.billing_address),
+      lineItems,
+      billingAddress,
       issuedAt: row.issued_at,
       dueAt: row.due_at,
       paidAt: row.paid_at,
@@ -629,30 +659,49 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
 
     if (!result.ok) return Result.err(result.error);
 
-    return Result.ok(result.value.rows.map(row => ({
-      id: row.id,
-      tenantId: row.tenant_id,
-      stripeInvoiceId: row.stripe_invoice_id,
-      invoiceNumber: row.invoice_number,
-      status: row.status,
-      currency: row.currency,
-      subtotal: row.subtotal,
-      vatTotal: row.vat_total,
-      total: row.total,
-      lineItems: JSON.parse(row.line_items),
-      billingAddress: JSON.parse(row.billing_address),
-      issuedAt: row.issued_at,
-      dueAt: row.due_at,
-      paidAt: row.paid_at,
-      periodStart: row.period_start,
-      periodEnd: row.period_end,
-      purchaseOrderNumber: row.purchase_order_number,
-      notes: row.notes,
-      pdfUrl: row.pdf_url,
-      xmlUrl: row.xml_url,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    })));
+    return Result.ok(result.value.rows.map(row => {
+      // Safe JSON parsing to prevent crashes
+      let lineItems: InvoiceLineItem[] = [];
+      let billingAddress: BillingAddress = { 
+        companyName: '', 
+        vatNumber: null, 
+        addressLine1: '', 
+        addressLine2: null, 
+        city: '', 
+        state: null, 
+        postalCode: '', 
+        country: '', 
+        email: '' 
+      };
+      
+      try { lineItems = JSON.parse(row.line_items || '[]'); } catch { /* use default */ }
+      try { billingAddress = JSON.parse(row.billing_address || '{}'); } catch { /* use default */ }
+      
+      return {
+        id: row.id,
+        tenantId: row.tenant_id,
+        stripeInvoiceId: row.stripe_invoice_id,
+        invoiceNumber: row.invoice_number,
+        status: row.status,
+        currency: row.currency,
+        subtotal: row.subtotal,
+        vatTotal: row.vat_total,
+        total: row.total,
+        lineItems,
+        billingAddress,
+        issuedAt: row.issued_at,
+        dueAt: row.due_at,
+        paidAt: row.paid_at,
+        periodStart: row.period_start,
+        periodEnd: row.period_end,
+        purchaseOrderNumber: row.purchase_order_number,
+        notes: row.notes,
+        pdfUrl: row.pdf_url,
+        xmlUrl: row.xml_url,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    }));
   }
 
   private escapeXml(str: string): string {

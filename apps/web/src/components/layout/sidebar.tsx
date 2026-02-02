@@ -5,21 +5,21 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cva, type VariantProps } from 'class-variance-authority';
 import {
-    Home,
-    Mail,
-    Users,
-    BarChart3,
-    Settings,
-    Send,
-    ListFilter,
-    Shield,
-    Bot,
-    Building2,
-    CreditCard,
-    HelpCircle,
-    ChevronLeft,
-    ChevronRight,
-    LogOut,
+ Home,
+ Mail,
+ Users,
+ BarChart3,
+ Settings,
+ Send,
+ ListFilter,
+ Shield,
+ Bot,
+ CreditCard,
+ HelpCircle,
+ ChevronLeft,
+ ChevronRight,
+ LogOut,
+ type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -28,194 +28,195 @@ import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface NavItem {
-    title: string;
-    href: string;
-    icon: React.ComponentType<{ className?: string }>;
-    badge?: string | number;
-    disabled?: boolean;
+ title: string;
+ href: string;
+ icon: LucideIcon;
+ badge?: string | number;
+ disabled?: boolean;
 }
 
 interface NavSection {
-    title?: string;
-    items: NavItem[];
+ title?: string;
+ items: NavItem[];
 }
 
+/**
+ * Customer Console Navigation
+ * 
+ * NOTE: Sales/CRM features are INTENTIONALLY EXCLUDED from customer console.
+ * CRM Pipeline, Lead Scoring, and Sales Automation are CONTROL PLANE features
+ * available only at the internal Sales Autopilot service (port 3010).
+ * 
+ * This separation ensures:
+ * 1. Customer data isolation - customers never see owner's lead data
+ * 2. Process isolation - control plane runs in separate process
+ * 3. Security boundary - different auth/authorization rules
+ */
 const mainNav: NavSection[] = [
-    {
-        items: [
-            { title: 'Dashboard', href: '/dashboard', icon: Home },
-            { title: 'Campaigns', href: '/campaigns', icon: Send },
-            { title: 'Contacts', href: '/contacts', icon: Users },
-            { title: 'Lists', href: '/lists', icon: ListFilter },
-            { title: 'Templates', href: '/templates', icon: Mail },
-        ],
-    },
-    {
-        title: 'Analytics',
-        items: [
-            { title: 'Reports', href: '/reports', icon: BarChart3 },
-            { title: 'AI Insights', href: '/ai-insights', icon: Bot },
-        ],
-    },
-    {
-        title: 'Sales',
-        items: [
-            { title: 'CRM Pipeline', href: '/crm', icon: Building2 },
-            { title: 'Lead Scoring', href: '/leads', icon: Users },
-        ],
-    },
-    {
-        title: 'Settings',
-        items: [
-            { title: 'Account', href: '/settings', icon: Settings },
-            { title: 'Compliance', href: '/compliance', icon: Shield },
-            { title: 'Billing', href: '/billing', icon: CreditCard },
-        ],
-    },
+ {
+ items: [
+ { title: 'Dashboard', href: '/dashboard', icon: Home },
+ { title: 'Campaigns', href: '/campaigns', icon: Send },
+ { title: 'Contacts', href: '/contacts', icon: Users },
+ { title: 'Lists', href: '/lists', icon: ListFilter },
+ { title: 'Templates', href: '/templates', icon: Mail },
+ ],
+ },
+ {
+ title: 'Analytics',
+ items: [
+ { title: 'Reports', href: '/reports', icon: BarChart3 },
+ { title: 'AI Insights', href: '/ai-insights', icon: Bot },
+ ],
+ },
+ {
+ title: 'Settings',
+ items: [
+ { title: 'Account', href: '/settings', icon: Settings },
+ { title: 'Compliance', href: '/compliance', icon: Shield },
+ { title: 'Billing', href: '/billing', icon: CreditCard },
+ ],
+ },
 ];
 
 const sidebarVariants = cva(
-    'flex flex-col border-r bg-background transition-all duration-300 ease-in-out',
-    {
-        variants: {
-            collapsed: {
-                true: 'w-16',
-                false: 'w-64',
-            },
-        },
-        defaultVariants: {
-            collapsed: false,
-        },
-    }
+  'flex flex-col border-r border-surface-200 bg-surface-50/80 backdrop-blur-xl transition-all duration-300 ease-in-out',
+  {
+    variants: {
+      collapsed: {
+        true: 'w-16',
+        false: 'w-64',
+      },
+    },
+    defaultVariants: {
+      collapsed: false,
+    },
+  }
 );
 
 interface SidebarProps extends VariantProps<typeof sidebarVariants> {
-    className?: string;
+  className?: string;
 }
 
 export function Sidebar({ className }: SidebarProps) {
-    const [collapsed, setCollapsed] = React.useState(false);
-    const pathname = usePathname();
+  const [collapsed, setCollapsed] = React.useState(false);
+  const pathname = usePathname();
 
-    return (
-        <aside className={cn(sidebarVariants({ collapsed }), className)}>
-            {/* Logo */}
-            <div className="flex h-16 items-center justify-between px-4 border-b">
-                {!collapsed && (
-                    <Link href="/dashboard" className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold">
-                            A
-                        </div>
-                        <span className="text-lg font-semibold">ApexMail</span>
-                    </Link>
-                )}
-                {collapsed && (
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold mx-auto">
-                        A
-                    </div>
-                )}
+  return (
+    <aside className={cn(sidebarVariants({ collapsed }), className)}>
+      {/* Logo */}
+      <div className="flex h-16 items-center justify-between px-4">
+        {!collapsed && (
+          <Link href="/dashboard" className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold shadow-sm">
+              A
             </div>
+            <span className="text-lg font-bold tracking-tight text-foreground">ApexMail</span>
+          </Link>
+        )}
+        {collapsed && (
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold mx-auto shadow-sm">
+            A
+          </div>
+        )}
+      </div>
 
-            {/* Navigation */}
-            <ScrollArea className="flex-1 py-4">
-                <nav className="space-y-6 px-2">
-                    {mainNav.map((section, sectionIndex) => (
-                        <div key={sectionIndex}>
-                            {section.title && !collapsed && (
-                                <h4 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                                    {section.title}
-                                </h4>
-                            )}
-                            {section.title && collapsed && (
-                                <Separator className="my-2" />
-                            )}
-                            <div className="space-y-1">
-                                {section.items.map((item) => {
-                                    const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
-                                    const Icon = item.icon;
+      <Separator className="bg-border/50" />
 
-                                    const linkContent = (
-                                        <Link
-                                            href={item.disabled ? '#' : item.href}
-                                            className={cn(
-                                                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                                                isActive
-                                                    ? 'bg-primary/10 text-primary'
-                                                    : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-                                                item.disabled && 'cursor-not-allowed opacity-50',
-                                                collapsed && 'justify-center px-2'
-                                            )}
-                                        >
-                                            <Icon className="h-5 w-5 shrink-0" />
-                                            {!collapsed && (
-                                                <>
-                                                    <span className="flex-1">{item.title}</span>
-                                                    {item.badge && (
-                                                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
-                                                            {item.badge}
-                                                        </span>
-                                                    )}
-                                                </>
-                                            )}
-                                        </Link>
-                                    );
+      {/* Navigation */}
+      <ScrollArea className="flex-1 px-3">
+        <nav className="flex flex-col gap-6 py-6">
+          {mainNav.map((section, sectionIndex) => (
+            <div key={sectionIndex} className="flex flex-col gap-1">
+              {section.title && !collapsed && (
+                <h4 className="px-3 mb-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/60">
+                  {section.title}
+                </h4>
+              )}
+              {section.title && collapsed && (
+                <Separator className="my-2 bg-border/30" />
+              )}
+              <div className="flex flex-col gap-1">
+                {section.items.map((item) => {
+                  const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
+                  const Icon = item.icon;
 
-                                    return collapsed ? (
-                                        <SimpleTooltip
-                                            key={item.href}
-                                            content={item.title}
-                                            side="right"
-                                        >
-                                            {linkContent}
-                                        </SimpleTooltip>
-                                    ) : (
-                                        <React.Fragment key={item.href}>
-                                            {linkContent}
-                                        </React.Fragment>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    ))}
-                </nav>
-            </ScrollArea>
-
-            {/* Footer */}
-            <div className="border-t p-4">
-                {!collapsed && (
-                    <div className="mb-4">
-                        <Link
-                            href="/help"
-                            className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-                        >
-                            <HelpCircle className="h-5 w-5" />
-                            <span>Help & Support</span>
-                        </Link>
-                    </div>
-                )}
-                <div className="flex items-center justify-between">
-                    {!collapsed && (
-                        <Button variant="ghost" size="sm" className="text-muted-foreground">
-                            <LogOut className="h-4 w-4 mr-2" />
-                            Sign Out
-                        </Button>
-                    )}
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => setCollapsed(!collapsed)}
-                        className={cn(collapsed && 'mx-auto')}
+                  const linkContent = (
+                    <Link
+                      href={item.disabled ? '#' : item.href}
+                      className={cn(
+                        'flex items-center gap-3 rounded-lg px-3 py-2 text-[14px] font-medium transition-all duration-200',
+                        isActive
+                          ? 'bg-primary/5 text-primary shadow-[inset_0_0_0_1px_rgba(37,99,235,0.1)]'
+                          : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                        item.disabled && 'cursor-not-allowed opacity-50',
+                        collapsed && 'justify-center px-2'
+                      )}
                     >
-                        {collapsed ? (
-                            <ChevronRight className="h-4 w-4" />
-                        ) : (
-                            <ChevronLeft className="h-4 w-4" />
-                        )}
-                    </Button>
-                </div>
+                      <Icon className={cn('h-[18px] w-[18px]', isActive ? 'text-primary' : 'text-muted-foreground/70')} />
+                      {!collapsed && (
+                        <>
+                          <span className="flex-1 truncate">{item.title}</span>
+                          {item.badge && (
+                            <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-bold text-primary">
+                              {item.badge}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </Link>
+                  );
+
+                  return collapsed ? (
+                    <SimpleTooltip key={item.href} content={item.title} side="right">
+                      {linkContent}
+                    </SimpleTooltip>
+                  ) : (
+                    <React.Fragment key={item.href}>{linkContent}</React.Fragment>
+                  );
+                })}
+              </div>
             </div>
-        </aside>
-    );
+          ))}
+        </nav>
+      </ScrollArea>
+
+ {/* Footer */}
+ <div className="border-t p-4">
+ {!collapsed && (
+ <div className="mb-4">
+ <Link
+ href="/help"
+ className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+ >
+ <HelpCircle className="h-5 w-5" />
+ <span>Help & Support</span>
+ </Link>
+ </div>
+ )}
+ <div className="flex items-center justify-between">
+ {!collapsed && (
+ <Button variant="ghost" size="sm" className="text-muted-foreground">
+ <LogOut className="h-4 w-4 mr-2" />
+ Sign Out
+ </Button>
+ )}
+ <Button
+ variant="ghost"
+ size="icon"
+ onClick={() => setCollapsed(!collapsed)}
+ className={cn(collapsed && 'mx-auto')}
+ >
+ {collapsed ? (
+ <ChevronRight className="h-4 w-4" />
+ ) : (
+ <ChevronLeft className="h-4 w-4" />
+ )}
+ </Button>
+ </div>
+ </div>
+ </aside>
+ );
 }
 
 export { mainNav, type NavItem, type NavSection };

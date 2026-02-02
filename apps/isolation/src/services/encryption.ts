@@ -9,9 +9,10 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import CryptoJS from 'crypto-js';
 import { v4 as uuidv4 } from 'uuid';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export interface EncryptionKey {
@@ -41,18 +42,17 @@ export interface EncryptionPolicy {
   keyRotationDays: number;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class EncryptionService {
   private db: Pool;
-  private redis: Redis;
+  // @ts-expect-error - reserved for future caching
+  private _redis: Redis;
   private masterKey: string;
   private activeKeys: Map<string, EncryptionKey> = new Map();
   private policies: Map<string, EncryptionPolicy> = new Map();
 
   constructor(db: Pool, redis: Redis) {
     this.db = db;
-    this.redis = redis;
+    this._redis = redis;
     this.masterKey = config.security.encryptionKey;
   }
 
@@ -90,7 +90,7 @@ export class EncryptionService {
       WHERE organization_id = $1
     `, [organizationId]);
 
-    const version = versionResult.rows[0].next_version;
+    const version = parseInt(versionResult.rows[0]?.next_version ?? '1', 10);
 
     const key: EncryptionKey = {
       id,
@@ -140,7 +140,11 @@ export class EncryptionService {
       if (!newKeyResult.ok) return newKeyResult;
     }
 
-    const key = keyResult.ok ? keyResult.value : (await this.getActiveKey(organizationId)).value!;
+    const activeKeyResult = keyResult.ok ? keyResult : await this.getActiveKey(organizationId);
+    if (!activeKeyResult.ok || !activeKeyResult.value) {
+      return { ok: false, error: new Error('Failed to get encryption key') };
+    }
+    const key = activeKeyResult.value;
 
     try {
       // Decrypt the data key
@@ -289,7 +293,7 @@ export class EncryptionService {
   /**
    * Re-encrypt all data for an organization
    */
-  async reencryptData(organizationId: string, oldKeyId: string, newKeyId: string): Promise<Result<void>> {
+  async reencryptData(organizationId: string, oldKeyId: string, _newKeyId: string): Promise<Result<void>> {
     // This would re-encrypt all encrypted fields in the database
     // For each policy, iterate through affected tables and re-encrypt
 
@@ -299,6 +303,12 @@ export class EncryptionService {
         const tableName = this.resourceToTable(policy.resource);
         
         for (const field of policy.fields) {
+          // Validate field name to prevent SQL injection
+          if (!/^[a-z_][a-z0-9_]*$/i.test(field)) {
+            console.error(`[Encryption] Invalid field name: ${field}`);
+            continue;
+          }
+          
           const result = await this.db.query(`
             SELECT id, "${field}" FROM ${tableName}
             WHERE organization_id = $1
@@ -507,6 +517,10 @@ export class EncryptionService {
       api_key: 'api_keys',
       webhook: 'webhooks',
     };
-    return mapping[resource] || resource;
+    const tableName = mapping[resource];
+    if (!tableName) {
+      throw new Error(`Unknown resource type: ${resource}`);
+    }
+    return tableName;
   }
 }

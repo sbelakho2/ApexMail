@@ -250,6 +250,33 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
                 expect(fileExists('apps/tracking/src/processor.ts')).toBe(true);
             });
         });
+        
+        describe('5.1.1.5 Custom Tracking Domains', () => {
+            // Evidence Required: Customer configures track.example.com -> TLS valid
+            
+            it('should support custom tracking domains in config', () => {
+                const content = readFile('apps/tracking/src/config.ts');
+                expect(content).toMatch(/domain|customDomain|trackingDomain/i);
+            });
+            
+            it('should have whitelabel support for tracking', () => {
+                expect(fileExists('apps/enterprise/src/services/whitelabel.ts')).toBe(true);
+            });
+        });
+        
+        describe('5.1.1.6 Engagement Scoring', () => {
+            // Evidence Required: Dashboard showing engagement scores
+            
+            it('should have engagement scoring in query engine', () => {
+                const content = readFile('apps/analytics/src/query-engine.ts');
+                expect(content).toMatch(/engagement|score/i);
+            });
+            
+            it('should support engagement metrics in API', () => {
+                const content = readFile('apps/api/src/routes/events.ts');
+                expect(content).toMatch(/engagement|score/i);
+            });
+        });
     });
     
     describe('5.2 Cold Storage Engine', () => {
@@ -333,6 +360,38 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
                 const content = readFile('apps/mta/src/servers/inbound.ts');
                 expect(content).toContain('simpleParser');
                 expect(content).toContain('onData');
+            });
+        });
+        
+        describe('5.3.2 Reply Tracking', () => {
+            // Evidence Required: Reply received -> Dashboard shows "1 Reply" linked to original
+            
+            it('should support VERP-style reply addresses', () => {
+                const content = readFile('apps/mta/src/servers/inbound.ts');
+                expect(content).toMatch(/reply|verp/i);
+            });
+        });
+        
+        describe('5.3.3 Inbound Authentication Verification', () => {
+            // Evidence Required: Receive email failing DKIM -> Webhook shows dkim: fail
+            
+            it('should verify SPF on inbound', () => {
+                const content = readFile('apps/mta/src/servers/inbound.ts');
+                expect(content).toMatch(/spf|authentication/i);
+            });
+            
+            it('should verify DKIM on inbound', () => {
+                const content = readFile('apps/mta/src/servers/inbound.ts');
+                expect(content).toMatch(/dkim|authentication/i);
+            });
+        });
+        
+        describe('5.3.4 Inbound Rate Limiting', () => {
+            // Evidence Required: 1000 emails/min -> 421 Rate limit exceeded
+            
+            it('should have rate limiting for inbound', () => {
+                const content = readFile('apps/mta/src/servers/inbound.ts');
+                expect(content).toMatch(/rate|limit/i);
             });
         });
     });

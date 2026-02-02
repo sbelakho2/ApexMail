@@ -296,7 +296,7 @@ function executeStageAutomations(
                 }
                 break;
 
-            case 'remove_tag':
+            case 'remove_tag': {
                 const tagIndex = lead.tags.indexOf(automation.config['tag'] as string);
                 if (tagIndex > -1) {
                     lead.tags.splice(tagIndex, 1);
@@ -308,6 +308,7 @@ function executeStageAutomations(
                     });
                 }
                 break;
+            }
 
             case 'assign_user':
                 lead.assignedTo = automation.config['userId'] as string;
@@ -615,7 +616,7 @@ export function getPipelineStats(tenantId: string): {
     );
 
     const byStage: Record<string, { count: number; value: number }> = {};
-    let totalValue = 0;
+    const totalValue = 0;
     let totalScore = 0;
     let closedWon = 0;
     let closedTotal = 0;

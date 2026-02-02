@@ -77,6 +77,7 @@ export class SessionManager {
 
         const session: ChatSession = {
             id: sessionId,
+            tenantId: 'default',
             userId,
             messages: [],
             context: {
@@ -264,7 +265,7 @@ export class ChatbotAssistant {
         this.pruneHistory(sessionId);
 
         return {
-            message: text,
+            message: { role: 'assistant' as const, content: text },
             suggestions: this.config.suggestActions ? suggestions : undefined,
             tokens: result.tokens,
             latencyMs: result.latencyMs,
@@ -462,8 +463,8 @@ export class ChatbotAssistant {
         // Look for bullet points starting with "•" or "-" that suggest actions
         const lines = cleanText.split('\n');
         for (const line of lines) {
-            if (line.match(/^[•\-]\s*(?:Try|Consider|You could|Suggestion:)/i)) {
-                const label = line.replace(/^[•\-]\s*/, '').trim();
+            if (line.match(/^[•-]\s*(?:Try|Consider|You could|Suggestion:)/i)) {
+                const label = line.replace(/^[•-]\s*/, '').trim();
                 if (label.length < 100) {
                     suggestions.push({
                         type: 'query' as const,

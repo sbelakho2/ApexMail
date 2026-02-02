@@ -9,7 +9,6 @@ import {
     AlertRule,
     AlertSeverity,
     AlertChannel,
-    NotificationPreferences,
 } from '../types.js';
 import { EventEmitter } from 'events';
 import pino from 'pino';
@@ -51,6 +50,9 @@ export class AlertManager extends EventEmitter {
     private escalationPolicies: Map<string, EscalationPolicy> = new Map();
     private deduplicationCache: Map<string, number> = new Map();
     private escalationTimers: Map<string, NodeJS.Timeout[]> = new Map();
+    private deduplicationCleanupInterval: NodeJS.Timeout | null = null;
+    private static readonly MAX_ALERT_HISTORY_SIZE = 10000;
+    private static readonly MAX_NOTIFICATION_HISTORY_SIZE = 10000;
 
     constructor(config: AlertManagerConfig) {
         super();
@@ -260,14 +262,36 @@ export class AlertManager extends EventEmitter {
      * Starts deduplication cache cleanup
      */
     private startDeduplicationCleanup(): void {
-        setInterval(() => {
+        this.deduplicationCleanupInterval = setInterval(() => {
             const now = Date.now();
             for (const [key, timestamp] of this.deduplicationCache) {
                 if (now - timestamp > this.config.deduplicationWindowMs) {
                     this.deduplicationCache.delete(key);
                 }
             }
+            // Also trim alert history to prevent unbounded growth
+            if (this.alertHistory.length > AlertManager.MAX_ALERT_HISTORY_SIZE) {
+                this.alertHistory = this.alertHistory.slice(-AlertManager.MAX_ALERT_HISTORY_SIZE);
+            }
         }, 60000); // Clean every minute
+    }
+
+    /**
+     * Stops the alert manager and cleans up resources
+     */
+    stop(): void {
+        if (this.deduplicationCleanupInterval) {
+            clearInterval(this.deduplicationCleanupInterval);
+            this.deduplicationCleanupInterval = null;
+        }
+        // Clear all escalation timers
+        for (const timers of this.escalationTimers.values()) {
+            for (const timer of timers) {
+                clearTimeout(timer);
+            }
+        }
+        this.escalationTimers.clear();
+        logger.info('Alert manager stopped');
     }
 
     /**
@@ -317,7 +341,7 @@ export class AlertManager extends EventEmitter {
      */
     evaluateMetric(metricName: string, value: number, labels: Record<string, string> = {}): void {
         for (const rule of this.rules.values()) {
-            if (!rule.enabled || rule.condition.metric !== metricName) {
+            if (!rule.enabled || !rule.condition || rule.condition.metric !== metricName) {
                 continue;
             }
 
@@ -338,6 +362,7 @@ export class AlertManager extends EventEmitter {
         condition: AlertRule['condition'],
         value: number
     ): boolean {
+        if (!condition) return false;
         switch (condition.operator) {
             case 'greater_than':
                 return value > condition.threshold;
@@ -382,17 +407,17 @@ export class AlertManager extends EventEmitter {
             id: `alert-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             ruleId: rule.id,
             name: rule.name,
-            description: `${rule.description}. Current value: ${value}`,
+            description: `${rule.description || rule.name}. Current value: ${value}`,
             severity: rule.severity,
             status: 'firing',
             labels: { ...rule.labels, ...labels },
             annotations: {
                 value: String(value),
-                threshold: String(rule.condition.threshold),
-                metric: rule.condition.metric,
+                threshold: String(rule.condition?.threshold || 0),
+                metric: rule.condition?.metric || '',
             },
             startsAt: new Date(),
-            endsAt: null,
+            endsAt: undefined,
         };
 
         this.activeAlerts.set(alert.id, alert);
@@ -402,7 +427,7 @@ export class AlertManager extends EventEmitter {
         logger.warn({ alertId: alert.id, rule: rule.id }, 'Alert triggered');
 
         // Send notifications
-        this.sendNotifications(alert, rule.channels);
+        this.sendNotifications(alert, rule.channels || this.config.defaultChannels);
 
         // Setup escalation
         this.setupEscalation(alert, rule.severity);
@@ -442,7 +467,7 @@ export class AlertManager extends EventEmitter {
             labels: params.labels || {},
             annotations: params.annotations || {},
             startsAt: new Date(),
-            endsAt: null,
+            endsAt: undefined,
         };
 
         this.activeAlerts.set(alert.id, alert);
@@ -492,9 +517,11 @@ export class AlertManager extends EventEmitter {
         logger.info({ alertId, resolvedBy }, 'Alert resolved');
 
         // Send resolution notification
-        const rule = this.rules.get(alert.ruleId);
-        if (rule) {
-            this.sendNotifications(alert, rule.channels, true);
+        if (alert.ruleId) {
+            const rule = this.rules.get(alert.ruleId);
+            if (rule) {
+                this.sendNotifications(alert, rule.channels || this.config.defaultChannels, true);
+            }
         }
     }
 
@@ -592,6 +619,12 @@ export class AlertManager extends EventEmitter {
         }
 
         this.notifications.push(notification);
+        
+        // Prevent unbounded growth of notification history
+        if (this.notifications.length > AlertManager.MAX_NOTIFICATION_HISTORY_SIZE) {
+            this.notifications = this.notifications.slice(-AlertManager.MAX_NOTIFICATION_HISTORY_SIZE);
+        }
+        
         this.emit('notification:sent', notification);
     }
 

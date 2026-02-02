@@ -17,74 +17,76 @@ const config: Config = {
         },
         extend: {
             colors: {
-                border: 'hsl(var(--border))',
-                input: 'hsl(var(--input))',
-                ring: 'hsl(var(--ring))',
-                background: 'hsl(var(--background))',
-                foreground: 'hsl(var(--foreground))',
+                border: 'rgb(var(--border) / <alpha-value>)',
+                input: 'rgb(var(--input) / <alpha-value>)',
+                ring: 'rgb(var(--ring) / <alpha-value>)',
+                background: 'rgb(var(--background) / <alpha-value>)',
+                foreground: 'rgb(var(--foreground) / <alpha-value>)',
                 primary: {
-                    DEFAULT: 'hsl(var(--primary))',
-                    foreground: 'hsl(var(--primary-foreground))',
+                    DEFAULT: 'rgb(var(--primary) / <alpha-value>)',
+                    foreground: 'rgb(var(--primary-foreground) / <alpha-value>)',
                 },
                 secondary: {
-                    DEFAULT: 'hsl(var(--secondary))',
-                    foreground: 'hsl(var(--secondary-foreground))',
+                    DEFAULT: 'rgb(var(--secondary) / <alpha-value>)',
+                    foreground: 'rgb(var(--secondary-foreground) / <alpha-value>)',
                 },
                 destructive: {
-                    DEFAULT: 'hsl(var(--destructive))',
-                    foreground: 'hsl(var(--destructive-foreground))',
+                    DEFAULT: 'rgb(var(--destructive) / <alpha-value>)',
+                    foreground: 'rgb(var(--destructive-foreground) / <alpha-value>)',
                 },
                 muted: {
-                    DEFAULT: 'hsl(var(--muted))',
-                    foreground: 'hsl(var(--muted-foreground))',
+                    DEFAULT: 'rgb(var(--muted) / <alpha-value>)',
+                    foreground: 'rgb(var(--muted-foreground) / <alpha-value>)',
                 },
                 accent: {
-                    DEFAULT: 'hsl(var(--accent))',
-                    foreground: 'hsl(var(--accent-foreground))',
+                    DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
+                    foreground: 'rgb(var(--accent-foreground) / <alpha-value>)',
                 },
                 popover: {
-                    DEFAULT: 'hsl(var(--popover))',
-                    foreground: 'hsl(var(--popover-foreground))',
+                    DEFAULT: 'rgb(var(--popover) / <alpha-value>)',
+                    foreground: 'rgb(var(--popover-foreground) / <alpha-value>)',
                 },
                 card: {
-                    DEFAULT: 'hsl(var(--card))',
-                    foreground: 'hsl(var(--card-foreground))',
+                    DEFAULT: 'rgb(var(--card) / <alpha-value>)',
+                    foreground: 'rgb(var(--card-foreground) / <alpha-value>)',
                 },
+                success: 'rgb(var(--success) / <alpha-value>)',
+                warning: 'rgb(var(--warning) / <alpha-value>)',
+                danger: 'rgb(var(--danger) / <alpha-value>)',
+                info: 'rgb(var(--info) / <alpha-value>)',
                 // ApexMail brand colors
                 apex: {
-                    50: '#f0f9ff',
-                    100: '#e0f2fe',
-                    200: '#bae6fd',
-                    300: '#7dd3fc',
-                    400: '#38bdf8',
-                    500: '#0ea5e9',
-                    600: '#0284c7',
-                    700: '#0369a1',
-                    800: '#075985',
-                    900: '#0c4a6e',
-                    950: '#082f49',
+                    DEFAULT: 'rgb(var(--apex) / <alpha-value>)',
+                    50: 'rgb(var(--apex-50) / <alpha-value>)',
+                    100: 'rgb(var(--apex-100) / <alpha-value>)',
+                    200: 'rgb(var(--apex-200) / <alpha-value>)',
+                    300: 'rgb(var(--apex-300) / <alpha-value>)',
+                    400: 'rgb(var(--apex-400) / <alpha-value>)',
+                    500: 'rgb(var(--apex-500) / <alpha-value>)',
+                    600: 'rgb(var(--apex-600) / <alpha-value>)',
+                    700: 'rgb(var(--apex-700) / <alpha-value>)',
+                    800: 'rgb(var(--apex-800) / <alpha-value>)',
+                    900: 'rgb(var(--apex-900) / <alpha-value>)',
                 },
-                success: {
-                    DEFAULT: 'hsl(var(--success))',
-                    foreground: 'hsl(var(--success-foreground))',
-                },
-                warning: {
-                    DEFAULT: 'hsl(var(--warning))',
-                    foreground: 'hsl(var(--warning-foreground))',
-                },
-                error: {
-                    DEFAULT: 'hsl(var(--error))',
-                    foreground: 'hsl(var(--error-foreground))',
-                },
+            },
+            spacing: {
+                '1': 'var(--space-1)',
+                '2': 'var(--space-2)',
+                '3': 'var(--space-3)',
+                '4': 'var(--space-4)',
+                '6': 'var(--space-6)',
+                '8': 'var(--space-8)',
+                '12': 'var(--space-12)',
             },
             borderRadius: {
-                lg: 'var(--radius)',
-                md: 'calc(var(--radius) - 2px)',
-                sm: 'calc(var(--radius) - 4px)',
+                xl: 'var(--radius-xl)',
+                lg: 'var(--radius-lg)',
+                md: 'var(--radius-md)',
+                sm: 'var(--radius-sm)',
             },
             fontFamily: {
-                sans: ['var(--font-geist-sans)', 'system-ui', 'sans-serif'],
-                mono: ['var(--font-geist-mono)', 'monospace'],
+                sans: ['var(--font-inter)', 'system-ui', 'sans-serif'],
+                mono: ['var(--font-jetbrains)', 'monospace'],
             },
             fontSize: {
                 '2xs': ['0.625rem', { lineHeight: '0.75rem' }],
@@ -144,10 +146,6 @@ const config: Config = {
                         animationTimingFunction: 'cubic-bezier(0, 0, 0.2, 1)',
                     },
                 },
-                'glass-shine': {
-                    '0%': { transform: 'translateX(-100%) skewX(-15deg)' },
-                    '100%': { transform: 'translateX(200%) skewX(-15deg)' },
-                },
             },
             animation: {
                 'accordion-down': 'accordion-down 0.2s ease-out',
@@ -162,51 +160,11 @@ const config: Config = {
                 pulse: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
                 spin: 'spin 1s linear infinite',
                 bounce: 'bounce 1s infinite',
-                'glass-shine': 'glass-shine 3s ease-in-out infinite',
-            },
-            boxShadow: {
-                glass: '0 8px 32px 0 rgba(31, 38, 135, 0.15)',
-                'glass-hover': '0 8px 32px 0 rgba(31, 38, 135, 0.25)',
-                glow: '0 0 20px rgba(14, 165, 233, 0.3)',
-                'glow-lg': '0 0 40px rgba(14, 165, 233, 0.4)',
-            },
-            backdropBlur: {
-                xs: '2px',
-            },
-            backgroundImage: {
-                'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
-                'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-                'glass-gradient': 'linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05))',
             },
         },
     },
     plugins: [
         require('tailwindcss-animate'),
-        // Custom plugin for glassmorphism utilities
-        function ({ addUtilities }: { addUtilities: Function }) {
-            const newUtilities = {
-                '.glass': {
-                    background: 'rgba(255, 255, 255, 0.1)',
-                    backdropFilter: 'blur(10px)',
-                    WebkitBackdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(255, 255, 255, 0.2)',
-                },
-                '.glass-dark': {
-                    background: 'rgba(0, 0, 0, 0.1)',
-                    backdropFilter: 'blur(10px)',
-                    WebkitBackdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                },
-                '.glass-card': {
-                    background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05))',
-                    backdropFilter: 'blur(20px)',
-                    WebkitBackdropFilter: 'blur(20px)',
-                    border: '1px solid rgba(255, 255, 255, 0.18)',
-                    boxShadow: '0 8px 32px 0 rgba(31, 38, 135, 0.15)',
-                },
-            };
-            addUtilities(newUtilities);
-        },
     ],
 };
 

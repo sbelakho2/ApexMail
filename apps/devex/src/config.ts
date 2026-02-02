@@ -17,6 +17,13 @@ const configSchema = z.object({
   supportedApiVersions: z.array(z.string()).default(['2024-01', '2023-10', '2023-06']),
   deprecatedApiVersions: z.array(z.string()).default(['2023-01', '2022-10']),
   sandboxEnabled: z.boolean().default(true),
+  // Database config
+  dbHost: z.string().default('localhost'),
+  dbPort: z.number().default(5432),
+  dbName: z.string().default('apexmail'),
+  dbUser: z.string().default('postgres'),
+  dbPassword: z.string().default(''),
+  nodeEnv: z.string().default('development'),
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -35,6 +42,12 @@ function loadConfig(): Config {
     supportedApiVersions: process.env.SUPPORTED_API_VERSIONS?.split(',') ?? ['2024-01', '2023-10', '2023-06'],
     deprecatedApiVersions: process.env.DEPRECATED_API_VERSIONS?.split(',') ?? ['2023-01', '2022-10'],
     sandboxEnabled: process.env.SANDBOX_ENABLED !== 'false',
+    dbHost: process.env.DB_HOST ?? 'localhost',
+    dbPort: parseInt(process.env.DB_PORT ?? '5432', 10),
+    dbName: process.env.DB_NAME ?? 'apexmail',
+    dbUser: process.env.DB_USER ?? 'postgres',
+    dbPassword: process.env.DB_PASSWORD ?? '',
+    nodeEnv: process.env.NODE_ENV ?? 'development',
   });
 }
 

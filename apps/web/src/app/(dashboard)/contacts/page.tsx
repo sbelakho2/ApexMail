@@ -1,24 +1,20 @@
 'use client';
 
 import * as React from 'react';
-import Link from 'next/link';
 import {
     Plus,
     Search,
     MoreHorizontal,
     Users,
     Upload,
-    Download,
     Trash2,
     Pencil,
     Eye,
     Tag,
-    Filter,
     ChevronLeft,
     ChevronRight,
     Mail,
     UserPlus,
-    AlertCircle,
 } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -58,7 +54,6 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { cn, formatNumber, formatRelativeTime, getInitials } from '@/lib/utils';
 
 // Mock data

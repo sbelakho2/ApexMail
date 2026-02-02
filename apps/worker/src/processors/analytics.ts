@@ -207,10 +207,11 @@ export class AnalyticsProcessor {
       let stats = this.aggregationBuffer.get(key);
       
       if (!stats) {
-        const [tenantId, domainOrCampaign, campaignOrTime, maybeTime] = key.split(':');
+        // Parse key: tenantId:domainOrCampaign:campaignOrTime:timestamp
+        const [tenantId, domainOrCampaign, campaignOrTime] = key.split(':');
         
         stats = {
-          tenantId,
+          tenantId: tenantId ?? '',  // Ensure tenantId is always a string
           domainId: domainOrCampaign && !domainOrCampaign.startsWith('20') ? domainOrCampaign : undefined,
           campaignId: campaignOrTime && !campaignOrTime.startsWith('20') ? campaignOrTime : undefined,
           periodStart,
@@ -227,31 +228,35 @@ export class AnalyticsProcessor {
         this.aggregationBuffer.set(key, stats);
       }
 
+      // Stats is guaranteed to be defined here since we either got it from the buffer
+      // or just created it above
+      const currentStats = stats!;
+
       // Increment counter based on event type
       switch (event.eventType) {
         case 'sent':
-          stats.sent++;
+          currentStats.sent++;
           break;
         case 'delivered':
-          stats.delivered++;
+          currentStats.delivered++;
           break;
         case 'opened':
-          stats.opened++;
+          currentStats.opened++;
           break;
         case 'clicked':
-          stats.clicked++;
+          currentStats.clicked++;
           break;
         case 'bounced':
-          stats.bounced++;
+          currentStats.bounced++;
           break;
         case 'unsubscribed':
-          stats.unsubscribed++;
+          currentStats.unsubscribed++;
           break;
         case 'complained':
-          stats.complained++;
+          currentStats.complained++;
           break;
         case 'failed':
-          stats.failed++;
+          currentStats.failed++;
           break;
       }
     }
@@ -317,7 +322,8 @@ export class AnalyticsProcessor {
     try {
       await client.query('BEGIN');
 
-      for (const [key, stats] of aggregations) {
+      for (const [_key, stats] of aggregations) {
+        void _key; // Key is used as map identifier but not needed in the insert
         await client.query(`
           INSERT INTO analytics_hourly (
             id, tenant_id, domain_id, campaign_id, period_start, period_end,
@@ -578,11 +584,16 @@ export class AnalyticsProcessor {
       const key = keys[i];
       const value = values[i];
       
+      // Skip if key is undefined (shouldn't happen but TypeScript is cautious)
+      if (key === undefined) continue;
+      
       // Extract event type from key
       const parts = key.split(':');
       const eventType = parts[parts.length - 1];
       
-      stats[eventType] = parseInt(value ?? '0', 10);
+      if (eventType !== undefined) {
+        stats[eventType] = parseInt(value ?? '0', 10);
+      }
     }
 
     return stats;

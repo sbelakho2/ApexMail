@@ -15,7 +15,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     if (!isAdmin) {
       return c.json({ error: 'Admin access required' }, 403);
     }
-    await next();
+    return next();
   });
 
   // List all tenants with billing status
@@ -53,16 +53,20 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
     const result = await ctx.db.query(query, params);
 
-    return c.json({ tenants: result.rows, limit, offset });
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
+    return c.json({ tenants: result.value.rows, limit, offset });
   });
 
   // Get tenant billing details
   router.get('/tenants/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
 
-    const [subscription, plan, dunning, wallet, invoices] = await Promise.all([
+    const [subscription, planLimits, dunning, wallet, invoices] = await Promise.all([
       ctx.stripe.getSubscription(tenantId),
-      ctx.plans.getTenantPlan(tenantId),
+      ctx.plans.getPlanLimits(tenantId),
       ctx.dunning.getFullState(tenantId),
       ctx.wallet.getBalance(tenantId),
       ctx.invoices.listInvoices(tenantId, { limit: 10 }),
@@ -71,7 +75,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     return c.json({
       tenantId,
       subscription: subscription.ok ? subscription.value : null,
-      plan: plan.ok ? plan.value : null,
+      plan: planLimits.ok ? planLimits.value : null,
       dunning: dunning.ok ? dunning.value : null,
       wallet: wallet.ok ? wallet.value : null,
       recentInvoices: invoices.ok ? invoices.value : [],
@@ -92,12 +96,12 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const parsed = schema.parse(body);
     const adminId = c.get('adminId');
 
-    const result = await ctx.wallet.credit(tenantId, {
-      amount: parsed.amount,
-      description: `Admin credit: ${parsed.reason}`,
-      reference: `admin_credit_${adminId}_${Date.now()}`,
-      expiresAt: parsed.expiresAt ? new Date(parsed.expiresAt) : undefined,
-    });
+    const result = await ctx.wallet.credit(
+      tenantId,
+      parsed.amount,
+      `Admin credit: ${parsed.reason}`,
+      `admin_credit_${adminId}_${Date.now()}`
+    );
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -188,8 +192,11 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       reason: z.string(),
     });
 
-    const parsed = schema.parse(body);
-    const result = await ctx.dunning.resetDunning(tenantId, parsed.reason);
+    // Validate body even though we only need to log the reason
+    schema.parse(body);
+    
+    // Reset dunning by recording a successful payment
+    const result = await ctx.dunning.recordSuccessfulPayment(tenantId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -215,7 +222,8 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
 
     const parsed = schema.parse(body);
-    const result = await ctx.invoices.createInvoice(tenantId, {
+    const result = await ctx.invoices.createInvoice({
+      tenantId,
       periodStart: new Date(parsed.periodStart),
       periodEnd: new Date(parsed.periodEnd),
       lineItems: parsed.lineItems,
@@ -252,7 +260,11 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       [new Date(startDate), new Date(endDate)]
     );
 
-    return c.json({ report: result.rows });
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
+    return c.json({ report: result.value.rows });
   });
 
   // Get MRR report
@@ -275,7 +287,11 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       LIMIT 12
     `);
 
-    return c.json({ report: result.rows });
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
+    return c.json({ report: result.value.rows });
   });
 
   // Get churn report
@@ -304,7 +320,11 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       LIMIT 12
     `);
 
-    return c.json({ report: result.rows });
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
+    return c.json({ report: result.value.rows });
   });
 
   // Get dunning report
@@ -319,7 +339,11 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       GROUP BY dunning_state
     `);
 
-    return c.json({ report: result.rows });
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
+    return c.json({ report: result.value.rows });
   });
 
   // Get cost report
@@ -348,7 +372,11 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       [new Date(startDate), new Date(endDate)]
     );
 
-    return c.json({ report: result.rows });
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
+    return c.json({ report: result.value.rows });
   });
 
   // Export billing data
@@ -363,7 +391,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     let query: string;
-    let params: Date[];
+    const params: Date[] = [new Date(startDate), new Date(endDate)];
 
     switch (type) {
       case 'invoices':
@@ -409,22 +437,25 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
         return c.json({ error: 'Invalid export type' }, 400);
     }
 
-    params = [new Date(startDate), new Date(endDate)];
     const result = await ctx.db.query(query, params);
 
+    if (!result.ok) {
+      return c.json({ error: result.error.message }, 500);
+    }
+
     if (format === 'json') {
-      return c.json({ data: result.rows });
+      return c.json({ data: result.value.rows });
     }
 
     // CSV format
-    if (result.rows.length === 0) {
+    if (result.value.rows.length === 0) {
       return c.text('', 200, { 'Content-Type': 'text/csv' });
     }
 
-    const headers = Object.keys(result.rows[0]);
+    const headers = Object.keys(result.value.rows[0]!);
     const csvRows = [
       headers.join(','),
-      ...result.rows.map((row: Record<string, unknown>) =>
+      ...result.value.rows.map((row: Record<string, unknown>) =>
         headers.map(h => {
           const val = row[h];
           if (val === null || val === undefined) return '';

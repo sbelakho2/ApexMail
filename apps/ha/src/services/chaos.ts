@@ -11,6 +11,7 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum ExperimentType {
@@ -101,8 +102,6 @@ export interface MetricSnapshot {
   availability: number;
   requestsPerSecond: number;
 }
-
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class ChaosEngineeringService {
   private db: Pool;
@@ -432,7 +431,7 @@ export class ChaosEngineeringService {
         ok: true,
         value: {
           experiments,
-          total: parseInt(countResult.rows[0].total),
+          total: parseInt(countResult.rows[0]?.total ?? '0', 10),
         },
       };
     } catch (error) {
@@ -506,20 +505,22 @@ export class ChaosEngineeringService {
    */
   async applyFault(faultType: ExperimentType, parameters: ExperimentParameters): Promise<void> {
     switch (faultType) {
-      case ExperimentType.LATENCY:
+      case ExperimentType.LATENCY: {
         const latency = parameters.latencyMs ?? 1000;
         const jitter = parameters.latencyJitter ?? 0;
         const actualLatency = latency + (Math.random() * jitter * 2 - jitter);
         await new Promise(resolve => setTimeout(resolve, actualLatency));
         break;
+      }
 
-      case ExperimentType.FAILURE:
+      case ExperimentType.FAILURE: {
         const failureRate = parameters.failureRate ?? 1.0;
         if (Math.random() < failureRate) {
           const errorCode = parameters.errorCode ?? 500;
           throw new ChaosError(`Chaos-induced failure`, errorCode);
         }
         break;
+      }
 
       case ExperimentType.NETWORK_PARTITION:
         throw new ChaosError('Network partition simulated', 503);
@@ -568,6 +569,7 @@ export class ChaosEngineeringService {
     const workers: NodeJS.Timeout[] = [];
 
     // Create CPU stress workers
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const workerCount = Math.ceil(require('os').cpus().length * (_targetPercent / 100));
     for (let i = 0; i < workerCount; i++) {
       const worker = setInterval(() => {
@@ -636,13 +638,15 @@ export class ChaosEngineeringService {
           experiment.results.safetyCheckTriggered = true;
 
           switch (check.action) {
-            case 'abort':
+            case 'abort': {
               await this.abortExperiment(experiment.id, `Safety check: ${check.type}`);
               clearInterval(interval);
               return;
-            case 'alert':
+            }
+            case 'alert': {
               await this.sendAlert(experiment, check);
               break;
+            }
           }
         }
       }

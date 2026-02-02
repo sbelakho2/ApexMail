@@ -5,9 +5,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import punycode from 'punycode/';
-import { UNICODE_NORMALIZATION, SMTPUTF8_EXTENSION } from '../config.js';
+import { UNICODE_NORMALIZATION } from '../config.js';
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -66,7 +66,7 @@ export class EAIService {
       
       // Extract display name and address if in format "Name <email>"
       const angleMatch = email.match(/^(.+?)\s*<(.+)>$/);
-      if (angleMatch) {
+      if (angleMatch && angleMatch[1] && angleMatch[2]) {
         displayName = displayName || angleMatch[1].trim().replace(/^["']|["']$/g, '');
         email = angleMatch[2].trim();
       }
@@ -154,7 +154,7 @@ export class EAIService {
 
     for (const email of emails) {
       const result = await this.validateEmail(email);
-      if (!result.ok) {
+      if (result.ok === false) {
         return { ok: false, error: result.error };
       }
       results.push(result.value);
@@ -173,7 +173,7 @@ export class EAIService {
     try {
       // Parse the email
       const parseResult = await this.parseEmailAddress(email);
-      if (!parseResult.ok) {
+      if (parseResult.ok === false) {
         return {
           ok: true,
           value: {
@@ -237,6 +237,7 @@ export class EAIService {
    * Check if string contains non-ASCII characters
    */
   containsNonAscii(text: string): boolean {
+    // eslint-disable-next-line no-control-regex
     return /[^\x00-\x7F]/.test(text);
   }
 
@@ -279,6 +280,7 @@ export class EAIService {
 
       // Check for disallowed Unicode categories
       // Control characters, surrogates, etc.
+      // eslint-disable-next-line no-control-regex
       if (/[\u0000-\u001F\u007F-\u009F\uFEFF\uFFFE\uFFFF]/.test(localPart)) {
         return { isValid: false, error: 'Control characters are not allowed' };
       }
@@ -332,7 +334,7 @@ export class EAIService {
 
     // Check TLD is not all numeric
     const tld = labels[labels.length - 1];
-    if (/^\d+$/.test(tld)) {
+    if (tld && /^\d+$/.test(tld)) {
       return { isValid: false, error: 'TLD cannot be all numeric' };
     }
 
@@ -457,7 +459,7 @@ export class EAIService {
     };
     
     if (charsetMap[originalCharset]) {
-      originalCharset = charsetMap[originalCharset];
+      originalCharset = charsetMap[originalCharset]!;
     }
 
     return {

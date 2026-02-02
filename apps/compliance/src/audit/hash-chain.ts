@@ -9,13 +9,13 @@
 import * as CryptoJS from 'crypto-js';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import { generateUUID, timingSafeCompareBuffers } from '@apexmail/lib/crypto';
 import {
     AuditLogEntry,
     AuditAction,
     AuditResource,
     AuditLogQuery,
 } from '../types';
-import { randomUUID } from 'crypto';
 
 interface LogContext {
     tenantId?: string;
@@ -63,7 +63,7 @@ export class AuditLogger {
         errorMessage: string | null,
         context: LogContext
     ): Promise<AuditLogEntry> {
-        const id = randomUUID();
+        const id = generateUUID();
         const timestamp = new Date();
 
         // Get the previous hash for this tenant (or global if no tenant)
@@ -249,11 +249,11 @@ export class AuditLogger {
         }
 
         // Get total count
-        const countResult = await this.db.query(
+        const countResult = await this.db.query<{ count: string }>(
             `SELECT COUNT(*) as count FROM (${sql}) as subquery`,
             params
         );
-        const total = parseInt(countResult.rows[0].count, 10);
+        const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
 
         // Add ordering and pagination
         sql += ` ORDER BY timestamp DESC`;
@@ -566,11 +566,20 @@ export class AuditLogger {
     }
 
     /**
-     * Verify a signature
+     * Verify a signature using timing-safe comparison
+     * to prevent timing attacks
      */
     private verifySignature(hash: string, signature: string): boolean {
         const expectedSignature = this.sign(hash);
-        return signature === expectedSignature;
+        
+        // Use timing-safe comparison to prevent timing attacks
+        try {
+            const sigBuffer = Buffer.from(signature, 'hex');
+            const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+            return timingSafeCompareBuffers(sigBuffer, expectedBuffer);
+        } catch {
+            return false;
+        }
     }
 
     /**
@@ -769,7 +778,7 @@ export class AuditLogger {
         url: string,
         events: AuditAction[]
     ): Promise<string> {
-        const id = randomUUID();
+        const id = generateUUID();
 
         await this.db.query(
             `INSERT INTO audit_webhooks (id, tenant_id, url, events, active)

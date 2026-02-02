@@ -163,14 +163,13 @@ export class InferenceEngine extends EventEmitter {
 
         try {
             // Configure session options
-            const options: ort.InferenceSession.SessionOptions = {
-                executionProviders: this.config.useGPU
-                    ? ['cuda', 'cpu']
-                    : ['cpu'],
-                graphOptimizationLevel: 'all',
-                intraOpNumThreads: this.config.numThreads,
-                interOpNumThreads: this.config.numThreads,
-            };
+            // Note: options would be used with ort.InferenceSession.create in production
+            // const options: ort.InferenceSession.SessionOptions = {
+            //     executionProviders: this.config.useGPU ? ['cuda', 'cpu'] : ['cpu'],
+            //     graphOptimizationLevel: 'all',
+            //     intraOpNumThreads: this.config.numThreads,
+            //     interOpNumThreads: this.config.numThreads,
+            // };
 
             // Load the model
             // Note: In production, you would load the actual ONNX model file
@@ -398,12 +397,12 @@ export class InferenceEngine extends EventEmitter {
     }
 
     private async generateTokens(
-        inputTokens: number[],
+        _inputTokens: number[],
         maxTokens: number,
-        temperature: number,
-        topP: number,
-        topK: number,
-        repetitionPenalty: number,
+        _temperature: number,
+        _topP: number,
+        _topK: number,
+        _repetitionPenalty: number,
         stopSequences: string[]
     ): Promise<number[]> {
         // Simplified token generation

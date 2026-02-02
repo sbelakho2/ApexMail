@@ -1,0 +1,268 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * ApexMail Control Plane Design System
+ * =====================================
+ * Follows strict brand guidelines with Theme Lock enforcement.
+ * Uses identical tokens as customer console for visual consistency.
+ */
+
+@layer base {
+    :root {
+        /* Core Brand Colors */
+        --brand-50: 239 246 255;
+        --brand-100: 219 234 254;
+        --brand-200: 191 219 254;
+        --brand-300: 147 197 253;
+        --brand-400: 96 165 250;
+        --brand-500: 59 130 246;
+        --brand-600: 37 99 235;
+        --brand-700: 29 78 216;
+        --brand-800: 30 64 175;
+        --brand-900: 30 58 138;
+
+        /* Surface Colors */
+        --surface-0: 255 255 255;
+        --surface-50: 248 250 252;
+        --surface-100: 241 245 249;
+        --surface-200: 226 232 240;
+        --surface-300: 203 213 225;
+        --surface-400: 148 163 184;
+        --surface-500: 100 116 139;
+        --surface-600: 71 85 105;
+        --surface-700: 51 65 85;
+        --surface-800: 30 41 59;
+        --surface-900: 15 23 42;
+
+        /* Semantic Colors */
+        --success-50: 240 253 244;
+        --success-100: 220 252 231;
+        --success-500: 34 197 94;
+        --success-600: 22 163 74;
+        --success-700: 21 128 61;
+
+        --warning-50: 255 251 235;
+        --warning-100: 254 243 199;
+        --warning-500: 245 158 11;
+        --warning-600: 217 119 6;
+        --warning-700: 180 83 9;
+
+        --danger-50: 254 242 242;
+        --danger-100: 254 226 226;
+        --danger-500: 239 68 68;
+        --danger-600: 220 38 38;
+        --danger-700: 185 28 28;
+
+        --info-50: 239 246 255;
+        --info-100: 219 234 254;
+        --info-500: 59 130 246;
+        --info-600: 37 99 235;
+
+        /* Control Plane Accent (Amber) - Subtle admin indicator */
+        --cp-accent-50: 255 251 235;
+        --cp-accent-100: 254 243 199;
+        --cp-accent-500: 245 158 11;
+        --cp-accent-600: 217 119 6;
+
+        /* Design System Variables */
+        --background: 248 250 252;
+        --foreground: 15 23 42;
+        --card: 255 255 255;
+        --card-foreground: 15 23 42;
+        --popover: 255 255 255;
+        --popover-foreground: 15 23 42;
+        --primary: 37 99 235;
+        --primary-foreground: 255 255 255;
+        --secondary: 241 245 249;
+        --secondary-foreground: 30 41 59;
+        --muted: 241 245 249;
+        --muted-foreground: 100 116 139;
+        --accent: 241 245 249;
+        --accent-foreground: 15 23 42;
+        --destructive: 220 38 38;
+        --destructive-foreground: 255 255 255;
+        --border: 226 232 240;
+        --input: 226 232 240;
+        --ring: 59 130 246;
+        --radius: 0.5rem;
+
+        /* Chart Colors */
+        --chart-1: 59 130 246;
+        --chart-2: 34 197 94;
+        --chart-3: 245 158 11;
+        --chart-4: 239 68 68;
+        --chart-5: 99 102 241;
+        --chart-6: 168 85 247;
+        --chart-7: 236 72 153;
+        --chart-8: 20 184 166;
+    }
+
+    .dark {
+        --background: 15 23 42;
+        --foreground: 248 250 252;
+        --card: 30 41 59;
+        --card-foreground: 248 250 252;
+        --popover: 30 41 59;
+        --popover-foreground: 248 250 252;
+        --primary: 59 130 246;
+        --primary-foreground: 15 23 42;
+        --secondary: 51 65 85;
+        --secondary-foreground: 248 250 252;
+        --muted: 51 65 85;
+        --muted-foreground: 148 163 184;
+        --accent: 51 65 85;
+        --accent-foreground: 248 250 252;
+        --destructive: 239 68 68;
+        --destructive-foreground: 248 250 252;
+        --border: 51 65 85;
+        --input: 51 65 85;
+        --ring: 96 165 250;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+
+    html {
+        font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+        @apply bg-slate-50 text-slate-900;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+}
+
+@layer components {
+    /* Card Component */
+    .card {
+        @apply bg-white rounded-xl border border-slate-200 shadow-sm;
+    }
+
+    .card-header {
+        @apply px-6 py-4 border-b border-slate-100;
+    }
+
+    .card-body {
+        @apply p-6;
+    }
+
+    /* Button Variants */
+    .btn {
+        @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all duration-150;
+        @apply focus:outline-none focus:ring-2 focus:ring-offset-2;
+        @apply disabled:opacity-50 disabled:cursor-not-allowed;
+    }
+
+    .btn-primary {
+        @apply btn bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500;
+    }
+
+    .btn-secondary {
+        @apply btn bg-slate-100 text-slate-700 hover:bg-slate-200 focus:ring-slate-500;
+    }
+
+    .btn-ghost {
+        @apply btn bg-transparent text-slate-600 hover:bg-slate-100 focus:ring-slate-500;
+    }
+
+    .btn-danger {
+        @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+    }
+
+    /* Badge Styles */
+    .badge {
+        @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+    }
+
+    .badge-primary { @apply badge bg-blue-100 text-blue-700; }
+    .badge-success { @apply badge bg-green-100 text-green-700; }
+    .badge-warning { @apply badge bg-amber-100 text-amber-700; }
+    .badge-danger { @apply badge bg-red-100 text-red-700; }
+    .badge-neutral { @apply badge bg-slate-100 text-slate-600; }
+
+    /* Data Table */
+    .data-table {
+        @apply w-full;
+    }
+
+    .data-table thead {
+        @apply bg-slate-50 border-b border-slate-200;
+    }
+
+    .data-table th {
+        @apply px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider;
+    }
+
+    .data-table td {
+        @apply px-4 py-3 text-sm text-slate-700;
+    }
+
+    .data-table tbody tr {
+        @apply border-b border-slate-100 hover:bg-slate-50/50 transition-colors;
+    }
+
+    /* Input Styles */
+    .input {
+        @apply w-full px-3 py-2 border border-slate-200 rounded-lg text-sm;
+        @apply focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent;
+        @apply placeholder:text-slate-400;
+    }
+}
+
+/* Print Styles for Reports */
+@media print {
+    @page {
+        size: A4;
+        margin: 15mm;
+    }
+
+    body {
+        font-size: 10pt;
+        line-height: 1.4;
+        color: #000;
+        background: #fff !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    .no-print, .sidebar, nav, button, .btn {
+        display: none !important;
+    }
+
+    .print-only {
+        display: block !important;
+    }
+
+    .print-break-before {
+        page-break-before: always;
+    }
+
+    .print-break-after {
+        page-break-after: always;
+    }
+
+    .print-avoid-break {
+        page-break-inside: avoid;
+    }
+
+    .card {
+        border: 1px solid #e2e8f0 !important;
+        box-shadow: none !important;
+        break-inside: avoid;
+    }
+
+    .chart-container {
+        max-width: 100%;
+        page-break-inside: avoid;
+    }
+}
+

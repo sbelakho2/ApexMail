@@ -5,10 +5,10 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import * as crypto from 'crypto';
-import { config } from '../config.js';
+import { randomToken } from '@apexmail/lib/crypto';
+// import { config } from '../config.js';
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -279,7 +279,7 @@ export class PrivateDeploymentService {
   async provisionDeployment(id: string): Promise<Result<PrivateDeployment>> {
     try {
       const deploymentResult = await this.getDeployment(id);
-      if (!deploymentResult.ok) return { ok: false, error: deploymentResult.error };
+      if (deploymentResult.ok === false) return { ok: false, error: deploymentResult.error };
 
       const deployment = deploymentResult.value;
 
@@ -426,7 +426,7 @@ export class PrivateDeploymentService {
   async startIPWarming(ipId: string): Promise<Result<IPWarmingPlan>> {
     try {
       const ipResult = await this.getDedicatedIP(ipId);
-      if (!ipResult.ok) return { ok: false, error: ipResult.error };
+      if (ipResult.ok === false) return { ok: false, error: ipResult.error };
 
       const id = uuidv4();
       const startDate = new Date();
@@ -552,7 +552,7 @@ export class PrivateDeploymentService {
       }
 
       const id = uuidv4();
-      const verificationToken = crypto.randomBytes(32).toString('hex');
+      const verificationToken = randomToken(32);
 
       await this.pool.query(`
         INSERT INTO ent_byoip_ranges (
@@ -594,7 +594,8 @@ export class PrivateDeploymentService {
         return { ok: false, error: new Error('BYOIP range not found') };
       }
 
-      const range = result.rows[0];
+      // Get range for verification (reserved for production use)
+      void result.rows[0];
 
       // In production, this would verify:
       // 1. ROA (Route Origin Authorization) in RPKI
@@ -787,7 +788,7 @@ export class PrivateDeploymentService {
   ): Promise<Result<DeploymentEndpoints>> {
     try {
       const deploymentResult = await this.getDeployment(deploymentId);
-      if (!deploymentResult.ok) return { ok: false, error: deploymentResult.error };
+      if (deploymentResult.ok === false) return { ok: false, error: deploymentResult.error };
 
       const endpoints = {
         ...deploymentResult.value.endpoints,
@@ -821,9 +822,10 @@ export class PrivateDeploymentService {
   }>> {
     try {
       const deploymentResult = await this.getDeployment(deploymentId);
-      if (!deploymentResult.ok) return { ok: false, error: deploymentResult.error };
+      if (deploymentResult.ok === false) return { ok: false, error: deploymentResult.error };
 
-      const deployment = deploymentResult.value;
+      // Deployment validated (reserved for production metrics)
+      void deploymentResult.value;
 
       // Check component health
       const components: ComponentHealth[] = [
@@ -853,8 +855,8 @@ export class PrivateDeploymentService {
         WHERE deployment_id = $1 AND severity IN ('critical', 'major')
       `, [deploymentId]);
 
-      const totalSeconds = parseFloat(uptimeResult.rows[0].total_seconds) || 1;
-      const downtimeSeconds = parseFloat(uptimeResult.rows[0].downtime_seconds) || 0;
+      const totalSeconds = parseFloat(uptimeResult.rows[0]?.total_seconds) || 1;
+      const downtimeSeconds = parseFloat(uptimeResult.rows[0]?.downtime_seconds) || 0;
       const uptime = Math.max(0, Math.min(100, ((totalSeconds - downtimeSeconds) / totalSeconds) * 100));
 
       // Get last incident
@@ -927,7 +929,7 @@ export class PrivateDeploymentService {
 
   private generateWarmingSchedule(totalDays: number): WarmingScheduleDay[] {
     const schedule: WarmingScheduleDay[] = [];
-    let baseVolume = 100;
+    const baseVolume = 100;
 
     for (let day = 1; day <= totalDays; day++) {
       // Exponential ramp-up
@@ -948,6 +950,7 @@ export class PrivateDeploymentService {
     if (!regex.test(cidr)) return false;
 
     const [ip, prefix] = cidr.split('/');
+    if (!ip || !prefix) return false;
     const prefixNum = parseInt(prefix, 10);
 
     if (prefixNum < 24 || prefixNum > 32) return false; // Only allow /24 to /32
@@ -958,6 +961,7 @@ export class PrivateDeploymentService {
 
   private parseCIDRToIPs(cidr: string): string[] {
     const [ip, prefix] = cidr.split('/');
+    if (!ip || !prefix) return [];
     const prefixNum = parseInt(prefix, 10);
     const hostBits = 32 - prefixNum;
     const numIPs = Math.pow(2, hostBits);
@@ -979,22 +983,22 @@ export class PrivateDeploymentService {
     return ips;
   }
 
-  private async getBounceRate(ip: string): Promise<number> {
+  private async getBounceRate(_ip: string): Promise<number> {
     // In production, calculate from actual metrics
     return 0.02; // 2%
   }
 
-  private async getComplaintRate(ip: string): Promise<number> {
+  private async getComplaintRate(_ip: string): Promise<number> {
     // In production, calculate from actual metrics
     return 0.0005; // 0.05%
   }
 
-  private async getSendingConsistency(ip: string): Promise<number> {
+  private async getSendingConsistency(_ip: string): Promise<number> {
     // In production, analyze sending patterns
     return 85;
   }
 
-  private async checkBlacklists(ip: string): Promise<number> {
+  private async checkBlacklists(_ip: string): Promise<number> {
     // In production, check against major blacklists (Spamhaus, Barracuda, etc.)
     return 100;
   }

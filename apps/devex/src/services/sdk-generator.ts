@@ -39,9 +39,20 @@ export interface SdkFile {
 
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
+// SDK language values object for runtime validation
+export const SDK_LANGUAGES = {
+  typescript: 'typescript',
+  python: 'python',
+  ruby: 'ruby',
+  go: 'go',
+  php: 'php',
+  java: 'java',
+  csharp: 'csharp',
+} as const;
+
 export class SdkGeneratorService {
-  private db: Pool;
-  private apiVersion: string;
+  protected db: Pool;
+  protected apiVersion: string;
 
   constructor(db: Pool) {
     this.db = db;
@@ -3187,3 +3198,6 @@ Console.WriteLine($"Email sent: {response.Id}");
     return ['typescript', 'python', 'ruby', 'go', 'php', 'java', 'csharp'];
   }
 }
+
+// Alias for backwards compatibility
+export const SdkGenerator = SdkGeneratorService;

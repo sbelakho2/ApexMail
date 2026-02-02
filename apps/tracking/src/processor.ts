@@ -6,7 +6,7 @@ import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
-import { createHash } from 'crypto';
+import { sha256 } from '@apexmail/lib/crypto';
 
 interface EventProcessorConfig {
   db: Pool;
@@ -302,7 +302,7 @@ export class EventProcessor {
 
   private generateDedupeKey(...parts: (string | undefined)[]): string {
     const data = parts.filter(Boolean).join(':');
-    return createHash('sha256').update(data).digest('hex').substring(0, 32);
+    return sha256(data).substring(0, 32);
   }
 
   private async isDuplicate(key: string): Promise<boolean> {

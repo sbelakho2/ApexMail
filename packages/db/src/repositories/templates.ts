@@ -88,18 +88,19 @@ export class TemplatesRepository {
 
   private extractVariables(content: string, engine: Template['engine']): string[] {
     const variables = new Set<string>();
+    let match;
 
     switch (engine) {
-      case 'handlebars':
+      case 'handlebars': {
         // Match {{variable}} and {{#each variable}} etc.
         const handlebarsRegex = /\{\{(?:#[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/g;
-        let match;
         while ((match = handlebarsRegex.exec(content)) !== null) {
           const varPart = match[1]?.split('.')[0];
           if (varPart) variables.add(varPart);
         }
         break;
-      case 'mjml':
+      }
+      case 'mjml': {
         // MJML uses Handlebars by default
         const mjmlRegex = /\{\{(?:#[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/g;
         while ((match = mjmlRegex.exec(content)) !== null) {
@@ -107,7 +108,8 @@ export class TemplatesRepository {
           if (varPart) variables.add(varPart);
         }
         break;
-      case 'liquid':
+      }
+      case 'liquid': {
         // Match {{ variable }} and {% for item in variable %}
         const liquidRegex = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)|{%\s*(?:for|if|unless)\s+\w+\s+in\s+([a-zA-Z_][a-zA-Z0-9_.]*)/g;
         while ((match = liquidRegex.exec(content)) !== null) {
@@ -118,7 +120,8 @@ export class TemplatesRepository {
           }
         }
         break;
-      case 'ejs':
+      }
+      case 'ejs': {
         // Match <%= variable %> and <% variable %>
         const ejsRegex = /<%[=-]?\s*([a-zA-Z_][a-zA-Z0-9_.]*)/g;
         while ((match = ejsRegex.exec(content)) !== null) {
@@ -126,6 +129,7 @@ export class TemplatesRepository {
           if (varPart) variables.add(varPart);
         }
         break;
+      }
     }
 
     return Array.from(variables).sort();

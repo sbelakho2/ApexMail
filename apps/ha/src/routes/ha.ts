@@ -8,7 +8,7 @@ import { Hono } from 'hono';
 import { Pool } from 'pg';
 import Redis from 'ioredis';
 import { HealthCheckService } from '../services/health-check.js';
-import { FailoverService, FailoverType } from '../services/failover.js';
+import { FailoverService } from '../services/failover.js';
 import { BackupService, BackupType } from '../services/backup.js';
 import { ReplicationService } from '../services/replication.js';
 import { MultiRegionService, RegionStatus, RegionRole, RoutingMode } from '../services/multi-region.js';

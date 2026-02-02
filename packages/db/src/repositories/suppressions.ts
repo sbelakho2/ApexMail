@@ -57,6 +57,7 @@ export class SuppressionsRepository {
   private hashEmail(email: string): string {
     // Using SHA-256 for email hashing - normalize first
     const normalizedEmail = email.toLowerCase().trim();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const crypto = require('crypto');
     return crypto.createHash('sha256').update(normalizedEmail).digest('hex');
   }

@@ -12,8 +12,6 @@ import {
     ErrorBudgetReport,
     ErrorBudgetIncident,
     MetricQuery,
-    SLOTarget,
-    SLIType,
 } from '../types.js';
 import { MetricsCollector } from '../metrics/collector.js';
 import { EventEmitter } from 'events';

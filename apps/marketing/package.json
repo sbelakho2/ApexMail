@@ -22,13 +22,16 @@
     "lucide-react": "0.344.0",
     "react-intersection-observer": "9.8.0",
     "@vercel/analytics": "1.2.0",
-    "sharp": "0.33.0"
+    "sharp": "0.33.0",
+    "dompurify": "^3.0.8",
+    "isomorphic-dompurify": "^2.4.0"
   },
   "devDependencies": {
     "@types/node": "20.11.0",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
     "@types/three": "0.162.0",
+    "@types/dompurify": "^3.0.5",
     "typescript": "5.3.3",
     "tailwindcss": "3.4.0",
     "postcss": "8.4.33",

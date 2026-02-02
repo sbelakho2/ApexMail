@@ -9,8 +9,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum AuditEventType {
@@ -113,8 +114,6 @@ export interface AuditQuery {
   offset?: number;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class AuditService {
   private db: Pool;
   private redis: Redis;
@@ -132,9 +131,11 @@ export class AuditService {
    * Initialize audit service
    */
   async initialize(): Promise<void> {
-    // Start buffer flush interval
-    this.flushInterval = setInterval(async () => {
-      await this.flushBuffer();
+    // Start buffer flush interval with error handling
+    this.flushInterval = setInterval(() => {
+      this.flushBuffer().catch(err => {
+        console.error('[Audit] Buffer flush failed:', err instanceof Error ? err.message : err);
+      });
     }, this.flushIntervalMs);
 
     console.log('[Audit] Service initialized');
@@ -189,7 +190,7 @@ export class AuditService {
       actorUserAgent: options.actorUserAgent || null,
       resource: 'auth',
       resourceId: options.actorId,
-      action: options.type.split('.')[1],
+      action: options.type.split('.')[1] ?? 'unknown',
       details: options.details || {},
       metadata: { success: options.success },
     });
@@ -219,7 +220,7 @@ export class AuditService {
     return this.log({
       organizationId: options.organizationId,
       workspaceId: options.workspaceId,
-      type: typeMap[options.action],
+      type: typeMap[options.action] ?? AuditEventType.DATA_READ,
       severity: AuditSeverity.INFO,
       actorId: options.actorId,
       actorType: options.actorType,
@@ -256,7 +257,7 @@ export class AuditService {
       actorUserAgent: null,
       resource: 'security',
       resourceId: null,
-      action: options.type.split('.')[1],
+      action: options.type.split('.')[1] ?? 'unknown',
       details: options.details,
       metadata: {},
     });
@@ -326,7 +327,7 @@ export class AuditService {
         ok: true,
         value: {
           events,
-          total: parseInt(countResult.rows[0].total),
+          total: parseInt(countResult.rows[0]?.total ?? '0', 10),
         },
       };
     } catch (error) {
@@ -397,16 +398,16 @@ export class AuditService {
       return {
         ok: true,
         value: {
-          totalEvents: parseInt(totalResult.rows[0].total),
+          totalEvents: parseInt(totalResult.rows[0]?.total ?? '0', 10),
           byType,
           bySeverity,
           byDay: dayResult.rows.map(row => ({
             date: row.date.toISOString().split('T')[0],
-            count: parseInt(row.count),
+            count: parseInt(row.count, 10),
           })),
           topActors: actorResult.rows.map(row => ({
             actorId: row.actor_id,
-            count: parseInt(row.count),
+            count: parseInt(row.count, 10),
           })),
         },
       };

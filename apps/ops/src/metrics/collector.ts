@@ -166,6 +166,20 @@ export class MetricsCollector {
             labelNames: ['service', 'check'],
         });
 
+        this.createHistogram({
+            name: 'health_check_latency_seconds',
+            help: 'Health check latency in seconds',
+            labelNames: ['check'],
+            buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+        });
+
+        // Alert metrics
+        this.createCounter({
+            name: 'alerts_total',
+            help: 'Total number of alerts',
+            labelNames: ['severity', 'action'],
+        });
+
         // SLO metrics
         this.createGauge({
             name: 'slo_current_value',
@@ -552,6 +566,53 @@ export class MetricsCollector {
         });
 
         return labels;
+    }
+
+    /**
+     * Sets SLO current value
+     */
+    setSLOValue(sloId: string, value: number): void {
+        this.setGauge('slo_current_value', value, { slo_id: sloId });
+    }
+
+    /**
+     * Sets SLO error budget remaining
+     */
+    setSLOErrorBudget(sloId: string, value: number): void {
+        this.setGauge('slo_error_budget_remaining', value, { slo_id: sloId });
+    }
+
+    /**
+     * Increments alert counter
+     */
+    incrementAlertCounter(severity: string, action: string): void {
+        this.increment('alerts_total', { severity, action }, 1);
+    }
+
+    /**
+     * Records health check result
+     */
+    recordHealthCheck(checkId: string, healthy: boolean, latency: number): void {
+        this.setGauge('health_check_status', healthy ? 1 : 0, { check: checkId });
+        this.observe('health_check_latency_seconds', latency / 1000, { check: checkId });
+    }
+
+    /**
+     * Gets Prometheus metrics format
+     */
+    async getPrometheusMetrics(): Promise<string> {
+        return this.registry.metrics();
+    }
+
+    /**
+     * Gets metrics as JSON
+     */
+    getMetricsJSON(): Record<string, unknown> {
+        const metrics: Record<string, unknown> = {};
+        for (const [name, points] of this.dataStore.entries()) {
+            metrics[name] = points;
+        }
+        return metrics;
     }
 
     /**

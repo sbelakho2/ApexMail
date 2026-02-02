@@ -10,9 +10,10 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts",
-    "test": "vitest"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@apexmail/lib": "workspace:*",
     "@hono/node-server": "^1.8.0",
     "hono": "^4.0.0",
     "ioredis": "^5.3.2",

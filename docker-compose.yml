@@ -1,0 +1,233 @@
+# =============================================================================
+# ApexMail Docker Compose - Production Deployment
+# =============================================================================
+# This compose file provides a complete production-ready deployment including:
+# - API Server (port 3000)
+# - Worker (email sending, webhooks, analytics)
+# - Tracking Server (port 3001)
+# - PostgreSQL Database
+# - Redis for queues and caching
+# - Prometheus for metrics
+# - Mailpit (development SMTP server)
+#
+# Usage:
+#   Development: docker-compose up -d
+#   Production:  docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ===========================================================================
+  # DATABASE
+  # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: apexmail-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apexmail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apexmail_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-apexmail}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./tools/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d ${POSTGRES_DB:-apexmail}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - apexmail
+
+  # ===========================================================================
+  # REDIS
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: apexmail-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - apexmail
+
+  # ===========================================================================
+  # API SERVER
+  # ===========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: apexmail-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:-apexmail_dev_password}@postgres:5432/${POSTGRES_DB:-apexmail}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
+      API_KEY_SECRET: ${API_KEY_SECRET:-change-this-in-production}
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost:3001}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    networks:
+      - apexmail
+
+  # ===========================================================================
+  # WORKER
+  # ===========================================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: apexmail-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:-apexmail_dev_password}@postgres:5432/${POSTGRES_DB:-apexmail}
+      REDIS_URL: redis://redis:6379
+      # SMTP Configuration
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_RATE_LIMIT: ${SMTP_RATE_LIMIT:-10}
+      # IP Rate Limiting
+      IP_RATE_LIMITING_ENABLED: ${IP_RATE_LIMITING_ENABLED:-true}
+      SENDING_IP_ADDRESS: ${SENDING_IP_ADDRESS:-}
+      IP_HOURLY_LIMIT: ${IP_HOURLY_LIMIT:-2500}
+      # Tracking
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost:3001}
+      TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
+      # Warmup
+      WARMUP_ENABLED: ${WARMUP_ENABLED:-false}
+      # Metrics
+      METRICS_ENABLED: true
+      METRICS_PORT: 9090
+    ports:
+      - "${WORKER_METRICS_PORT:-9090}:9090"
+    networks:
+      - apexmail
+
+  # ===========================================================================
+  # TRACKING SERVER
+  # ===========================================================================
+  tracking:
+    build:
+      context: .
+      dockerfile: Dockerfile.tracking
+    container_name: apexmail-tracking
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:-apexmail_dev_password}@postgres:5432/${POSTGRES_DB:-apexmail}
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${TRACKING_PORT:-3001}:3001"
+    networks:
+      - apexmail
+
+  # ===========================================================================
+  # DEVELOPMENT SMTP (Mailpit)
+  # ===========================================================================
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: apexmail-mailpit
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"  # SMTP
+      - "${MAILPIT_WEB_PORT:-8025}:8025"   # Web UI
+    environment:
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+      MP_MAX_MESSAGES: 5000
+    networks:
+      - apexmail
+    profiles:
+      - dev
+
+  # ===========================================================================
+  # PROMETHEUS (Optional metrics collection)
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: apexmail-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    networks:
+      - apexmail
+    profiles:
+      - monitoring
+
+  # ===========================================================================
+  # GRAFANA (Optional dashboards)
+  # ===========================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: apexmail-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "${GRAFANA_PORT:-3002}:3000"
+    networks:
+      - apexmail
+    profiles:
+      - monitoring
+
+# ===========================================================================
+# VOLUMES
+# ===========================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+# ===========================================================================
+# NETWORKS
+# ===========================================================================
+networks:
+  apexmail:
+    driver: bridge

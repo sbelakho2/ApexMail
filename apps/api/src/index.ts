@@ -59,6 +59,17 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+// Global error handlers
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
 main().catch((err) => {
   logger.error('Fatal error starting server', { error: err });
   process.exit(1);

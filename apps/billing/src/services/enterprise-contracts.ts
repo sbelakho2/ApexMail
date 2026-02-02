@@ -7,7 +7,7 @@ import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 
-const logger = createLogger('enterprise-billing');
+const logger = createLogger();
 
 export interface Contract {
   id: string;
@@ -131,12 +131,14 @@ export class EnterpriseContractService {
 
   /**
    * Activate a contract (after signature)
+   * CRITICAL: Uses atomic CTE to ensure contract and tenant are updated together
    */
   async activateContract(
     contractId: string,
     signedBy: string,
     purchaseOrderNumber?: string
   ): Promise<Result<Contract, Error>> {
+    // Use atomic CTE to activate contract and upgrade tenant plan together
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -159,14 +161,23 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE contracts
-       SET status = 'active',
-           signed_at = NOW(),
-           signed_by = $2,
-           purchase_order_number = $3,
-           updated_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
+      `WITH activate_contract AS (
+        UPDATE contracts
+        SET status = 'active',
+            signed_at = NOW(),
+            signed_by = $2,
+            purchase_order_number = $3,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      ),
+      upgrade_tenant AS (
+        UPDATE tenants 
+        SET plan = 'enterprise', updated_at = NOW()
+        WHERE id = (SELECT tenant_id FROM activate_contract)
+        RETURNING id
+      )
+      SELECT * FROM activate_contract`,
       [contractId, signedBy, purchaseOrderNumber ?? null]
     );
 
@@ -175,13 +186,7 @@ export class EnterpriseContractService {
     const row = result.value.rows[0];
     if (!row) return Result.err(new Error('Contract not found'));
 
-    // Upgrade tenant to enterprise plan
-    await this.db.query(
-      `UPDATE tenants SET plan = 'enterprise', updated_at = NOW() WHERE id = $1`,
-      [row.tenant_id]
-    );
-
-    logger.info({ contractId, tenantId: row.tenant_id }, 'Contract activated');
+    logger.info('Contract activated', { contractId, tenantId: row.tenant_id });
 
     return Result.ok(this.mapRow(row));
   }
@@ -361,69 +366,72 @@ export class EnterpriseContractService {
     const now = new Date();
     const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-    // Find contracts expiring in 30 days
+    // Find contracts expiring in 30 days and queue notifications atomically
     const expiringResult = await this.db.query<{ id: string; tenant_id: string }>(
-      `SELECT id, tenant_id FROM contracts
-       WHERE status = 'active'
-         AND end_date <= $1
-         AND end_date > $2`,
+      `WITH expiring_contracts AS (
+        SELECT id, tenant_id FROM contracts
+        WHERE status = 'active'
+          AND end_date <= $1
+          AND end_date > $2
+      ),
+      queue_notifications AS (
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        SELECT gen_random_uuid(), tenant_id, 'contract_expiring', jsonb_build_object('contractId', id), 'pending', NOW()
+        FROM expiring_contracts
+        ON CONFLICT (tenant_id, type) WHERE status = 'pending'
+        DO NOTHING
+        RETURNING tenant_id
+      )
+      SELECT id, tenant_id FROM expiring_contracts`,
       [thirtyDaysFromNow, now]
     );
 
     const expiringSoon: string[] = [];
     if (expiringResult.ok) {
-      for (const row of expiringResult.value.rows) {
-        expiringSoon.push(row.id);
-        
-        // Queue renewal reminder
-        await this.db.query(
-          `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-           VALUES (gen_random_uuid(), $1, 'contract_expiring', $2, 'pending', NOW())
-           ON CONFLICT (tenant_id, type) WHERE status = 'pending'
-           DO NOTHING`,
-          [row.tenant_id, JSON.stringify({ contractId: row.id })]
-        );
-      }
+      expiringSoon.push(...expiringResult.value.rows.map(r => r.id));
     }
 
-    // Find and handle expired contracts
+    // Handle expired contracts atomically - auto-renew or expire and downgrade
     const expiredResult = await this.db.query<{
       id: string;
-      tenant_id: string;
-      auto_renew: boolean;
+      action: string;
     }>(
-      `SELECT id, tenant_id, auto_renew FROM contracts
-       WHERE status = 'active' AND end_date <= $1`,
+      `WITH expired_contracts AS (
+        SELECT id, tenant_id, auto_renew FROM contracts
+        WHERE status = 'active' AND end_date <= $1
+      ),
+      auto_renew_contracts AS (
+        UPDATE contracts 
+        SET end_date = end_date + INTERVAL '1 year', updated_at = NOW()
+        WHERE id IN (SELECT id FROM expired_contracts WHERE auto_renew = true)
+        RETURNING id, 'renewed' as action
+      ),
+      expire_contracts AS (
+        UPDATE contracts 
+        SET status = 'expired', updated_at = NOW()
+        WHERE id IN (SELECT id FROM expired_contracts WHERE auto_renew = false)
+        RETURNING id, tenant_id, 'expired' as action
+      ),
+      downgrade_tenants AS (
+        UPDATE tenants 
+        SET plan = 'scale', updated_at = NOW()
+        WHERE id IN (SELECT tenant_id FROM expire_contracts)
+        RETURNING id
+      )
+      SELECT id, action FROM auto_renew_contracts
+      UNION ALL
+      SELECT id, action FROM expire_contracts`,
       [now]
     );
 
     const expired: string[] = [];
     if (expiredResult.ok) {
       for (const row of expiredResult.value.rows) {
-        if (row.auto_renew) {
-          // Auto-renew: extend by 1 year
-          await this.db.query(
-            `UPDATE contracts
-             SET end_date = end_date + INTERVAL '1 year', updated_at = NOW()
-             WHERE id = $1`,
-            [row.id]
-          );
-          logger.info({ contractId: row.id }, 'Contract auto-renewed');
+        if (row.action === 'renewed') {
+          logger.info('Contract auto-renewed', { contractId: row.id });
         } else {
-          // Mark as expired
-          await this.db.query(
-            `UPDATE contracts SET status = 'expired', updated_at = NOW() WHERE id = $1`,
-            [row.id]
-          );
-          
-          // Downgrade tenant
-          await this.db.query(
-            `UPDATE tenants SET plan = 'scale', updated_at = NOW() WHERE id = $1`,
-            [row.tenant_id]
-          );
-          
           expired.push(row.id);
-          logger.info({ contractId: row.id }, 'Contract expired');
+          logger.info('Contract expired', { contractId: row.id });
         }
       }
     }
@@ -600,6 +608,18 @@ export class EnterpriseContractService {
     created_at: Date;
     updated_at: Date;
   }): Contract {
+    // Safe JSON parsing for additional_fees
+    let additionalFees: Contract['additionalFees'] = [];
+    try {
+      try {
+        additionalFees = JSON.parse(row.additional_fees || '[]');
+      } catch {
+        additionalFees = [];
+      }
+    } catch {
+      console.warn(`[EnterpriseContracts] Failed to parse additional_fees for contract ${row.id}`);
+    }
+    
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -612,7 +632,7 @@ export class EnterpriseContractService {
       committedVolume: row.committed_volume,
       overageRate: row.overage_rate,
       annualPrepayDiscount: row.annual_prepay_discount,
-      additionalFees: JSON.parse(row.additional_fees),
+      additionalFees,
       paymentTermsDays: row.payment_terms_days,
       slaCreditPercentage: row.sla_credit_percentage,
       customTerms: row.custom_terms,
@@ -622,5 +642,397 @@ export class EnterpriseContractService {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  /**
+   * List all contracts for a tenant
+   */
+  async listContracts(tenantId: string): Promise<Result<Contract[], Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      name: string;
+      status: Contract['status'];
+      start_date: Date;
+      end_date: Date;
+      auto_renew: boolean;
+      base_price: number;
+      committed_volume: number;
+      overage_rate: number;
+      annual_prepay_discount: number;
+      additional_fees: string;
+      payment_terms_days: number;
+      sla_credit_percentage: number;
+      custom_terms: string | null;
+      signed_at: Date | null;
+      signed_by: string | null;
+      purchase_order_number: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT * FROM contracts WHERE tenant_id = $1 ORDER BY created_at DESC`,
+      [tenantId]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    return Result.ok(result.value.rows.map(row => this.mapRow(row)));
+  }
+
+  /**
+   * Get contract usage
+   */
+  async getContractUsage(tenantId: string, contractId: string): Promise<Result<{
+    currentUsage: number;
+    committedVolume: number;
+    percentUsed: number;
+    projectedUsage: number;
+    overageEstimate: number;
+  }, Error>> {
+    const contractResult = await this.getContract(contractId);
+    if (!contractResult.ok) return Result.err(contractResult.error);
+    if (!contractResult.value) return Result.err(new Error('Contract not found'));
+
+    const contract = contractResult.value;
+    
+    // Calculate current period dates based on contract
+    const now = new Date();
+    const contractStart = new Date(contract.startDate);
+    
+    // Calculate which period we're in (monthly periods from contract start)
+    const monthsSinceStart = Math.floor(
+      (now.getTime() - contractStart.getTime()) / (1000 * 60 * 60 * 24 * 30)
+    );
+    
+    const periodStart = new Date(contractStart);
+    periodStart.setMonth(periodStart.getMonth() + monthsSinceStart);
+    const periodEnd = new Date(periodStart);
+    periodEnd.setMonth(periodEnd.getMonth() + 1);
+    
+    // Query actual usage from usage_events table
+    const usageResult = await this.db.query<{ total: string }>(
+      `SELECT COALESCE(SUM(quantity), 0)::text as total
+       FROM usage_events
+       WHERE tenant_id = $1
+         AND event_type = 'emails_sent'
+         AND timestamp >= $2
+         AND timestamp < $3`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    const currentUsage = usageResult.ok 
+      ? parseInt(usageResult.value.rows[0]?.total ?? '0', 10) 
+      : 0;
+
+    // Calculate committed volume for the current period
+    const monthsInContract = Math.ceil(
+      (contract.endDate.getTime() - contract.startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)
+    );
+    const monthlyCommitted = Math.floor(contract.committedVolume / Math.max(1, monthsInContract));
+    
+    // Calculate percentage used
+    const percentUsed = monthlyCommitted > 0 ? (currentUsage / monthlyCommitted) * 100 : 0;
+    
+    // Project usage based on current rate and time elapsed in period
+    const daysSincePeriodStart = Math.max(1, Math.floor(
+      (now.getTime() - periodStart.getTime()) / (1000 * 60 * 60 * 24)
+    ));
+    const daysInPeriod = Math.max(1, Math.floor(
+      (periodEnd.getTime() - periodStart.getTime()) / (1000 * 60 * 60 * 24)
+    ));
+    // Guard against division by zero (daysSincePeriodStart is already guarded with Math.max(1, ...))
+    const dailyRate = currentUsage / daysSincePeriodStart;
+    const projectedUsage = Math.floor(dailyRate * daysInPeriod);
+    
+    // Estimate overage based on projected usage
+    const projectedOverage = Math.max(0, projectedUsage - monthlyCommitted);
+    const overageEstimate = projectedOverage * contract.overageRate;
+
+    return Result.ok({
+      currentUsage,
+      committedVolume: monthlyCommitted,
+      percentUsed,
+      projectedUsage,
+      overageEstimate,
+    });
+  }
+
+  /**
+   * Submit contract for signature
+   */
+  async submitForSignature(_tenantId: string, contractId: string): Promise<Result<Contract, Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      name: string;
+      status: Contract['status'];
+      start_date: Date;
+      end_date: Date;
+      auto_renew: boolean;
+      base_price: number;
+      committed_volume: number;
+      overage_rate: number;
+      annual_prepay_discount: number;
+      additional_fees: string;
+      payment_terms_days: number;
+      sla_credit_percentage: number;
+      custom_terms: string | null;
+      signed_at: Date | null;
+      signed_by: string | null;
+      purchase_order_number: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE contracts SET status = 'pending_signature', updated_at = NOW() 
+       WHERE id = $1 RETURNING *`,
+      [contractId]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    const row = result.value.rows[0];
+    if (!row) return Result.err(new Error('Contract not found'));
+    return Result.ok(this.mapRow(row));
+  }
+
+  /**
+   * Sign contract
+   */
+  async signContract(_tenantId: string, contractId: string, data: {
+    signatureData: string;
+    signerName: string;
+    signerTitle: string;
+    signedAt: Date;
+  }): Promise<Result<Contract, Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      name: string;
+      status: Contract['status'];
+      start_date: Date;
+      end_date: Date;
+      auto_renew: boolean;
+      base_price: number;
+      committed_volume: number;
+      overage_rate: number;
+      annual_prepay_discount: number;
+      additional_fees: string;
+      payment_terms_days: number;
+      sla_credit_percentage: number;
+      custom_terms: string | null;
+      signed_at: Date | null;
+      signed_by: string | null;
+      purchase_order_number: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE contracts SET 
+        status = 'active', 
+        signed_at = $2, 
+        signed_by = $3,
+        updated_at = NOW() 
+       WHERE id = $1 RETURNING *`,
+      [contractId, data.signedAt, `${data.signerName} (${data.signerTitle})`]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    const row = result.value.rows[0];
+    if (!row) return Result.err(new Error('Contract not found'));
+    logger.info('Contract signed', { contractId, signedBy: data.signerName });
+    return Result.ok(this.mapRow(row));
+  }
+
+  /**
+   * Request contract amendment
+   * 
+   * Amendments are stored in the contract_amendments table and go through
+   * an approval workflow before being applied to the contract.
+   */
+  async requestAmendment(_tenantId: string, contractId: string, amendment: {
+    reason: string;
+    proposedChanges: Record<string, unknown>;
+  }): Promise<Result<{ id: string; status: string }, Error>> {
+    // Create amendment record in contract_amendments table
+    const result = await this.db.query<{ id: string; status: string }>(
+      `INSERT INTO contract_amendments (
+        contract_id, reason, proposed_changes, status, created_at
+      ) VALUES ($1, $2, $3, 'pending', NOW())
+      RETURNING id, status`,
+      [contractId, amendment.reason, JSON.stringify(amendment.proposedChanges)]
+    );
+    
+    if (!result.ok) {
+      logger.error('Failed to create amendment', { contractId, error: result.error });
+      return Result.err(result.error);
+    }
+    
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('Failed to create amendment record'));
+    }
+
+    logger.info('Amendment requested', { 
+      contractId, 
+      amendmentId: row.id,
+      reason: amendment.reason,
+    });
+    
+    return Result.ok({ id: row.id, status: row.status });
+  }
+
+  /**
+   * Cancel contract
+   */
+  async cancelContract(_tenantId: string, contractId: string, data: {
+    reason: string;
+    effectiveDate?: Date;
+  }): Promise<Result<Contract, Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      name: string;
+      status: Contract['status'];
+      start_date: Date;
+      end_date: Date;
+      auto_renew: boolean;
+      base_price: number;
+      committed_volume: number;
+      overage_rate: number;
+      annual_prepay_discount: number;
+      additional_fees: string;
+      payment_terms_days: number;
+      sla_credit_percentage: number;
+      custom_terms: string | null;
+      signed_at: Date | null;
+      signed_by: string | null;
+      purchase_order_number: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE contracts SET 
+        status = 'terminated', 
+        end_date = $2,
+        updated_at = NOW() 
+       WHERE id = $1 RETURNING *`,
+      [contractId, data.effectiveDate || new Date()]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    const row = result.value.rows[0];
+    if (!row) return Result.err(new Error('Contract not found'));
+    logger.info('Contract cancelled', { contractId, reason: data.reason });
+    return Result.ok(this.mapRow(row));
+  }
+
+  /**
+   * Get renewal quote
+   */
+  async getRenewalQuote(_tenantId: string, contractId: string): Promise<Result<{
+    currentContract: Contract;
+    proposedTerms: {
+      basePrice: number;
+      committedVolume: number;
+      overageRate: number;
+    };
+    savings: number;
+  }, Error>> {
+    const contractResult = await this.getContract(contractId);
+    if (!contractResult.ok) return Result.err(contractResult.error);
+    if (!contractResult.value) return Result.err(new Error('Contract not found'));
+
+    const contract = contractResult.value;
+    // Offer 5% discount on renewal
+    const discountedPrice = Math.floor(contract.basePrice * 0.95);
+
+    return Result.ok({
+      currentContract: contract,
+      proposedTerms: {
+        basePrice: discountedPrice,
+        committedVolume: contract.committedVolume,
+        overageRate: contract.overageRate,
+      },
+      savings: (contract.basePrice - discountedPrice) * 12,
+    });
+  }
+
+  /**
+   * Renew contract
+   */
+  async renewContract(_tenantId: string, contractId: string, terms: {
+    newEndDate: Date;
+    newTerms?: {
+      baseFee?: number;
+      committedVolume?: Record<string, number>;
+      overageRates?: Record<string, number>;
+    };
+  }): Promise<Result<Contract, Error>> {
+    const existingResult = await this.getContract(contractId);
+    if (!existingResult.ok) return Result.err(existingResult.error);
+    if (!existingResult.value) return Result.err(new Error('Contract not found'));
+
+    const existing = existingResult.value;
+    const newContract = await this.createContract({
+      tenantId: existing.tenantId,
+      name: `${existing.name} (Renewed)`,
+      startDate: existing.endDate,
+      endDate: terms.newEndDate,
+      autoRenew: existing.autoRenew,
+      basePrice: terms.newTerms?.baseFee ?? existing.basePrice,
+      committedVolume: existing.committedVolume,
+      overageRate: existing.overageRate,
+      annualPrepayDiscount: existing.annualPrepayDiscount,
+      paymentTermsDays: existing.paymentTermsDays,
+      slaCreditPercentage: existing.slaCreditPercentage,
+    });
+
+    if (!newContract.ok) return Result.err(newContract.error);
+    logger.info('Contract renewed', { oldContractId: contractId, newContractId: newContract.value.id });
+    return newContract;
+  }
+
+  /**
+   * Submit purchase order
+   */
+  async submitPurchaseOrder(_tenantId: string, contractId: string, po: {
+    poNumber: string;
+    amount: number;
+    issuedDate: Date;
+    expiryDate?: Date;
+    attachmentUrl?: string;
+  }): Promise<Result<{ id: string; poNumber: string; status: string }, Error>> {
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      name: string;
+      status: Contract['status'];
+      start_date: Date;
+      end_date: Date;
+      auto_renew: boolean;
+      base_price: number;
+      committed_volume: number;
+      overage_rate: number;
+      annual_prepay_discount: number;
+      additional_fees: string;
+      payment_terms_days: number;
+      sla_credit_percentage: number;
+      custom_terms: string | null;
+      signed_at: Date | null;
+      signed_by: string | null;
+      purchase_order_number: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE contracts SET 
+        purchase_order_number = $2,
+        updated_at = NOW() 
+       WHERE id = $1 RETURNING *`,
+      [contractId, po.poNumber]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    logger.info('Purchase order submitted', { contractId, poNumber: po.poNumber });
+    return Result.ok({
+      id: `po-${Date.now()}`,
+      poNumber: po.poNumber,
+      status: 'received',
+    });
   }
 }

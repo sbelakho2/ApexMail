@@ -48,6 +48,30 @@ export interface PlanFeatures {
   poweredByFooter: boolean;
 }
 
+const DEFAULT_PLAN_FEATURES: PlanFeatures = {
+  dedicatedIp: false,
+  dedicatedIpCount: 0,
+  ssoEnabled: false,
+  apiAccess: true,
+  webhooksEnabled: false,
+  advancedAnalytics: false,
+  customTrackingDomain: false,
+  prioritySupport: false,
+  templateApprovalWorkflow: false,
+  customRetention: false,
+  maxRetentionDays: 30,
+  subaccounts: false,
+  maxSubaccounts: 0,
+  whiteLabel: false,
+  byoip: false,
+  slaGuarantee: false,
+  slaCreditPercentage: 0,
+  maxTeamMembers: 1,
+  dataExport: false,
+  auditLogs: false,
+  poweredByFooter: true,
+};
+
 export interface CreatePlanInput {
   name: string;
   displayName: string;
@@ -332,7 +356,7 @@ export class PlansService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM plans WHERE is_active = true ORDER BY sort_order ASC`
+      `SELECT * FROM plans WHERE is_active = true ORDER BY sort_order ASC LIMIT 100`
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -392,8 +416,12 @@ export class PlansService {
     const row = result.value.rows[0];
     if (!row) return Result.ok(false);
 
-    const features = JSON.parse(row.features) as PlanFeatures;
-    return Result.ok(Boolean(features[feature]));
+    try {
+      const features = JSON.parse(row.features) as PlanFeatures;
+      return Result.ok(Boolean(features[feature]));
+    } catch {
+      return Result.err(new Error('Invalid plan features data'));
+    }
   }
 
   /**
@@ -421,10 +449,17 @@ export class PlansService {
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);
 
+    let features: PlanFeatures;
+    try {
+      features = JSON.parse(row.features) as PlanFeatures;
+    } catch {
+      return Result.err(new Error('Invalid plan features data'));
+    }
+    
     return Result.ok({
       emailLimit: row.email_limit,
       apiCallLimit: row.api_call_limit,
-      features: JSON.parse(row.features) as PlanFeatures,
+      features,
     });
   }
 
@@ -445,6 +480,14 @@ export class PlansService {
     created_at: Date;
     updated_at: Date;
   }): Plan {
+    let features: PlanFeatures = { ...DEFAULT_PLAN_FEATURES };
+    try {
+      const parsed = JSON.parse(row.features);
+      features = { ...DEFAULT_PLAN_FEATURES, ...parsed };
+    } catch {
+      console.error('Invalid plan features JSON for plan:', row.id);
+    }
+    
     return {
       id: row.id,
       name: row.name,
@@ -454,7 +497,7 @@ export class PlansService {
       priceYearly: row.price_yearly,
       emailLimit: row.email_limit,
       apiCallLimit: row.api_call_limit,
-      features: JSON.parse(row.features),
+      features,
       stripePriceIdMonthly: row.stripe_price_id_monthly,
       stripePriceIdYearly: row.stripe_price_id_yearly,
       isActive: row.is_active,

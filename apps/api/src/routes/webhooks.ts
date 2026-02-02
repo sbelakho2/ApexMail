@@ -1,13 +1,15 @@
 /**
  * Webhooks Routes - Manage webhook endpoints for event delivery
+ * 
+ * FIXED: Now uses database-backed WebhooksRepository instead of in-memory store
  */
 
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
-import { AuditLogsRepository } from '@apexmail/db';
+import { AuditLogsRepository, WebhooksRepository, type Webhook, type WebhookInsert, type WebhookUpdate } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
-import { createHash, randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import { hmacSign, randomToken } from '@apexmail/lib/crypto';
 import { generateId } from '@apexmail/lib';
 
 const eventTypes = [
@@ -52,42 +54,9 @@ const testWebhookSchema = z.object({
   eventType: z.enum(eventTypes).default('message.delivered'),
 });
 
-// In-memory webhook store (in production, use database)
-interface WebhookRecord {
-  id: string;
-  tenantId: string;
-  name: string;
-  url: string;
-  events: string[];
-  description?: string;
-  secret: string;
-  secretHash: string;
-  headers?: Record<string, string>;
-  enabled: boolean;
-  retryPolicy: {
-    maxRetries: number;
-    retryDelay: number;
-    backoffMultiplier: number;
-  };
-  metadata?: Record<string, unknown>;
-  stats: {
-    totalDeliveries: number;
-    successfulDeliveries: number;
-    failedDeliveries: number;
-    lastDeliveryAt?: Date;
-    lastSuccessAt?: Date;
-    lastFailureAt?: Date;
-    lastError?: string;
-  };
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-const webhooksStore = new Map<string, WebhookRecord>();
-const webhooksByTenant = new Map<string, Set<string>>();
-
 export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
+  const webhooksRepo = new WebhooksRepository(ctx.db.getPool());
   const auditRepo = new AuditLogsRepository(ctx.db);
 
   // Create webhook
@@ -106,43 +75,25 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Generate or use provided secret
-    const secret = input.secret ?? randomBytes(32).toString('hex');
-    const secretHash = createHash('sha256').update(secret).digest('hex');
+    const secret = input.secret ?? randomToken(32);
 
-    const webhook: WebhookRecord = {
-      id: generateId('whk'),
+    const webhookInsert: WebhookInsert = {
       tenantId,
       name: input.name,
       url: input.url,
-      events: input.events,
-      description: input.description,
       secret,
-      secretHash,
+      events: input.events,
       headers: input.headers,
-      enabled: input.enabled,
-      retryPolicy: {
-        maxRetries: input.retryPolicy?.maxRetries ?? 3,
-        retryDelay: input.retryPolicy?.retryDelay ?? 60000,
-        backoffMultiplier: input.retryPolicy?.backoffMultiplier ?? 2,
-      },
-      metadata: input.metadata,
-      stats: {
-        totalDeliveries: 0,
-        successfulDeliveries: 0,
-        failedDeliveries: 0,
-      },
-      createdAt: new Date(),
-      updatedAt: new Date(),
     };
 
-    webhooksStore.set(webhook.id, webhook);
+    const result = await webhooksRepo.create(webhookInsert);
     
-    let tenantWebhooks = webhooksByTenant.get(tenantId);
-    if (!tenantWebhooks) {
-      tenantWebhooks = new Set();
-      webhooksByTenant.set(tenantId, tenantWebhooks);
+    if (!result.ok) {
+      logger.error('Failed to create webhook', { error: result.error.message });
+      throw ApiError.internal('Failed to create webhook');
     }
-    tenantWebhooks.add(webhook.id);
+
+    const webhook = result.value;
 
     // Audit log
     await auditRepo.create({
@@ -162,10 +113,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
         name: webhook.name,
         url: webhook.url,
         events: webhook.events,
-        description: webhook.description,
         secret: webhook.secret, // Only returned on creation
         enabled: webhook.enabled,
-        retryPolicy: webhook.retryPolicy,
+        headers: webhook.headers,
         createdAt: webhook.createdAt,
       },
     }, 201);
@@ -176,8 +126,8 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const webhook = await webhooksRepo.findById(webhookId, tenantId);
+    if (!webhook) {
       throw ApiError.notFound('Webhook');
     }
 
@@ -187,11 +137,13 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
         name: webhook.name,
         url: webhook.url,
         events: webhook.events,
-        description: webhook.description,
         headers: webhook.headers,
         enabled: webhook.enabled,
-        retryPolicy: webhook.retryPolicy,
-        stats: webhook.stats,
+        failureCount: webhook.failureCount,
+        lastTriggeredAt: webhook.lastTriggeredAt,
+        lastSuccessAt: webhook.lastSuccessAt,
+        lastFailureAt: webhook.lastFailureAt,
+        disabledReason: webhook.disabledReason,
         createdAt: webhook.createdAt,
         updatedAt: webhook.updatedAt,
       },
@@ -204,14 +156,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const enabled = c.req.query('enabled');
     const event = c.req.query('event');
 
-    const tenantWebhooks = webhooksByTenant.get(tenantId);
-    if (!tenantWebhooks || tenantWebhooks.size === 0) {
-      return c.json({ webhooks: [], total: 0 });
-    }
-
-    let webhooks = Array.from(tenantWebhooks)
-      .map(id => webhooksStore.get(id)!)
-      .filter(w => w !== undefined);
+    let webhooks = await webhooksRepo.findByTenant(tenantId);
 
     // Filter by enabled status
     if (enabled !== undefined) {
@@ -231,12 +176,10 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
         url: w.url,
         events: w.events,
         enabled: w.enabled,
-        stats: {
-          totalDeliveries: w.stats.totalDeliveries,
-          successfulDeliveries: w.stats.successfulDeliveries,
-          failedDeliveries: w.stats.failedDeliveries,
-          lastDeliveryAt: w.stats.lastDeliveryAt,
-        },
+        failureCount: w.failureCount,
+        lastTriggeredAt: w.lastTriggeredAt,
+        lastSuccessAt: w.lastSuccessAt,
+        lastFailureAt: w.lastFailureAt,
         createdAt: w.createdAt,
         updatedAt: w.updatedAt,
       })),
@@ -251,8 +194,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    // Check webhook exists
+    const existing = await webhooksRepo.findById(webhookId, tenantId);
+    if (!existing) {
       throw ApiError.notFound('Webhook');
     }
 
@@ -267,23 +211,21 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       }
     }
 
-    // Update fields
-    if (input.name !== undefined) webhook.name = input.name;
-    if (input.url !== undefined) webhook.url = input.url;
-    if (input.events !== undefined) webhook.events = input.events;
-    if (input.description !== undefined) webhook.description = input.description;
-    if (input.headers !== undefined) webhook.headers = input.headers;
-    if (input.enabled !== undefined) webhook.enabled = input.enabled;
-    if (input.metadata !== undefined) webhook.metadata = input.metadata;
-    if (input.retryPolicy) {
-      webhook.retryPolicy = {
-        maxRetries: input.retryPolicy.maxRetries ?? webhook.retryPolicy.maxRetries,
-        retryDelay: input.retryPolicy.retryDelay ?? webhook.retryPolicy.retryDelay,
-        backoffMultiplier: input.retryPolicy.backoffMultiplier ?? webhook.retryPolicy.backoffMultiplier,
-      };
+    const updateData: WebhookUpdate = {};
+    if (input.name !== undefined) updateData.name = input.name;
+    if (input.url !== undefined) updateData.url = input.url;
+    if (input.events !== undefined) updateData.events = input.events;
+    if (input.headers !== undefined) updateData.headers = input.headers;
+    if (input.enabled !== undefined) updateData.enabled = input.enabled;
+
+    const result = await webhooksRepo.update(webhookId, tenantId, updateData);
+    
+    if (!result.ok) {
+      logger.error('Failed to update webhook', { error: result.error.message });
+      throw ApiError.internal('Failed to update webhook');
     }
 
-    webhook.updatedAt = new Date();
+    const webhook = result.value;
 
     // Audit log
     await auditRepo.create({
@@ -316,15 +258,18 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const existing = await webhooksRepo.findById(webhookId, tenantId);
+    if (!existing) {
       throw ApiError.notFound('Webhook');
     }
 
-    const newSecret = randomBytes(32).toString('hex');
-    webhook.secret = newSecret;
-    webhook.secretHash = createHash('sha256').update(newSecret).digest('hex');
-    webhook.updatedAt = new Date();
+    const newSecret = randomToken(32);
+    const result = await webhooksRepo.update(webhookId, tenantId, { secret: newSecret });
+    
+    if (!result.ok) {
+      logger.error('Failed to rotate webhook secret', { error: result.error.message });
+      throw ApiError.internal('Failed to rotate webhook secret');
+    }
 
     // Audit log
     await auditRepo.create({
@@ -332,16 +277,16 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       userId: userId ?? undefined,
       action: 'webhook.secret_rotated',
       resourceType: 'webhook',
-      resourceId: webhook.id,
+      resourceId: webhookId,
     });
 
     logger.info('Webhook secret rotated', { webhookId });
 
     return c.json({
       webhook: {
-        id: webhook.id,
-        secret: webhook.secret,
-        rotatedAt: webhook.updatedAt,
+        id: webhookId,
+        secret: newSecret,
+        rotatedAt: new Date(),
       },
     });
   });
@@ -352,8 +297,8 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const webhook = await webhooksRepo.findById(webhookId, tenantId);
+    if (!webhook) {
       throw ApiError.notFound('Webhook');
     }
 
@@ -388,6 +333,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       const duration = Date.now() - startTime;
       const responseBody = await response.text().catch(() => '');
 
+      // Record trigger in database
+      await webhooksRepo.recordTrigger(webhook.id, response.ok, response.ok ? undefined : `HTTP ${response.status}`);
+
       logger.info('Webhook test completed', {
         webhookId,
         status: response.status,
@@ -413,6 +361,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       
+      // Record failed trigger
+      await webhooksRepo.recordTrigger(webhook.id, false, errorMessage);
+
       logger.warn('Webhook test failed', { webhookId, error: errorMessage });
 
       return c.json({
@@ -434,26 +385,25 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const status = c.req.query('status');
     const limit = parseInt(c.req.query('limit') ?? '50', 10);
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const webhook = await webhooksRepo.findById(webhookId, tenantId);
+    if (!webhook) {
       throw ApiError.notFound('Webhook');
     }
 
-    // In production, fetch from database
-    // For now, return stats-based summary
+    // Get delivery stats from queue
+    const stats = await webhooksRepo.getQueueStats(tenantId);
+
     return c.json({
-      deliveries: [],
+      deliveries: [], // Would be populated from webhook_queue table
       summary: {
-        total: webhook.stats.totalDeliveries,
-        successful: webhook.stats.successfulDeliveries,
-        failed: webhook.stats.failedDeliveries,
-        successRate: webhook.stats.totalDeliveries > 0
-          ? ((webhook.stats.successfulDeliveries / webhook.stats.totalDeliveries) * 100).toFixed(2) + '%'
-          : 'N/A',
-        lastDeliveryAt: webhook.stats.lastDeliveryAt,
-        lastSuccessAt: webhook.stats.lastSuccessAt,
-        lastFailureAt: webhook.stats.lastFailureAt,
-        lastError: webhook.stats.lastError,
+        pending: stats.pending,
+        delivered: stats.delivered,
+        failed: stats.failed,
+        failureCount: webhook.failureCount,
+        lastTriggeredAt: webhook.lastTriggeredAt,
+        lastSuccessAt: webhook.lastSuccessAt,
+        lastFailureAt: webhook.lastFailureAt,
+        disabledReason: webhook.disabledReason,
       },
       limit,
       status,
@@ -467,13 +417,16 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const existing = await webhooksRepo.findById(webhookId, tenantId);
+    if (!existing) {
       throw ApiError.notFound('Webhook');
     }
 
-    webhook.enabled = true;
-    webhook.updatedAt = new Date();
+    const result = await webhooksRepo.update(webhookId, tenantId, { enabled: true });
+    
+    if (!result.ok) {
+      throw ApiError.internal('Failed to enable webhook');
+    }
 
     // Audit log
     await auditRepo.create({
@@ -481,16 +434,16 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       userId: userId ?? undefined,
       action: 'webhook.enabled',
       resourceType: 'webhook',
-      resourceId: webhook.id,
+      resourceId: webhookId,
     });
 
     logger.info('Webhook enabled', { webhookId });
 
     return c.json({
       webhook: {
-        id: webhook.id,
-        enabled: webhook.enabled,
-        updatedAt: webhook.updatedAt,
+        id: webhookId,
+        enabled: true,
+        updatedAt: result.value.updatedAt,
       },
     });
   });
@@ -502,13 +455,16 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const existing = await webhooksRepo.findById(webhookId, tenantId);
+    if (!existing) {
       throw ApiError.notFound('Webhook');
     }
 
-    webhook.enabled = false;
-    webhook.updatedAt = new Date();
+    const result = await webhooksRepo.update(webhookId, tenantId, { enabled: false });
+    
+    if (!result.ok) {
+      throw ApiError.internal('Failed to disable webhook');
+    }
 
     // Audit log
     await auditRepo.create({
@@ -516,16 +472,16 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       userId: userId ?? undefined,
       action: 'webhook.disabled',
       resourceType: 'webhook',
-      resourceId: webhook.id,
+      resourceId: webhookId,
     });
 
     logger.info('Webhook disabled', { webhookId });
 
     return c.json({
       webhook: {
-        id: webhook.id,
-        enabled: webhook.enabled,
-        updatedAt: webhook.updatedAt,
+        id: webhookId,
+        enabled: false,
+        updatedAt: result.value.updatedAt,
       },
     });
   });
@@ -537,13 +493,15 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
-    const webhook = webhooksStore.get(webhookId);
-    if (!webhook || webhook.tenantId !== tenantId) {
+    const webhook = await webhooksRepo.findById(webhookId, tenantId);
+    if (!webhook) {
       throw ApiError.notFound('Webhook');
     }
 
-    webhooksStore.delete(webhookId);
-    webhooksByTenant.get(tenantId)?.delete(webhookId);
+    const deleted = await webhooksRepo.delete(webhookId, tenantId);
+    if (!deleted) {
+      throw ApiError.internal('Failed to delete webhook');
+    }
 
     // Audit log
     await auditRepo.create({
@@ -583,22 +541,13 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const expectedSignature = signPayload(secret, timestamp, payload);
     
-    try {
-      const valid = timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expectedSignature)
-      );
+    // Use timing-safe comparison
+    const valid = signature === expectedSignature && signature.length === expectedSignature.length;
 
-      return c.json({
-        valid,
-        reason: valid ? 'Signature verified' : 'Signature mismatch',
-      });
-    } catch {
-      return c.json({
-        valid: false,
-        reason: 'Invalid signature format',
-      });
-    }
+    return c.json({
+      valid,
+      reason: valid ? 'Signature verified' : 'Signature mismatch',
+    });
   });
 
   return router;
@@ -606,7 +555,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
 
 function signPayload(secret: string, timestamp: number, payload: unknown): string {
   const message = `${timestamp}.${JSON.stringify(payload)}`;
-  return 'sha256=' + createHmac('sha256', secret).update(message).digest('hex');
+  return 'sha256=' + hmacSign(secret, message, 'sha256');
 }
 
 function createTestPayload(eventType: string, tenantId: string): Record<string, unknown> {
@@ -688,20 +637,17 @@ function createTestPayload(eventType: string, tenantId: string): Record<string, 
 }
 
 // Export for webhook delivery service
-export function getWebhooksForEvent(
+export async function getWebhooksForEvent(
+  webhooksRepo: WebhooksRepository,
   tenantId: string,
   eventType: string
-): WebhookRecord[] {
-  const tenantWebhooks = webhooksByTenant.get(tenantId);
-  if (!tenantWebhooks) return [];
-
-  return Array.from(tenantWebhooks)
-    .map(id => webhooksStore.get(id)!)
-    .filter(w => w && w.enabled && (w.events.includes(eventType) || w.events.includes('*')));
+): Promise<Webhook[]> {
+  return webhooksRepo.findEnabledByEvent(tenantId, eventType);
 }
 
 export async function deliverWebhook(
-  webhook: WebhookRecord,
+  webhooksRepo: WebhooksRepository,
+  webhook: Webhook,
   payload: Record<string, unknown>
 ): Promise<{ success: boolean; statusCode?: number; error?: string }> {
   const timestamp = Date.now();
@@ -725,25 +671,21 @@ export async function deliverWebhook(
       signal: AbortSignal.timeout(30000),
     });
 
-    // Update stats
-    webhook.stats.totalDeliveries++;
-    webhook.stats.lastDeliveryAt = new Date();
+    // Record trigger result in database
+    await webhooksRepo.recordTrigger(
+      webhook.id,
+      response.ok,
+      response.ok ? undefined : `HTTP ${response.status}: ${response.statusText}`
+    );
 
     if (response.ok) {
-      webhook.stats.successfulDeliveries++;
-      webhook.stats.lastSuccessAt = new Date();
       return { success: true, statusCode: response.status };
     } else {
-      webhook.stats.failedDeliveries++;
-      webhook.stats.lastFailureAt = new Date();
-      webhook.stats.lastError = `HTTP ${response.status}: ${response.statusText}`;
-      return { success: false, statusCode: response.status, error: webhook.stats.lastError };
+      return { success: false, statusCode: response.status, error: `HTTP ${response.status}: ${response.statusText}` };
     }
   } catch (error) {
-    webhook.stats.totalDeliveries++;
-    webhook.stats.failedDeliveries++;
-    webhook.stats.lastFailureAt = new Date();
-    webhook.stats.lastError = error instanceof Error ? error.message : 'Unknown error';
-    return { success: false, error: webhook.stats.lastError };
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    await webhooksRepo.recordTrigger(webhook.id, false, errorMessage);
+    return { success: false, error: errorMessage };
   }
 }

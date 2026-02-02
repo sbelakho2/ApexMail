@@ -17,6 +17,84 @@ import { AuditLogger } from './audit';
 import { SecretManager } from './secrets';
 import { GDPRAutomation } from './gdpr';
 import { complianceConfig } from './config';
+import type { RiskFlagType, ConsentType, AuditAction, AuditResource } from './types';
+
+// Type validation helpers
+const RISK_FLAG_TYPES: readonly RiskFlagType[] = [
+    'high_bounce_rate',
+    'spam_trap_hit',
+    'blocklist_detected',
+    'unusual_sending_pattern',
+    'phishing_content',
+    'malware_attachment',
+    'suspended_account',
+    'payment_failed',
+] as const;
+
+const CONSENT_TYPES: readonly ConsentType[] = [
+    'marketing',
+    'transactional',
+    'analytics',
+    'profiling',
+    'third_party',
+    'data_processing',
+] as const;
+
+const AUDIT_ACTIONS: readonly AuditAction[] = [
+    'create',
+    'read',
+    'update',
+    'delete',
+    'export',
+    'import',
+    'login',
+    'logout',
+    'send',
+    'receive',
+    'configure',
+    'approve',
+    'reject',
+    'escalate',
+] as const;
+
+const AUDIT_RESOURCES: readonly AuditResource[] = [
+    'tenant',
+    'user',
+    'domain',
+    'api_key',
+    'message',
+    'campaign',
+    'list',
+    'subscriber',
+    'template',
+    'webhook',
+    'settings',
+    'billing',
+    'consent',
+] as const;
+
+type AuditOutcome = 'success' | 'failure';
+const AUDIT_OUTCOMES: readonly AuditOutcome[] = ['success', 'failure'] as const;
+
+function isRiskFlagType(value: string): value is RiskFlagType {
+    return RISK_FLAG_TYPES.includes(value as RiskFlagType);
+}
+
+function isConsentType(value: string): value is ConsentType {
+    return CONSENT_TYPES.includes(value as ConsentType);
+}
+
+function isAuditAction(value: string | undefined): value is AuditAction {
+    return value !== undefined && AUDIT_ACTIONS.includes(value as AuditAction);
+}
+
+function isAuditResource(value: string | undefined): value is AuditResource {
+    return value !== undefined && AUDIT_RESOURCES.includes(value as AuditResource);
+}
+
+function isAuditOutcome(value: string | undefined): value is AuditOutcome {
+    return value !== undefined && AUDIT_OUTCOMES.includes(value as AuditOutcome);
+}
 
 // Initialize dependencies
 const db = new Pool({
@@ -94,7 +172,11 @@ app.post('/api/risk/:tenantId/flags/:flagType/resolve', async (c) => {
     const { tenantId, flagType } = c.req.param();
     const { resolution } = await c.req.json();
 
-    await riskEngine.resolveFlag(tenantId, flagType as any, resolution);
+    if (!isRiskFlagType(flagType)) {
+        return c.json({ error: 'Invalid flag type' }, 400);
+    }
+
+    await riskEngine.resolveFlag(tenantId, flagType, resolution);
 
     await auditLogger.log(
         'update',
@@ -167,15 +249,19 @@ app.get('/api/scan/stats', async (c) => {
 // ==================== Audit Log Routes ====================
 
 app.get('/api/audit', async (c) => {
+    const actionParam = c.req.query('action');
+    const resourceParam = c.req.query('resource');
+    const outcomeParam = c.req.query('outcome');
+
     const query = {
         tenantId: c.req.query('tenantId'),
         userId: c.req.query('userId'),
-        action: c.req.query('action') as any,
-        resource: c.req.query('resource') as any,
+        action: isAuditAction(actionParam) ? actionParam : undefined,
+        resource: isAuditResource(resourceParam) ? resourceParam : undefined,
         resourceId: c.req.query('resourceId'),
         startDate: c.req.query('startDate') ? new Date(c.req.query('startDate')!) : undefined,
         endDate: c.req.query('endDate') ? new Date(c.req.query('endDate')!) : undefined,
-        outcome: c.req.query('outcome') as any,
+        outcome: isAuditOutcome(outcomeParam) ? outcomeParam : undefined,
         limit: c.req.query('limit') ? parseInt(c.req.query('limit')!, 10) : 50,
         offset: c.req.query('offset') ? parseInt(c.req.query('offset')!, 10) : 0,
     };
@@ -212,8 +298,8 @@ app.post('/api/audit/export', async (c) => {
 
     const exportResult = await auditLogger.export(query, format);
 
-    // Log the export
-    await auditLogger.logExport('audit_logs' as any, null, { format, query }, {});
+    // Log the export - using 'settings' resource as audit log exports are admin operations
+    await auditLogger.logExport('settings', null, { format, query, exportType: 'audit_logs' }, {});
 
     return c.json(exportResult);
 });
@@ -261,7 +347,7 @@ app.post('/api/secrets', async (c) => {
 
     await auditLogger.log(
         'create',
-        'api_key' as any,
+        'api_key',
         secret.id,
         { name: secret.name, type: secret.type },
         'success',
@@ -291,13 +377,20 @@ app.get('/api/secrets/:secretId', async (c) => {
 
 app.get('/api/secrets', async (c) => {
     const tenantId = c.req.query('tenantId');
-    const type = c.req.query('type') as any;
+    const typeParam = c.req.query('type');
 
     if (!tenantId) {
         return c.json({ error: 'tenantId is required' }, 400);
     }
 
-    const secrets = await secretManager.listSecrets(tenantId, type);
+    // Validate type parameter if provided
+    const validTypes = ['api_key', 'smtp_password', 'webhook_secret', 'encryption_key', 'oauth_token', 'certificate'] as const;
+    type SecretType = typeof validTypes[number];
+    const secretType: SecretType | undefined = typeParam && validTypes.includes(typeParam as SecretType) 
+        ? typeParam as SecretType 
+        : undefined;
+
+    const secrets = await secretManager.listSecrets(tenantId, secretType);
     return c.json(secrets);
 });
 
@@ -310,7 +403,7 @@ app.patch('/api/secrets/:secretId', async (c) => {
 
     await auditLogger.log(
         'update',
-        'api_key' as any,
+        'api_key',
         secretId,
         { updated: Object.keys(update) },
         'success',
@@ -331,7 +424,7 @@ app.post('/api/secrets/:secretId/rotate', async (c) => {
 
     await auditLogger.log(
         'update',
-        'api_key' as any,
+        'api_key',
         secretId,
         { action: 'rotate' },
         'success',
@@ -351,7 +444,7 @@ app.delete('/api/secrets/:secretId', async (c) => {
 
     await auditLogger.log(
         'delete',
-        'api_key' as any,
+        'api_key',
         secretId,
         {},
         'success',
@@ -415,7 +508,7 @@ app.post('/api/gdpr/requests', async (c) => {
 
     await auditLogger.log(
         'create',
-        'consent' as any,
+        'consent',
         request.id,
         { requestType, email: email.substring(0, 3) + '***' },
         'success',
@@ -455,9 +548,15 @@ app.post('/api/gdpr/requests/:requestId/process', async (c) => {
 });
 
 app.get('/api/gdpr/requests/:requestId', async (c) => {
-    const { requestId: _requestId } = c.req.param();
-    // Get request details (requires implementation in GDPRAutomation)
-    return c.json({ error: 'Not implemented' }, 501);
+    const { requestId } = c.req.param();
+    
+    const request = await gdprAutomation.getRequest(requestId);
+    
+    if (!request) {
+        return c.json({ error: 'Request not found' }, 404);
+    }
+    
+    return c.json({ request });
 });
 
 app.get('/api/gdpr/stats', async (c) => {
@@ -494,7 +593,7 @@ app.post('/api/gdpr/consent', async (c) => {
 
     await auditLogger.log(
         'update',
-        'consent' as any,
+        'consent',
         consent.id,
         { consentType: consent.consentType, granted: consent.granted },
         'success',
@@ -508,11 +607,15 @@ app.post('/api/gdpr/consent', async (c) => {
 app.delete('/api/gdpr/consent/:tenantId/:subscriberId/:consentType', async (c) => {
     const { tenantId, subscriberId, consentType } = c.req.param();
 
-    await gdprAutomation.revokeConsent(tenantId, subscriberId, consentType as any);
+    if (!isConsentType(consentType)) {
+        return c.json({ error: 'Invalid consent type' }, 400);
+    }
+
+    await gdprAutomation.revokeConsent(tenantId, subscriberId, consentType);
 
     await auditLogger.log(
         'update',
-        'consent' as any,
+        'consent',
         `${subscriberId}-${consentType}`,
         { action: 'revoke', consentType },
         'success',
@@ -533,10 +636,14 @@ app.get('/api/gdpr/consent/:tenantId/:subscriberId', async (c) => {
 app.get('/api/gdpr/consent/:tenantId/:subscriberId/:consentType/check', async (c) => {
     const { tenantId, subscriberId, consentType } = c.req.param();
 
+    if (!isConsentType(consentType)) {
+        return c.json({ error: 'Invalid consent type' }, 400);
+    }
+
     const hasConsent = await gdprAutomation.hasConsent(
         tenantId,
         subscriberId,
-        consentType as any
+        consentType
     );
 
     return c.json({ hasConsent });

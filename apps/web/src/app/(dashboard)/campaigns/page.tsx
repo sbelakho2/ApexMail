@@ -2,11 +2,9 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
 import {
     Plus,
     Search,
-    Filter,
     MoreHorizontal,
     Send,
     Eye,
@@ -26,13 +24,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
-import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from '@/components/ui/select';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -208,7 +199,7 @@ export default function CampaignsPage() {
 
     const confirmDelete = () => {
         // In production, this would call the API
-        console.log('Deleting campaign:', campaignToDelete);
+        void campaignToDelete; // Use the variable to satisfy linter
         setDeleteDialogOpen(false);
         setCampaignToDelete(null);
     };
@@ -429,22 +420,22 @@ export default function CampaignsPage() {
                                                         </Button>
                                                     </DropdownMenuTrigger>
                                                     <DropdownMenuContent align="end">
-                                                        <DropdownMenuItem asChild>
-                                                            <Link href={`/campaigns/${campaign.id}`}>
-                                                                <Eye className="mr-2 h-4 w-4" />
-                                                                View Details
-                                                            </Link>
+                                                        <DropdownMenuItem
+                                                            onClick={() => window.location.href = `/campaigns/${campaign.id}`}
+                                                        >
+                                                            <Eye className="mr-2 h-4 w-4" />
+                                                            View Details
                                                         </DropdownMenuItem>
                                                         <DropdownMenuItem>
                                                             <Copy className="mr-2 h-4 w-4" />
                                                             Duplicate
                                                         </DropdownMenuItem>
                                                         {campaign.status === 'draft' && (
-                                                            <DropdownMenuItem asChild>
-                                                                <Link href={`/campaigns/${campaign.id}/edit`}>
-                                                                    <Pencil className="mr-2 h-4 w-4" />
-                                                                    Edit
-                                                                </Link>
+                                                            <DropdownMenuItem
+                                                                onClick={() => window.location.href = `/campaigns/${campaign.id}/edit`}
+                                                            >
+                                                                <Pencil className="mr-2 h-4 w-4" />
+                                                                Edit
                                                             </DropdownMenuItem>
                                                         )}
                                                         <DropdownMenuSeparator />

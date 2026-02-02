@@ -8,7 +8,7 @@ import type { Logger } from '@apexmail/lib';
 import { config } from './config.js';
 import { mkdir, writeFile, readdir, unlink, stat } from 'fs/promises';
 import { join, basename } from 'path';
-import { createHash } from 'crypto';
+import { sha256 } from '@apexmail/lib/crypto';
 
 interface CompactionWorkerConfig {
   db: Pool;
@@ -332,11 +332,8 @@ export class CompactionWorker {
   }
 
   private generateChecksum(events: EventRow[]): string {
-    const hash = createHash('sha256');
-    for (const event of events) {
-      hash.update(event.id);
-    }
-    return hash.digest('hex');
+    const eventIds = events.map(e => e.id).join('');
+    return sha256(eventIds);
   }
 
   private async markDateCompacted(date: Date, status: string, eventCount: number): Promise<void> {

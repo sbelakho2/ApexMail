@@ -10,7 +10,7 @@
  */
 
 import Redis from 'ioredis';
-import { config } from '../config.js';
+import { Result } from '@apexmail/lib';
 
 export enum CircuitState {
   CLOSED = 'closed',     // Normal operation
@@ -60,8 +60,6 @@ interface CircuitData {
   closedAt: Date | null;
   failureTimestamps: number[];
 }
-
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class CircuitBreakerService {
   private redis: Redis;

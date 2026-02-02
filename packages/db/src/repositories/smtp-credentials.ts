@@ -245,6 +245,7 @@ export class SmtpCredentialsRepository {
         const bytes = Buffer.alloc(32);
         
         // Use crypto for secure random bytes
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const crypto = require('node:crypto');
         crypto.randomFillSync(bytes);
         

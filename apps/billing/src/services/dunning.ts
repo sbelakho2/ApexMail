@@ -3,12 +3,12 @@
  * Manages failed payment retry sequences and account suspension
  */
 
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 
-const logger = createLogger('dunning');
+const logger = createLogger();
 
 export interface DunningState {
   tenantId: string;
@@ -52,6 +52,7 @@ export class DunningService {
 
   /**
    * Record a failed payment
+   * CRITICAL: Uses atomic transaction to ensure consistency
    */
   async recordFailedPayment(
     tenantId: string,
@@ -101,22 +102,49 @@ export class DunningService {
       suspendedAt = existing?.status.includes('suspended') ? null : now;
     }
 
-    // Upsert dunning record
-    const upsertResult = await this.db.query(
-      `INSERT INTO dunning_records (
-        id, tenant_id, status, failed_payment_count, first_failed_at,
-        last_failed_at, next_retry_at, suspended_at, grace_period_ends_at,
-        created_at, updated_at
+    // Use atomic CTE to upsert dunning record, log event, and update tenant if needed
+    const metadata = JSON.stringify({ attempt: failedCount, daysSinceFirstFailure });
+    const shouldSuspendTenant = newStatus === 'hard_suspended';
+
+    const upsertResult = await this.db.query<{
+      dunning_updated: boolean;
+      event_logged: boolean;
+      tenant_suspended: boolean;
+    }>(
+      `WITH upsert_dunning AS (
+        INSERT INTO dunning_records (
+          id, tenant_id, status, failed_payment_count, first_failed_at,
+          last_failed_at, next_retry_at, suspended_at, grace_period_ends_at,
+          created_at, updated_at
+        )
+        VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+        ON CONFLICT (tenant_id) DO UPDATE SET
+          status = $2,
+          failed_payment_count = $3,
+          last_failed_at = $5,
+          next_retry_at = $6,
+          suspended_at = COALESCE(dunning_records.suspended_at, $7),
+          grace_period_ends_at = COALESCE($8, dunning_records.grace_period_ends_at),
+          updated_at = NOW()
+        RETURNING tenant_id
+      ),
+      log_event AS (
+        INSERT INTO dunning_events (
+          id, tenant_id, event_type, invoice_id, amount, metadata, created_at
+        )
+        VALUES (gen_random_uuid(), $1, 'payment_failed', $9, $10, $11, NOW())
+        RETURNING tenant_id
+      ),
+      suspend_tenant AS (
+        UPDATE tenants 
+        SET status = 'suspended', updated_at = NOW() 
+        WHERE id = $1 AND $12 = true
+        RETURNING id
       )
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-      ON CONFLICT (tenant_id) DO UPDATE SET
-        status = $2,
-        failed_payment_count = $3,
-        last_failed_at = $5,
-        next_retry_at = $6,
-        suspended_at = COALESCE(dunning_records.suspended_at, $7),
-        grace_period_ends_at = COALESCE($8, dunning_records.grace_period_ends_at),
-        updated_at = NOW()`,
+      SELECT 
+        EXISTS (SELECT 1 FROM upsert_dunning) as dunning_updated,
+        EXISTS (SELECT 1 FROM log_event) as event_logged,
+        EXISTS (SELECT 1 FROM suspend_tenant) as tenant_suspended`,
       [
         tenantId,
         newStatus,
@@ -126,34 +154,21 @@ export class DunningService {
         nextRetryAt,
         suspendedAt,
         gracePeriodEndsAt,
+        invoiceId,
+        amount,
+        metadata,
+        shouldSuspendTenant,
       ]
     );
 
     if (!upsertResult.ok) return Result.err(upsertResult.error);
 
-    // Log payment failure
-    await this.db.query(
-      `INSERT INTO dunning_events (
-        id, tenant_id, event_type, invoice_id, amount, metadata, created_at
-      )
-      VALUES (gen_random_uuid(), $1, 'payment_failed', $2, $3, $4, NOW())`,
-      [tenantId, invoiceId, amount, JSON.stringify({ attempt: failedCount, daysSinceFirstFailure })]
-    );
-
-    // Send notification
+    // Send notification (non-critical, doesn't need transaction)
     await this.sendDunningNotification(tenantId, newStatus, {
       failedCount,
       daysSinceFirstFailure,
       nextRetryAt,
     });
-
-    // Update tenant status if suspended
-    if (newStatus === 'hard_suspended') {
-      await this.db.query(
-        `UPDATE tenants SET status = 'suspended', updated_at = NOW() WHERE id = $1`,
-        [tenantId]
-      );
-    }
 
     // Cache status in Redis for fast checks
     await this.redis.setex(
@@ -177,35 +192,43 @@ export class DunningService {
 
   /**
    * Record successful payment (clears dunning state)
+   * CRITICAL: Uses atomic transaction to ensure consistency
    */
   async recordSuccessfulPayment(tenantId: string): Promise<Result<void, Error>> {
-    // Update dunning record
-    await this.db.query(
-      `UPDATE dunning_records
-       SET status = 'healthy', 
-           failed_payment_count = 0,
-           first_failed_at = NULL,
-           last_failed_at = NULL,
-           next_retry_at = NULL,
-           suspended_at = NULL,
-           grace_period_ends_at = NULL,
-           updated_at = NOW()
-       WHERE tenant_id = $1`,
+    // Use atomic CTE to update dunning record, log event, and reactivate tenant
+    const result = await this.db.query(
+      `WITH update_dunning AS (
+        UPDATE dunning_records
+        SET status = 'healthy', 
+            failed_payment_count = 0,
+            first_failed_at = NULL,
+            last_failed_at = NULL,
+            next_retry_at = NULL,
+            suspended_at = NULL,
+            grace_period_ends_at = NULL,
+            updated_at = NOW()
+        WHERE tenant_id = $1
+        RETURNING tenant_id
+      ),
+      log_recovery AS (
+        INSERT INTO dunning_events (id, tenant_id, event_type, created_at)
+        VALUES (gen_random_uuid(), $1, 'payment_recovered', NOW())
+        RETURNING tenant_id
+      ),
+      reactivate_tenant AS (
+        UPDATE tenants 
+        SET status = 'active', updated_at = NOW() 
+        WHERE id = $1
+        RETURNING id
+      )
+      SELECT 
+        EXISTS (SELECT 1 FROM update_dunning) as dunning_updated,
+        EXISTS (SELECT 1 FROM log_recovery) as event_logged,
+        EXISTS (SELECT 1 FROM reactivate_tenant) as tenant_reactivated`,
       [tenantId]
     );
 
-    // Log recovery
-    await this.db.query(
-      `INSERT INTO dunning_events (id, tenant_id, event_type, created_at)
-       VALUES (gen_random_uuid(), $1, 'payment_recovered', NOW())`,
-      [tenantId]
-    );
-
-    // Reactivate tenant
-    await this.db.query(
-      `UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1`,
-      [tenantId]
-    );
+    if (!result.ok) return Result.err(result.error);
 
     // Clear Redis cache
     await this.redis.del(`dunning:status:${tenantId}`);
@@ -214,7 +237,7 @@ export class DunningService {
     const queuedCount = await this.getQueuedMessagesCount(tenantId);
     if (queuedCount > 0) {
       await this.releaseQueuedMessages(tenantId);
-      logger.info({ tenantId, queuedCount }, 'Released queued messages after payment recovery');
+      logger.info('Released queued messages after payment recovery', { tenantId, queuedCount });
     }
 
     return Result.ok(undefined);
@@ -279,6 +302,7 @@ export class DunningService {
 
   /**
    * Process grace period expirations (run daily)
+   * CRITICAL: Uses atomic CTE to ensure consistency
    */
   async processGracePeriodExpirations(): Promise<Result<{
     processedCount: number;
@@ -286,46 +310,65 @@ export class DunningService {
   }, Error>> {
     const now = new Date();
 
-    // Find tenants with expired grace periods
-    const expiredResult = await this.db.query<{
+    // Use atomic CTE to: find expired, delete messages, queue notifications, update records
+    const result = await this.db.query<{
       tenant_id: string;
+      purged_count: number;
     }>(
-      `SELECT tenant_id FROM dunning_records
-       WHERE status = 'hard_suspended'
-         AND grace_period_ends_at IS NOT NULL
-         AND grace_period_ends_at < $1`,
+      `WITH expired_tenants AS (
+        SELECT tenant_id FROM dunning_records
+        WHERE status = 'hard_suspended'
+          AND grace_period_ends_at IS NOT NULL
+          AND grace_period_ends_at < $1
+        FOR UPDATE
+      ),
+      purge_messages AS (
+        DELETE FROM messages 
+        WHERE tenant_id IN (SELECT tenant_id FROM expired_tenants) 
+          AND status = 'dunning_queued'
+        RETURNING tenant_id
+      ),
+      purge_counts AS (
+        SELECT tenant_id, COUNT(*) as purged_count
+        FROM purge_messages
+        GROUP BY tenant_id
+      ),
+      queue_notifications AS (
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        SELECT gen_random_uuid(), et.tenant_id, 'messages_purged', 
+               jsonb_build_object('purgedCount', COALESCE(pc.purged_count, 0)), 
+               'pending', NOW()
+        FROM expired_tenants et
+        LEFT JOIN purge_counts pc ON et.tenant_id = pc.tenant_id
+        RETURNING tenant_id
+      ),
+      update_dunning AS (
+        UPDATE dunning_records
+        SET grace_period_ends_at = NULL, updated_at = NOW()
+        WHERE tenant_id IN (SELECT tenant_id FROM expired_tenants)
+        RETURNING tenant_id
+      )
+      SELECT et.tenant_id, COALESCE(pc.purged_count, 0)::int as purged_count
+      FROM expired_tenants et
+      LEFT JOIN purge_counts pc ON et.tenant_id = pc.tenant_id`,
       [now]
     );
 
-    if (!expiredResult.ok) return Result.err(expiredResult.error);
+    if (!result.ok) return Result.err(result.error);
 
-    let totalPurged = 0;
+    const processedCount = result.value.rows.length;
+    const purgedMessagesCount = result.value.rows.reduce((sum, r) => sum + r.purged_count, 0);
 
-    for (const row of expiredResult.value.rows) {
-      const purgedCount = await this.purgeQueuedMessages(row.tenant_id);
-      totalPurged += purgedCount;
-
-      // Send final notification
-      await this.db.query(
-        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-         VALUES (gen_random_uuid(), $1, 'messages_purged', $2, 'pending', NOW())`,
-        [row.tenant_id, JSON.stringify({ purgedCount })]
-      );
-
-      // Update dunning record
-      await this.db.query(
-        `UPDATE dunning_records
-         SET grace_period_ends_at = NULL, updated_at = NOW()
-         WHERE tenant_id = $1`,
-        [row.tenant_id]
-      );
-
-      logger.info({ tenantId: row.tenant_id, purgedCount }, 'Purged queued messages after grace period');
+    for (const row of result.value.rows) {
+      logger.info('Purged queued messages after grace period', { 
+        tenantId: row.tenant_id, 
+        purgedCount: row.purged_count 
+      });
     }
 
     return Result.ok({
-      processedCount: expiredResult.value.rows.length,
-      purgedMessagesCount: totalPurged,
+      processedCount,
+      purgedMessagesCount,
     });
   }
 
@@ -372,7 +415,10 @@ export class DunningService {
       return null; // No more retries
     }
 
-    const daysToAdd = retryScheduleDays[attemptCount - 1] ?? retryScheduleDays[retryScheduleDays.length - 1];
+    const daysToAdd = retryScheduleDays[attemptCount - 1];
+    if (daysToAdd === undefined) {
+      return null;
+    }
     return new Date(firstFailedAt.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
   }
 
@@ -381,55 +427,79 @@ export class DunningService {
     status: DunningState['status'],
     details: Record<string, unknown>
   ): Promise<void> {
-    const notificationType = status === 'warning' 
-      ? 'payment_reminder'
-      : status === 'soft_suspended'
-      ? 'account_soft_suspended'
-      : 'account_hard_suspended';
+    try {
+      const notificationType = status === 'warning' 
+        ? 'payment_reminder'
+        : status === 'soft_suspended'
+        ? 'account_soft_suspended'
+        : 'account_hard_suspended';
 
-    await this.db.query(
-      `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, 'pending', NOW())`,
-      [tenantId, notificationType, JSON.stringify(details)]
-    );
+      await this.db.query(
+        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'pending', NOW())`,
+        [tenantId, notificationType, JSON.stringify(details)]
+      );
+    } catch (error) {
+      console.error(`[Dunning] Failed to send notification for tenant ${tenantId}:`, error);
+      // Don't throw - notification failure shouldn't block dunning process
+    }
   }
 
   private async getQueuedMessagesCount(tenantId: string): Promise<number> {
-    const result = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM messages
-       WHERE tenant_id = $1 AND status = 'dunning_queued'`,
-      [tenantId]
-    );
+    try {
+      const result = await this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::text as count FROM messages
+         WHERE tenant_id = $1 AND status = 'dunning_queued'`,
+        [tenantId]
+      );
 
-    return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
+      return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
+    } catch (error) {
+      console.error(`[Dunning] Failed to get queued messages count for tenant ${tenantId}:`, error);
+      return 0;
+    }
   }
 
   private async releaseQueuedMessages(tenantId: string): Promise<number> {
-    const result = await this.db.query<{ count: string }>(
-      `WITH updated AS (
-        UPDATE messages
-        SET status = 'queued', updated_at = NOW()
-        WHERE tenant_id = $1 AND status = 'dunning_queued'
-        RETURNING id
-      )
-      SELECT COUNT(*)::text as count FROM updated`,
-      [tenantId]
-    );
+    try {
+      const result = await this.db.query<{ count: string }>(
+        `WITH updated AS (
+          UPDATE messages
+          SET status = 'queued', updated_at = NOW()
+          WHERE tenant_id = $1 AND status = 'dunning_queued'
+          RETURNING id
+        )
+        SELECT COUNT(*)::text as count FROM updated`,
+        [tenantId]
+      );
 
-    return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
+      return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
+    } catch (error) {
+      console.error(`[Dunning] Failed to release queued messages for tenant ${tenantId}:`, error);
+      throw new Error(`Failed to release queued messages: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
-  private async purgeQueuedMessages(tenantId: string): Promise<number> {
-    const result = await this.db.query<{ count: string }>(
-      `WITH deleted AS (
-        DELETE FROM messages
-        WHERE tenant_id = $1 AND status = 'dunning_queued'
-        RETURNING id
-      )
-      SELECT COUNT(*)::text as count FROM deleted`,
-      [tenantId]
-    );
+  /**
+   * Purge dunning-queued messages (used for account termination)
+   * Note: Kept as internal method for future use
+   */
+  async purgeQueuedMessages(tenantId: string): Promise<number> {
+    try {
+      const result = await this.db.query<{ count: string }>(
+        `WITH deleted AS (
+          DELETE FROM messages
+          WHERE tenant_id = $1 AND status = 'dunning_queued'
+          RETURNING id
+        )
+        SELECT COUNT(*)::text as count FROM deleted`,
+        [tenantId]
+      );
 
-    return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
+      return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
+    } catch (error) {
+      console.error(`[Dunning] Failed to purge queued messages for tenant ${tenantId}:`, error);
+      throw new Error(`Failed to purge queued messages: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 }

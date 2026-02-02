@@ -5,9 +5,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { config, EnterprisePlan } from '../config.js';
+// Unused: import { config, EnterprisePlan } from '../config.js';
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -306,7 +306,7 @@ export class QBRService {
   async generateQBRData(id: string): Promise<Result<QBR>> {
     try {
       const qbrResult = await this.getQBR(id);
-      if (!qbrResult.ok) return { ok: false, error: qbrResult.error };
+      if (qbrResult.ok === false) return { ok: false, error: qbrResult.error };
 
       const qbr = qbrResult.value;
 
@@ -369,7 +369,7 @@ export class QBRService {
   async generateReport(id: string): Promise<Result<QBRAttachment>> {
     try {
       const qbrResult = await this.getQBR(id);
-      if (!qbrResult.ok) return { ok: false, error: qbrResult.error };
+      if (qbrResult.ok === false) return { ok: false, error: qbrResult.error };
 
       const qbr = qbrResult.value;
 
@@ -467,7 +467,7 @@ export class QBRService {
   ): Promise<Result<void>> {
     try {
       const qbrResult = await this.getQBR(qbrId);
-      if (!qbrResult.ok) return { ok: false, error: qbrResult.error };
+      if (qbrResult.ok === false) return { ok: false, error: qbrResult.error };
 
       const qbr = qbrResult.value;
       const goals = qbr.goals.map(g => {
@@ -497,7 +497,7 @@ export class QBRService {
   /**
    * Get QBR benchmarks
    */
-  async getBenchmarks(industry?: string): Promise<Result<{
+  async getBenchmarks(_industry?: string): Promise<Result<{
     deliveryRate: { average: number; p75: number; p90: number };
     openRate: { average: number; p75: number; p90: number };
     clickRate: { average: number; p75: number; p90: number };
@@ -529,7 +529,8 @@ export class QBRService {
    */
   async scheduleRecurringQBRs(accountId: string): Promise<Result<void>> {
     try {
-      const currentQuarter = this.getCurrentQuarter();
+      // Current quarter tracked for future use
+      void this.getCurrentQuarter();
       const nextQuarters = this.getNextQuarters(4);
 
       for (const quarter of nextQuarters) {
@@ -737,7 +738,7 @@ export class QBRService {
     return insights;
   }
 
-  private generateRecommendations(metrics: QBRMetrics, insights: QBRInsight[]): QBRRecommendation[] {
+  private generateRecommendations(metrics: QBRMetrics, _insights: QBRInsight[]): QBRRecommendation[] {
     const recommendations: QBRRecommendation[] = [];
 
     // Based on deliverability
@@ -855,12 +856,14 @@ export class QBRService {
   }
 
   private getQuarterDates(quarter: string): { startDate: Date; endDate: Date } {
-    const [year, q] = quarter.split('-Q');
-    const quarterNum = parseInt(q, 10);
+    const parts = quarter.split('-Q');
+    const yearStr = parts[0] || '2024';
+    const qStr = parts[1] || '1';
+    const quarterNum = parseInt(qStr, 10);
     const startMonth = (quarterNum - 1) * 3;
     
-    const startDate = new Date(parseInt(year, 10), startMonth, 1);
-    const endDate = new Date(parseInt(year, 10), startMonth + 3, 0, 23, 59, 59);
+    const startDate = new Date(parseInt(yearStr, 10), startMonth, 1);
+    const endDate = new Date(parseInt(yearStr, 10), startMonth + 3, 0, 23, 59, 59);
     
     return { startDate, endDate };
   }
@@ -872,13 +875,15 @@ export class QBRService {
   }
 
   private getNextQuarter(quarter: string): string {
-    const [year, q] = quarter.split('-Q');
-    const quarterNum = parseInt(q, 10);
+    const parts = quarter.split('-Q');
+    const yearStr = parts[0] || '2024';
+    const qStr = parts[1] || '1';
+    const quarterNum = parseInt(qStr, 10);
     
     if (quarterNum === 4) {
-      return `${parseInt(year, 10) + 1}-Q1`;
+      return `${parseInt(yearStr, 10) + 1}-Q1`;
     }
-    return `${year}-Q${quarterNum + 1}`;
+    return `${yearStr}-Q${quarterNum + 1}`;
   }
 
   private getQuarterEndDate(quarter: string): Date {

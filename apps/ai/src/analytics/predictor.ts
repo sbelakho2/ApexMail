@@ -11,7 +11,6 @@ import type {
     PredictionType,
     AudienceSegmentRequest,
     AudienceSegmentResult,
-    SegmentationType,
     ABTestAnalysisRequest,
     ABTestAnalysisResult,
 } from '../types.js';
@@ -120,7 +119,7 @@ export class PredictiveAnalytics {
                 case 'revenue':
                     ({ prediction, confidence, factors } = this.predictRevenue(request));
                     break;
-                case 'best_time':
+                case 'best_time': {
                     const bestTime = this.predictBestTime(request);
                     return {
                         prediction: bestTime.hour,
@@ -130,6 +129,7 @@ export class PredictiveAnalytics {
                         dataPoints: this.historicalData.length,
                         latencyMs: Date.now() - startTime,
                     };
+                }
                 default:
                     throw new Error(`Unknown prediction type: ${request.type}`);
             }
@@ -212,16 +212,21 @@ export class PredictiveAnalytics {
     async analyzeABTest(request: ABTestAnalysisRequest): Promise<ABTestAnalysisResult> {
         const startTime = Date.now();
         const { variantA, variantB, metric } = request;
+        const metricStr = metric ?? 'open_rate';
+
+        if (!variantA || !variantB) {
+            throw new Error('Both variantA and variantB are required');
+        }
 
         // Calculate key metrics
-        const rateA = this.calculateRate(variantA, metric);
-        const rateB = this.calculateRate(variantB, metric);
+        const rateA = this.calculateRate(variantA, metricStr);
+        const rateB = this.calculateRate(variantB, metricStr);
 
         // Statistical significance using z-test
         const { significant, pValue, confidence } = this.calculateSignificance(
             variantA,
             variantB,
-            metric
+            metricStr
         );
 
         // Determine winner
@@ -233,7 +238,7 @@ export class PredictiveAnalytics {
         const { required, current, needsMore } = this.calculateSampleSize(
             variantA,
             variantB,
-            metric
+            metricStr
         );
 
         return {
@@ -245,12 +250,12 @@ export class PredictiveAnalytics {
             variantAMetrics: {
                 rate: rateA,
                 samples: variantA.sent,
-                conversions: this.getMetricValue(variantA, metric),
+                conversions: this.getMetricValue(variantA, metricStr),
             },
             variantBMetrics: {
                 rate: rateB,
                 samples: variantB.sent,
-                conversions: this.getMetricValue(variantB, metric),
+                conversions: this.getMetricValue(variantB, metricStr),
             },
             sampleSize: {
                 current,
@@ -654,7 +659,7 @@ export class PredictiveAnalytics {
         };
     }
 
-    private predictBestTime(request: PredictionRequest): {
+    private predictBestTime(_request: PredictionRequest): {
         hour: number;
         confidence: number;
         factors: Array<{ name: string; impact: number; description: string }>;
@@ -748,7 +753,6 @@ export class PredictiveAnalytics {
         characteristics: Record<string, unknown>;
         recommendedAction: string;
     }> {
-        const now = new Date();
         const segments = [
             { id: 'active', name: 'Active (7 days)', maxDays: 7, subscribers: [] as SubscriberBehavior[] },
             { id: 'recent', name: 'Recent (30 days)', maxDays: 30, subscribers: [] as SubscriberBehavior[] },
@@ -966,7 +970,7 @@ export class PredictiveAnalytics {
     }
 
     private calculateRate(
-        variant: ABTestAnalysisRequest['variantA'],
+        variant: NonNullable<ABTestAnalysisRequest['variantA']>,
         metric: string
     ): number {
         switch (metric) {
@@ -982,7 +986,7 @@ export class PredictiveAnalytics {
     }
 
     private getMetricValue(
-        variant: ABTestAnalysisRequest['variantA'],
+        variant: NonNullable<ABTestAnalysisRequest['variantA']>,
         metric: string
     ): number {
         switch (metric) {
@@ -998,8 +1002,8 @@ export class PredictiveAnalytics {
     }
 
     private calculateSignificance(
-        variantA: ABTestAnalysisRequest['variantA'],
-        variantB: ABTestAnalysisRequest['variantB'],
+        variantA: NonNullable<ABTestAnalysisRequest['variantA']>,
+        variantB: NonNullable<ABTestAnalysisRequest['variantB']>,
         metric: string
     ): { significant: boolean; pValue: number; confidence: number } {
         const rateA = this.calculateRate(variantA, metric);
@@ -1051,8 +1055,8 @@ export class PredictiveAnalytics {
     }
 
     private calculateSampleSize(
-        variantA: ABTestAnalysisRequest['variantA'],
-        variantB: ABTestAnalysisRequest['variantB'],
+        variantA: NonNullable<ABTestAnalysisRequest['variantA']>,
+        variantB: NonNullable<ABTestAnalysisRequest['variantB']>,
         _metric: string
     ): { required: number; current: number; needsMore: boolean } {
         // Minimum sample size for 95% confidence, 80% power

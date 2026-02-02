@@ -238,37 +238,37 @@ export function generatePromoHtml(
     switch (promo.type) {
         case 'banner':
             return `
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
-    ${promo.content.imageUrl ? `<img src="${promo.content.imageUrl}" alt="${promo.name}" style="max-width: 100%; height: auto; margin-bottom: 10px;">` : ''}
-    <p style="color: white; font-size: 16px; margin: 0 0 15px 0;">${promo.content.text}</p>
-    <a href="${trackingUrl}" style="display: inline-block; background: white; color: #667eea; padding: 10px 25px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+<div style="background-color: #2563EB; padding: 24px; border-radius: 18px; margin: 24px 0; text-align: center; border: 1px solid #1D4ED8;">
+    ${promo.content.imageUrl ? `<img src="${promo.content.imageUrl}" alt="${promo.name}" style="max-width: 100%; height: auto; margin-bottom: 12px; border-radius: 12px;">` : ''}
+    <p style="color: white; font-size: 17px; margin: 0 0 18px 0; font-family: 'Inter', sans-serif; font-weight: 700; line-height: 1.4; letter-spacing: -0.01em;">${promo.content.text}</p>
+    <a href="${trackingUrl}" style="display: inline-block; background: white; color: #2563EB; padding: 12px 28px; border-radius: 12px; text-decoration: none; font-weight: 700; font-family: 'Inter', sans-serif; text-transform: uppercase; font-size: 13px; letter-spacing: 0.05em; transition: all 0.2s;">
         ${promo.content.ctaText || 'Learn More'}
     </a>
 </div>`;
 
         case 'text_link':
-            return `<p style="margin: 15px 0; padding: 10px; background: #f7f7f7; border-radius: 4px;">
-    ${promo.content.text} <a href="${trackingUrl}" style="color: #667eea; text-decoration: underline;">${promo.content.ctaText || 'Click here'}</a>
+            return `<p style="margin: 18px 0; padding: 12px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; font-family: 'Inter', sans-serif; font-size: 15px; color: #475569;">
+    ${promo.content.text} <a href="${trackingUrl}" style="color: #2563EB; text-decoration: underline; font-weight: 700;">${promo.content.ctaText || 'Click here'}</a>
 </p>`;
 
         case 'cta_button':
             return `
-<div style="text-align: center; margin: 20px 0;">
-    <a href="${trackingUrl}" style="display: inline-block; background: #667eea; color: white; padding: 12px 30px; border-radius: 5px; text-decoration: none; font-weight: bold;">
+<div style="text-align: center; margin: 24px 0;">
+    <a href="${trackingUrl}" style="display: inline-block; background: #2563EB; color: white; padding: 14px 32px; border-radius: 12px; text-decoration: none; font-weight: 700; font-family: 'Inter', sans-serif; text-transform: uppercase; font-size: 13px; letter-spacing: 0.05em;">
         ${promo.content.ctaText || promo.content.text}
     </a>
 </div>`;
 
         case 'signature':
             return `
-<p style="margin-top: 20px; font-size: 12px; color: #666;">
-    ${promo.content.text} <a href="${trackingUrl}" style="color: #667eea;">${promo.content.ctaText || 'Learn more'}</a>
-</p>`;
+<div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #E2E8F0; font-family: 'Inter', sans-serif; font-size: 13px; color: #64748B;">
+    ${promo.content.text} <a href="${trackingUrl}" style="color: #2563EB; font-weight: 700;">${promo.content.ctaText || 'Learn more'}</a>
+</div>`;
 
         case 'ps_line':
             return `
-<p style="margin-top: 20px; font-size: 14px; font-style: italic;">
-    P.S. ${promo.content.text} <a href="${trackingUrl}" style="color: #667eea;">${promo.content.ctaText || 'Check it out'}</a>
+<p style="margin-top: 24px; font-family: 'Inter', sans-serif; font-size: 15px; font-style: italic; color: #475569; border-left: 3px solid #2563EB; padding-left: 12px;">
+    P.S. ${promo.content.text} <a href="${trackingUrl}" style="color: #2563EB; font-weight: 700; font-style: normal;">${promo.content.ctaText || 'Check it out'}</a>
 </p>`;
 
         default:
@@ -336,7 +336,7 @@ export function injectPromoIntoEmail(
             }
             return htmlContent + promoHtml;
 
-        case 'inline':
+        case 'inline': {
             // Insert after first paragraph
             const firstParagraphEnd = htmlContent.indexOf('</p>');
             if (firstParagraphEnd > -1) {
@@ -347,6 +347,7 @@ export function injectPromoIntoEmail(
                 );
             }
             return htmlContent + promoHtml;
+        }
 
         default:
             return htmlContent + promoHtml;

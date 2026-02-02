@@ -8,9 +8,8 @@
  * - Rate limit testing
  */
 
-import { randomUUID } from 'crypto';
+import { generateUUID } from '@apexmail/lib/crypto';
 import type { Pool } from 'pg';
-import { config } from '../config.js';
 
 export interface SandboxEnvironment {
   id: string;
@@ -146,7 +145,7 @@ export class SandboxService {
     expiresInHours?: number
   ): Promise<Result<SandboxEnvironment>> {
     try {
-      const id = `sbx_${randomUUID().replace(/-/g, '')}`;
+      const id = `sbx_${generateUUID().replace(/-/g, '')}`;
       
       const environment: SandboxEnvironment = {
         id,
@@ -343,7 +342,7 @@ export class SandboxService {
       }
 
       // Create captured email
-      const id = `cap_${randomUUID().replace(/-/g, '')}`;
+      const id = `cap_${generateUUID().replace(/-/g, '')}`;
       const captured: CapturedEmail = {
         id,
         sandboxId,
@@ -476,7 +475,7 @@ export class SandboxService {
         `SELECT COUNT(*) as total FROM (${query}) subq`,
         params
       );
-      const total = parseInt(countResult.rows[0].total);
+      const total = parseInt(countResult.rows[0]?.total ?? '0', 10);
 
       // Add ordering and pagination
       query += ` ORDER BY captured_at DESC`;
@@ -658,7 +657,7 @@ export class SandboxService {
    */
   async createTestInbox(sandboxId: string): Promise<Result<{ email: string; inboxId: string }>> {
     try {
-      const inboxId = `inbox_${randomUUID().replace(/-/g, '')}`;
+      const inboxId = `inbox_${generateUUID().replace(/-/g, '')}`;
       const email = `test-${inboxId.slice(0, 8)}@sandbox.apexmail.dev`;
 
       await this.db.query(`
@@ -724,8 +723,8 @@ export class SandboxService {
     sandboxId: string
   ): Promise<Result<{ apiKey: string; prefix: string }>> {
     try {
-      const keyId = randomUUID().replace(/-/g, '').slice(0, 16);
-      const secret = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+      const keyId = generateUUID().replace(/-/g, '').slice(0, 16);
+      const secret = generateUUID().replace(/-/g, '') + generateUUID().replace(/-/g, '');
       const apiKey = `apx_test_${keyId}${secret}`;
       const prefix = apiKey.slice(0, 16);
 
@@ -781,17 +780,76 @@ export class SandboxService {
 
   // Private helper methods
 
+  /**
+   * Check if an email matches any of the given patterns
+   * SECURITY: Patterns are converted to safe regex to prevent ReDoS attacks
+   * Patterns support only '*' as a wildcard for "any characters"
+   * Examples: "*@example.com", "test-*@*.example.com"
+   */
   private matchesPattern(email: string, patterns: string[]): boolean {
     for (const pattern of patterns) {
       if (pattern === '*') return true;
       
-      const regex = new RegExp(
-        '^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$',
-        'i'
-      );
-      if (regex.test(email)) return true;
+      // SECURITY: Use a safe pattern matching approach instead of arbitrary regex
+      // This prevents ReDoS attacks from malicious patterns like "(a+)+b"
+      if (this.safePatternMatch(email.toLowerCase(), pattern.toLowerCase())) {
+        return true;
+      }
     }
     return false;
+  }
+
+  /**
+   * Safe pattern matching using string operations instead of regex
+   * Supports only '*' as wildcard - no regex metacharacters allowed
+   * This prevents ReDoS vulnerabilities from user-provided patterns
+   */
+  private safePatternMatch(email: string, pattern: string): boolean {
+    // Split pattern by wildcard
+    const parts = pattern.split('*');
+    
+    // If no wildcards, exact match
+    if (parts.length === 1) {
+      return email === pattern;
+    }
+
+    let position = 0;
+    
+    // Check first part (must match at start if not empty)
+    const firstPart = parts[0];
+    if (firstPart && firstPart.length > 0) {
+      if (!email.startsWith(firstPart)) {
+        return false;
+      }
+      position = firstPart.length;
+    }
+
+    // Check middle parts (must exist somewhere after previous match)
+    for (let i = 1; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!part || part.length === 0) continue;
+      
+      const idx = email.indexOf(part, position);
+      if (idx === -1) {
+        return false;
+      }
+      position = idx + part.length;
+    }
+
+    // Check last part (must match at end if not empty)
+    const lastPart = parts[parts.length - 1];
+    if (lastPart && lastPart.length > 0) {
+      if (!email.endsWith(lastPart)) {
+        return false;
+      }
+      // Also verify we haven't gone past where it ends
+      const lastPartStart = email.length - lastPart.length;
+      if (lastPartStart < position) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   private simulateDeliveryEvents(
@@ -887,7 +945,7 @@ export class SandboxService {
       return {
         status: 200,
         body: {
-          id: `msg_${randomUUID().replace(/-/g, '')}`,
+          id: `msg_${generateUUID().replace(/-/g, '')}`,
           status: 'queued',
           message: 'Email queued for delivery (sandbox mode)',
         },
@@ -915,14 +973,14 @@ export class SandboxService {
       return {
         status: 200,
         body: {
-          id: `dom_${randomUUID().replace(/-/g, '')}`,
+          id: `dom_${generateUUID().replace(/-/g, '')}`,
           domain: (body as Record<string, unknown>)?.domain ?? 'example.com',
           status: 'pending_verification',
           dnsRecords: [
             {
               type: 'TXT',
               name: '_apexmail',
-              value: `apexmail-verify=${randomUUID()}`,
+              value: `apexmail-verify=${generateUUID()}`,
             },
             {
               type: 'TXT',

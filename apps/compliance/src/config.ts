@@ -160,7 +160,7 @@ export function loadConfig(): Config {
 
         gdpr: {
             dataRetentionDays: process.env['GDPR_RETENTION_DAYS'],
-            exportFormat: process.env['GDPR_EXPORT_FORMAT'] as any,
+            exportFormat: process.env['GDPR_EXPORT_FORMAT'],
             deletionGracePeriodDays: process.env['GDPR_DELETION_GRACE_PERIOD'],
             requestExpirationDays: process.env['GDPR_REQUEST_EXPIRATION_DAYS'],
             exportExpirationDays: process.env['GDPR_EXPORT_EXPIRATION_DAYS'],

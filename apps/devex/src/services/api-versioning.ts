@@ -11,7 +11,15 @@
 
 import type { Pool } from 'pg';
 import type { Context, Next } from 'hono';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
+
+export enum VersionStatus {
+  CURRENT = 'current',
+  SUPPORTED = 'supported',
+  DEPRECATED = 'deprecated',
+  SUNSET = 'sunset',
+}
 
 export interface ApiVersion {
   version: string;
@@ -34,8 +42,6 @@ export interface VersionContext {
   isDeprecated: boolean;
   sunsetDate?: Date;
 }
-
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class ApiVersioningService {
   private db: Pool;
@@ -275,6 +281,20 @@ export class ApiVersioningService {
     } catch (error) {
       return { ok: false, error: error as Error };
     }
+  }
+
+  /**
+   * Alias for getAllVersions
+   */
+  async getVersions(): Promise<Result<ApiVersion[]>> {
+    return this.getAllVersions();
+  }
+
+  /**
+   * Create middleware for API versioning
+   */
+  createMiddleware() {
+    return this.middleware();
   }
 
   /**

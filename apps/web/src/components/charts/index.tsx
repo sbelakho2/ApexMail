@@ -2,380 +2,383 @@
 
 import * as React from 'react';
 import {
-    LineChart,
-    Line,
-    BarChart,
-    Bar,
-    AreaChart,
-    Area,
-    PieChart,
-    Pie,
-    Cell,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip,
-    Legend,
-    ResponsiveContainer,
-    type TooltipProps,
+ LineChart,
+ Line,
+ BarChart,
+ Bar,
+ AreaChart,
+ Area,
+ PieChart,
+ Pie,
+ Cell,
+ XAxis,
+ YAxis,
+ CartesianGrid,
+ Tooltip,
+ Legend,
+ ResponsiveContainer,
+ type TooltipProps,
 } from 'recharts';
 import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 
 // Color palette for charts
 const CHART_COLORS = {
-    primary: 'hsl(var(--primary))',
-    secondary: 'hsl(var(--secondary))',
-    success: 'hsl(var(--success))',
-    warning: 'hsl(var(--warning))',
-    error: 'hsl(var(--error))',
-    muted: 'hsl(var(--muted))',
-    accent: 'hsl(var(--accent))',
+ primary: 'hsl(var(--primary))',
+ secondary: 'hsl(var(--secondary))',
+ success: 'hsl(var(--success))',
+ warning: 'hsl(var(--warning))',
+ error: 'hsl(var(--error))',
+ muted: 'hsl(var(--muted))',
+ accent: 'hsl(var(--accent))',
 } as const;
 
 const COLOR_ARRAY = [
-    '#6366f1', // indigo
-    '#22c55e', // green
-    '#f59e0b', // amber
-    '#ef4444', // red
-    '#8b5cf6', // violet
-    '#06b6d4', // cyan
-    '#ec4899', // pink
-    '#14b8a6', // teal
+ '#2563EB', // brand-500 (sapphire)
+ '#64748B', // slate-500
+ '#10B981', // emerald-500 (success)
+ '#F59E0B', // amber-500 (warning)
+ '#EF4444', // rose-500 (error)
+ '#1742B4', // brand-700 (navy)
+ '#0EA5E9', // sky-500
+ '#8B5CF6', // violet-500
 ];
 
 // Custom Tooltip component
 function CustomTooltip({
-    active,
-    payload,
-    label,
-    formatter,
+  active,
+  payload,
+  label,
+  formatter,
 }: TooltipProps<number, string> & { formatter?: (value: number) => string }) {
-    if (!active || !payload?.length) return null;
+  if (!active || !payload?.length) return null;
 
-    return (
-        <div className="rounded-lg border bg-background p-3 shadow-lg">
-            <p className="mb-2 text-sm font-medium">{label}</p>
-            {payload.map((entry, index) => (
-                <p key={index} className="text-sm" style={{ color: entry.color }}>
-                    <span className="font-medium">{entry.name}: </span>
-                    {formatter ? formatter(entry.value as number) : entry.value}
-                </p>
-            ))}
-        </div>
-    );
+  return (
+    <div className="rounded-xl border border-surface-200 bg-white/95 backdrop-blur-xl p-4 shadow-xl">
+      <p className="mb-2 text-[13px] font-bold text-surface-900 uppercase tracking-tight">{label}</p>
+      {payload.map((entry, index) => (
+        <p key={index} className="text-sm font-medium flex items-center gap-2" style={{ color: entry.color }}>
+          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
+          <span>{entry.name}:</span>
+          <span className="font-bold tabular-nums text-surface-900">
+            {formatter ? formatter(entry.value as number) : entry.value}
+          </span>
+        </p>
+      ))}
+    </div>
+  );
 }
 
 // Line Chart Component
 interface LineChartData {
-    [key: string]: string | number;
+ [key: string]: string | number;
 }
 
 interface ApexLineChartProps {
-    data: LineChartData[];
-    xKey: string;
-    lines: Array<{
-        key: string;
-        name: string;
-        color?: string;
-        strokeDasharray?: string;
-    }>;
-    title?: string;
-    description?: string;
-    height?: number;
-    showGrid?: boolean;
-    showLegend?: boolean;
-    formatter?: (value: number) => string;
-    className?: string;
+ data: LineChartData[];
+ xKey: string;
+ lines: Array<{
+ key: string;
+ name: string;
+ color?: string;
+ strokeDasharray?: string;
+ }>;
+ title?: string;
+ description?: string;
+ height?: number;
+ showGrid?: boolean;
+ showLegend?: boolean;
+ formatter?: (value: number) => string;
+ className?: string;
 }
 
 export function ApexLineChart({
-    data,
-    xKey,
-    lines,
-    title,
-    description,
-    height = 300,
-    showGrid = true,
-    showLegend = true,
-    formatter,
-    className,
+ data,
+ xKey,
+ lines,
+ title,
+ description,
+ height = 300,
+ showGrid = true,
+ showLegend = true,
+ formatter,
+ className,
 }: ApexLineChartProps) {
-    return (
-        <Card className={cn(className)}>
-            {(title || description) && (
-                <CardHeader>
-                    {title && <CardTitle>{title}</CardTitle>}
-                    {description && <CardDescription>{description}</CardDescription>}
-                </CardHeader>
-            )}
-            <CardContent>
-                <ResponsiveContainer width="100%" height={height}>
-                    <LineChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                        {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
-                        <XAxis
-                            dataKey={xKey}
-                            tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
-                            tickLine={{ stroke: 'hsl(var(--border))' }}
-                            axisLine={{ stroke: 'hsl(var(--border))' }}
-                        />
-                        <YAxis
-                            tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
-                            tickLine={{ stroke: 'hsl(var(--border))' }}
-                            axisLine={{ stroke: 'hsl(var(--border))' }}
-                            tickFormatter={formatter}
-                        />
-                        <Tooltip content={<CustomTooltip formatter={formatter} />} />
-                        {showLegend && <Legend />}
-                        {lines.map((line, index) => (
-                            <Line
-                                key={line.key}
-                                type="monotone"
-                                dataKey={line.key}
-                                name={line.name}
-                                stroke={line.color || COLOR_ARRAY[index % COLOR_ARRAY.length]}
-                                strokeWidth={2}
-                                strokeDasharray={line.strokeDasharray}
-                                dot={{ fill: line.color || COLOR_ARRAY[index % COLOR_ARRAY.length], r: 4 }}
-                                activeDot={{ r: 6 }}
-                            />
-                        ))}
-                    </LineChart>
-                </ResponsiveContainer>
-            </CardContent>
-        </Card>
-    );
+ return (
+ <Card className={cn(className)}>
+ {(title || description) && (
+ <CardHeader>
+ {title && <CardTitle>{title}</CardTitle>}
+ {description && <CardDescription>{description}</CardDescription>}
+ </CardHeader>
+ )}
+ <CardContent>
+ <ResponsiveContainer width="100%" height={height}>
+ <LineChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+ {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
+ <XAxis
+ dataKey={xKey}
+ tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
+ tickLine={{ stroke: 'hsl(var(--border))' }}
+ axisLine={{ stroke: 'hsl(var(--border))' }}
+ />
+ <YAxis
+ tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
+ tickLine={{ stroke: 'hsl(var(--border))' }}
+ axisLine={{ stroke: 'hsl(var(--border))' }}
+ tickFormatter={formatter}
+ />
+ <Tooltip content={<CustomTooltip formatter={formatter} />} />
+ {showLegend && <Legend />}
+ {lines.map((line, index) => (
+ <Line
+ key={line.key}
+ type="monotone"
+ dataKey={line.key}
+ name={line.name}
+ stroke={line.color || COLOR_ARRAY[index % COLOR_ARRAY.length]}
+ strokeWidth={2}
+ strokeDasharray={line.strokeDasharray}
+ dot={{ fill: line.color || COLOR_ARRAY[index % COLOR_ARRAY.length], r: 4 }}
+ activeDot={{ r: 6 }}
+ />
+ ))}
+ </LineChart>
+ </ResponsiveContainer>
+ </CardContent>
+ </Card>
+ );
 }
 
 // Bar Chart Component
 interface ApexBarChartProps {
-    data: LineChartData[];
-    xKey: string;
-    bars: Array<{
-        key: string;
-        name: string;
-        color?: string;
-        stackId?: string;
-    }>;
-    title?: string;
-    description?: string;
-    height?: number;
-    showGrid?: boolean;
-    showLegend?: boolean;
-    layout?: 'vertical' | 'horizontal';
-    formatter?: (value: number) => string;
-    className?: string;
+ data: LineChartData[];
+ xKey: string;
+ bars: Array<{
+ key: string;
+ name: string;
+ color?: string;
+ stackId?: string;
+ }>;
+ title?: string;
+ description?: string;
+ height?: number;
+ showGrid?: boolean;
+ showLegend?: boolean;
+ layout?: 'vertical' | 'horizontal';
+ formatter?: (value: number) => string;
+ className?: string;
 }
 
 export function ApexBarChart({
-    data,
-    xKey,
-    bars,
-    title,
-    description,
-    height = 300,
-    showGrid = true,
-    showLegend = true,
-    layout = 'horizontal',
-    formatter,
-    className,
+ data,
+ xKey,
+ bars,
+ title,
+ description,
+ height = 300,
+ showGrid = true,
+ showLegend = true,
+ layout = 'horizontal',
+ formatter,
+ className,
 }: ApexBarChartProps) {
-    return (
-        <Card className={cn(className)}>
-            {(title || description) && (
-                <CardHeader>
-                    {title && <CardTitle>{title}</CardTitle>}
-                    {description && <CardDescription>{description}</CardDescription>}
-                </CardHeader>
-            )}
-            <CardContent>
-                <ResponsiveContainer width="100%" height={height}>
-                    <BarChart
-                        data={data}
-                        layout={layout === 'vertical' ? 'vertical' : 'horizontal'}
-                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-                    >
-                        {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
-                        {layout === 'vertical' ? (
-                            <>
-                                <XAxis type="number" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} tickFormatter={formatter} />
-                                <YAxis type="category" dataKey={xKey} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} />
-                            </>
-                        ) : (
-                            <>
-                                <XAxis dataKey={xKey} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} />
-                                <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} tickFormatter={formatter} />
-                            </>
-                        )}
-                        <Tooltip content={<CustomTooltip formatter={formatter} />} />
-                        {showLegend && <Legend />}
-                        {bars.map((bar, index) => (
-                            <Bar
-                                key={bar.key}
-                                dataKey={bar.key}
-                                name={bar.name}
-                                fill={bar.color || COLOR_ARRAY[index % COLOR_ARRAY.length]}
-                                stackId={bar.stackId}
-                                radius={[4, 4, 0, 0]}
-                            />
-                        ))}
-                    </BarChart>
-                </ResponsiveContainer>
-            </CardContent>
-        </Card>
-    );
+ return (
+ <Card className={cn(className)}>
+ {(title || description) && (
+ <CardHeader>
+ {title && <CardTitle>{title}</CardTitle>}
+ {description && <CardDescription>{description}</CardDescription>}
+ </CardHeader>
+ )}
+ <CardContent>
+ <ResponsiveContainer width="100%" height={height}>
+ <BarChart
+ data={data}
+ layout={layout === 'vertical' ? 'vertical' : 'horizontal'}
+ margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+ >
+ {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
+ {layout === 'vertical' ? (
+ <>
+ <XAxis type="number" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} tickFormatter={formatter} />
+ <YAxis type="category" dataKey={xKey} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} />
+ </>
+ ) : (
+ <>
+ <XAxis dataKey={xKey} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} />
+ <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} tickFormatter={formatter} />
+ </>
+ )}
+ <Tooltip content={<CustomTooltip formatter={formatter} />} />
+ {showLegend && <Legend />}
+ {bars.map((bar, index) => (
+ <Bar
+ key={bar.key}
+ dataKey={bar.key}
+ name={bar.name}
+ fill={bar.color || COLOR_ARRAY[index % COLOR_ARRAY.length]}
+ stackId={bar.stackId}
+ radius={[4, 4, 0, 0]}
+ />
+ ))}
+ </BarChart>
+ </ResponsiveContainer>
+ </CardContent>
+ </Card>
+ );
 }
 
 // Area Chart Component
 interface ApexAreaChartProps {
-    data: LineChartData[];
-    xKey: string;
-    areas: Array<{
-        key: string;
-        name: string;
-        color?: string;
-        stackId?: string;
-    }>;
-    title?: string;
-    description?: string;
-    height?: number;
-    showGrid?: boolean;
-    showLegend?: boolean;
-    formatter?: (value: number) => string;
-    className?: string;
+ data: LineChartData[];
+ xKey: string;
+ areas: Array<{
+ key: string;
+ name: string;
+ color?: string;
+ stackId?: string;
+ }>;
+ title?: string;
+ description?: string;
+ height?: number;
+ showGrid?: boolean;
+ showLegend?: boolean;
+ formatter?: (value: number) => string;
+ className?: string;
 }
 
 export function ApexAreaChart({
-    data,
-    xKey,
-    areas,
-    title,
-    description,
-    height = 300,
-    showGrid = true,
-    showLegend = true,
-    formatter,
-    className,
+ data,
+ xKey,
+ areas,
+ title,
+ description,
+ height = 300,
+ showGrid = true,
+ showLegend = true,
+ formatter,
+ className,
 }: ApexAreaChartProps) {
-    return (
-        <Card className={cn(className)}>
-            {(title || description) && (
-                <CardHeader>
-                    {title && <CardTitle>{title}</CardTitle>}
-                    {description && <CardDescription>{description}</CardDescription>}
-                </CardHeader>
-            )}
-            <CardContent>
-                <ResponsiveContainer width="100%" height={height}>
-                    <AreaChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-                        {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
-                        <XAxis
-                            dataKey={xKey}
-                            tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
-                        />
-                        <YAxis
-                            tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
-                            tickFormatter={formatter}
-                        />
-                        <Tooltip content={<CustomTooltip formatter={formatter} />} />
-                        {showLegend && <Legend />}
-                        {areas.map((area, index) => {
-                            const color = area.color || COLOR_ARRAY[index % COLOR_ARRAY.length];
-                            return (
-                                <Area
-                                    key={area.key}
-                                    type="monotone"
-                                    dataKey={area.key}
-                                    name={area.name}
-                                    stroke={color}
-                                    fill={color}
-                                    fillOpacity={0.3}
-                                    stackId={area.stackId}
-                                />
-                            );
-                        })}
-                    </AreaChart>
-                </ResponsiveContainer>
-            </CardContent>
-        </Card>
-    );
+ return (
+ <Card className={cn(className)}>
+ {(title || description) && (
+ <CardHeader>
+ {title && <CardTitle>{title}</CardTitle>}
+ {description && <CardDescription>{description}</CardDescription>}
+ </CardHeader>
+ )}
+ <CardContent>
+ <ResponsiveContainer width="100%" height={height}>
+ <AreaChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+ {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
+ <XAxis
+ dataKey={xKey}
+ tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
+ />
+ <YAxis
+ tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
+ tickFormatter={formatter}
+ />
+ <Tooltip content={<CustomTooltip formatter={formatter} />} />
+ {showLegend && <Legend />}
+ {areas.map((area, index) => {
+ const color = area.color || COLOR_ARRAY[index % COLOR_ARRAY.length];
+ return (
+ <Area
+ key={area.key}
+ type="monotone"
+ dataKey={area.key}
+ name={area.name}
+ stroke={color}
+ fill={color}
+ fillOpacity={0.3}
+ stackId={area.stackId}
+ />
+ );
+ })}
+ </AreaChart>
+ </ResponsiveContainer>
+ </CardContent>
+ </Card>
+ );
 }
 
 // Pie Chart Component
 interface PieChartData {
-    name: string;
-    value: number;
-    color?: string;
+ name: string;
+ value: number;
+ color?: string;
 }
 
 interface ApexPieChartProps {
-    data: PieChartData[];
-    title?: string;
-    description?: string;
-    height?: number;
-    showLegend?: boolean;
-    innerRadius?: number;
-    outerRadius?: number;
-    formatter?: (value: number) => string;
-    className?: string;
+ data: PieChartData[];
+ title?: string;
+ description?: string;
+ height?: number;
+ showLegend?: boolean;
+ innerRadius?: number;
+ outerRadius?: number;
+ formatter?: (value: number) => string;
+ className?: string;
 }
 
 export function ApexPieChart({
-    data,
-    title,
-    description,
-    height = 300,
-    showLegend = true,
-    innerRadius = 0,
-    outerRadius = 80,
-    formatter,
-    className,
+ data,
+ title,
+ description,
+ height = 300,
+ showLegend = true,
+ innerRadius = 0,
+ outerRadius = 80,
+ formatter,
+ className,
 }: ApexPieChartProps) {
-    const dataWithColors = data.map((item, index) => ({
-        ...item,
-        color: item.color || COLOR_ARRAY[index % COLOR_ARRAY.length],
-    }));
+ const dataWithColors = data.map((item, index) => ({
+ ...item,
+ color: item.color || COLOR_ARRAY[index % COLOR_ARRAY.length],
+ }));
 
-    return (
-        <Card className={cn(className)}>
-            {(title || description) && (
-                <CardHeader>
-                    {title && <CardTitle>{title}</CardTitle>}
-                    {description && <CardDescription>{description}</CardDescription>}
-                </CardHeader>
-            )}
-            <CardContent>
-                <ResponsiveContainer width="100%" height={height}>
-                    <PieChart>
-                        <Pie
-                            data={dataWithColors}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={innerRadius}
-                            outerRadius={outerRadius}
-                            paddingAngle={2}
-                            dataKey="value"
-                            label={({ name, percent }) =>
-                                `${name} (${(percent * 100).toFixed(0)}%)`
-                            }
-                            labelLine={{ stroke: 'hsl(var(--muted-foreground))' }}
-                        >
-                            {dataWithColors.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={entry.color} />
-                            ))}
-                        </Pie>
-                        <Tooltip content={<CustomTooltip formatter={formatter} />} />
-                        {showLegend && <Legend />}
-                    </PieChart>
-                </ResponsiveContainer>
-            </CardContent>
-        </Card>
-    );
+ return (
+ <Card className={cn(className)}>
+ {(title || description) && (
+ <CardHeader>
+ {title && <CardTitle>{title}</CardTitle>}
+ {description && <CardDescription>{description}</CardDescription>}
+ </CardHeader>
+ )}
+ <CardContent>
+ <ResponsiveContainer width="100%" height={height}>
+ <PieChart>
+ <Pie
+ data={dataWithColors}
+ cx="50%"
+ cy="50%"
+ innerRadius={innerRadius}
+ outerRadius={outerRadius}
+ paddingAngle={2}
+ dataKey="value"
+ label={({ name, percent }) =>
+ `${name} (${(percent * 100).toFixed(0)}%)`
+ }
+ labelLine={{ stroke: 'hsl(var(--muted-foreground))' }}
+ >
+ {dataWithColors.map((entry, index) => (
+ <Cell key={`cell-${index}`} fill={entry.color} />
+ ))}
+ </Pie>
+ <Tooltip content={<CustomTooltip formatter={formatter} />} />
+ {showLegend && <Legend />}
+ </PieChart>
+ </ResponsiveContainer>
+ </CardContent>
+ </Card>
+ );
 }
 
 // Donut Chart (Pie with inner radius)
 export function ApexDonutChart(props: ApexPieChartProps) {
-    return <ApexPieChart {...props} innerRadius={60} outerRadius={80} />;
+ return <ApexPieChart {...props} innerRadius={60} outerRadius={80} />;
 }
 
 export { CHART_COLORS, COLOR_ARRAY };

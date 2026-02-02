@@ -44,6 +44,7 @@ const gdprAutomation = new GDPRAutomation(db, redis);
  * Process GDPR request queue
  */
 async function processGDPRQueue(): Promise<void> {
+    // eslint-disable-next-line no-constant-condition
     while (true) {
         const item = await redis.rpop('gdpr:requests:queue');
         if (!item) break;
@@ -431,7 +432,7 @@ async function start(): Promise<void> {
         // Log startup
         await auditLogger.log(
             'configure',
-            'settings' as any,
+            'settings',
             null,
             { action: 'service_start', port },
             'success',

@@ -2,13 +2,13 @@
  * Inbound SMTP Server - Receives and processes incoming email
  */
 
-import type { Pool } from 'pg';
+import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
+import { sha256 } from '@apexmail/lib/crypto';
 import { SMTPServer, type SMTPServerSession, type SMTPServerAddress, type SMTPServerDataStream } from 'smtp-server';
 import { simpleParser, type ParsedMail, type AddressObject, type Headers } from 'mailparser';
-import { createHash, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 
 interface InboundServerConfig {
@@ -48,7 +48,6 @@ interface SessionContext {
 
 export class InboundServer {
   private readonly db: Pool;
-  private readonly redis: Redis;
   private readonly config: InboundServerConfig['config'];
   private readonly rateLimit: InboundServerConfig['rateLimit'];
   private readonly logger: Logger;
@@ -60,7 +59,6 @@ export class InboundServer {
 
   constructor(options: InboundServerConfig) {
     this.db = options.db;
-    this.redis = options.redis;
     this.config = options.config;
     this.rateLimit = options.rateLimit;
     this.logger = options.logger;
@@ -72,6 +70,9 @@ export class InboundServer {
       port: this.config.port,
     });
 
+    // Determine if we're in production mode
+    const isProduction = process.env.NODE_ENV === 'production';
+
     // Load TLS certificates if enabled
     let tlsOptions: { key?: Buffer; cert?: Buffer } = {};
     if (this.config.tls.enabled && this.config.tls.keyPath && this.config.tls.certPath) {
@@ -80,9 +81,39 @@ export class InboundServer {
           key: readFileSync(this.config.tls.keyPath),
           cert: readFileSync(this.config.tls.certPath),
         };
+        this.logger.info('TLS certificates loaded successfully', {
+          keyPath: this.config.tls.keyPath,
+          certPath: this.config.tls.certPath,
+        });
       } catch (error) {
-        this.logger.warn('Failed to load TLS certificates, starting without TLS', { error });
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        // In production, TLS certificate failure is fatal
+        if (isProduction) {
+          this.logger.error('FATAL: Failed to load TLS certificates in production mode', { 
+            error: errorMessage,
+            keyPath: this.config.tls.keyPath,
+            certPath: this.config.tls.certPath,
+          });
+          throw new Error(`Failed to load TLS certificates: ${errorMessage}. TLS is required in production.`);
+        }
+        
+        // In development, warn but continue
+        this.logger.warn('Failed to load TLS certificates, starting without TLS (development mode only)', { 
+          error: errorMessage 
+        });
       }
+    } else if (isProduction && this.config.tls.enabled) {
+      // TLS is enabled but paths are missing in production
+      throw new Error('TLS is enabled but certificate paths are not configured. TLS is required in production.');
+    }
+
+    // Security: Only allow insecure auth in development mode AND when explicitly not in production
+    // This prevents accidental exposure if NODE_ENV is unset
+    const allowInsecureAuth = !isProduction && process.env.ALLOW_INSECURE_AUTH === 'true';
+    
+    if (allowInsecureAuth) {
+      this.logger.warn('SECURITY WARNING: Insecure authentication is enabled. Do not use in production!');
     }
 
     // Create SMTP server (port 25)
@@ -90,7 +121,7 @@ export class InboundServer {
       name: this.config.hostname,
       size: this.config.maxMessageSize,
       authOptional: !this.config.authRequired,
-      allowInsecureAuth: process.env.NODE_ENV !== 'production',
+      allowInsecureAuth,
       disabledCommands: this.config.authRequired ? [] : ['AUTH'],
       
       onConnect: (session, callback) => this.onConnect(session, callback),
@@ -236,14 +267,15 @@ export class InboundServer {
       WHERE username = $1 AND is_active = true
     `, [username]);
 
-    if (result.rows.length === 0) {
+    const row = result.rows[0];
+    if (!row) {
       return { valid: false };
     }
 
-    const { tenant_id, password_hash } = result.rows[0];
+    const { tenant_id, password_hash } = row;
 
-    // Verify password (using scrypt or similar)
-    const hash = createHash('sha256').update(password).digest('hex');
+    // Verify password (using sha256 hash comparison)
+    const hash = sha256(password);
     if (hash !== password_hash) {
       return { valid: false };
     }
@@ -420,6 +452,10 @@ export class InboundServer {
       size: rawMessage.length,
     });
 
+    // Check for VERP-style reply addresses to link replies to original messages
+    // Format: reply+{original_message_id}@inbound.domain.com
+    const replyTracking = await this.checkVerpReplyAddress(envelope.rcptTo);
+
     // Extract recipient domains to find tenants
     const recipientDomains = new Set<string>();
     for (const rcpt of envelope.rcptTo) {
@@ -433,23 +469,27 @@ export class InboundServer {
       WHERE name = ANY($1) AND is_verified = true
     `, [Array.from(recipientDomains)]);
 
-    const domainMap = new Map(domainResult.rows.map(d => [d.name, d]));
+    const domainMap = new Map<string, { id: string; tenant_id: string; name: string }>(domainResult.rows.map((d: { id: string; tenant_id: string; name: string }) => [d.name, d]));
 
     // Store message for each recipient
     for (const rcpt of envelope.rcptTo) {
       const recipientEmail = rcpt.address;
       const recipientDomain = recipientEmail.split('@')[1]?.toLowerCase();
-      const domain = domainMap.get(recipientDomain!);
+      if (!recipientDomain) continue;
+      const domain = domainMap.get(recipientDomain);
 
       if (!domain) continue;
+
+      // Check if this is a reply to an original message via VERP
+      const linkedMessageId = replyTracking.get(recipientEmail);
 
       // Store inbound message
       await this.db.query(`
         INSERT INTO inbound_messages (
           id, tenant_id, domain_id, message_id_header, from_address, to_address,
           subject, text_body, html_body, raw_message, headers, attachments,
-          received_at, client_ip, session_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14)
+          received_at, client_ip, session_id, in_reply_to_message_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15)
       `, [
         messageId,
         domain.tenant_id,
@@ -465,7 +505,13 @@ export class InboundServer {
         JSON.stringify(this.extractAttachments(parsed)),
         ctx.clientIP,
         ctx.id,
+        linkedMessageId ?? parsed.inReplyTo ?? null,
       ]);
+
+      // If this is a reply, update the original message's reply count
+      if (linkedMessageId) {
+        await this.recordReplyToOriginalMessage(domain.tenant_id, linkedMessageId, messageId);
+      }
 
       // Queue for webhook delivery if configured
       await this.queueInboundWebhook(domain.tenant_id, messageId, {
@@ -475,6 +521,86 @@ export class InboundServer {
         textBody: parsed.text,
         htmlBody: parsed.html !== false ? parsed.html : undefined,
         headers: this.headersToObject(parsed.headers),
+        inReplyTo: linkedMessageId ?? parsed.inReplyTo ?? undefined,
+        isReply: !!linkedMessageId,
+      });
+    }
+  }
+
+  /**
+   * Check for VERP-style reply addresses in recipients
+   * Format: reply+{message_id}@domain.com or bounce+{message_id}@domain.com
+   * Returns a map of recipient address -> original message ID
+   */
+  private async checkVerpReplyAddress(
+    recipients: readonly SMTPServerAddress[]
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    
+    for (const rcpt of recipients) {
+      const address = rcpt.address.toLowerCase();
+      // Match VERP patterns: reply+xxx@, bounce+xxx@, r+xxx@
+      const verpMatch = address.match(/^(?:reply|bounce|r)\+([a-z0-9_-]+)@/i);
+      
+      if (verpMatch?.[1]) {
+        const originalMessageId = verpMatch[1];
+        result.set(rcpt.address, originalMessageId);
+        
+        this.logger.debug('Detected VERP reply address', {
+          recipient: rcpt.address,
+          originalMessageId,
+        });
+      }
+    }
+    
+    return result;
+  }
+
+  /**
+   * Record that a reply was received for an original message
+   */
+  private async recordReplyToOriginalMessage(
+    tenantId: string,
+    originalMessageId: string,
+    replyMessageId: string
+  ): Promise<void> {
+    try {
+      // Update reply count on original message
+      await this.db.query(`
+        UPDATE messages 
+        SET reply_count = COALESCE(reply_count, 0) + 1,
+            last_reply_at = NOW()
+        WHERE id = $1 OR message_id = $1
+      `, [originalMessageId]);
+
+      // Create a reply event
+      await this.db.query(`
+        INSERT INTO events (
+          id, tenant_id, message_id, event_type, timestamp,
+          metadata, deduplication_key
+        ) VALUES (
+          $1, $2, $3, 'reply_received', NOW(),
+          $4, $5
+        )
+        ON CONFLICT (deduplication_key) DO NOTHING
+      `, [
+        generateId('evt'),
+        tenantId,
+        originalMessageId,
+        JSON.stringify({ replyMessageId }),
+        `reply:${originalMessageId}:${replyMessageId}`,
+      ]);
+
+      this.logger.info('Recorded reply to original message', {
+        tenantId,
+        originalMessageId,
+        replyMessageId,
+      });
+    } catch (error) {
+      this.logger.error('Failed to record reply', {
+        originalMessageId,
+        replyMessageId,
+        error: error instanceof Error ? error.message : 'Unknown',
       });
     }
   }

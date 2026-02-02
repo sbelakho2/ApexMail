@@ -8,8 +8,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import * as promClient from 'prom-client';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum MetricType {
@@ -47,8 +48,6 @@ export interface AggregatedMetric {
   }>;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class MetricsService {
   private db: Pool;
   private redis: Redis;
@@ -81,14 +80,18 @@ export class MetricsService {
     // Register built-in ApexMail metrics
     this.registerBuiltInMetrics();
 
-    // Start collection interval
-    this.collectInterval = setInterval(async () => {
-      await this.collectSystemMetrics();
+    // Start collection interval with error handling
+    this.collectInterval = setInterval(() => {
+      this.collectSystemMetrics().catch(err => {
+        console.error('[Metrics] System metrics collection failed:', err instanceof Error ? err.message : err);
+      });
     }, config.metrics.aggregationInterval);
 
-    // Start aggregation interval
-    this.aggregateInterval = setInterval(async () => {
-      await this.aggregateMetrics();
+    // Start aggregation interval with error handling
+    this.aggregateInterval = setInterval(() => {
+      this.aggregateMetrics().catch(err => {
+        console.error('[Metrics] Metrics aggregation failed:', err instanceof Error ? err.message : err);
+      });
     }, 60000);
 
     console.log('[Metrics] Service initialized');
@@ -264,6 +267,20 @@ export class MetricsService {
   }
 
   /**
+   * Record HTTP request metrics
+   */
+  recordHttpRequest(method: string, path: string, statusCode: number, duration: number): void {
+    // Record to Prometheus counters/histograms
+    const labels = { method, path, status_code: String(statusCode) };
+    
+    // Increment request counter
+    this.incrementCounter('http_requests_total', 1, labels);
+    
+    // Record duration in histogram
+    this.observeHistogram('http_request_duration_seconds', duration / 1000, labels);
+  }
+
+  /**
    * Get metrics in Prometheus format
    */
   async getPrometheusMetrics(): Promise<string> {
@@ -275,6 +292,81 @@ export class MetricsService {
    */
   async getMetricsJson(): Promise<object[]> {
     return this.registry.getMetricsAsJSON();
+  }
+
+  /**
+   * Aggregate metrics with grouping
+   */
+  async aggregate(options: {
+    name: string;
+    startTime: Date;
+    endTime: Date;
+    aggregation: 'sum' | 'avg' | 'min' | 'max' | 'count';
+    groupBy?: string[];
+    interval?: string;
+  }): Promise<Result<{ series: { name: string; values: { time: Date; value: number }[] }[] }, Error>> {
+    try {
+      const agg = options.aggregation.toUpperCase();
+      const query = `
+        SELECT 
+          ${agg}(value) as value,
+          ${options.interval ? `date_trunc('${options.interval}', recorded_at)` : 'recorded_at'} as time
+          ${options.groupBy?.length ? `, ${options.groupBy.map(g => `labels->>'${g}' as ${g}`).join(', ')}` : ''}
+        FROM obs_metrics
+        WHERE name = $1 AND recorded_at >= $2 AND recorded_at <= $3
+        GROUP BY ${options.interval ? `date_trunc('${options.interval}', recorded_at)` : 'recorded_at'}
+          ${options.groupBy?.length ? `, ${options.groupBy.map(g => `labels->>'${g}'`).join(', ')}` : ''}
+        ORDER BY time
+      `;
+
+      const result = await this.db.query(query, [options.name, options.startTime, options.endTime]);
+
+      // Group by series
+      const seriesMap = new Map<string, { time: Date; value: number }[]>();
+      for (const row of result.rows) {
+        const seriesKey = options.groupBy?.map(g => row[g]).join('-') || 'default';
+        if (!seriesMap.has(seriesKey)) {
+          seriesMap.set(seriesKey, []);
+        }
+        seriesMap.get(seriesKey)!.push({
+          time: new Date(row.time),
+          value: parseFloat(row.value) || 0,
+        });
+      }
+
+      const series = Array.from(seriesMap.entries()).map(([name, values]) => ({
+        name,
+        values,
+      }));
+
+      return { ok: true, value: { series } };
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
+  }
+
+  /**
+   * List available metrics
+   */
+  async listMetrics(): Promise<Result<{ name: string; type: string; description: string }[], Error>> {
+    try {
+      const result = await this.db.query(`
+        SELECT DISTINCT name, type
+        FROM obs_metrics
+        ORDER BY name
+      `);
+
+      return {
+        ok: true,
+        value: result.rows.map(row => ({
+          name: row.name,
+          type: row.type,
+          description: '', // Would come from metric registration in production
+        })),
+      };
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
   }
 
   /**
@@ -542,7 +634,7 @@ export class MetricsService {
     try {
       // Collect database metrics
       const dbStats = await this.db.query('SELECT count(*) as active FROM pg_stat_activity WHERE state = $1', ['active']);
-      this.setGauge('apexmail_db_connections_active', parseInt(dbStats.rows[0].active));
+      this.setGauge('apexmail_db_connections_active', parseInt(dbStats.rows[0]?.active ?? '0', 10));
 
       // Collect queue metrics from Redis
       const queueSizes = await this.redis.llen('email:queue:high');
@@ -551,13 +643,22 @@ export class MetricsService {
       // Store metrics in database for persistence
       const metricsJson = await this.registry.getMetricsAsJSON();
       for (const metric of metricsJson as promClient.MetricObject[]) {
-        if (metric.values) {
-          for (const value of metric.values) {
+        const metricWithValues = metric as promClient.MetricObjectWithValues<promClient.MetricValue<string>>;
+        if (metricWithValues.values) {
+          for (const value of metricWithValues.values) {
+            const labels: Record<string, string> = {};
+            if (value.labels) {
+              for (const [k, v] of Object.entries(value.labels)) {
+                if (v !== undefined) {
+                  labels[k] = String(v);
+                }
+              }
+            }
             await this.recordMetric({
               name: metric.name,
-              type: this.metricTypeFromString(metric.type),
+              type: this.metricTypeFromString(String(metric.type)),
               value: typeof value.value === 'number' ? value.value : 0,
-              labels: value.labels || {},
+              labels,
               timestamp: new Date(),
             });
           }

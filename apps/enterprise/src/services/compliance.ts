@@ -5,9 +5,8 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import * as crypto from 'crypto';
 import { config } from '../config.js';
 
 // Result type for error handling
@@ -481,7 +480,7 @@ export class ComplianceService {
     try {
       // Check if access control is required
       const configResult = await this.getComplianceConfig(accountId);
-      if (!configResult.ok) return { ok: false, error: configResult.error };
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
 
       const complianceConfig = configResult.value;
 
@@ -767,7 +766,7 @@ export class ComplianceService {
         framework,
       }, { page: 1, limit: 1000 });
 
-      if (!logsResult.ok) return { ok: false, error: logsResult.error };
+      if (logsResult.ok === false) return { ok: false, error: logsResult.error };
 
       // Get access requests
       const accessResult = await this.pool.query(`
@@ -963,7 +962,7 @@ export class ComplianceService {
     await this.redis.sadd('compliance:zero_retention_accounts', accountId);
   }
 
-  private async generateBAADocument(id: string, data: any): Promise<string> {
+  private async generateBAADocument(id: string, _data: unknown): Promise<string> {
     // In production, this would generate a PDF and upload to secure storage
     return `https://secure-docs.apexmail.com/baa/${id}.pdf`;
   }

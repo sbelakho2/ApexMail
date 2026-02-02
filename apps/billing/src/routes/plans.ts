@@ -11,7 +11,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Get all plans
   router.get('/', async (c) => {
-    const result = await ctx.plans.getAllPlans();
+    const result = await ctx.plans.getActivePlans();
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -20,11 +20,11 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
     return c.json({ plans: result.value });
   });
 
-  // Get plan by ID
+  // Get plan by ID (using name)
   router.get('/:planId', async (c) => {
     const planId = c.req.param('planId');
 
-    const result = await ctx.plans.getPlan(planId);
+    const result = await ctx.plans.getPlanByName(planId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -41,7 +41,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   router.get('/tenant/current', async (c) => {
     const tenantId = c.get('tenantId');
 
-    const result = await ctx.plans.getTenantPlan(tenantId);
+    const result = await ctx.plans.getPlanLimits(tenantId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -53,9 +53,9 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Check feature access
   router.get('/features/:feature', async (c) => {
     const tenantId = c.get('tenantId');
-    const feature = c.req.param('feature');
+    const feature = c.req.param('feature') as keyof import('../services/plans.js').PlanFeatures;
 
-    const result = await ctx.plans.checkFeatureAccess(tenantId, feature);
+    const result = await ctx.plans.hasFeature(tenantId, feature);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -68,20 +68,20 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   router.get('/tenant/features', async (c) => {
     const tenantId = c.get('tenantId');
 
-    const result = await ctx.plans.getTenantFeatures(tenantId);
+    const result = await ctx.plans.getPlanLimits(tenantId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
 
-    return c.json(result.value);
+    return c.json(result.value?.features ?? {});
   });
 
   // Get plan limits
   router.get('/tenant/limits', async (c) => {
     const tenantId = c.get('tenantId');
 
-    const result = await ctx.plans.getTenantLimits(tenantId);
+    const result = await ctx.plans.getPlanLimits(tenantId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -96,8 +96,8 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const planId2 = c.req.param('planId2');
 
     const [plan1Result, plan2Result] = await Promise.all([
-      ctx.plans.getPlan(planId1),
-      ctx.plans.getPlan(planId2),
+      ctx.plans.getPlanByName(planId1),
+      ctx.plans.getPlanByName(planId2),
     ]);
 
     if (!plan1Result.ok || !plan2Result.ok) {
@@ -114,20 +114,20 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
         name: plan1Result.value.name,
         priceMonthly: plan1Result.value.priceMonthly,
         features: plan1Result.value.features,
-        limits: plan1Result.value.limits,
+        limits: { emailLimit: plan1Result.value.emailLimit, apiCallLimit: plan1Result.value.apiCallLimit },
       },
       plan2: {
         id: plan2Result.value.id,
         name: plan2Result.value.name,
         priceMonthly: plan2Result.value.priceMonthly,
         features: plan2Result.value.features,
-        limits: plan2Result.value.limits,
+        limits: { emailLimit: plan2Result.value.emailLimit, apiCallLimit: plan2Result.value.apiCallLimit },
       },
       differences: {
         priceDifference: plan2Result.value.priceMonthly - plan1Result.value.priceMonthly,
         featureDifferences: calculateFeatureDifferences(
-          plan1Result.value.features,
-          plan2Result.value.features
+          plan1Result.value.features as unknown as Record<string, boolean>,
+          plan2Result.value.features as unknown as Record<string, boolean>
         ),
       },
     };
@@ -161,7 +161,18 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
 
     const parsed = schema.parse(body);
-    const result = await ctx.plans.createPlan(parsed);
+    const result = await ctx.plans.createOrUpdatePlan({
+      name: parsed.name,
+      displayName: parsed.displayName,
+      description: parsed.description,
+      priceMonthly: parsed.priceMonthly,
+      priceYearly: parsed.priceYearly,
+      emailLimit: parsed.limits.emailsPerMonth,
+      apiCallLimit: parsed.limits.apiCallsPerMinute * 60, // Convert per minute to per hour
+      features: parsed.features as unknown as import('../services/plans.js').PlanFeatures,
+      stripePriceIdMonthly: parsed.stripePriceIdMonthly,
+      stripePriceIdYearly: parsed.stripePriceIdYearly,
+    });
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -196,7 +207,29 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
 
     const parsed = schema.parse(body);
-    const result = await ctx.plans.updatePlan(planId, parsed);
+    
+    // Get existing plan first
+    const existingResult = await ctx.plans.getPlanByName(planId);
+    if (!existingResult.ok) {
+      return c.json({ error: existingResult.error.message }, 500);
+    }
+    if (!existingResult.value) {
+      return c.json({ error: 'Plan not found' }, 404);
+    }
+
+    const existing = existingResult.value;
+    const result = await ctx.plans.createOrUpdatePlan({
+      name: planId,
+      displayName: parsed.displayName ?? existing.displayName,
+      description: parsed.description ?? existing.description,
+      priceMonthly: parsed.priceMonthly ?? existing.priceMonthly,
+      priceYearly: parsed.priceYearly ?? existing.priceYearly,
+      emailLimit: parsed.limits?.emailsPerMonth ?? existing.emailLimit,
+      apiCallLimit: parsed.limits?.apiCallsPerMinute ? parsed.limits.apiCallsPerMinute * 60 : existing.apiCallLimit,
+      features: (parsed.features ?? existing.features) as import('../services/plans.js').PlanFeatures,
+      stripePriceIdMonthly: parsed.stripePriceIdMonthly ?? existing.stripePriceIdMonthly ?? undefined,
+      stripePriceIdYearly: parsed.stripePriceIdYearly ?? existing.stripePriceIdYearly ?? undefined,
+    });
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -207,13 +240,13 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Admin: Seed default plans
   router.post('/seed', async (c) => {
-    const result = await ctx.plans.seedDefaultPlans();
+    const result = await ctx.plans.initializeDefaultPlans();
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
 
-    return c.json({ message: 'Default plans seeded', count: result.value });
+    return c.json({ message: 'Default plans seeded' });
   });
 
   return router;

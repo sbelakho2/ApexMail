@@ -31,10 +31,10 @@ const envSchema = z.object({
 
 export type Config = z.infer<typeof envSchema>;
 
-let config: Config | null = null;
+let loadedConfig: Config | null = null;
 
 export function loadConfig(): Config {
-  if (config) return config;
+  if (loadedConfig) return loadedConfig;
   
   const result = envSchema.safeParse(process.env);
   
@@ -49,13 +49,47 @@ export function loadConfig(): Config {
     );
   }
   
-  config = result.data;
-  return config;
+  loadedConfig = result.data;
+  return loadedConfig;
 }
 
 export function getConfig(): Config {
-  if (!config) {
+  if (!loadedConfig) {
     throw new Error('Config not loaded. Call loadConfig() first.');
   }
-  return config;
+  return loadedConfig;
 }
+
+// Export a config object with getter properties for convenience
+export const config = {
+  get databaseUrl(): string {
+    return getConfig().DATABASE_URL;
+  },
+  get redisUrl(): string {
+    return getConfig().REDIS_URL;
+  },
+  get stripeSecretKey(): string {
+    return getConfig().STRIPE_SECRET_KEY;
+  },
+  get stripeWebhookSecret(): string {
+    return getConfig().STRIPE_WEBHOOK_SECRET;
+  },
+  get serviceAuthToken(): string {
+    return getConfig().SERVICE_AUTH_TOKEN;
+  },
+  get port(): number {
+    return parseInt(getConfig().PORT, 10);
+  },
+  get host(): string {
+    return getConfig().HOST;
+  },
+  get corsOrigins(): string[] {
+    return ['http://localhost:3000', 'https://apexmail.ee'];
+  },
+  get meteringBatchSize(): number {
+    return parseInt(getConfig().METERING_BATCH_SIZE, 10);
+  },
+  get meteringFlushIntervalMs(): number {
+    return parseInt(getConfig().METERING_FLUSH_INTERVAL_MS, 10);
+  },
+};

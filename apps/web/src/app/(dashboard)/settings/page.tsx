@@ -2,14 +2,11 @@
 
 import * as React from 'react';
 import {
-    Settings,
     User,
     Bell,
     Shield,
     CreditCard,
     Key,
-    Globe,
-    Palette,
     Mail,
     Webhook,
     Building2,
@@ -30,8 +27,8 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Separator } from '@/components/ui/separator';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
 const settingsSections = [

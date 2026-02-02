@@ -296,7 +296,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to fetch campaign stats');
     }
 
-    let campaigns = result.value;
+    const campaigns = result.value;
 
     // Sort
     if (sortBy === 'openRate') {
@@ -754,7 +754,7 @@ function generateBounceRecommendations(bounces: BounceItem[], total: number): st
   return recommendations;
 }
 
-function analyzeISPPerformance(_bounces: BounceItem[]): Array<{
+function analyzeISPPerformance(bounces: BounceItem[]): Array<{
   isp: string;
   bounces: number;
   topIssue: string;
@@ -767,15 +767,54 @@ function analyzeISPPerformance(_bounces: BounceItem[]): Array<{
     other: { bounces: 0, issues: {} },
   };
 
-  // TODO: In production, parse actual bounce messages from _bounces to categorize
-  // For now, return placeholder data
+  // ISP detection patterns in bounce messages/subtypes
+  const ispDetectionPatterns = {
+    gmail: ['gmail', 'google', 'googlemail'],
+    outlook: ['outlook', 'hotmail', 'live.com', 'msn.com', 'microsoft'],
+    yahoo: ['yahoo', 'ymail', 'aol'],
+  };
+
+  // Analyze each bounce item
+  for (const bounce of bounces) {
+    const bounceText = `${bounce.bounceType} ${bounce.bounceSubtype}`.toLowerCase();
+    
+    // Try to detect ISP from bounce subtype
+    let detectedISP = 'other';
+    for (const [isp, patterns] of Object.entries(ispDetectionPatterns)) {
+      if (patterns.some(pattern => bounceText.includes(pattern))) {
+        detectedISP = isp;
+        break;
+      }
+    }
+    
+    // Get or create ISP record
+    const ispRecord = ispPatterns[detectedISP];
+    if (ispRecord) {
+      ispRecord.bounces += bounce.count;
+      
+      // Track issue types
+      const issue = bounce.bounceSubtype || bounce.bounceType;
+      ispRecord.issues[issue] = (ispRecord.issues[issue] ?? 0) + bounce.count;
+    }
+  }
+
+  // Convert to output format, filtering out ISPs with no bounces
   return Object.entries(ispPatterns)
     .filter(([, data]) => data.bounces > 0)
-    .map(([isp, data]) => ({
-      isp,
-      bounces: data.bounces,
-      topIssue: Object.entries(data.issues).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'unknown',
-    }));
+    .map(([isp, data]) => {
+      // Find the top issue for this ISP
+      const issueEntries = Object.entries(data.issues);
+      const topIssue = issueEntries.length > 0
+        ? issueEntries.sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'unknown'
+        : 'unknown';
+      
+      return {
+        isp,
+        bounces: data.bounces,
+        topIssue,
+      };
+    })
+    .sort((a, b) => b.bounces - a.bounces);
 }
 
 interface DeliverabilityScoreInput {

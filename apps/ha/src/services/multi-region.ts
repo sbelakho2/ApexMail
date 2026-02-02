@@ -11,6 +11,7 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum RegionStatus {
@@ -77,8 +78,6 @@ export interface CrossRegionConfig {
   syncTables: string[];
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class MultiRegionService {
   private db: Pool;
   private redis: Redis;
@@ -132,15 +131,19 @@ export class MultiRegionService {
    * Start health checking and synchronization
    */
   startServices(): void {
-    // Start health checking
-    this.healthCheckInterval = setInterval(async () => {
-      await this.checkAllRegions();
+    // Start health checking with error handling
+    this.healthCheckInterval = setInterval(() => {
+      this.checkAllRegions().catch(err => {
+        console.error('[MultiRegion] Health check failed:', err instanceof Error ? err.message : err);
+      });
     }, config.regionHealthCheckIntervalMs ?? 10000);
 
-    // Start cross-region sync
+    // Start cross-region sync with error handling
     if (this.routingMode === RoutingMode.ACTIVE_ACTIVE) {
-      this.syncInterval = setInterval(async () => {
-        await this.synchronizeRegions();
+      this.syncInterval = setInterval(() => {
+        this.synchronizeRegions().catch(err => {
+          console.error('[MultiRegion] Region sync failed:', err instanceof Error ? err.message : err);
+        });
       }, config.crossRegionSyncIntervalMs ?? 5000);
     }
 
@@ -296,6 +299,7 @@ export class MultiRegionService {
 
   /**
    * Failover to another region
+   * CRITICAL: Verifies replication lag before failover to prevent data loss
    */
   async failoverToRegion(targetRegionId: string): Promise<Result<void>> {
     const targetRegion = this.regions.get(targetRegionId);
@@ -312,7 +316,20 @@ export class MultiRegionService {
       return { ok: false, error: new Error('No current primary region') };
     }
 
+    // CRITICAL: Check replication lag before allowing failover
+    const MAX_LAG_MS = 10000; // 10 seconds max acceptable lag
+    if (targetRegion.replicationLagMs > MAX_LAG_MS) {
+      return {
+        ok: false,
+        error: new Error(
+          `Target region replication lag too high: ${targetRegion.replicationLagMs}ms (max: ${MAX_LAG_MS}ms). ` +
+          `Data loss risk is too high. Please wait for replication to catch up or use force option.`
+        )
+      };
+    }
+
     console.log(`[MultiRegion] Starting failover: ${currentPrimary.id} -> ${targetRegionId}`);
+    console.log(`[MultiRegion] Target region replication lag: ${targetRegion.replicationLagMs}ms`);
 
     try {
       // Mark current primary as degraded
@@ -328,12 +345,12 @@ export class MultiRegionService {
       // Update DNS/routing (in production, would call DNS API)
       await this.updateGlobalRouting(targetRegionId);
 
-      // Record failover event
+      // Record failover event with replication lag data
       await this.db.query(`
         INSERT INTO ha_region_failovers (
-          source_region, target_region, reason, initiated_at, completed_at
-        ) VALUES ($1, $2, 'manual_failover', NOW(), NOW())
-      `, [currentPrimary.id, targetRegionId]);
+          source_region, target_region, reason, initiated_at, completed_at, metadata
+        ) VALUES ($1, $2, 'manual_failover', NOW(), NOW(), $3)
+      `, [currentPrimary.id, targetRegionId, JSON.stringify({ replicationLagMs: targetRegion.replicationLagMs })]);
 
       console.log(`[MultiRegion] Failover completed to ${targetRegionId}`);
 
@@ -425,8 +442,10 @@ export class MultiRegionService {
 
     // Restart services if needed
     if (mode === RoutingMode.ACTIVE_ACTIVE && previousMode !== RoutingMode.ACTIVE_ACTIVE) {
-      this.syncInterval = setInterval(async () => {
-        await this.synchronizeRegions();
+      this.syncInterval = setInterval(() => {
+        this.synchronizeRegions().catch(err => {
+          console.error('[MultiRegion] Region sync failed:', err instanceof Error ? err.message : err);
+        });
       }, config.crossRegionSyncIntervalMs ?? 5000);
     } else if (mode !== RoutingMode.ACTIVE_ACTIVE && this.syncInterval) {
       clearInterval(this.syncInterval);
@@ -619,10 +638,11 @@ export class MultiRegionService {
 
       case RoutingMode.ACTIVE_ACTIVE:
       case RoutingMode.GEO_PROXIMITY:
-      default:
+      default: {
         // Return current region if healthy, otherwise best available
         const current = this.regions.get(this.currentRegion);
         return current && current.status === RegionStatus.HEALTHY ? current : healthyRegions[0];
+      }
     }
   }
 

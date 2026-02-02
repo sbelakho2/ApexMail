@@ -24,24 +24,34 @@ import { SimpleSpanProcessor, BatchSpanProcessor, ConsoleSpanExporter } from '@o
 import { JaegerExporter } from '@opentelemetry/exporter-jaeger';
 import { ZipkinExporter } from '@opentelemetry/exporter-zipkin';
 import { Resource } from '@opentelemetry/resources';
-import { SemanticResourceAttributes, SemanticAttributes } from '@opentelemetry/semantic-conventions';
+import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
-export interface TraceContext {
+export interface TraceContextData {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
   sampled: boolean;
 }
 
+export interface TraceContext extends TraceContextData {
+  /** Set an attribute on the span */
+  setAttribute(key: string, value: string | number | boolean): void;
+  /** Set the status of the span */
+  setStatus(status: 'ok' | 'error', message?: string): void;
+  /** End the span */
+  end(): void;
+}
+
 export interface SpanOptions {
   name: string;
   kind?: SpanKind;
   attributes?: Record<string, string | number | boolean>;
-  parentContext?: TraceContext;
+  parentContext?: TraceContextData;
 }
 
 export interface SpanEvent {
@@ -80,20 +90,17 @@ export interface SpanRecord {
   }>;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class TracingService {
   private db: Pool;
-  private redis: Redis;
   private provider: NodeTracerProvider | null = null;
   private tracer: Tracer | null = null;
   private activeSpans: Map<string, Span> = new Map();
   private spanBuffer: SpanRecord[] = [];
   private flushInterval: NodeJS.Timeout | null = null;
 
-  constructor(db: Pool, redis: Redis) {
+  constructor(db: Pool, _redis: Redis) {
     this.db = db;
-    this.redis = redis;
+    void _redis; // Reserved for future caching implementation
   }
 
   /**
@@ -195,6 +202,20 @@ export class TracingService {
       spanId: spanContext.spanId,
       parentSpanId: options.parentContext?.spanId,
       sampled: (spanContext.traceFlags & 1) === 1,
+      setAttribute: (key: string, value: string | number | boolean) => {
+        span.setAttribute(key, value);
+      },
+      setStatus: (status: 'ok' | 'error', message?: string) => {
+        if (status === 'error') {
+          span.setStatus({ code: SpanStatusCode.ERROR, message });
+        } else {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
+      },
+      end: () => {
+        span.end();
+        this.activeSpans.delete(spanContext.spanId);
+      },
     };
 
     this.activeSpans.set(spanContext.spanId, span);
@@ -262,7 +283,7 @@ export class TracingService {
    * Extract trace context from HTTP headers
    * Supports W3C Trace Context (traceparent/tracestate) headers
    */
-  extractContext(headers: Record<string, string>): TraceContext | null {
+  extractContext(headers: Record<string, string>): TraceContextData | null {
     try {
       // W3C Trace Context: Check for traceparent header first
       // Format: version-traceId-parentId-flags (e.g., "00-{traceId}-{spanId}-01")
@@ -271,8 +292,11 @@ export class TracingService {
       if (traceparent) {
         const parts = traceparent.split('-');
         if (parts.length === 4) {
-          const [version, traceId, spanId, flags] = parts;
-          if (version === '00' && traceId.length === 32 && spanId.length === 16) {
+          const version = parts[0];
+          const traceId = parts[1];
+          const spanId = parts[2];
+          const flags = parts[3];
+          if (version === '00' && traceId && traceId.length === 32 && spanId && spanId.length === 16 && flags) {
             return {
               traceId,
               spanId,
@@ -352,8 +376,12 @@ export class TracingService {
         events: row.events || [],
       }));
 
-      const firstSpan = spans[0];
-      const lastSpan = spans[spans.length - 1];
+      if (spans.length === 0) {
+        return { ok: false, error: new Error('No spans found for trace') };
+      }
+
+      const firstSpan = spans[0]!;
+      const lastSpan = spans[spans.length - 1]!;
 
       const trace: TraceRecord = {
         traceId,
@@ -476,7 +504,7 @@ export class TracingService {
         ok: true,
         value: {
           traces,
-          total: parseInt(countResult.rows[0].total),
+          total: parseInt(countResult.rows[0]?.total ?? '0', 10),
         },
       };
     } catch (error) {
@@ -506,7 +534,7 @@ export class TracingService {
     }>;
   }>> {
     try {
-      let params: unknown[] = [options.startTime, options.endTime];
+      const params: unknown[] = [options.startTime, options.endTime];
       let serviceCondition = '';
       
       if (options.service) {
@@ -672,6 +700,9 @@ export class TracingService {
       traceId: uuidv4().replace(/-/g, ''),
       spanId: uuidv4().replace(/-/g, '').substring(0, 16),
       sampled: false,
+      setAttribute: () => { /* no-op when tracing disabled */ },
+      setStatus: () => { /* no-op when tracing disabled */ },
+      end: () => { /* no-op when tracing disabled */ },
     };
   }
 

@@ -3,6 +3,7 @@
  * Handles all email lifecycle events: sent, delivered, bounced, opened, clicked, unsubscribed, complained
  */
 
+import { createHash } from 'node:crypto';
 import { Result } from '@apexmail/lib';
 import { generateUuid } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
@@ -93,12 +94,10 @@ export class EventsRepository {
 
   private hashEmail(email: string): string {
     const normalizedEmail = email.toLowerCase().trim();
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(normalizedEmail).digest('hex');
+    return createHash('sha256').update(normalizedEmail).digest('hex');
   }
 
   private generateDeduplicationKey(input: CreateEventInput): string {
-    const crypto = require('crypto');
     // Dedup key: message + recipient + event type + timestamp (minute precision for opens/clicks)
     const timestampStr = input.eventType === 'opened' || input.eventType === 'clicked'
       ? new Date(input.timestamp ?? Date.now()).toISOString().slice(0, 16) // Minute precision
@@ -112,7 +111,7 @@ export class EventsRepository {
       input.linkUrl ?? '',
     ];
     
-    return crypto.createHash('sha256').update(components.join('|')).digest('hex');
+    return createHash('sha256').update(components.join('|')).digest('hex');
   }
 
   async create(input: CreateEventInput): Promise<Result<Event | null, Error>> {

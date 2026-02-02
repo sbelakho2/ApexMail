@@ -7,7 +7,7 @@ import type { MiddlewareHandler } from 'hono';
 import type { AppEnv, AppContext } from '../app.js';
 import { createCache } from '@apexmail/lib/cache';
 import { ApiError } from './error-handler.js';
-import crypto from 'crypto';
+import { sha256 } from '@apexmail/lib/crypto';
 
 interface IdempotentResponse {
   status: number;
@@ -66,10 +66,7 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
     
     // Create request fingerprint (hash of request body)
     const bodyText = await c.req.text();
-    const fingerprint = crypto
-      .createHash('sha256')
-      .update(bodyText)
-      .digest('hex');
+    const fingerprint = sha256(bodyText);
 
     // Check for existing response
     const existing = await redisCache.get<IdempotentResponse>(cacheKey);
@@ -174,5 +171,5 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
  */
 export function generateIdempotencyKey(data: Record<string, unknown>): string {
   const normalized = JSON.stringify(data, Object.keys(data).sort());
-  return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 32);
+  return sha256(normalized).slice(0, 32);
 }

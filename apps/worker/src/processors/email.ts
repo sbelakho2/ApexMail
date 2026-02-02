@@ -6,12 +6,14 @@ import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
-import { MessagesRepository, EventsRepository, DomainsRepository, SuppressionsRepository } from '@apexmail/db';
+import { MessagesRepository, EventsRepository, DomainsRepository, SuppressionsRepository, type Domain, type DatabasePool } from '@apexmail/db';
 import { createTransport, type Transporter, type SentMessageInfo } from 'nodemailer';
-import { createHash, createSign, generateKeyPairSync, randomBytes } from 'crypto';
+import { CircuitBreakerFactory } from '../circuit-breaker.js';
+import { IPRateLimiter } from '../services/ip-rate-limiter.js';
 
 interface EmailProcessorConfig {
   db: Pool;
+  dbPool: DatabasePool;
   redis: Redis;
   config: {
     name: string;
@@ -46,6 +48,10 @@ interface EmailProcessorConfig {
     enabled: boolean;
     schedule: Record<string, number[]>;
   };
+  ipRateLimiting?: {
+    enabled: boolean;
+    ipAddress?: string; // The IP this worker sends from
+  };
   logger: Logger;
 }
 
@@ -76,19 +82,22 @@ interface EmailJob {
 
 export class EmailProcessor {
   private readonly db: Pool;
+  private readonly dbPool: DatabasePool;
   private readonly redis: Redis;
   private readonly config: EmailProcessorConfig['config'];
   private readonly smtpConfig: EmailProcessorConfig['smtp'];
   private readonly dkimConfig: EmailProcessorConfig['dkim'];
   private readonly trackingConfig: EmailProcessorConfig['tracking'];
   private readonly warmupConfig: EmailProcessorConfig['warmup'];
+  private readonly ipRateLimitingConfig: EmailProcessorConfig['ipRateLimiting'];
   private readonly logger: Logger;
   
   private readonly messagesRepo: MessagesRepository;
   private readonly eventsRepo: EventsRepository;
   private readonly domainsRepo: DomainsRepository;
   private readonly suppressionsRepo: SuppressionsRepository;
-  
+  private readonly circuitBreakers: CircuitBreakerFactory;
+  private ipRateLimiter: IPRateLimiter | null = null;
   private transporter: Transporter | null = null;
   private isRunning = false;
   private activeJobs = 0;
@@ -98,23 +107,34 @@ export class EmailProcessor {
 
   constructor(options: EmailProcessorConfig) {
     this.db = options.db;
+    this.dbPool = options.dbPool;
     this.redis = options.redis;
     this.config = options.config;
     this.smtpConfig = options.smtp;
     this.dkimConfig = options.dkim;
     this.trackingConfig = options.tracking;
     this.warmupConfig = options.warmup;
+    this.ipRateLimitingConfig = options.ipRateLimiting;
     this.logger = options.logger;
     
-    this.messagesRepo = new MessagesRepository(this.db);
-    this.eventsRepo = new EventsRepository(this.db);
-    this.domainsRepo = new DomainsRepository(this.db);
-    this.suppressionsRepo = new SuppressionsRepository(this.db);
+    // Create repositories using the DatabasePool
+    this.messagesRepo = new MessagesRepository(this.dbPool);
+    this.eventsRepo = new EventsRepository(this.dbPool);
+    this.domainsRepo = new DomainsRepository(this.dbPool);
+    this.suppressionsRepo = new SuppressionsRepository(this.dbPool);
     
     this.rateLimiter = new TokenBucketRateLimiter(
       this.smtpConfig.rateLimitPerSecond,
       this.smtpConfig.rateLimitPerSecond
     );
+    
+    // Initialize circuit breaker factory for SMTP servers
+    this.circuitBreakers = new CircuitBreakerFactory(options.redis, {
+      failureThreshold: 10,       // Higher threshold for SMTP - more tolerant
+      resetTimeout: 60000,        // 1 minute before attempting recovery
+      successThreshold: 3,        // Need 3 successes to close
+      rollingWindowMs: 120000,    // 2 minute rolling window
+    });
   }
 
   async start(): Promise<void> {
@@ -122,6 +142,25 @@ export class EmailProcessor {
       concurrency: this.config.concurrency,
       pollInterval: this.config.pollInterval,
     });
+
+    // Initialize IP Rate Limiter if enabled
+    if (this.ipRateLimitingConfig?.enabled) {
+      this.ipRateLimiter = new IPRateLimiter({
+        redis: this.redis,
+        db: this.db,
+        logger: this.logger,
+        // Sensible defaults - can be overridden via config
+        globalHourlyLimit: 2500, // 2500/hour per IP (allows 60K/day theoretical max)
+        burstLimit: 50,          // Allow brief bursts of 50 concurrent
+        ispAwareLimiting: true,  // Enable ISP-specific limits
+      });
+      
+      this.logger.info('IP rate limiter initialized', {
+        ipAddress: this.ipRateLimitingConfig.ipAddress ?? 'auto-detect',
+        globalHourlyLimit: 2500,
+        ispAwareLimiting: true,
+      });
+    }
 
     // Initialize SMTP transporter
     this.transporter = createTransport({
@@ -135,7 +174,7 @@ export class EmailProcessor {
       tls: {
         rejectUnauthorized: process.env.NODE_ENV === 'production',
       },
-    });
+    } as Parameters<typeof createTransport>[0]);
 
     // Verify SMTP connection
     try {
@@ -200,8 +239,20 @@ export class EmailProcessor {
           continue;
         }
 
-        // Process jobs concurrently
-        await Promise.all(jobs.map(job => this.processJob(job)));
+        // Process jobs concurrently - use allSettled to prevent single failure from failing batch
+        // This ensures all jobs are processed even if some fail
+        const results = await Promise.allSettled(jobs.map(job => this.processJob(job)));
+        
+        // Log any unexpected rejections (processJob should handle its own errors)
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          if (result && result.status === 'rejected') {
+            this.logger.error('Unexpected job processing error', {
+              jobId: jobs[i]?.id,
+              error: result.reason,
+            });
+          }
+        }
       } catch (error) {
         this.logger.error('Poll error', { error });
         await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
@@ -210,35 +261,39 @@ export class EmailProcessor {
   }
 
   private async fetchJobs(limit: number): Promise<EmailJob[]> {
-    // Use SKIP LOCKED for concurrent workers
+    // SECURITY FIX: Use single atomic UPDATE ... RETURNING to prevent double-processing
+    // 
+    // Previous implementation used separate SELECT + UPDATE which is vulnerable to race conditions:
+    // 1. Worker A: SELECT ... FOR UPDATE SKIP LOCKED (autocommit releases lock after query)
+    // 2. Worker B: SELECT ... FOR UPDATE SKIP LOCKED (can now see same rows)
+    // 3. Both workers UPDATE and process the same jobs
+    //
+    // This atomic operation ensures each job is claimed by exactly one worker.
+    // The WHERE clause filters, and RETURNING gives us the job data in one atomic operation.
+    
+    const lockUntil = new Date(Date.now() + this.config.visibilityTimeout);
+    
     const result = await this.db.query<EmailJob>(`
-      SELECT 
+      UPDATE email_queue
+      SET status = 'processing', 
+          locked_until = $1, 
+          updated_at = NOW()
+      WHERE id IN (
+        SELECT id
+        FROM email_queue
+        WHERE status = 'pending'
+          AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+          AND (locked_until IS NULL OR locked_until < NOW())
+        ORDER BY priority DESC, created_at ASC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING 
         id, message_id as "messageId", tenant_id as "tenantId", domain_id as "domainId",
         "from", "to", subject, html, text, headers, attachments,
         campaign_id as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
         attempt, created_at as "createdAt"
-      FROM email_queue
-      WHERE status = 'pending'
-        AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-        AND (locked_until IS NULL OR locked_until < NOW())
-      ORDER BY priority DESC, created_at ASC
-      LIMIT $1
-      FOR UPDATE SKIP LOCKED
-    `, [limit]);
-
-    if (result.rows.length === 0) {
-      return [];
-    }
-
-    // Lock the jobs
-    const ids = result.rows.map(r => r.id);
-    const lockUntil = new Date(Date.now() + this.config.visibilityTimeout);
-    
-    await this.db.query(`
-      UPDATE email_queue
-      SET status = 'processing', locked_until = $1, updated_at = NOW()
-      WHERE id = ANY($2)
-    `, [lockUntil, ids]);
+    `, [lockUntil, limit]);
 
     return result.rows;
   }
@@ -255,11 +310,14 @@ export class EmailProcessor {
         attempt: job.attempt,
       });
 
-      // Check suppression
+      // Check suppression - findByEmail returns array, check first match
       const suppressionResult = await this.suppressionsRepo.findByEmail(job.to, job.tenantId);
-      if (suppressionResult.ok && suppressionResult.value) {
-        await this.handleSuppressed(job, suppressionResult.value.reason);
-        return;
+      if (suppressionResult.ok && suppressionResult.value && suppressionResult.value.length > 0) {
+        const firstSuppression = suppressionResult.value[0];
+        if (firstSuppression) {
+          await this.handleSuppressed(job, firstSuppression.reason ?? 'unknown');
+          return;
+        }
       }
 
       // Check warmup limits
@@ -271,7 +329,29 @@ export class EmailProcessor {
         }
       }
 
-      // Rate limit
+      // Check IP rate limits (ISP-aware warmup)
+      if (this.ipRateLimiter && this.ipRateLimitingConfig?.ipAddress) {
+        const recipientDomain = job.to.split('@')[1] ?? '';
+        const rateLimitResult = await this.ipRateLimiter.checkRateLimit(
+          this.ipRateLimitingConfig.ipAddress,
+          recipientDomain
+        );
+        
+        if (!rateLimitResult.allowed) {
+          this.logger.warn('IP rate limit exceeded', {
+            jobId: job.id,
+            reason: rateLimitResult.reason,
+            currentCount: rateLimitResult.currentCount,
+            limit: rateLimitResult.limit,
+            retryAfter: rateLimitResult.retryAfter,
+            isp: rateLimitResult.isp,
+          });
+          await this.requeueJob(job, 'ip_rate_limit');
+          return;
+        }
+      }
+
+      // Token bucket rate limit (per-second smoothing)
       await this.rateLimiter.acquire();
 
       // Get domain for DKIM signing
@@ -306,9 +386,9 @@ export class EmailProcessor {
     }
   }
 
-  private async prepareEmail(job: EmailJob, domain: { name: string; dkimPrivateKey?: string }): Promise<PreparedEmail> {
+  private async prepareEmail(job: EmailJob, domainData: Domain): Promise<PreparedEmail> {
     let html = job.html;
-    let text = job.text;
+    const text = job.text;
 
     // Add tracking if enabled
     if (this.trackingConfig.enabled && html) {
@@ -316,8 +396,8 @@ export class EmailProcessor {
       html = this.rewriteLinks(html, job);
     }
 
-    // Generate Message-ID
-    const messageId = `<${job.messageId}@${domain.name}>`;
+    // Generate Message-ID using domain.domain property
+    const messageId = `<${job.messageId}@${domainData.domain}>`;
 
     // Build headers
     const headers: Record<string, string> = {
@@ -333,13 +413,14 @@ export class EmailProcessor {
       headers['X-ApexMail-Campaign-ID'] = job.campaignId;
     }
 
-    // DKIM signing
+    // DKIM signing - get private key from dkimKeys cache (loaded during start)
     let dkim: DkimConfig | undefined;
-    if (this.dkimConfig.enabled && domain.dkimPrivateKey) {
+    const dkimKey = this.dkimKeys.get(domainData.id);
+    if (this.dkimConfig.enabled && dkimKey?.privateKey) {
       dkim = {
-        domainName: domain.name,
+        domainName: domainData.domain,
         keySelector: this.dkimConfig.selector,
-        privateKey: domain.dkimPrivateKey,
+        privateKey: dkimKey.privateKey,
       };
     }
 
@@ -399,12 +480,27 @@ export class EmailProcessor {
   private generateUnsubscribeHeader(job: EmailJob): string {
     const unsubscribeId = this.encodeTrackingId(job.messageId, job.tenantId);
     const unsubscribeUrl = `${this.trackingConfig.baseUrl}/unsubscribe/${unsubscribeId}`;
-    return `<${unsubscribeUrl}>, <mailto:unsubscribe@${job.from.split('@')[1]}?subject=Unsubscribe>`;
+    const domain = job.from.split('@')[1] ?? 'example.com';
+    return `<${unsubscribeUrl}>, <mailto:unsubscribe@${domain}?subject=Unsubscribe>`;
   }
 
   private async sendEmail(email: PreparedEmail): Promise<SentMessageInfo> {
     if (!this.transporter) {
       throw new Error('SMTP transporter not initialized');
+    }
+
+    // Use circuit breaker keyed by SMTP host to prevent overwhelming a failing server
+    const circuitBreakerKey = `smtp:${this.smtpConfig.host}:${this.smtpConfig.port}`;
+    const circuitBreaker = this.circuitBreakers.get(circuitBreakerKey);
+    
+    // Check if circuit is open (too many failures)
+    const state = await circuitBreaker.getState();
+    if (state === 'open') {
+      this.logger.warn('Circuit breaker open for SMTP server', {
+        host: this.smtpConfig.host,
+        port: this.smtpConfig.port,
+      });
+      throw new Error(`SMTP circuit breaker open - server ${this.smtpConfig.host} temporarily unavailable`);
     }
 
     const mailOptions: Record<string, unknown> = {
@@ -422,7 +518,26 @@ export class EmailProcessor {
       mailOptions.dkim = email.dkim;
     }
 
-    return await this.transporter.sendMail(mailOptions);
+    // CRITICAL: Add timeout to prevent hung SMTP connections from blocking the worker forever
+    const SMTP_TIMEOUT_MS = 30000; // 30 seconds
+    
+    try {
+      const sendPromise = this.transporter.sendMail(mailOptions);
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`SMTP send timeout after ${SMTP_TIMEOUT_MS}ms`)), SMTP_TIMEOUT_MS);
+      });
+      
+      const result = await Promise.race([sendPromise, timeoutPromise]);
+      
+      // Record success to circuit breaker
+      await circuitBreaker.recordSuccess();
+      
+      return result;
+    } catch (error) {
+      // Record failure to circuit breaker
+      await circuitBreaker.recordFailure();
+      throw error;
+    }
   }
 
   private async handleSuccess(job: EmailJob, result: SentMessageInfo): Promise<void> {
@@ -432,11 +547,8 @@ export class EmailProcessor {
       response: result.response,
     });
 
-    // Update message status
-    await this.messagesRepo.updateStatus(job.messageId, 'sent', {
-      smtpResponse: result.response,
-      sentAt: new Date(),
-    });
+    // Update message status using proper repository method
+    await this.messagesRepo.markSent(job.messageId, result.messageId || '');
 
     // Record sent event
     await this.eventsRepo.create({
@@ -456,6 +568,15 @@ export class EmailProcessor {
     // Update warmup counter
     if (this.warmupConfig.enabled) {
       this.incrementWarmupCounter(job.domainId);
+    }
+
+    // Record send in IP rate limiter for warmup tracking
+    if (this.ipRateLimiter && this.ipRateLimitingConfig?.ipAddress) {
+      const recipientDomain = job.to.split('@')[1] ?? '';
+      await this.ipRateLimiter.recordSend(
+        this.ipRateLimitingConfig.ipAddress,
+        recipientDomain
+      );
     }
   }
 
@@ -482,12 +603,12 @@ export class EmailProcessor {
   private async handleBounce(job: EmailJob, error: Error): Promise<void> {
     const bounceType = this.classifyBounce(error);
 
-    // Update message status
-    await this.messagesRepo.updateStatus(job.messageId, 'bounced', {
-      bounceType: bounceType.type,
-      bounceSubtype: bounceType.subtype,
-      errorMessage: error.message,
-    });
+    // Update message status using proper repository method
+    await this.messagesRepo.markBounced(
+      job.messageId, 
+      bounceType.type as 'hard' | 'soft', 
+      `${bounceType.subtype}: ${error.message}`
+    );
 
     // Record bounce event
     await this.eventsRepo.create({
@@ -496,8 +617,10 @@ export class EmailProcessor {
       eventType: 'bounced',
       recipientEmail: job.to,
       bounceType: bounceType.type,
-      bounceSubtype: bounceType.subtype,
-      bounceMessage: error.message,
+      metadata: {
+        bounceSubtype: bounceType.subtype,
+        bounceMessage: error.message,
+      },
     });
 
     // Add to suppression list for hard bounces
@@ -505,13 +628,15 @@ export class EmailProcessor {
       await this.suppressionsRepo.create({
         tenantId: job.tenantId,
         email: job.to,
-        reason: 'bounce',
+        type: 'bounce',  // Use 'type' not 'reason' per CreateSuppressionInput interface
         bounceType: bounceType.type,
-        bounceSubtype: bounceType.subtype,
         source: 'system',
-        sourceMessageId: job.messageId,
-        domainId: job.domainId,
-        campaignId: job.campaignId,
+        originalMessageId: job.messageId,  // Use 'originalMessageId' not 'sourceMessageId'
+        metadata: {
+          domainId: job.domainId,
+          campaignId: job.campaignId,
+          bounceSubtype: bounceType.subtype,
+        },
       });
     }
 
@@ -527,9 +652,11 @@ export class EmailProcessor {
       reason,
     });
 
-    // Update message status
-    await this.messagesRepo.updateStatus(job.messageId, 'dropped', {
-      dropReason: `suppressed:${reason}`,
+    // Update message status using update method - use 'failed' status as there's no 'dropped'
+    // Store the drop reason in metadata for tracking
+    await this.messagesRepo.update(job.messageId, {
+      status: 'failed',  // No 'dropped' status in Message type, use 'failed' with reason in metadata
+      metadata: { dropReason: `suppressed:${reason}`, suppressed: true },
     });
 
     // Record dropped event
@@ -577,21 +704,20 @@ export class EmailProcessor {
   }
 
   private async failJob(job: EmailJob, error: Error): Promise<void> {
-    // Update message status
-    await this.messagesRepo.updateStatus(job.messageId, 'failed', {
-      errorMessage: error.message,
-      failedAt: new Date(),
-    });
+    // Update message status using proper repository method
+    await this.messagesRepo.markFailed(job.messageId, error.message);
 
-    // Record failed event
+    // Record dropped event for permanent failure
     await this.eventsRepo.create({
       tenantId: job.tenantId,
       messageId: job.messageId,
-      eventType: 'failed',
+      eventType: 'dropped',
       recipientEmail: job.to,
       metadata: {
         error: error.message,
         attempt: job.attempt,
+        permanentFailure: true,
+        reason: 'max_retries_exceeded',
       },
     });
 
@@ -691,14 +817,15 @@ export class EmailProcessor {
     if (!schedule) return true; // No warmup schedule, no limit
 
     const dayOfWarmup = this.calculateWarmupDay(domainId);
-    const dailyLimit = schedule[dayOfWarmup] ?? schedule[schedule.length - 1];
+    const dailyLimit = schedule[dayOfWarmup] ?? schedule[schedule.length - 1] ?? Number.MAX_SAFE_INTEGER;
     const currentCount = this.warmupCounters.get(domainId) ?? 0;
 
     return currentCount < dailyLimit;
   }
 
-  private calculateWarmupDay(domainId: string): number {
+  private calculateWarmupDay(_domainId: string): number {
     // In production, calculate from domain verification date
+    void _domainId;
     return 0;
   }
 

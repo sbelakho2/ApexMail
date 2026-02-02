@@ -17,7 +17,7 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     const rawBody = await c.req.text();
-    const result = await ctx.stripe.handleWebhook(rawBody, signature);
+    const result = await ctx.stripe.processWebhook(rawBody, signature);
 
     if (!result.ok) {
       console.error('Stripe webhook error:', result.error);
@@ -184,13 +184,12 @@ async function handlePaddlePaymentFailed(
 
   if (!tenantId) return;
 
-  // Start dunning process
-  await ctx.dunning.startDunning(tenantId, {
-    amount: parseInt(transaction.details.totals.total, 10),
-    currency: transaction.currency_code,
-    failureReason: transaction.payments?.[0]?.error_code ?? 'unknown',
-    processor: 'paddle',
-  });
+  // Start dunning process - record failed payment
+  await ctx.dunning.recordFailedPayment(
+    tenantId,
+    transaction.id,
+    parseInt(transaction.details.totals.total, 10)
+  );
 }
 
 interface PaddleWebhookPayload {

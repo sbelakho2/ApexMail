@@ -601,7 +601,7 @@ export class TrustCenterService extends EventEmitter {
         return Array.from(this.certifications.values()).filter(
             (cert) =>
                 cert.status === 'valid' &&
-                cert.validFrom <= now &&
+                (!cert.validFrom || cert.validFrom <= now) &&
                 (!cert.validUntil || cert.validUntil > now)
         );
     }

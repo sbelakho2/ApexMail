@@ -10,6 +10,7 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 import { HealthCheckService, HealthStatus, ClusterHealth } from './health-check.js';
 
@@ -60,8 +61,6 @@ export interface FailoverTarget {
   region?: string;
   zone?: string;
 }
-
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class FailoverService {
   private db: Pool;
@@ -311,6 +310,7 @@ export class FailoverService {
 
   /**
    * Execute database failover
+   * CRITICAL: Verifies replication lag before promotion to prevent data loss
    */
   private async executeDatabaseFailover(event: FailoverEvent): Promise<void> {
     if (!config.dbStandbyHost) {
@@ -338,6 +338,49 @@ export class FailoverService {
           throw new Error('Standby is not in recovery mode');
         }
 
+        // CRITICAL: Check replication lag before failover
+        // This prevents data loss by ensuring standby has caught up
+        const lagResult = await client.query(`
+          SELECT 
+            CASE 
+              WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+              ELSE COALESCE(
+                EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())),
+                0
+              )
+            END AS replication_lag_seconds,
+            pg_wal_lsn_diff(
+              COALESCE(pg_last_wal_receive_lsn(), '0/0'),
+              COALESCE(pg_last_wal_replay_lsn(), '0/0')
+            ) AS bytes_behind
+        `);
+        
+        const lagSeconds = parseFloat(lagResult.rows[0]?.replication_lag_seconds ?? '0');
+        const bytesBehind = parseInt(lagResult.rows[0]?.bytes_behind ?? '0', 10);
+        
+        // Maximum acceptable lag: 10 seconds or 16MB of WAL
+        const MAX_LAG_SECONDS = 10;
+        const MAX_BYTES_BEHIND = 16 * 1024 * 1024; // 16MB
+        
+        event.metadata.replicationLagSeconds = lagSeconds;
+        event.metadata.bytesBehind = bytesBehind;
+        
+        if (lagSeconds > MAX_LAG_SECONDS) {
+          throw new Error(
+            `Replication lag too high for safe failover: ${lagSeconds.toFixed(2)}s (max: ${MAX_LAG_SECONDS}s). ` +
+            `Manual intervention required to prevent data loss.`
+          );
+        }
+        
+        if (bytesBehind > MAX_BYTES_BEHIND) {
+          throw new Error(
+            `Standby is ${(bytesBehind / 1024 / 1024).toFixed(2)}MB behind primary (max: ${MAX_BYTES_BEHIND / 1024 / 1024}MB). ` +
+            `Manual intervention required to prevent data loss.`
+          );
+        }
+
+        console.log(`[Failover] Replication lag acceptable: ${lagSeconds.toFixed(2)}s, ${bytesBehind} bytes behind`);
+
         // Step 2: Promote standby to primary
         // In production, this would use pg_promote() or external orchestration
         console.log('[Failover] Promoting standby database...');
@@ -356,6 +399,7 @@ export class FailoverService {
         await this.redis.publish('ha:failover:database', JSON.stringify({
           eventId: event.id,
           newPrimary: `${config.dbStandbyHost}:${config.dbStandbyPort}`,
+          replicationLagSeconds: lagSeconds,
           timestamp: new Date().toISOString(),
         }));
 

@@ -76,6 +76,7 @@ export interface CreateMessageInput {
   tenantId: string;
   userId?: string;
   idempotencyKey?: string;
+  domainId?: string; // Required for email queue
   fromEmail: string;
   fromName?: string;
   replyTo?: string;
@@ -233,7 +234,56 @@ export class MessagesRepository {
       return Result.err(new Error('Failed to create message'));
     }
 
-    return Result.ok(this.mapRow(row));
+    const message = this.mapRow(row);
+
+    // Insert into email_queue for each recipient (denormalized for worker performance)
+    // Only queue if not scheduled in the future
+    const shouldQueue = !input.scheduledAt || input.scheduledAt <= now;
+    
+    if (shouldQueue && input.domainId) {
+      const priorityValue = input.priority === 'high' ? 10 : input.priority === 'low' ? 1 : 5;
+      
+      for (const recipient of input.recipients) {
+        // Only queue 'to' recipients individually; cc/bcc are handled together
+        if (recipient.type === 'to') {
+          const queueId = generateUuid();
+          await this.db.query(
+            `INSERT INTO email_queue (
+              id, message_id, tenant_id, domain_id, "from", "to", subject,
+              html, text, headers, attachments, campaign_id, tags, metadata,
+              scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
+            ) VALUES (
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+            )`,
+            [
+              queueId,
+              message.id,
+              input.tenantId,
+              input.domainId,
+              input.fromName ? `${input.fromName} <${input.fromEmail}>` : input.fromEmail,
+              recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email,
+              input.subject,
+              input.htmlBody ?? null,
+              input.textBody ?? null,
+              JSON.stringify(headers),
+              JSON.stringify(attachments),
+              input.campaignId ?? null,
+              JSON.stringify(input.tags ?? []),
+              JSON.stringify(input.metadata ?? {}),
+              input.scheduledAt ?? null,
+              priorityValue,
+              'pending',
+              0,
+              5,
+              now,
+              now,
+            ]
+          );
+        }
+      }
+    }
+
+    return Result.ok(message);
   }
 
   async findById(id: string): Promise<Result<Message | null, Error>> {

@@ -9,8 +9,9 @@
  * - Synchronous/asynchronous mode control
  */
 
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 import Redis from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum ReplicationMode {
@@ -83,8 +84,6 @@ export interface LogicalReplicationConfig {
   copyData: boolean;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class ReplicationService {
   private primaryDb: Pool;
   private redis: Redis;
@@ -155,6 +154,9 @@ export class ReplicationService {
     try {
       // Get current WAL position on primary
       const lsnResult = await this.primaryDb.query('SELECT pg_current_wal_lsn() as lsn');
+      if (!lsnResult.rows[0]) {
+        return { ok: false, error: new Error('Failed to get current WAL LSN') };
+      }
       const primaryLsn = lsnResult.rows[0].lsn;
 
       // Get replica information
@@ -273,6 +275,10 @@ export class ReplicationService {
         [slotName]
       );
 
+      if (!result.rows[0]) {
+        return { ok: false, error: new Error(`Failed to create replication slot: ${slotName}`) };
+      }
+
       const slot: ReplicationSlot = {
         slotName: result.rows[0].slot_name,
         slotType: 'physical',
@@ -313,17 +319,22 @@ export class ReplicationService {
         [slotName]
       );
 
+      if (!result.rows[0]) {
+        return { ok: false, error: new Error(`Failed to create logical slot: ${slotName}`) };
+      }
+
+      const row = result.rows[0];
       const slot: ReplicationSlot = {
-        slotName: result.rows[0].slot_name,
+        slotName: row.slot_name,
         slotType: 'logical',
-        database: result.rows[0].database,
+        database: row.database,
         plugin,
         active: false,
         xmin: null,
-        catalogXmin: result.rows[0].catalog_xmin,
-        restartLsn: result.rows[0].restart_lsn,
-        confirmedFlushLsn: result.rows[0].confirmed_flush_lsn,
-        walStatus: result.rows[0].wal_status,
+        catalogXmin: row.catalog_xmin,
+        restartLsn: row.restart_lsn,
+        confirmedFlushLsn: row.confirmed_flush_lsn,
+        walStatus: row.wal_status,
         safeWalSize: null,
       };
 
@@ -524,7 +535,7 @@ export class ReplicationService {
     const targetPool = pool ?? this.primaryDb;
     try {
       const result = await targetPool.query('SELECT pg_is_in_recovery() as is_replica');
-      return { ok: true, value: result.rows[0].is_replica };
+      return { ok: true, value: result.rows[0]?.is_replica ?? false };
     } catch (error) {
       return { ok: false, error: error as Error };
     }
@@ -543,12 +554,19 @@ export class ReplicationService {
       const primaryLsn = await this.primaryDb.query('SELECT pg_current_wal_lsn() as lsn');
       const replicaLsn = await replicaPool.query('SELECT pg_last_wal_replay_lsn() as lsn');
 
+      const primaryLsnValue = primaryLsn.rows[0]?.lsn;
+      const replicaLsnValue = replicaLsn.rows[0]?.lsn;
+
+      if (!primaryLsnValue || !replicaLsnValue) {
+        return { ok: false, error: new Error('Failed to get WAL LSN values') };
+      }
+
       const lagResult = await this.primaryDb.query(
         'SELECT pg_wal_lsn_diff($1::pg_lsn, $2::pg_lsn) as lag',
-        [primaryLsn.rows[0].lsn, replicaLsn.rows[0].lsn]
+        [primaryLsnValue, replicaLsnValue]
       );
 
-      return { ok: true, value: parseInt(lagResult.rows[0].lag) || 0 };
+      return { ok: true, value: parseInt(lagResult.rows[0]?.lag ?? '0', 10) };
     } catch (error) {
       return { ok: false, error: error as Error };
     }
@@ -604,7 +622,8 @@ export class ReplicationService {
         FROM pg_control_checkpoint()
       `);
 
-      console.log(`[Replication] WAL cleanup check - current: ${result.rows[0].current_wal}`);
+      const currentWal = result.rows[0]?.current_wal ?? 'unknown';
+      console.log(`[Replication] WAL cleanup check - current: ${currentWal}`);
 
       // In production, would actually clean up old WAL files
       return { ok: true, value: { filesRemoved: 0, bytesFreed: 0 } };

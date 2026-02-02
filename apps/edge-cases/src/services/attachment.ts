@@ -5,13 +5,11 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import * as mimeTypes from 'mime-types';
+import { Result } from '@apexmail/lib';
 import { config, BASE64_OVERHEAD } from '../config.js';
-import * as net from 'net';
-
-// Result type for error handling
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+import * as net from 'node:net';
 
 export interface Attachment {
   filename: string;
@@ -58,12 +56,10 @@ export interface AttachmentStats {
  */
 export class AttachmentService {
   private pool: Pool;
-  private redis: Redis;
-  private clamavSocket?: net.Socket;
 
-  constructor(pool: Pool, redis: Redis) {
+  constructor(pool: Pool, _redis: Redis) {
     this.pool = pool;
-    this.redis = redis;
+    void _redis; // Reserved for future caching
   }
 
   /**
@@ -178,7 +174,7 @@ export class AttachmentService {
       // Validate each attachment
       for (const attachment of attachments) {
         const result = await this.validateAttachment(attachment);
-        if (!result.ok) {
+        if (result.ok === false) {
           return { ok: false, error: result.error };
         }
 
@@ -423,8 +419,8 @@ export class AttachmentService {
     const parts = filename.split('.');
 
     if (parts.length > 2) {
-      const lastExt = '.' + parts[parts.length - 1].toLowerCase();
-      const secondLastExt = '.' + parts[parts.length - 2].toLowerCase();
+      const lastExt = '.' + (parts[parts.length - 1] ?? '').toLowerCase();
+      const secondLastExt = '.' + (parts[parts.length - 2] ?? '').toLowerCase();
 
       // Check if the last extension is dangerous
       if (dangerousExtensions.includes(lastExt)) {
@@ -450,7 +446,7 @@ export class AttachmentService {
     // Check for password-protected ZIP
     if (contentType === 'application/zip') {
       // Check for encryption flag in local file header
-      if (content.length > 8 && (content[6] & 0x01) === 1) {
+      if (content.length > 8 && ((content[6] ?? 0) & 0x01) === 1) {
         return true;
       }
     }
@@ -481,7 +477,7 @@ export class AttachmentService {
     return {
       count: attachments.length,
       totalSize: attachments.reduce((sum, att) => sum + att.size, 0),
-      mimeTypes: [...new Set(attachments.map(att => att.contentType))],
+      mimeTypes: Array.from(new Set(attachments.map(att => att.contentType))),
       hasInline: attachments.some(att => att.disposition === 'inline'),
       hasAttachment: attachments.some(att => att.disposition === 'attachment'),
     };

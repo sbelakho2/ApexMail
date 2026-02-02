@@ -7,12 +7,104 @@
  * - Event filtering
  * - Delivery logging
  * - Rate limiting
+ * - SSRF protection
  */
 
 import type { Pool } from 'pg';
-import type Redis from 'ioredis';
-import { createHmac, randomBytes } from 'crypto';
-import { config } from '../config.js';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
+import { hmacSign, randomToken, timingSafeCompare } from '@apexmail/lib/crypto';
+import { lookup } from 'dns/promises';
+
+/**
+ * SSRF Protection: Check if an IP address is private/internal
+ * Blocks access to internal infrastructure via webhooks
+ */
+function isPrivateIP(ip: string): boolean {
+  // IPv4 private ranges
+  const ipv4Patterns = [
+    /^127\./,                    // Loopback 127.0.0.0/8
+    /^10\./,                     // Private 10.0.0.0/8
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // Private 172.16.0.0/12
+    /^192\.168\./,               // Private 192.168.0.0/16
+    /^169\.254\./,               // Link-local 169.254.0.0/16 (AWS metadata)
+    /^0\./,                      // Current network
+    /^100\.(6[4-9]|[7-9][0-9]|1[0-2][0-7])\./, // Shared address space
+    /^192\.0\.0\./,              // IETF protocol assignments
+    /^192\.0\.2\./,              // Documentation
+    /^198\.51\.100\./,           // Documentation
+    /^203\.0\.113\./,            // Documentation
+    /^224\./,                    // Multicast
+    /^240\./,                    // Reserved
+    /^255\.255\.255\.255$/,      // Broadcast
+  ];
+
+  // IPv6 private ranges
+  const ipv6Patterns = [
+    /^::1$/,                     // Loopback
+    /^::$/,                      // Unspecified
+    /^fe80:/i,                   // Link-local
+    /^fc00:/i,                   // Unique local (fc00::/7)
+    /^fd00:/i,                   // Unique local
+    /^ff00:/i,                   // Multicast
+    /^::ffff:(?:127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|169\.254\.)/i, // IPv4-mapped private
+  ];
+
+  // Check IPv4 patterns
+  for (const pattern of ipv4Patterns) {
+    if (pattern.test(ip)) return true;
+  }
+
+  // Check IPv6 patterns
+  for (const pattern of ipv6Patterns) {
+    if (pattern.test(ip)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Validate webhook URL is safe (no SSRF)
+ */
+async function validateWebhookUrl(urlString: string): Promise<{ safe: boolean; error?: string }> {
+  try {
+    const url = new URL(urlString);
+    
+    // Only allow HTTP/HTTPS
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return { safe: false, error: 'Only HTTP and HTTPS URLs are allowed' };
+    }
+
+    // Resolve hostname to IP
+    const hostname = url.hostname;
+    
+    // Allow localhost only in development
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      if (process.env.NODE_ENV === 'production') {
+        return { safe: false, error: 'Localhost URLs not allowed in production' };
+      }
+      return { safe: true }; // Allow in dev
+    }
+
+    // DNS lookup to check resolved IP
+    try {
+      const addresses = await lookup(hostname, { all: true });
+      for (const addr of addresses) {
+        if (isPrivateIP(addr.address)) {
+          return { safe: false, error: `URL resolves to private IP address` };
+        }
+      }
+    } catch (dnsError) {
+      // If DNS lookup fails, allow the request (let fetch handle it)
+      // This handles cases where DNS might be temporarily unavailable
+      console.warn(`[Webhook] DNS lookup failed for ${hostname}:`, dnsError);
+    }
+
+    return { safe: true };
+  } catch (error) {
+    return { safe: false, error: `Invalid URL: ${error instanceof Error ? error.message : 'Unknown error'}` };
+  }
+}
 
 export interface WebhookEndpoint {
   id: string;
@@ -49,7 +141,22 @@ export interface WebhookDelivery {
   createdAt: Date;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+// Webhook event types as enum for type safety
+export enum WebhookEventType {
+  EMAIL_SENT = 'email.sent',
+  EMAIL_DELIVERED = 'email.delivered',
+  EMAIL_BOUNCED = 'email.bounced',
+  EMAIL_DEFERRED = 'email.deferred',
+  EMAIL_OPENED = 'email.opened',
+  EMAIL_CLICKED = 'email.clicked',
+  EMAIL_COMPLAINED = 'email.complained',
+  EMAIL_UNSUBSCRIBED = 'email.unsubscribed',
+  CONTACT_CREATED = 'contact.created',
+  CONTACT_UPDATED = 'contact.updated',
+  CONTACT_DELETED = 'contact.deleted',
+  LIST_SUBSCRIBED = 'list.subscribed',
+  LIST_UNSUBSCRIBED = 'list.unsubscribed',
+}
 
 // Webhook event types
 export const WEBHOOK_EVENTS = {
@@ -119,15 +226,18 @@ export class WebhookService {
     }
   ): Promise<Result<WebhookEndpoint>> {
     try {
-      // Validate URL
-      const url = new URL(data.url);
-      if (!['https:', 'http:'].includes(url.protocol)) {
-        return { ok: false, error: new Error('Webhook URL must use HTTPS (or HTTP for localhost)') };
+      // SSRF Protection: Validate URL is safe
+      const urlValidation = await validateWebhookUrl(data.url);
+      if (!urlValidation.safe) {
+        return { ok: false, error: new Error(urlValidation.error || 'Invalid webhook URL') };
       }
 
-      // Only allow HTTP for localhost in development
-      if (url.protocol === 'http:' && !url.hostname.match(/^(localhost|127\.0\.0\.1)$/)) {
-        return { ok: false, error: new Error('Webhook URL must use HTTPS') };
+      // Validate URL format
+      const url = new URL(data.url);
+
+      // Require HTTPS in production (except for localhost in dev)
+      if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
+        return { ok: false, error: new Error('Webhook URL must use HTTPS in production') };
       }
 
       // Validate events
@@ -148,7 +258,7 @@ export class WebhookService {
       }
 
       // Generate signing secret
-      const secret = `whsec_${randomBytes(32).toString('hex')}`;
+      const secret = `whsec_${randomToken(32)}`;
 
       const result = await this.db.query(
         `INSERT INTO webhook_endpoints (
@@ -313,7 +423,7 @@ export class WebhookService {
    */
   async rotateSecret(tenantId: string, endpointId: string): Promise<Result<string>> {
     try {
-      const newSecret = `whsec_${randomBytes(32).toString('hex')}`;
+      const newSecret = `whsec_${randomToken(32)}`;
 
       const result = await this.db.query(
         `UPDATE webhook_endpoints 
@@ -359,6 +469,9 @@ export class WebhookService {
          RETURNING id`,
         [event.tenantId, event.type, JSON.stringify(event.data)]
       );
+      if (!eventResult.rows[0]) {
+        return { ok: false, error: new Error('Failed to create webhook event') };
+      }
       const eventId = eventResult.rows[0].id;
 
       // Deliver to each endpoint
@@ -396,6 +509,9 @@ export class WebhookService {
       RETURNING id`,
       [endpoint.id, event.id]
     );
+    if (!deliveryResult.rows[0]) {
+      return { ok: false, error: new Error('Failed to create webhook delivery record') };
+    }
     const deliveryId = deliveryResult.rows[0].id;
 
     // Attempt delivery
@@ -412,6 +528,16 @@ export class WebhookService {
     attempt: number
   ): Promise<Result<WebhookDelivery>> {
     try {
+      // SSRF Protection: Re-validate URL before delivery
+      // (URL could have been modified or DNS could have changed)
+      const urlValidation = await validateWebhookUrl(endpoint.url);
+      if (!urlValidation.safe) {
+        return {
+          ok: false,
+          error: new Error(`Webhook URL blocked for security: ${urlValidation.error}`),
+        };
+      }
+
       const timestamp = Math.floor(Date.now() / 1000);
       const payload = JSON.stringify({
         id: event.id,
@@ -541,7 +667,7 @@ export class WebhookService {
     }
 
     // Schedule retry
-    const retryDelay = RETRY_SCHEDULE[nextAttempt - 1] ?? RETRY_SCHEDULE[RETRY_SCHEDULE.length - 1];
+    const retryDelay = RETRY_SCHEDULE[nextAttempt - 1] ?? RETRY_SCHEDULE[RETRY_SCHEDULE.length - 1] ?? 60000;
     const nextRetryAt = new Date(Date.now() + retryDelay);
 
     await this.db.query(
@@ -638,9 +764,7 @@ export class WebhookService {
    */
   generateSignature(secret: string, timestamp: number, payload: string): string {
     const signedPayload = `${timestamp}.${payload}`;
-    const hmac = createHmac('sha256', secret);
-    hmac.update(signedPayload);
-    const signature = hmac.digest('hex');
+    const signature = hmacSign(secret, signedPayload, 'sha256');
     return `t=${timestamp},v1=${signature}`;
   }
 
@@ -672,21 +796,10 @@ export class WebhookService {
 
     // Calculate expected signature
     const signedPayload = `${timestamp}.${payload}`;
-    const hmac = createHmac('sha256', secret);
-    hmac.update(signedPayload);
-    const calculatedSignature = hmac.digest('hex');
+    const calculatedSignature = hmacSign(secret, signedPayload, 'sha256');
 
-    // Constant-time comparison
-    if (expectedSignature.length !== calculatedSignature.length) {
-      return { valid: false, error: 'Signature mismatch' };
-    }
-
-    let result = 0;
-    for (let i = 0; i < expectedSignature.length; i++) {
-      result |= expectedSignature.charCodeAt(i) ^ calculatedSignature.charCodeAt(i);
-    }
-
-    if (result !== 0) {
+    // Timing-safe comparison
+    if (!timingSafeCompare(expectedSignature, calculatedSignature)) {
       return { valid: false, error: 'Signature mismatch' };
     }
 

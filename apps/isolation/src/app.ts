@@ -11,7 +11,7 @@ import { prettyJSON } from 'hono/pretty-json';
 import { compress } from 'hono/compress';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 import { config } from './config.js';
 import { TenantService } from './services/tenant.js';
@@ -43,7 +43,7 @@ async function initializeServices(): Promise<void> {
     database: config.database.database,
     user: config.database.user,
     password: config.database.password,
-    ssl: config.database.ssl ? { rejectUnauthorized: false } : false,
+    ssl: (config.database as { ssl?: boolean }).ssl ? { rejectUnauthorized: false } : false,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
@@ -57,7 +57,7 @@ async function initializeServices(): Promise<void> {
   redis = new Redis({
     host: config.redis.host,
     port: config.redis.port,
-    password: config.redis.password,
+    password: config.redis.password ?? undefined,
     db: config.redis.db,
     maxRetriesPerRequest: 3,
     retryStrategy: (times: number) => Math.min(times * 100, 3000),
@@ -76,7 +76,7 @@ async function initializeServices(): Promise<void> {
 
   encryptionService = new EncryptionService(
     pool,
-    config.encryption.masterKey
+    redis
   );
 
   auditService = new AuditService(pool, redis);
@@ -126,25 +126,28 @@ export function createApp(): Hono {
       if (wsResult.ok) {
         const configs = rateLimitService.getWorkspaceRateLimitConfigs(wsResult.value.quota);
         const key = `${workspaceId}:api`;
+        const apiConfig = configs.api;
         
-        const limitResult = await rateLimitService.checkLimit(key, configs.api);
-        
-        if (limitResult.ok) {
-          c.header('X-RateLimit-Limit', String(configs.api.maxRequests));
-          c.header('X-RateLimit-Remaining', String(limitResult.value.remaining));
-          c.header('X-RateLimit-Reset', String(limitResult.value.resetAt.getTime()));
+        if (apiConfig) {
+          const limitResult = await rateLimitService.checkRateLimit(key, apiConfig);
           
-          if (!limitResult.value.allowed) {
-            return c.json({
-              error: 'Rate limit exceeded',
-              retryAfter: Math.ceil((limitResult.value.resetAt.getTime() - Date.now()) / 1000),
-            }, 429);
+          if (limitResult.ok) {
+            c.header('X-RateLimit-Limit', String(apiConfig.maxRequests));
+            c.header('X-RateLimit-Remaining', String(limitResult.value.remaining));
+            c.header('X-RateLimit-Reset', String(limitResult.value.resetAt.getTime()));
+            
+            if (!limitResult.value.allowed) {
+              return c.json({
+                error: 'Rate limit exceeded',
+                retryAfter: Math.ceil((limitResult.value.resetAt.getTime() - Date.now()) / 1000),
+              }, 429);
+            }
           }
         }
       }
     }
     
-    await next();
+    return next();
   });
 
   // Audit logging middleware
@@ -162,8 +165,8 @@ export function createApp(): Hono {
       // Log API access for non-GET requests
       if (c.req.method !== 'GET') {
         await auditService.log({
-          organizationId,
-          workspaceId,
+          organizationId: organizationId || '',
+          workspaceId: workspaceId ?? null,
           type: AuditEventType.DATA_READ,
           severity: AuditSeverity.INFO,
           actorId: userId,
@@ -256,7 +259,7 @@ export function createApp(): Hono {
         auditService.log({
           organizationId,
           workspaceId: null,
-          type: AuditEventType.SECURITY_ALERT,
+          type: AuditEventType.SECURITY_SUSPICIOUS_ACTIVITY,
           severity: AuditSeverity.CRITICAL,
           actorId: c.req.header('X-User-ID') || 'unknown',
           actorType: 'system',
@@ -300,7 +303,7 @@ export async function shutdown(): Promise<void> {
   
   // Flush audit buffer
   if (auditService) {
-    await auditService.flush();
+    await (auditService as unknown as { flushBuffer(): Promise<void> }).flushBuffer();
     console.log('[Isolation] Audit buffer flushed');
   }
   

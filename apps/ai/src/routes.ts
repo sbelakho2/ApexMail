@@ -400,6 +400,8 @@ const stoRoutes = new Hono();
 stoRoutes.post(
     '/optimize',
     zValidator('json', z.object({
+        tenantId: z.string().optional(),
+        campaignId: z.string().optional(),
         subscriberIds: z.array(z.string()).optional(),
         listId: z.string().optional(),
         timezone: z.string().optional().default('America/New_York'),
@@ -411,7 +413,11 @@ stoRoutes.post(
     })),
     async (c) => {
         const body = c.req.valid('json');
-        const result = await sto.optimize(body);
+        const result = await sto.optimize({
+            tenantId: body.tenantId ?? 'default',
+            campaignId: body.campaignId ?? 'unknown',
+            ...body,
+        });
 
         return c.json({
             success: true,
@@ -467,11 +473,17 @@ stoRoutes.post(
         const { subscriberId, pattern } = c.req.valid('json');
         
         sto.addEngagementData(subscriberId, {
-            ...pattern,
+            contactId: subscriberId,
+            hourlyDistribution: [],
+            dayOfWeekDistribution: [],
+            timezone: 'UTC',
+            preferredDevices: [],
             timestamp: new Date(pattern.timestamp),
             sentAt: pattern.sentAt ? new Date(pattern.sentAt) : undefined,
             openedAt: pattern.openedAt ? new Date(pattern.openedAt) : undefined,
             clickedAt: pattern.clickedAt ? new Date(pattern.clickedAt) : undefined,
+            opened: pattern.opened,
+            clicked: pattern.clicked,
         });
 
         return c.json({

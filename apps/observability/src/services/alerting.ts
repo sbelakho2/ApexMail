@@ -9,7 +9,8 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum AlertSeverity {
@@ -96,8 +97,6 @@ export interface EscalationPolicy {
   }>;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class AlertingService {
   private db: Pool;
   private redis: Redis;
@@ -128,9 +127,11 @@ export class AlertingService {
     await this.loadSilences();
     await this.loadActiveAlerts();
 
-    // Start evaluation loop
-    this.evaluationInterval = setInterval(async () => {
-      await this.evaluateRules();
+    // Start evaluation loop with proper error handling
+    this.evaluationInterval = setInterval(() => {
+      this.evaluateRules().catch(err => {
+        console.error('[Alerting] Rule evaluation failed:', err instanceof Error ? err.message : err);
+      });
     }, 60000);
 
     console.log('[Alerting] Service initialized');
@@ -501,7 +502,7 @@ export class AlertingService {
         ok: true,
         value: {
           alerts,
-          total: parseInt(countResult.rows[0].total),
+          total: parseInt(countResult.rows[0]?.total ?? '0', 10),
         },
       };
     } catch (error) {
@@ -569,12 +570,12 @@ export class AlertingService {
       return {
         ok: true,
         value: {
-          totalAlerts: parseInt(totalResult.rows[0].total),
+          totalAlerts: parseInt(totalResult.rows[0]?.total ?? '0', 10),
           bySeverity,
           byRule: ruleResult.rows.map(row => ({
             ruleId: row.rule_id,
             ruleName: row.rule_name,
-            count: parseInt(row.count),
+            count: parseInt(row.count, 10),
           })),
           averageTTAcknowledge: parseFloat(timesResult.rows[0]?.avg_tta) || 0,
           averageTTResolve: parseFloat(timesResult.rows[0]?.avg_ttr) || 0,
@@ -720,7 +721,11 @@ export class AlertingService {
       return { shouldFire: false, value: 0, threshold: 0, labels: {} };
     }
 
-    const [, aggregation, metric, operator, thresholdStr] = match;
+    const matchResult = match;
+    const aggregation = matchResult[1] ?? 'avg';
+    const metric = matchResult[2] ?? '';
+    const operator = matchResult[3] ?? '>';
+    const thresholdStr = matchResult[4] ?? '0';
     const threshold = parseFloat(thresholdStr);
 
     // Query metric value from database
@@ -805,7 +810,8 @@ export class AlertingService {
   }
 
   private async sendSlackNotification(config: Record<string, unknown>, message: string): Promise<void> {
-    const webhookUrl = config.webhookUrl as string || config.alerting?.slackWebhook;
+    const alertingConfig = config.alerting as { slackWebhook?: string } | undefined;
+    const webhookUrl = config.webhookUrl as string || alertingConfig?.slackWebhook;
     if (!webhookUrl) return;
 
     await fetch(webhookUrl, {
@@ -815,7 +821,7 @@ export class AlertingService {
     });
   }
 
-  private async sendEmailNotification(channelConfig: Record<string, unknown>, alert: Alert, type: string): Promise<void> {
+  private async sendEmailNotification(_channelConfig: Record<string, unknown>, alert: Alert, type: string): Promise<void> {
     // In production, would send via email service
     console.log(`[Alerting] Email notification: ${alert.summary} (${type})`);
   }
@@ -832,7 +838,8 @@ export class AlertingService {
   }
 
   private async sendPagerDutyNotification(config: Record<string, unknown>, alert: Alert, type: string): Promise<void> {
-    const routingKey = config.routingKey as string || config.alerting?.pagerdutyKey;
+    const alertingConfig = config.alerting as { pagerdutyKey?: string } | undefined;
+    const routingKey = config.routingKey as string || alertingConfig?.pagerdutyKey;
     if (!routingKey) return;
 
     await fetch('https://events.pagerduty.com/v2/enqueue', {
@@ -853,7 +860,8 @@ export class AlertingService {
   }
 
   private async sendOpsGenieNotification(config: Record<string, unknown>, alert: Alert, type: string): Promise<void> {
-    const apiKey = config.apiKey as string || config.alerting?.opsgenieKey;
+    const alertingConfig = config.alerting as { opsgenieKey?: string } | undefined;
+    const apiKey = config.apiKey as string || alertingConfig?.opsgenieKey;
     if (!apiKey) return;
 
     if (type === 'resolved') {

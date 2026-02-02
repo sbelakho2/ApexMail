@@ -73,6 +73,9 @@ export interface MTAConfig {
     port: number;
   };
   
+  /** HTTP port for health check endpoints (Kubernetes liveness/readiness probes) */
+  healthPort: number;
+  
   gracefulShutdownTimeout: number;
 }
 
@@ -168,6 +171,8 @@ export function loadConfig(): MTAConfig {
       enabled: parseBoolean(process.env.METRICS_ENABLED, true),
       port: parseNumber(process.env.METRICS_PORT, 9091),
     },
+    
+    healthPort: parseNumber(process.env.HEALTH_PORT, 9092),
     
     gracefulShutdownTimeout: parseNumber(process.env.GRACEFUL_SHUTDOWN_TIMEOUT, 30000),
   };

@@ -6,7 +6,8 @@ import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
-import { createHmac } from 'crypto';
+import { hmacSign } from '@apexmail/lib/crypto';
+import { CircuitBreakerFactory } from '../circuit-breaker.js';
 
 interface WebhookProcessorConfig {
   db: Pool;
@@ -47,18 +48,25 @@ interface WebhookDeliveryResult {
 
 export class WebhookProcessor {
   private readonly db: Pool;
-  private readonly redis: Redis;
   private readonly config: WebhookProcessorConfig['config'];
   private readonly logger: Logger;
+  private readonly circuitBreakers: CircuitBreakerFactory;
   
   private isRunning = false;
   private activeJobs = 0;
 
   constructor(options: WebhookProcessorConfig) {
     this.db = options.db;
-    this.redis = options.redis;
     this.config = options.config;
     this.logger = options.logger;
+    
+    // Initialize circuit breaker factory for per-endpoint circuit breakers
+    this.circuitBreakers = new CircuitBreakerFactory(options.redis, {
+      failureThreshold: 5,
+      resetTimeout: 30000,  // 30 seconds
+      successThreshold: 2,
+      rollingWindowMs: 60000, // 1 minute
+    });
   }
 
   async start(): Promise<void> {
@@ -106,7 +114,19 @@ export class WebhookProcessor {
           continue;
         }
 
-        await Promise.all(jobs.map(job => this.processJob(job)));
+        // Use allSettled to prevent single failure from failing entire batch
+        const results = await Promise.allSettled(jobs.map(job => this.processJob(job)));
+        
+        // Log any unexpected rejections (processJob should handle its own errors)
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          if (result && result.status === 'rejected') {
+            this.logger.error('Unexpected webhook job processing error', {
+              jobId: jobs[i]?.id,
+              error: result.reason,
+            });
+          }
+        }
       } catch (error) {
         this.logger.error('Poll error', { error });
         await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
@@ -115,38 +135,39 @@ export class WebhookProcessor {
   }
 
   private async fetchJobs(limit: number): Promise<WebhookJob[]> {
-    const result = await this.db.query<WebhookJob>(`
+    const lockUntil = new Date(Date.now() + 60000); // 1 minute lock
+    
+    // Use CTE with UPDATE...RETURNING for atomic claim
+    // This prevents race conditions between SELECT and UPDATE
+    const result = await this.db.query<WebhookJob & { id: string }>(`
+      WITH claimed_jobs AS (
+        UPDATE webhook_queue wq
+        SET status = 'processing', locked_until = $1, updated_at = NOW()
+        WHERE wq.id IN (
+          SELECT wq2.id
+          FROM webhook_queue wq2
+          JOIN webhooks w ON w.id = wq2.webhook_id
+          WHERE wq2.status = 'pending'
+            AND (wq2.scheduled_at IS NULL OR wq2.scheduled_at <= NOW())
+            AND (wq2.locked_until IS NULL OR wq2.locked_until < NOW())
+            AND w.enabled = true
+          ORDER BY wq2.created_at ASC
+          LIMIT $2
+          FOR UPDATE OF wq2 SKIP LOCKED
+        )
+        RETURNING wq.id, wq.webhook_id, wq.tenant_id, wq.event_type, 
+                  wq.payload, wq.attempt, wq.created_at
+      )
       SELECT 
-        wq.id, wq.webhook_id as "webhookId", wq.tenant_id as "tenantId",
-        wq.event_type as "eventType", wq.payload, wq.attempt, wq.created_at as "createdAt",
+        cj.id, cj.webhook_id as "webhookId", cj.tenant_id as "tenantId",
+        cj.event_type as "eventType", cj.payload, cj.attempt, cj.created_at as "createdAt",
         w.url, w.secret, w.headers,
         (w.retry_policy->>'maxRetries')::int as "maxRetries",
         (w.retry_policy->>'retryDelay')::int as "retryDelay",
         (w.retry_policy->>'backoffMultiplier')::float as "backoffMultiplier"
-      FROM webhook_queue wq
-      JOIN webhooks w ON w.id = wq.webhook_id
-      WHERE wq.status = 'pending'
-        AND (wq.scheduled_at IS NULL OR wq.scheduled_at <= NOW())
-        AND (wq.locked_until IS NULL OR wq.locked_until < NOW())
-        AND w.enabled = true
-      ORDER BY wq.created_at ASC
-      LIMIT $1
-      FOR UPDATE OF wq SKIP LOCKED
-    `, [limit]);
-
-    if (result.rows.length === 0) {
-      return [];
-    }
-
-    // Lock jobs
-    const ids = result.rows.map(r => r.id);
-    const lockUntil = new Date(Date.now() + 60000); // 1 minute lock
-
-    await this.db.query(`
-      UPDATE webhook_queue
-      SET status = 'processing', locked_until = $1, updated_at = NOW()
-      WHERE id = ANY($2)
-    `, [lockUntil, ids]);
+      FROM claimed_jobs cj
+      JOIN webhooks w ON w.id = cj.webhook_id
+    `, [lockUntil, limit]);
 
     return result.rows;
   }
@@ -163,15 +184,45 @@ export class WebhookProcessor {
         attempt: job.attempt,
       });
 
+      // Get circuit breaker for this webhook endpoint (keyed by webhook ID)
+      const circuitBreaker = this.circuitBreakers.get(`webhook:${job.webhookId}`);
+
+      // Check if circuit is open
+      const canExecute = await circuitBreaker.canExecute();
+      if (!canExecute) {
+        this.logger.warn('Circuit breaker open for webhook', {
+          webhookId: job.webhookId,
+          jobId: job.id,
+        });
+        
+        // Schedule for retry if circuit is open
+        if (job.attempt < job.maxRetries) {
+          await this.retryJob(job, 'Circuit breaker open');
+        } else {
+          await this.failJob(job, { 
+            success: false, 
+            responseTime: 0, 
+            error: 'Circuit breaker open - max retries exceeded' 
+          });
+        }
+        return;
+      }
+
       const result = await this.deliverWebhook(job);
 
+      // Update circuit breaker state based on result
       if (result.success) {
+        await circuitBreaker.recordSuccess();
         await this.handleSuccess(job, result);
       } else {
+        await circuitBreaker.recordFailure();
         await this.handleFailure(job, result);
       }
 
     } catch (error) {
+      // Record failure in circuit breaker for unexpected errors
+      const circuitBreaker = this.circuitBreakers.get(`webhook:${job.webhookId}`);
+      await circuitBreaker.recordFailure();
       await this.handleError(job, error as Error);
     } finally {
       this.activeJobs--;
@@ -235,8 +286,8 @@ export class WebhookProcessor {
         };
       }
 
-      // Check if retryable status code
-      const isRetryable = this.isRetryableStatusCode(response.status);
+      // Note: isRetryableStatusCode check is done by the caller
+      // when deciding whether to retry the job
       
       return {
         success: false,
@@ -258,7 +309,7 @@ export class WebhookProcessor {
 
   private signPayload(secret: string, timestamp: number, payload: Record<string, unknown>): string {
     const message = `${timestamp}.${JSON.stringify(payload)}`;
-    return 'sha256=' + createHmac('sha256', secret).update(message).digest('hex');
+    return 'sha256=' + hmacSign(secret, message, 'sha256');
   }
 
   private isRetryableStatusCode(statusCode: number): boolean {
@@ -435,6 +486,8 @@ export class WebhookProcessor {
     if (result.rows.length === 0) return;
 
     const stats = result.rows[0];
+    if (!stats) return; // TypeScript guard for array access
+    
     const total = parseInt(stats.total, 10);
     const failures = parseInt(stats.failures, 10);
     const recentFailures = parseInt(stats.recent_failures, 10);
@@ -510,8 +563,8 @@ export async function dispatchWebhookEvent(
   };
 
   // Queue events for each webhook
-  const values = result.rows.map((row, index) => {
-    const offset = index * 6;
+  const values = result.rows.map((_row: { id: string }, index: number) => {
+    const offset = index * 5;  // Fixed: we have 5 placeholders per row
     return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, 'pending', 1, NOW())`;
   }).join(', ');
 

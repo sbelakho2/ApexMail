@@ -1,5 +1,26 @@
 /**
  * Sales Autopilot Configuration
+ * 
+ * CONTROL PLANE SERVICE - PROCESS ISOLATION
+ * ==========================================
+ * 
+ * This service runs as a SEPARATE PROCESS from the customer-facing API.
+ * 
+ * Port Allocation:
+ * - Customer Console (web):     port 3000
+ * - Customer API (api):         port 3001
+ * - Sales Autopilot (control):  port 3010 <-- THIS SERVICE
+ * - Compliance (control):       port 3011
+ * - Control Plane UI:           port 3020
+ * 
+ * Data Isolation:
+ * - This service stores OWNER's leads, not customer data
+ * - Uses separate tables: autopilot_leads, autopilot_campaigns, etc.
+ * - Never accesses tenant-specific email/message data
+ * 
+ * Authentication:
+ * - Uses internal API keys, NOT tenant API keys
+ * - Control Plane UI authenticates with owner credentials
  */
 
 import { z } from 'zod';
@@ -127,11 +148,19 @@ export function loadConfig(): Config {
 
         promo: {
             enabled: process.env['PROMO_ENABLED'] !== 'false',
-            affiliateLinks: process.env['PROMO_AFFILIATE_LINKS']
-                ? JSON.parse(process.env['PROMO_AFFILIATE_LINKS'])
-                : {},
+            affiliateLinks: parseJSON(process.env['PROMO_AFFILIATE_LINKS'], {}),
         },
     });
+}
+
+function parseJSON<T>(value: string | undefined, defaultValue: T): T {
+    if (!value) return defaultValue;
+    try {
+        return JSON.parse(value) as T;
+    } catch {
+        console.warn(`Invalid JSON in config: ${value.substring(0, 50)}...`);
+        return defaultValue;
+    }
 }
 
 export const config = loadConfig();

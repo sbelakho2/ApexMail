@@ -193,7 +193,7 @@ export class STOOptimizer {
     /**
      * Get aggregate patterns for a list
      */
-    getListPattern(listId: string): {
+    getListPattern(_listId: string): {
         heatmap: Array<{ hour: number; day: number; score: number }>;
         peakHours: number[];
         peakDays: number[];
@@ -448,7 +448,6 @@ export class STOOptimizer {
 
         // Build recommendations
         const recommendations: STORecommendation[] = [];
-        const now = new Date();
 
         for (let i = 0; i < Math.min(5, sorted.length); i++) {
             const slot = sorted[i];

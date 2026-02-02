@@ -16,7 +16,7 @@ import {
     SecretAccess,
 } from '../types';
 import { complianceConfig } from '../config';
-import { randomUUID, randomBytes } from 'crypto';
+import { generateUUID, randomToken, secureRandomBase64 } from '@apexmail/lib/crypto';
 
 interface SecretCreateInput {
     tenantId: string;
@@ -50,7 +50,7 @@ export class SecretManager {
      * Create a new secret
      */
     async createSecret(input: SecretCreateInput): Promise<Secret> {
-        const id = randomUUID();
+        const id = generateUUID();
         const encryptedValue = this.encrypt(input.value);
         const now = new Date();
 
@@ -349,7 +349,7 @@ export class SecretManager {
             throw new Error('Access denied to grant secret access');
         }
 
-        const id = randomUUID();
+        const id = generateUUID();
         const now = new Date();
 
         const access: SecretAccess = {
@@ -591,13 +591,13 @@ export class SecretManager {
     private generateSecretValue(type?: SecretType): string {
         switch (type) {
             case 'api_key':
-                return `apx_${randomBytes(32).toString('hex')}`;
+                return `apx_${randomToken(32)}`;
             case 'webhook_secret':
-                return `whsec_${randomBytes(32).toString('hex')}`;
+                return `whsec_${randomToken(32)}`;
             case 'encryption_key':
-                return randomBytes(32).toString('base64');
+                return secureRandomBase64(32);
             default:
-                return randomBytes(32).toString('hex');
+                return randomToken(32);
         }
     }
 

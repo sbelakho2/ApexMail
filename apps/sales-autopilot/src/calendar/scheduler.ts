@@ -456,9 +456,20 @@ function generateMeetingLink(slot: DemoSlot): string {
 }
 
 /**
+ * Minimal slot data needed for ICS file generation
+ */
+export interface IcsSlotData {
+    id: string;
+    startTime: Date;
+    endTime: Date;
+    meetingType: MeetingType;
+    meetingLink: string | null;
+}
+
+/**
  * Generates ICS calendar file content
  */
-export function generateIcsFile(slot: DemoSlot, organizerEmail: string): string {
+export function generateIcsFile(slot: IcsSlotData, organizerEmail: string): string {
     const uid = `${slot.id}@apexmail.ee`;
     const now = new Date();
     const formatDate = (date: Date) =>
@@ -536,7 +547,7 @@ export function parseTimeRequest(
 
     // Specific date
     const dateMatch = lowerText.match(
-        /(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?/
+        /(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?/
     );
     if (dateMatch && dateMatch[1] && dateMatch[2]) {
         const month = parseInt(dateMatch[1], 10) - 1;

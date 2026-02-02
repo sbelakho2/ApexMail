@@ -5,7 +5,7 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { CALENDAR_CONTENT_TYPES } from '../config.js';
 
@@ -107,11 +107,10 @@ export interface ParsedCalendar {
  */
 export class CalendarService {
   private pool: Pool;
-  private redis: Redis;
 
-  constructor(pool: Pool, redis: Redis) {
+  constructor(pool: Pool, _redis: Redis) {
     this.pool = pool;
-    this.redis = redis;
+    void _redis; // Reserved for future caching
   }
 
   /**
@@ -283,50 +282,57 @@ export class CalendarService {
   <meta charset="utf-8">
   <style>
     .calendar-invite {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       max-width: 600px;
       margin: 0 auto;
       padding: 20px;
-      background: #f8f9fa;
-      border-radius: 8px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 18px;
     }
     .calendar-header {
-      background: #4285f4;
+      background: #2563eb;
       color: white;
       padding: 15px;
-      border-radius: 8px 8px 0 0;
+      border-radius: 18px 18px 0 0;
       text-align: center;
     }
     .calendar-body {
       background: white;
       padding: 20px;
-      border-radius: 0 0 8px 8px;
+      border-radius: 0 0 18px 18px;
     }
     .calendar-title {
       font-size: 20px;
-      font-weight: 600;
+      font-weight: 700;
       margin: 0;
+      letter-spacing: -0.01em;
     }
     .calendar-status {
       font-size: 12px;
       opacity: 0.9;
       margin-top: 5px;
+      font-weight: 500;
     }
     .calendar-detail {
       margin: 15px 0;
-      padding: 10px;
-      background: #f8f9fa;
-      border-radius: 4px;
+      padding: 12px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
     }
     .calendar-detail-label {
-      font-size: 12px;
-      color: #666;
+      font-size: 10px;
+      color: #64748b;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.05em;
+      font-weight: 700;
     }
     .calendar-detail-value {
       font-size: 14px;
       margin-top: 4px;
+      color: #0f172a;
+      font-weight: 500;
     }
     .calendar-attendees {
       margin: 15px 0;
@@ -337,34 +343,40 @@ export class CalendarService {
       margin: 5px 0 0 0;
     }
     .calendar-attendees li {
-      padding: 5px 0;
+      padding: 6px 0;
       font-size: 14px;
+      color: #334155;
+      border-bottom: 1px solid #f1f5f9;
     }
     .calendar-actions {
       display: flex;
-      gap: 10px;
-      margin-top: 20px;
+      gap: 12px;
+      margin-top: 24px;
     }
     .calendar-btn {
       flex: 1;
       padding: 12px;
       border: none;
-      border-radius: 4px;
-      font-size: 14px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
       cursor: pointer;
+      transition: all 0.2s;
       text-decoration: none;
       text-align: center;
     }
     .calendar-btn-accept {
-      background: #34a853;
+      background: #16a34a;
       color: white;
     }
     .calendar-btn-maybe {
-      background: #fbbc04;
-      color: #333;
+      background: #f59e0b;
+      color: white;
     }
     .calendar-btn-decline {
-      background: #ea4335;
+      background: #dc2626;
       color: white;
     }
   </style>
@@ -444,7 +456,7 @@ export class CalendarService {
         const value = line.substring(colonIndex + 1);
         const [prop, ...params] = key.split(';');
 
-        switch (prop.toUpperCase()) {
+        switch ((prop ?? '').toUpperCase()) {
           case 'METHOD':
             method = value as CalendarMethod;
             break;
@@ -617,7 +629,7 @@ export class CalendarService {
    * Format date only (no time)
    */
   private formatDateOnly(date: Date): string {
-    return date.toISOString().split('T')[0].replace(/-/g, '');
+    return date.toISOString().slice(0, 10).replace(/-/g, '');
   }
 
   /**

@@ -5,7 +5,7 @@
  */
 
 import { Hono } from 'hono';
-import { TenantService, TenantRole, TenantStatus } from '../services/tenant.js';
+import { TenantService, TenantRole } from '../services/tenant.js';
 import { DataIsolationService, IsolationContext } from '../services/data-isolation.js';
 import { EncryptionService } from '../services/encryption.js';
 import { RateLimitService } from '../services/rate-limit.js';
@@ -333,7 +333,11 @@ export function createIsolationRoutes(
     }
 
     const configs = rateLimit.getWorkspaceRateLimitConfigs(wsResult.value.quota);
-    const result = await rateLimit.getRateLimitStatus(`${workspaceId}:api`, configs.api);
+    const apiConfig = configs.api;
+    if (!apiConfig) {
+      return c.json({ error: 'API rate limit config not found' }, 500);
+    }
+    const result = await rateLimit.getRateLimitStatus(`${workspaceId}:api`, apiConfig);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);

@@ -4,10 +4,17 @@
 
 import { serve } from '@hono/node-server';
 import { createApp } from './app.js';
-import { config } from './config.js';
+import { config, loadConfig } from './config.js';
+
+// Track interval handles for cleanup
+const intervalHandles: NodeJS.Timeout[] = [];
+const timeoutHandles: NodeJS.Timeout[] = [];
 
 async function main(): Promise<void> {
   console.log('Starting ApexMail Billing Service...');
+
+  // Load config early
+  loadConfig();
 
   const { app, ctx } = createApp();
 
@@ -15,11 +22,20 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     console.log('Shutting down billing service...');
 
+    // Clear all intervals first to prevent callbacks executing after cleanup
+    for (const handle of intervalHandles) {
+      clearInterval(handle);
+    }
+    for (const handle of timeoutHandles) {
+      clearTimeout(handle);
+    }
+    console.log(`Cleared ${intervalHandles.length} intervals and ${timeoutHandles.length} timeouts`);
+
     // Close Redis connection
     await ctx.redis.quit();
 
     // Close database pool
-    await ctx.db.end();
+    await ctx.db.disconnect();
 
     process.exit(0);
   };
@@ -28,7 +44,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
 
   // Start server
-  const server = serve({
+  serve({
     fetch: app.fetch,
     port: config.port,
     hostname: config.host,
@@ -44,47 +60,47 @@ async function startBackgroundWorkers(ctx: ReturnType<typeof createApp>['ctx']):
   console.log('Starting background workers...');
 
   // Usage alert checker - runs every 5 minutes
-  setInterval(async () => {
+  intervalHandles.push(setInterval(async () => {
     try {
       const result = await ctx.usageAlerts.checkAllTenants();
       if (result.ok) {
-        console.log(`Usage alerts checked: ${result.value.checked} tenants`);
+        console.log(`Usage alerts checked: ${result.value.tenantsChecked} tenants`);
       }
     } catch (error) {
       console.error('Usage alert check failed:', error);
     }
-  }, 5 * 60 * 1000);
+  }, 5 * 60 * 1000));
 
   // Metering flush - runs every minute
-  setInterval(async () => {
+  intervalHandles.push(setInterval(async () => {
     try {
-      const result = await ctx.metering.flushPendingEvents();
+      const result = await ctx.metering.flush();
       if (result.ok && result.value > 0) {
         console.log(`Flushed ${result.value} metering events`);
       }
     } catch (error) {
       console.error('Metering flush failed:', error);
     }
-  }, 60 * 1000);
+  }, 60 * 1000));
 
   // Dunning processor - runs every hour
-  setInterval(async () => {
+  intervalHandles.push(setInterval(async () => {
     try {
-      const result = await ctx.dunning.processAll();
+      const result = await ctx.dunning.processGracePeriodExpirations();
       if (result.ok) {
-        console.log(`Dunning processed: ${result.value.processed} accounts`);
+        console.log(`Dunning processed: ${result.value.processedCount} accounts`);
       }
     } catch (error) {
       console.error('Dunning processing failed:', error);
     }
-  }, 60 * 60 * 1000);
+  }, 60 * 60 * 1000));
 
   // SLA credits checker - runs daily at midnight
   scheduleDailyTask(async () => {
     try {
-      const result = await ctx.slaCredits.processMonthlyCredits();
+      const result = await ctx.slaCredits.runMonthlyCheck();
       if (result.ok) {
-        console.log(`SLA credits processed: ${result.value.credits} credits issued`);
+        console.log(`SLA credits processed: ${result.value.totalCredits} credits issued`);
       }
     } catch (error) {
       console.error('SLA credits processing failed:', error);
@@ -92,52 +108,40 @@ async function startBackgroundWorkers(ctx: ReturnType<typeof createApp>['ctx']):
   }, 0, 0); // 00:00
 
   // Cost margin checker - runs every 15 minutes
-  setInterval(async () => {
+  intervalHandles.push(setInterval(async () => {
     try {
-      const result = await ctx.costCircuit.checkAllTenants();
+      const result = await ctx.costCircuit.runMarginChecks();
       if (result.ok) {
         console.log(`Cost margins checked: ${result.value.checked} tenants`);
       }
     } catch (error) {
       console.error('Cost margin check failed:', error);
     }
-  }, 15 * 60 * 1000);
+  }, 15 * 60 * 1000));
 
   // Wallet cleanup (expired reservations) - runs every 30 minutes
-  setInterval(async () => {
+  intervalHandles.push(setInterval(async () => {
     try {
-      const result = await ctx.wallet.cleanupExpiredReservations();
-      if (result.ok && result.value > 0) {
-        console.log(`Cleaned up ${result.value} expired wallet reservations`);
+      const result = await ctx.wallet.processExpiredReservations();
+      if (result.ok && result.value.releasedCount > 0) {
+        console.log(`Cleaned up ${result.value.releasedCount} expired wallet reservations`);
       }
     } catch (error) {
       console.error('Wallet cleanup failed:', error);
     }
-  }, 30 * 60 * 1000);
+  }, 30 * 60 * 1000));
 
   // Enterprise contract checker - runs daily at 06:00
   scheduleDailyTask(async () => {
     try {
       const result = await ctx.contracts.checkExpiringContracts();
       if (result.ok) {
-        console.log(`Contract check: ${result.value.expiring} contracts expiring soon`);
+        console.log(`Contract check: ${result.value.expiringSoon.length} contracts expiring soon`);
       }
     } catch (error) {
       console.error('Contract check failed:', error);
     }
   }, 6, 0); // 06:00
-
-  // Viral attribution processor - runs every 10 minutes
-  setInterval(async () => {
-    try {
-      const result = await ctx.viralLoop.processUnattributedConversions();
-      if (result.ok && result.value > 0) {
-        console.log(`Attributed ${result.value} viral conversions`);
-      }
-    } catch (error) {
-      console.error('Viral attribution failed:', error);
-    }
-  }, 10 * 60 * 1000);
 
   console.log('Background workers started');
 }
@@ -161,16 +165,29 @@ function scheduleDailyTask(task: () => Promise<void>, hour: number, minute: numb
 
   const msUntilTarget = targetTime.getTime() - now.getTime();
 
-  setTimeout(() => {
+  const timeout = setTimeout(() => {
     // Run the task
     task().catch(console.error);
 
     // Schedule for next day
-    setInterval(() => {
+    const interval = setInterval(() => {
       task().catch(console.error);
     }, 24 * 60 * 60 * 1000);
+    intervalHandles.push(interval);
   }, msUntilTarget);
+  timeoutHandles.push(timeout);
 }
+
+// Global error handlers
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
 
 main().catch((error) => {
   console.error('Fatal error:', error);

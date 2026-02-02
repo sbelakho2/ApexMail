@@ -74,12 +74,13 @@ export interface OpenApiOperation {
 }
 
 export interface OpenApiParameter {
-  name: string;
-  in: 'path' | 'query' | 'header' | 'cookie';
-  description: string;
-  required: boolean;
-  schema: OpenApiSchema;
+  name?: string;
+  in?: 'path' | 'query' | 'header' | 'cookie';
+  description?: string;
+  required?: boolean;
+  schema?: OpenApiSchema;
   example?: unknown;
+  $ref?: string;
 }
 
 export interface OpenApiRequestBody {
@@ -95,9 +96,10 @@ export interface OpenApiMediaType {
 }
 
 export interface OpenApiResponse {
-  description: string;
+  description?: string;
   headers?: Record<string, OpenApiHeader>;
   content?: Record<string, OpenApiMediaType>;
+  $ref?: string;
 }
 
 export interface OpenApiHeader {
@@ -125,6 +127,8 @@ export interface OpenApiSchema {
   maximum?: number;
   minLength?: number;
   maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
   pattern?: string;
 }
 
@@ -183,7 +187,7 @@ export interface OpenApiExternalDocs {
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export class OpenApiGenerator {
-  private db: Pool;
+  protected db: Pool;
   private version: string;
 
   constructor(db: Pool, version: string = config.currentApiVersion) {

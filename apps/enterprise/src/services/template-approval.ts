@@ -5,7 +5,7 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { config, TemplateApprovalStatus } from '../config.js';
 
@@ -134,7 +134,7 @@ export class TemplateApprovalService {
         SELECT MAX(version) as max_version FROM ent_template_submissions
         WHERE account_id = $1 AND name = $2
       `, [accountId, data.name]);
-      const version = (versionResult.rows[0].max_version || 0) + 1;
+      const version = (versionResult.rows[0]?.max_version ?? 0) + 1;
 
       await this.pool.query(`
         INSERT INTO ent_template_submissions (
@@ -671,6 +671,9 @@ export class TemplateApprovalService {
     content: string,
     metadata: TemplateMetadata
   ): Promise<{ action: 'auto_approve' | 'auto_reject' | 'require_review' | 'flag' | null; reason?: string; ruleName?: string }> {
+    // Account ID reserved for future account-specific rules
+    void accountId;
+    
     const rulesResult = await this.listRules();
     if (!rulesResult.ok) {
       return { action: null };

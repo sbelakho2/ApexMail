@@ -161,7 +161,8 @@ describe('PHASE 3: Core Email API - Deep Analysis', () => {
     it('✅ FIX VERIFIED: Has proper catch block', () => {
       // Count try blocks vs catch blocks
       const tryCount = (content.match(/\btry\s*\{/g) || []).length;
-      const catchCount = (content.match(/\bcatch\s*[\(\{]/g) || []).length;
+      // eslint-disable-next-line no-useless-escape
+      const catchCount = (content.match(/\bcatch\s*[({\[]/g) || []).length;
       
       if (tryCount <= catchCount) {
         console.log('✅ VERIFIED: All try blocks have catch handlers');

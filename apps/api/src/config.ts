@@ -1,6 +1,54 @@
 /**
  * API Configuration
+ * 
+ * Uses Zod for schema validation to catch configuration errors at startup.
  */
+
+import { z } from 'zod';
+
+// Zod schema for environment validation
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'staging', 'production']).default('development'),
+  PORT: z.string().transform(Number).pipe(z.number().min(1).max(65535)).default('3000'),
+  HOST: z.string().default('0.0.0.0'),
+  BASE_URL: z.string().url().default('http://localhost:3000'),
+  
+  // Database
+  DB_HOST: z.string().default('localhost'),
+  DB_PORT: z.string().transform(Number).pipe(z.number().min(1).max(65535)).default('5432'),
+  DB_NAME: z.string().default('apexmail'),
+  DB_USER: z.string().default('apexmail'),
+  DB_PASSWORD: z.string().default('apexmail'),
+  
+  // Redis
+  REDIS_HOST: z.string().default('localhost'),
+  REDIS_PORT: z.string().transform(Number).pipe(z.number().min(1).max(65535)).default('6379'),
+  REDIS_PASSWORD: z.string().optional(),
+  REDIS_DB: z.string().transform(Number).pipe(z.number().min(0)).default('0'),
+  
+  // Auth - conditional validation based on NODE_ENV
+  JWT_SECRET: z.string().min(1),
+  JWT_EXPIRY: z.string().default('24h'),
+  API_KEY_HASH_SECRET: z.string().min(1),
+  
+  // Rate limiting
+  RATE_LIMIT_WINDOW_MS: z.string().transform(Number).pipe(z.number().min(1)).default('60000'),
+  RATE_LIMIT_MAX_REQUESTS: z.string().transform(Number).pipe(z.number().min(1)).default('1000'),
+  
+  // CORS
+  CORS_ORIGINS: z.string().default('*'),
+  CORS_CREDENTIALS: z.enum(['true', 'false', '1', '0']).default('true'),
+  
+  // Idempotency
+  IDEMPOTENCY_TTL_SECONDS: z.string().transform(Number).pipe(z.number().min(1)).default('86400'),
+  
+  // Webhooks
+  WEBHOOK_SIGNING_SECRET: z.string().min(1),
+  WEBHOOK_TIMEOUT_MS: z.string().transform(Number).pipe(z.number().min(1000)).default('30000'),
+  WEBHOOK_MAX_RETRIES: z.string().transform(Number).pipe(z.number().min(0).max(10)).default('5'),
+});
+
+export type ValidatedEnv = z.infer<typeof envSchema>;
 
 export interface Config {
   env: 'development' | 'staging' | 'production';
@@ -50,83 +98,109 @@ export interface Config {
   };
 }
 
-function getEnv(key: string, defaultValue?: string): string {
-  const value = process.env[key] ?? defaultValue;
-  if (value === undefined) {
-    throw new Error(`Missing required environment variable: ${key}`);
-  }
-  return value;
-}
-
-function getEnvInt(key: string, defaultValue?: number): number {
-  const value = process.env[key];
-  if (value === undefined) {
-    if (defaultValue === undefined) {
-      throw new Error(`Missing required environment variable: ${key}`);
-    }
-    return defaultValue;
-  }
-  const parsed = parseInt(value, 10);
-  if (isNaN(parsed)) {
-    throw new Error(`Invalid integer value for ${key}: ${value}`);
-  }
-  return parsed;
-}
-
-function getEnvBool(key: string, defaultValue: boolean): boolean {
-  const value = process.env[key];
-  if (value === undefined) return defaultValue;
-  return value.toLowerCase() === 'true' || value === '1';
-}
-
 export function loadConfig(): Config {
-  const env = getEnv('NODE_ENV', 'development') as Config['env'];
+  // First, validate environment with Zod schema
+  const devDefaults: Record<string, string> = {
+    JWT_SECRET: 'dev-secret-change-in-production',
+    API_KEY_HASH_SECRET: 'dev-api-secret',
+    WEBHOOK_SIGNING_SECRET: 'dev-webhook-secret',
+  };
+  
+  const isDev = (process.env.NODE_ENV ?? 'development') === 'development';
+  
+  // Apply dev defaults only in development mode
+  const envToValidate = { ...process.env };
+  if (isDev) {
+    for (const [key, value] of Object.entries(devDefaults)) {
+      if (!envToValidate[key]) {
+        envToValidate[key] = value;
+      }
+    }
+  }
+  
+  // Validate with Zod - this will throw with detailed errors on invalid config
+  const result = envSchema.safeParse(envToValidate);
+  if (!result.success) {
+    const errors = result.error.issues
+      .map(issue => `  - ${issue.path.join('.')}: ${issue.message}`)
+      .join('\n');
+    throw new Error(`Configuration validation failed:\n${errors}`);
+  }
+  
+  const validated = result.data;
+  const env = validated.NODE_ENV;
+  
+  // SECURITY: Additional validation for production secrets
+  if (!isDev) {
+    const devDefaultValues = Object.values(devDefaults);
+    
+    if (devDefaultValues.includes(validated.JWT_SECRET)) {
+      throw new Error('SECURITY: JWT_SECRET is using a development default value in production!');
+    }
+    if (devDefaultValues.includes(validated.API_KEY_HASH_SECRET)) {
+      throw new Error('SECURITY: API_KEY_HASH_SECRET is using a development default value in production!');
+    }
+    if (devDefaultValues.includes(validated.WEBHOOK_SIGNING_SECRET)) {
+      throw new Error('SECURITY: WEBHOOK_SIGNING_SECRET is using a development default value in production!');
+    }
+    
+    // Ensure secrets meet minimum length requirements
+    if (validated.JWT_SECRET.length < 32) {
+      throw new Error('SECURITY: JWT_SECRET must be at least 32 characters in production');
+    }
+    if (validated.API_KEY_HASH_SECRET.length < 32) {
+      throw new Error('SECURITY: API_KEY_HASH_SECRET must be at least 32 characters in production');
+    }
+    if (validated.WEBHOOK_SIGNING_SECRET.length < 32) {
+      throw new Error('SECURITY: WEBHOOK_SIGNING_SECRET must be at least 32 characters in production');
+    }
+  }
   
   return {
     env,
-    port: getEnvInt('PORT', 3000),
-    host: getEnv('HOST', '0.0.0.0'),
-    baseUrl: getEnv('BASE_URL', 'http://localhost:3000'),
+    port: validated.PORT,
+    host: validated.HOST,
+    baseUrl: validated.BASE_URL,
     
     database: {
-      host: getEnv('DB_HOST', 'localhost'),
-      port: getEnvInt('DB_PORT', 5432),
-      name: getEnv('DB_NAME', 'apexmail'),
-      user: getEnv('DB_USER', 'apexmail'),
-      password: getEnv('DB_PASSWORD', 'apexmail'),
+      host: validated.DB_HOST,
+      port: validated.DB_PORT,
+      name: validated.DB_NAME,
+      user: validated.DB_USER,
+      password: validated.DB_PASSWORD,
     },
     
     redis: {
-      host: getEnv('REDIS_HOST', 'localhost'),
-      port: getEnvInt('REDIS_PORT', 6379),
-      password: process.env.REDIS_PASSWORD,
-      db: getEnvInt('REDIS_DB', 0),
+      host: validated.REDIS_HOST,
+      port: validated.REDIS_PORT,
+      password: validated.REDIS_PASSWORD,
+      db: validated.REDIS_DB,
     },
     
     auth: {
-      jwtSecret: getEnv('JWT_SECRET', env === 'development' ? 'dev-secret-change-in-production' : undefined),
-      jwtExpiry: getEnv('JWT_EXPIRY', '24h'),
-      apiKeyHashSecret: getEnv('API_KEY_HASH_SECRET', env === 'development' ? 'dev-api-secret' : undefined),
+      jwtSecret: validated.JWT_SECRET,
+      jwtExpiry: validated.JWT_EXPIRY,
+      apiKeyHashSecret: validated.API_KEY_HASH_SECRET,
     },
     
     rateLimit: {
-      windowMs: getEnvInt('RATE_LIMIT_WINDOW_MS', 60000),
-      maxRequests: getEnvInt('RATE_LIMIT_MAX_REQUESTS', 1000),
+      windowMs: validated.RATE_LIMIT_WINDOW_MS,
+      maxRequests: validated.RATE_LIMIT_MAX_REQUESTS,
     },
     
     cors: {
-      origins: getEnv('CORS_ORIGINS', '*').split(',').map(s => s.trim()),
-      credentials: getEnvBool('CORS_CREDENTIALS', true),
+      origins: validated.CORS_ORIGINS.split(',').map(s => s.trim()),
+      credentials: validated.CORS_CREDENTIALS === 'true' || validated.CORS_CREDENTIALS === '1',
     },
     
     idempotency: {
-      ttlSeconds: getEnvInt('IDEMPOTENCY_TTL_SECONDS', 86400), // 24 hours
+      ttlSeconds: validated.IDEMPOTENCY_TTL_SECONDS,
     },
 
     webhooks: {
-      signingSecret: getEnv('WEBHOOK_SIGNING_SECRET', env === 'development' ? 'dev-webhook-secret' : undefined),
-      timeoutMs: getEnvInt('WEBHOOK_TIMEOUT_MS', 30000),
-      maxRetries: getEnvInt('WEBHOOK_MAX_RETRIES', 5),
+      signingSecret: validated.WEBHOOK_SIGNING_SECRET,
+      timeoutMs: validated.WEBHOOK_TIMEOUT_MS,
+      maxRetries: validated.WEBHOOK_MAX_RETRIES,
     },
   };
 }

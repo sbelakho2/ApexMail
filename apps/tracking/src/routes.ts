@@ -23,6 +23,91 @@ interface TrackingContext {
 // 1x1 transparent GIF
 const TRANSPARENT_GIF = Buffer.from(config.tracking.pixel.gifBase64, 'base64');
 
+/**
+ * SECURITY: Verify that a redirect domain is allowed for a tenant
+ * This prevents open redirect attacks where attackers craft links to arbitrary domains
+ * through our trusted tracking URLs.
+ * 
+ * Allowed domains include:
+ * - Domains owned by the tenant (from domains table)
+ * - Domains in the tenant's allowed redirect domains list (from tenant_settings)
+ * - The configured fallback URL's domain
+ */
+async function verifyRedirectDomain(
+  db: Pool,
+  tenantId: string,
+  domain: string,
+  redis: Redis
+): Promise<boolean> {
+  // Check cache first (5 minute TTL)
+  const cacheKey = `redirect_domain:${tenantId}:${domain}`;
+  const cached = await redis.get(cacheKey);
+  if (cached !== null) {
+    return cached === '1';
+  }
+
+  // Allow the fallback domain
+  try {
+    const fallbackDomain = new URL(config.tracking.click.fallbackUrl).hostname;
+    if (domain === fallbackDomain) {
+      await redis.setex(cacheKey, 300, '1');
+      return true;
+    }
+  } catch {
+    // Ignore fallback URL parse errors
+  }
+
+  // Check tenant's owned domains
+  const domainResult = await db.query<{ id: string }>(
+    `SELECT id FROM domains WHERE tenant_id = $1 AND domain = $2 LIMIT 1`,
+    [tenantId, domain]
+  );
+
+  if (domainResult.rows.length > 0) {
+    await redis.setex(cacheKey, 300, '1');
+    return true;
+  }
+
+  // Check if domain matches tenant's allowed redirect patterns
+  // Patterns can include wildcards like *.example.com
+  const settingsResult = await db.query<{ allowed_redirect_domains: string[] }>(
+    `SELECT allowed_redirect_domains FROM tenant_settings WHERE tenant_id = $1`,
+    [tenantId]
+  );
+
+  const allowedDomains = settingsResult.rows[0]?.allowed_redirect_domains ?? [];
+  
+  for (const pattern of allowedDomains) {
+    if (matchDomainPattern(domain, pattern)) {
+      await redis.setex(cacheKey, 300, '1');
+      return true;
+    }
+  }
+
+  // Domain not allowed
+  await redis.setex(cacheKey, 300, '0');
+  return false;
+}
+
+/**
+ * Match a domain against a pattern (supports wildcard prefix)
+ * Examples:
+ * - "example.com" matches "example.com"
+ * - "*.example.com" matches "sub.example.com", "a.b.example.com"
+ */
+function matchDomainPattern(domain: string, pattern: string): boolean {
+  if (pattern === domain) {
+    return true;
+  }
+  
+  if (pattern.startsWith('*.')) {
+    const suffix = pattern.slice(1); // Remove the '*', keep the '.'
+    return domain.endsWith(suffix) && domain.length > suffix.length;
+  }
+  
+  return false;
+}
+
 export function createRoutes(ctx: TrackingContext): Hono {
   const { db, redis, logger, codec, processor } = ctx;
   const app = new Hono();
@@ -134,12 +219,30 @@ export function createRoutes(ctx: TrackingContext): Hono {
       ? decodeURIComponent(originalUrl) 
       : config.tracking.click.fallbackUrl;
 
-    // Validate URL
+    // SECURITY: Validate URL to prevent open redirect vulnerability
+    // Without proper validation, attackers could use: /click/xxx?r=https://evil.com
+    // to redirect users through our trusted domain to a phishing site
     try {
       const parsed = new URL(redirectUrl);
       // Only allow http/https
       if (!['http:', 'https:'].includes(parsed.protocol)) {
+        logger.warn('Click tracking: blocked non-http redirect', { 
+          protocol: parsed.protocol,
+          trackingId: trackingId.substring(0, 20) + '...',
+        });
         redirectUrl = config.tracking.click.fallbackUrl;
+      } else if (data) {
+        // For valid tracking data, verify the domain is allowed for this tenant
+        // This prevents attackers from crafting links to arbitrary domains
+        const domainAllowed = await verifyRedirectDomain(db, data.tenantId, parsed.hostname, redis);
+        if (!domainAllowed) {
+          logger.warn('Click tracking: blocked unauthorized redirect domain', {
+            domain: parsed.hostname,
+            tenantId: data.tenantId,
+            trackingId: trackingId.substring(0, 20) + '...',
+          });
+          redirectUrl = config.tracking.click.fallbackUrl;
+        }
       }
     } catch {
       redirectUrl = config.tracking.click.fallbackUrl;
@@ -462,8 +565,9 @@ function renderErrorPage(message: string): string {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { 
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: #F8FAFC;
+      color: #0F172A;
       min-height: 100vh;
       display: flex;
       align-items: center;
@@ -471,18 +575,16 @@ function renderErrorPage(message: string): string {
       padding: 20px;
     }
     .card {
-      background: rgba(255,255,255,0.05);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 16px;
+      background: #FFFFFF;
+      border: 1px solid #E2E8F0;
+      border-radius: 18px;
       padding: 40px;
       max-width: 400px;
       text-align: center;
-      color: #fff;
     }
     .icon { font-size: 48px; margin-bottom: 20px; }
-    h1 { font-size: 24px; margin-bottom: 16px; }
-    p { color: rgba(255,255,255,0.7); line-height: 1.6; }
+    h1 { font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }
+    p { color: #475569; line-height: 1.6; font-weight: 500; }
   </style>
 </head>
 <body>
@@ -505,8 +607,9 @@ function renderSuccessPage(email: string): string {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { 
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: #F8FAFC;
+      color: #0F172A;
       min-height: 100vh;
       display: flex;
       align-items: center;
@@ -514,19 +617,17 @@ function renderSuccessPage(email: string): string {
       padding: 20px;
     }
     .card {
-      background: rgba(255,255,255,0.05);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 16px;
+      background: #FFFFFF;
+      border: 1px solid #E2E8F0;
+      border-radius: 18px;
       padding: 40px;
       max-width: 400px;
       text-align: center;
-      color: #fff;
     }
     .icon { font-size: 48px; margin-bottom: 20px; }
-    h1 { font-size: 24px; margin-bottom: 16px; }
-    p { color: rgba(255,255,255,0.7); line-height: 1.6; }
-    .email { color: #fff; font-weight: 500; }
+    h1 { font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }
+    p { color: #475569; line-height: 1.6; font-weight: 500; }
+    .email { color: #0F172A; font-weight: 700; }
   </style>
 </head>
 <body>
@@ -549,8 +650,9 @@ function renderConfirmationPage(token: string, email: string): string {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { 
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: #F8FAFC;
+      color: #0F172A;
       min-height: 100vh;
       display: flex;
       align-items: center;
@@ -558,29 +660,30 @@ function renderConfirmationPage(token: string, email: string): string {
       padding: 20px;
     }
     .card {
-      background: rgba(255,255,255,0.05);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 16px;
+      background: #FFFFFF;
+      border: 1px solid #E2E8F0;
+      border-radius: 18px;
       padding: 40px;
       max-width: 400px;
       text-align: center;
-      color: #fff;
     }
-    h1 { font-size: 24px; margin-bottom: 16px; }
-    p { color: rgba(255,255,255,0.7); line-height: 1.6; margin-bottom: 24px; }
-    .email { color: #fff; font-weight: 500; display: block; margin-top: 8px; }
+    h1 { font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }
+    p { color: #475569; line-height: 1.6; margin-bottom: 24px; font-weight: 500; }
+    .email { color: #0F172A; font-weight: 700; display: block; margin-top: 8px; }
     .btn {
       display: inline-block;
-      background: #ef4444;
+      background: #2563EB;
       color: #fff;
       padding: 12px 24px;
-      border-radius: 8px;
+      border-radius: 12px;
       text-decoration: none;
-      font-weight: 500;
-      transition: background 0.2s;
+      font-weight: 700;
+      transition: all 0.2s;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-size: 14px;
     }
-    .btn:hover { background: #dc2626; }
+    .btn:hover { background: #1742B4; }
   </style>
 </head>
 <body>
@@ -625,8 +728,9 @@ function renderPreferencesPage(
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { 
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: #F8FAFC;
+      color: #0F172A;
       min-height: 100vh;
       display: flex;
       align-items: center;
@@ -634,64 +738,69 @@ function renderPreferencesPage(
       padding: 20px;
     }
     .card {
-      background: rgba(255,255,255,0.05);
-      backdrop-filter: blur(10px);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 16px;
+      background: #FFFFFF;
+      border: 1px solid #E2E8F0;
+      border-radius: 18px;
       padding: 40px;
       max-width: 500px;
       width: 100%;
-      color: #fff;
+      color: #0F172A;
     }
-    h1 { font-size: 24px; margin-bottom: 8px; }
-    .subtitle { color: rgba(255,255,255,0.7); margin-bottom: 24px; }
-    .email { color: #fff; font-weight: 500; }
+    h1 { font-size: 24px; margin-bottom: 8px; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; }
+    .subtitle { color: #475569; margin-bottom: 24px; font-weight: 500; }
+    .email { color: #0F172A; font-weight: 700; }
     .section { margin-bottom: 24px; }
-    .section-title { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(255,255,255,0.5); margin-bottom: 12px; }
+    .section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748B; margin-bottom: 12px; }
     .pref-item {
       display: flex;
       align-items: flex-start;
       gap: 12px;
       padding: 12px;
-      background: rgba(255,255,255,0.03);
-      border-radius: 8px;
+      background: #F8FAFC;
+      border: 1px solid #E2E8F0;
+      border-radius: 10px;
       margin-bottom: 8px;
       cursor: pointer;
+      transition: all 0.2s;
     }
-    .pref-item:hover { background: rgba(255,255,255,0.06); }
+    .pref-item:hover { background: #F1F5F9; border-color: #CBD5E1; }
     .pref-item input[type="checkbox"] {
       margin-top: 4px;
-      accent-color: #3b82f6;
+      accent-color: #2563EB;
     }
     .pref-info { flex: 1; }
-    .pref-name { display: block; font-weight: 500; margin-bottom: 4px; }
-    .pref-desc { display: block; font-size: 14px; color: rgba(255,255,255,0.6); }
+    .pref-name { display: block; font-weight: 700; margin-bottom: 2px; color: #0F172A; }
+    .pref-desc { display: block; font-size: 14px; color: #64748B; font-weight: 500; }
     .btn {
       display: inline-block;
       padding: 12px 24px;
-      border-radius: 8px;
-      font-weight: 500;
+      border-radius: 12px;
+      font-weight: 700;
       text-decoration: none;
       border: none;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      transition: all 0.2s;
     }
-    .btn-primary { background: #3b82f6; color: #fff; }
-    .btn-primary:hover { background: #2563eb; }
-    .btn-danger { background: #ef4444; color: #fff; }
-    .btn-danger:hover { background: #dc2626; }
-    .btn-success { background: #22c55e; color: #fff; }
-    .btn-success:hover { background: #16a34a; }
+    .btn-primary { background: #2563EB; color: #fff; }
+    .btn-primary:hover { background: #1742B4; }
+    .btn-danger { background: #FFFFFF; color: #EF4444; border: 1px solid #FECACA; }
+    .btn-danger:hover { background: #FEF2F2; border-color: #EF4444; }
+    .btn-success { background: #16A34A; color: #fff; }
+    .btn-success:hover { background: #15803D; }
     .actions { display: flex; gap: 12px; flex-wrap: wrap; }
-    .divider { border-top: 1px solid rgba(255,255,255,0.1); margin: 24px 0; }
+    .divider { border-top: 1px solid #E2E8F0; margin: 24px 0; }
     .alert {
       padding: 12px 16px;
-      border-radius: 8px;
+      border-radius: 10px;
       margin-bottom: 16px;
       font-size: 14px;
+      font-weight: 500;
     }
-    .alert-warning { background: rgba(234,179,8,0.2); border: 1px solid rgba(234,179,8,0.3); }
-    .alert-success { background: rgba(34,197,94,0.2); border: 1px solid rgba(34,197,94,0.3); }
+    .alert-warning { background: #FFFBEB; border: 1px solid #FEF3C7; color: #92400E; }
+    .alert-success { background: #F0FDF4; border: 1px solid #DCFCE7; color: #166534; }
   </style>
 </head>
 <body>
@@ -723,7 +832,7 @@ function renderPreferencesPage(
         
         <div class="section">
           <div class="section-title">Unsubscribe</div>
-          <p style="color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 12px;">
+          <p style="color: #64748B; font-size: 14px; margin-bottom: 12px;">
             Stop receiving all emails from this sender.
           </p>
         </div>

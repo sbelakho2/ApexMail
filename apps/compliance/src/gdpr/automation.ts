@@ -18,7 +18,7 @@ import {
     ConsentSource,
 } from '../types';
 import { complianceConfig } from '../config';
-import { randomUUID, randomBytes, createHash } from 'crypto';
+import { generateUUID, randomToken, sha256 } from '@apexmail/lib/crypto';
 
 interface DataExport {
     subscriber: Record<string, unknown>;
@@ -49,8 +49,8 @@ export class GDPRAutomation {
         requestType: DataSubjectRequestType,
         email: string
     ): Promise<DataSubjectRequest> {
-        const id = randomUUID();
-        const verificationToken = randomBytes(32).toString('hex');
+        const id = generateUUID();
+        const verificationToken = randomToken(32);
         const now = new Date();
         const expiresAt = new Date(
             now.getTime() + this.config.requestExpirationDays * 24 * 60 * 60 * 1000
@@ -151,6 +151,20 @@ export class GDPRAutomation {
             verifiedAt: now,
             status: 'verified',
         };
+    }
+
+    /**
+     * Get a data subject request by ID
+     */
+    async getRequest(requestId: string): Promise<DataSubjectRequest | null> {
+        const result = await this.db.query(
+            `SELECT * FROM data_subject_requests WHERE id = $1`,
+            [requestId]
+        );
+
+        if (result.rows.length === 0) return null;
+
+        return this.mapRowToRequest(result.rows[0]);
     }
 
     /**
@@ -467,7 +481,7 @@ export class GDPRAutomation {
         expiresAt?: Date,
         metadata?: Record<string, unknown>
     ): Promise<ConsentRecord> {
-        const id = randomUUID();
+        const id = generateUUID();
         const now = new Date();
 
         const consent: ConsentRecord = {
@@ -601,7 +615,7 @@ export class GDPRAutomation {
         email: string,
         consentTypes: ConsentType[]
     ): Promise<string> {
-        const token = randomBytes(32).toString('hex');
+        const token = randomToken(32);
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
         await this.db.query(
@@ -659,7 +673,7 @@ export class GDPRAutomation {
      * Hash a token for secure storage
      */
     private hashToken(token: string): string {
-        return createHash('sha256').update(token).digest('hex');
+        return sha256(token);
     }
 
     /**

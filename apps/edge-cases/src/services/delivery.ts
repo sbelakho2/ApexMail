@@ -5,11 +5,9 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import type { Redis } from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config, GREYLIST_CODES, AUTO_SUBMITTED_VALUES } from '../config.js';
-
-// Result type for error handling
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
 
 export enum DeliveryStatus {
   PENDING = 'pending',
@@ -175,7 +173,7 @@ export class DeliveryService {
   private extractRetryDelay(message: string): number | undefined {
     // Try to find explicit delay in message
     const delayMatch = message.match(/(\d+)\s*(second|minute|hour)/i);
-    if (delayMatch) {
+    if (delayMatch && delayMatch[1] && delayMatch[2]) {
       const value = parseInt(delayMatch[1], 10);
       const unit = delayMatch[2].toLowerCase();
       
@@ -272,7 +270,7 @@ export class DeliveryService {
     }
 
     // If any host appears more than 3 times, likely a loop
-    for (const [host, count] of hostCounts) {
+    for (const [host, count] of Array.from(hostCounts)) {
       if (count > 3) {
         return {
           isLoop: true,
@@ -455,12 +453,12 @@ export class DeliveryService {
       const samePriority = availableMX.filter(mx => mx.priority === preferredPriority);
       if (samePriority.length > 0) {
         // Random selection among same priority
-        return samePriority[Math.floor(Math.random() * samePriority.length)];
+        return samePriority[Math.floor(Math.random() * samePriority.length)] ?? null;
       }
     }
 
     // Return lowest priority (highest preference) available MX
-    return availableMX[0];
+    return availableMX[0] ?? null;
   }
 
   /**
@@ -548,7 +546,7 @@ export class DeliveryService {
         AND attempt_time > NOW() - INTERVAL '30 days'
       `, [`%.${domain}`]);
 
-      const isGreylister = result.rows[0].greylist_count > 10;
+      const isGreylister = (result.rows[0]?.greylist_count ?? 0) > 10;
       await this.redis.setex(cacheKey, 86400, isGreylister ? '1' : '0');
       
       return isGreylister;

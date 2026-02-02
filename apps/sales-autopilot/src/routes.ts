@@ -1,11 +1,21 @@
 /**
  * Sales Autopilot API Routes
+ * 
+ * SECURITY: This API is part of the Control Plane and is protected by:
+ * 1. Control Plane API key authentication
+ * 2. IP whitelisting in production
+ * 3. Explicit blocking of customer API keys
+ * 
+ * Customers CANNOT access these endpoints even with direct links.
  */
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger as honoLogger } from 'hono/logger';
 import { createLogger } from '@apexmail/lib';
+
+// Security middleware
+import { controlPlaneAuth, blockCustomerAuth } from './middleware/auth.js';
 
 // Import modules
 import * as scrapers from './scrapers/index.js';
@@ -15,20 +25,97 @@ import * as inbox from './inbox/index.js';
 import * as crm from './crm/index.js';
 import * as calendar from './calendar/index.js';
 import * as ads from './ads/index.js';
-import type { Lead, LeadFilters } from './types.js';
+import type { Lead, LeadFilters, LeadStatus, PipelineStage, MeetingType, PromoType, PromoPlacement, TaskType, TaskPriority } from './types.js';
+
+// Type validation helpers
+const LEAD_STATUSES: readonly LeadStatus[] = [
+    'new', 'contacted', 'qualified', 'unqualified', 'nurturing', 'converted', 'lost'
+] as const;
+
+const PIPELINE_STAGES: readonly PipelineStage[] = [
+    'prospect', 'outreach', 'engaged', 'demo_scheduled', 'proposal', 'negotiation', 'closed_won', 'closed_lost'
+] as const;
+
+const MEETING_TYPES: readonly MeetingType[] = [
+    'demo', 'discovery', 'follow_up', 'onboarding', 'support'
+] as const;
+
+const PROMO_TYPES: readonly PromoType[] = [
+    'banner', 'text_link', 'cta_button', 'signature', 'ps_line'
+] as const;
+
+const PROMO_PLACEMENTS: readonly PromoPlacement[] = [
+    'header', 'footer', 'inline', 'sidebar'
+] as const;
+
+const TASK_TYPES: readonly TaskType[] = [
+    'call', 'email', 'meeting', 'follow_up', 'research', 'other'
+] as const;
+
+const TASK_PRIORITIES: readonly TaskPriority[] = [
+    'low', 'medium', 'high', 'urgent'
+] as const;
+
+function isLeadStatus(value: string | undefined): value is LeadStatus {
+    return value !== undefined && LEAD_STATUSES.includes(value as LeadStatus);
+}
+
+function isLeadStatusArray(values: string[] | undefined): values is LeadStatus[] {
+    return values !== undefined && values.every(v => isLeadStatus(v));
+}
+
+function isPipelineStage(value: string | undefined): value is PipelineStage {
+    return value !== undefined && PIPELINE_STAGES.includes(value as PipelineStage);
+}
+
+function isPipelineStageArray(values: string[] | undefined): values is PipelineStage[] {
+    return values !== undefined && values.every(v => isPipelineStage(v));
+}
+
+function isMeetingType(value: string | undefined): value is MeetingType {
+    return value !== undefined && MEETING_TYPES.includes(value as MeetingType);
+}
+
+function isPromoType(value: string | undefined): value is PromoType {
+    return value !== undefined && PROMO_TYPES.includes(value as PromoType);
+}
+
+function isPromoPlacement(value: string | undefined): value is PromoPlacement {
+    return value !== undefined && PROMO_PLACEMENTS.includes(value as PromoPlacement);
+}
+
+function isTaskType(value: string | undefined): value is TaskType {
+    return value !== undefined && TASK_TYPES.includes(value as TaskType);
+}
+
+function isTaskPriority(value: string | undefined): value is TaskPriority {
+    return value !== undefined && TASK_PRIORITIES.includes(value as TaskPriority);
+}
 
 const logger = createLogger({ name: 'autopilot-api', level: 'info' });
 
 const app = new Hono();
 
-// Middleware
-app.use('*', cors());
+// ==== GLOBAL MIDDLEWARE ====
+app.use('*', cors({
+    // Only allow Control Plane UI origin in production
+    origin: process.env.NODE_ENV === 'production' 
+        ? (process.env.CONTROL_PLANE_ORIGIN || 'http://localhost:3020')
+        : '*',
+    credentials: true,
+}));
 app.use('*', honoLogger());
 
-// Health check
+// ==== SECURITY: Block customer auth on all routes ====
+app.use('*', blockCustomerAuth());
+
+// Health check (public, for orchestration)
 app.get('/health', (c) => {
     return c.json({ status: 'healthy', service: 'sales-autopilot' });
 });
+
+// ==== PROTECTED ROUTES: Require Control Plane authentication ====
+app.use('/api/v1/*', controlPlaneAuth());
 
 // ============================================
 // Lead Discovery Routes
@@ -380,9 +467,11 @@ app.post('/api/v1/inbox/classify', async (c) => {
 
 app.get('/api/v1/leads/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
+    const statusParam = c.req.query('status')?.split(',');
+    const stageParam = c.req.query('stage')?.split(',');
     const filters = {
-        status: c.req.query('status')?.split(',') as any,
-        stage: c.req.query('stage')?.split(',') as any,
+        status: isLeadStatusArray(statusParam) ? statusParam : undefined,
+        stage: isPipelineStageArray(stageParam) ? stageParam : undefined,
         search: c.req.query('search'),
     };
 
@@ -431,7 +520,11 @@ app.post('/api/v1/leads/:leadId/stage', async (c) => {
     const leadId = c.req.param('leadId');
     const body = await c.req.json<{ stage: string; userId?: string }>();
 
-    const lead = crm.moveLeadToStage(leadId, body.stage as any, body.userId);
+    if (!isPipelineStage(body.stage)) {
+        return c.json({ success: false, error: 'Invalid pipeline stage' }, 400);
+    }
+
+    const lead = crm.moveLeadToStage(leadId, body.stage, body.userId);
 
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
@@ -451,6 +544,13 @@ app.post('/api/v1/leads/:leadId/tasks', async (c) => {
         assignedTo?: string;
     }>();
 
+    if (!isTaskType(body.type)) {
+        return c.json({ success: false, error: 'Invalid task type' }, 400);
+    }
+    if (!isTaskPriority(body.priority)) {
+        return c.json({ success: false, error: 'Invalid task priority' }, 400);
+    }
+
     const lead = crm.getLead(leadId);
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
@@ -459,8 +559,8 @@ app.post('/api/v1/leads/:leadId/tasks', async (c) => {
     const task = crm.createTask(leadId, lead.tenantId, {
         title: body.title,
         description: body.description,
-        type: body.type as any,
-        priority: body.priority as any,
+        type: body.type,
+        priority: body.priority,
         dueAt: body.dueAt ? new Date(body.dueAt) : null,
         assignedTo: body.assignedTo || null,
     });
@@ -527,11 +627,13 @@ app.post('/api/v1/calendar/book', async (c) => {
         notes?: string;
     }>();
 
+    const meetingType: MeetingType = isMeetingType(body.meetingType) ? body.meetingType : 'demo';
+
     const slot = calendar.bookSlot(
         body.slotId,
         body.leadId,
         body.bookedBy,
-        (body.meetingType as any) || 'demo',
+        meetingType,
         body.notes
     );
 
@@ -571,14 +673,20 @@ app.get('/api/v1/calendar/ics/:slotId', async (c) => {
     const organizerEmail = c.req.query('email') || 'noreply@apexmail.ee';
 
     // This would need the actual slot data
-    // For now, create a mock slot
-    const mockSlot = {
+    // For now, create a mock slot with proper typing
+    const mockSlot: {
+        id: string;
+        startTime: Date;
+        endTime: Date;
+        meetingType: MeetingType;
+        meetingLink: string;
+    } = {
         id: slotId,
         startTime: new Date(Date.now() + 24 * 60 * 60 * 1000),
         endTime: new Date(Date.now() + 24 * 60 * 60 * 1000 + 30 * 60 * 1000),
-        meetingType: 'demo' as const,
+        meetingType: 'demo',
         meetingLink: `https://meet.apexmail.ee/${slotId}`,
-    } as any;
+    };
 
     const ics = calendar.generateIcsFile(mockSlot, organizerEmail);
 
@@ -604,13 +712,20 @@ app.post('/api/v1/promos', async (c) => {
         link: string;
         html?: string;
         ctaText?: string;
-        targeting?: any;
+        targeting?: Record<string, unknown>;
     }>();
+
+    if (!isPromoType(body.type)) {
+        return c.json({ success: false, error: 'Invalid promo type' }, 400);
+    }
+    if (!isPromoPlacement(body.placement)) {
+        return c.json({ success: false, error: 'Invalid promo placement' }, 400);
+    }
 
     const promo = ads.createPromoConfig(body.tenantId, {
         name: body.name,
-        type: body.type as any,
-        placement: body.placement as any,
+        type: body.type,
+        placement: body.placement,
         text: body.text,
         link: body.link,
         html: body.html,

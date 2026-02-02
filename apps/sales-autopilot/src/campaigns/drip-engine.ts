@@ -10,12 +10,16 @@ import type {
     DripCampaign,
     DripSequenceStep,
     CampaignEnrollment,
+    EnrollmentStatus,
     Lead,
     StepDelay,
     StepCondition,
     CampaignStatus,
     AbVariant,
 } from '../types.js';
+
+// Re-export types for API consumers
+export type { CampaignEnrollment, EnrollmentStatus, CampaignStatus, DripSequenceStep };
 
 const logger = createLogger({ name: 'drip-engine', level: 'info' });
 

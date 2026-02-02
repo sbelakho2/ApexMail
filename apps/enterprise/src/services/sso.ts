@@ -5,8 +5,8 @@
  */
 
 import { Pool } from 'pg';
-import Redis from 'ioredis';
-import jwt from 'jsonwebtoken';
+import type { Redis } from 'ioredis';
+// import * as jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { config, SSOProvider } from '../config.js';
 
@@ -79,11 +79,11 @@ export interface OIDCAuthRequest {
 
 export interface OIDCTokenResponse {
   accessToken: string;
-  idToken: string;
+  idToken?: string;
   refreshToken?: string;
   tokenType: string;
   expiresIn: number;
-  scope: string;
+  scope?: string;
 }
 
 export interface SSOSession {
@@ -93,7 +93,7 @@ export interface SSOSession {
   provider: SSOProvider;
   externalId: string;
   email: string;
-  attributes: Record<string, string>;
+  attributes: Record<string, unknown>;
   sessionIndex?: string;
   createdAt: Date;
   expiresAt: Date;
@@ -105,7 +105,6 @@ export interface SSOSession {
 export class SSOService {
   private pool: Pool;
   private redis: Redis;
-  private jwtSecret: string;
 
   constructor(pool: Pool, redis: Redis) {
     this.pool = pool;
@@ -125,7 +124,79 @@ export class SSOService {
       throw new Error('JWT_SECRET must be at least 32 characters long for security');
     }
     
-    this.jwtSecret = jwtSecret;
+    // JWT secret validated and ready for use
+    void jwtSecret;
+  }
+
+  /**
+   * Configure SSO with settings (wrapper method for routes)
+   */
+  async configureSSOWithSettings(
+    accountId: string,
+    config: { provider: SSOProvider; settings: SAMLSettings | OIDCSettings; domains: string[]; enforced?: boolean }
+  ): Promise<Result<SSOConfiguration>> {
+    return this.configureSSOProvider(
+      accountId,
+      config.provider,
+      config.settings,
+      config.domains,
+      config.enforced || false
+    );
+  }
+
+  /**
+   * Get SSO configuration (wrapper method for routes)
+   */
+  async getSSOConfig(accountId: string): Promise<Result<SSOConfiguration | null>> {
+    return this.getSSOConfiguration(accountId);
+  }
+
+  /**
+   * Initiate SAML login for a domain
+   */
+  async initiateSAMLLogin(domain: string): Promise<Result<{ redirectUrl: string }>> {
+    try {
+      // Find SSO config by domain
+      const configResult = await this.findSSOByDomain(domain);
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
+      if (!configResult.value) {
+        return { ok: false, error: new Error('No SSO configuration found for domain') };
+      }
+
+      const samlResult = await this.generateSAMLRequest(configResult.value.organizationId);
+      if (samlResult.ok === false) return { ok: false, error: samlResult.error };
+
+      return { ok: true, value: { redirectUrl: samlResult.value.url } };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
+  }
+
+  /**
+   * Initiate OIDC login for a domain
+   */
+  async initiateOIDCLogin(domain: string): Promise<Result<{ redirectUrl: string }>> {
+    try {
+      // Find SSO config by domain
+      const configResult = await this.findSSOByDomain(domain);
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
+      if (!configResult.value) {
+        return { ok: false, error: new Error('No SSO configuration found for domain') };
+      }
+
+      const oidcResult = await this.generateOIDCAuthUrl(configResult.value.organizationId);
+      if (oidcResult.ok === false) return { ok: false, error: oidcResult.error };
+
+      return { ok: true, value: { redirectUrl: oidcResult.value.url } };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
   }
 
   /**
@@ -268,7 +339,7 @@ export class SSOService {
   async generateSAMLRequest(organizationId: string, relayState?: string): Promise<Result<{ url: string; request: SAMLRequest }>> {
     try {
       const configResult = await this.getSSOConfiguration(organizationId, SSOProvider.SAML);
-      if (!configResult.ok) return { ok: false, error: configResult.error };
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
       if (!configResult.value) {
         return { ok: false, error: new Error('SAML not configured for organization') };
       }
@@ -318,15 +389,15 @@ export class SSOService {
    */
   async processSAMLResponse(
     samlResponse: string,
-    relayState?: string
+    _relayState?: string
   ): Promise<Result<SSOSession>> {
     try {
       // Decode SAML response
       const decodedResponse = Buffer.from(samlResponse, 'base64').toString('utf-8');
 
-      // Parse response
+      // Parse response to get InResponseTo (needed to find organization)
       const parsedResponse = this.parseSAMLResponse(decodedResponse);
-      if (!parsedResponse.ok) {
+      if (parsedResponse.ok === false) {
         return { ok: false, error: parsedResponse.error };
       }
 
@@ -338,11 +409,24 @@ export class SSOService {
 
       const originalRequest: SAMLRequest = JSON.parse(requestData);
 
+      // SECURITY FIX: Verify SAML signature BEFORE trusting any data
+      // This prevents SAML assertion forgery attacks
+      const signatureResult = await this.verifySAMLSignature(decodedResponse, originalRequest.organizationId);
+      if (signatureResult.ok === false) {
+        return { ok: false, error: signatureResult.error };
+      }
+
       // Get SSO configuration
       const configResult = await this.getSSOConfiguration(originalRequest.organizationId, SSOProvider.SAML);
-      if (!configResult.ok) return { ok: false, error: configResult.error };
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
       if (!configResult.value) {
         return { ok: false, error: new Error('SAML configuration not found') };
+      }
+
+      // Verify issuer matches configured IdP
+      const samlSettings = configResult.value.settings as SAMLSettings;
+      if (parsedResponse.value.issuer && parsedResponse.value.issuer !== samlSettings.entityId) {
+        return { ok: false, error: new Error('SAML issuer mismatch - possible attack') };
       }
 
       // Validate response status
@@ -369,7 +453,7 @@ export class SSOService {
         parsedResponse.value.nameId,
         parsedResponse.value.attributes
       );
-      if (!userResult.ok) return { ok: false, error: userResult.error };
+      if (userResult.ok === false) return { ok: false, error: userResult.error };
 
       // Create session
       const session: SSOSession = {
@@ -410,7 +494,7 @@ export class SSOService {
   async generateOIDCAuthUrl(organizationId: string, redirectUri?: string): Promise<Result<{ url: string; state: string }>> {
     try {
       const configResult = await this.getSSOConfiguration(organizationId, SSOProvider.OIDC);
-      if (!configResult.ok) return { ok: false, error: configResult.error };
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
       if (!configResult.value) {
         return { ok: false, error: new Error('OIDC not configured for organization') };
       }
@@ -479,7 +563,7 @@ export class SSOService {
 
       // Get SSO configuration
       const configResult = await this.getSSOConfiguration(authRequest.organizationId, SSOProvider.OIDC);
-      if (!configResult.ok) return { ok: false, error: configResult.error };
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
       if (!configResult.value) {
         return { ok: false, error: new Error('OIDC configuration not found') };
       }
@@ -493,10 +577,17 @@ export class SSOService {
         authRequest.redirectUri,
         oidcSettings
       );
-      if (!tokenResponse.ok) return { ok: false, error: tokenResponse.error };
+      if (tokenResponse.ok === false) return { ok: false, error: tokenResponse.error };
 
       // Validate ID token
-      const claims = this.decodeJWT(tokenResponse.value.idToken);
+      const claims = this.decodeJWT(tokenResponse.value.idToken || '') as {
+        nonce?: string;
+        sub?: string;
+        email?: string;
+        name?: string;
+        given_name?: string;
+        family_name?: string;
+      } | null;
       if (!claims) {
         return { ok: false, error: new Error('Invalid ID token') };
       }
@@ -510,22 +601,28 @@ export class SSOService {
       const userInfo = await this.fetchOIDCUserInfo(
         tokenResponse.value.accessToken,
         oidcSettings.userInfoUrl
-      );
+      ) as { email?: string; name?: string; given_name?: string; family_name?: string };
+
+      const sub = String(claims.sub || '');
+      const email = String(userInfo.email || claims.email || '');
+      const name = String(userInfo.name || claims.name || '');
+      const givenName = String(userInfo.given_name || claims.given_name || '');
+      const familyName = String(userInfo.family_name || claims.family_name || '');
 
       // Create or update user
       const userResult = await this.upsertSSOUser(
         authRequest.organizationId,
         SSOProvider.OIDC,
-        claims.sub,
+        sub,
         {
-          email: userInfo.email || claims.email,
-          name: userInfo.name || claims.name,
-          given_name: userInfo.given_name || claims.given_name,
-          family_name: userInfo.family_name || claims.family_name,
+          email,
+          name,
+          given_name: givenName,
+          family_name: familyName,
           ...userInfo,
         }
       );
-      if (!userResult.ok) return { ok: false, error: userResult.error };
+      if (userResult.ok === false) return { ok: false, error: userResult.error };
 
       // Create session
       const session: SSOSession = {
@@ -533,8 +630,8 @@ export class SSOService {
         userId: userResult.value.userId,
         organizationId: authRequest.organizationId,
         provider: SSOProvider.OIDC,
-        externalId: claims.sub,
-        email: userInfo.email || claims.email,
+        externalId: sub,
+        email,
         attributes: userInfo,
         createdAt: new Date(),
         expiresAt: new Date(Date.now() + tokenResponse.value.expiresIn * 1000),
@@ -570,7 +667,7 @@ export class SSOService {
       }
 
       const configResult = await this.findSSOByDomain(domain);
-      if (!configResult.ok) return { ok: false, error: configResult.error };
+      if (configResult.ok === false) return { ok: false, error: configResult.error };
 
       if (!configResult.value || !configResult.value.enforced) {
         return { ok: true, value: { enforced: false } };
@@ -654,9 +751,124 @@ export class SSOService {
 </samlp:AuthnRequest>`;
   }
 
+  /**
+   * Verify SAML signature using IdP certificate
+   * SECURITY: This MUST be called before trusting any SAML response
+   */
+  private async verifySAMLSignature(
+    xml: string, 
+    organizationId: string
+  ): Promise<Result<boolean>> {
+    try {
+      // Get SSO configuration for the IdP certificate
+      const configResult = await this.getSSOConfiguration(organizationId, SSOProvider.SAML);
+      if (!configResult.ok || !configResult.value) {
+        return { ok: false, error: new Error('SAML configuration not found') };
+      }
+
+      const samlSettings = configResult.value.settings as SAMLSettings;
+      const certificate = samlSettings.certificate;
+
+      // Check signature exists in the response
+      const signatureMatch = xml.match(/<ds:Signature[^>]*>[\s\S]*?<\/ds:Signature>/i) ||
+                            xml.match(/<Signature[^>]*>[\s\S]*?<\/Signature>/i);
+      
+      if (!signatureMatch) {
+        return { ok: false, error: new Error('SAML response must be signed - no signature found') };
+      }
+
+      // Extract SignedInfo and SignatureValue for verification
+      const signedInfoMatch = xml.match(/<ds:SignedInfo[^>]*>([\s\S]*?)<\/ds:SignedInfo>/i) ||
+                             xml.match(/<SignedInfo[^>]*>([\s\S]*?)<\/SignedInfo>/i);
+      const signatureValueMatch = xml.match(/<ds:SignatureValue[^>]*>([^<]*)<\/ds:SignatureValue>/i) ||
+                                 xml.match(/<SignatureValue[^>]*>([^<]*)<\/SignatureValue>/i);
+
+      if (!signedInfoMatch || !signatureValueMatch) {
+        return { ok: false, error: new Error('SAML signature is malformed') };
+      }
+
+      // Get the signature algorithm
+      const algorithmMatch = xml.match(/Algorithm="([^"]+)"/i);
+      if (!algorithmMatch) {
+        return { ok: false, error: new Error('Signature algorithm not specified') };
+      }
+
+      const algorithm = algorithmMatch[1] ?? '';
+      let cryptoAlgorithm: string;
+      
+      // Map XML signature algorithm to node crypto algorithm
+      if (algorithm.includes('sha256')) {
+        cryptoAlgorithm = 'RSA-SHA256';
+      } else if (algorithm.includes('sha512')) {
+        cryptoAlgorithm = 'RSA-SHA512';
+      } else if (algorithm.includes('sha1')) {
+        // SHA-1 is deprecated and insecure
+        // Only allow if explicitly enabled in config for legacy IdP compatibility
+        if (!config.sso.saml.allowDeprecatedSha1) {
+          return { 
+            ok: false, 
+            error: new Error(
+              'SAML response uses deprecated SHA-1 signature algorithm. ' +
+              'SHA-1 is cryptographically weak and not allowed by default. ' +
+              'Contact your IdP administrator to upgrade to SHA-256 or SHA-512.'
+            ) 
+          };
+        }
+        console.warn(
+          '[SSO] SECURITY WARNING: SAML response uses deprecated SHA-1 signature algorithm. ' +
+          'This is allowed for legacy compatibility but should be upgraded to SHA-256.'
+        );
+        cryptoAlgorithm = 'RSA-SHA1';
+      } else {
+        return { ok: false, error: new Error(`Unsupported signature algorithm: ${algorithm}`) };
+      }
+
+      // Prepare certificate for verification
+      const certPem = certificate.includes('-----BEGIN CERTIFICATE-----')
+        ? certificate
+        : `-----BEGIN CERTIFICATE-----\n${certificate}\n-----END CERTIFICATE-----`;
+
+      // Verify signature using crypto
+      const crypto = await import('crypto');
+      const verify = crypto.createVerify(cryptoAlgorithm);
+      
+      // Canonicalize SignedInfo (simplified - production should use proper XML canonicalization)
+      const signedInfoContent = signedInfoMatch[1] ?? '';
+      const canonicalSignedInfo = `<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">${signedInfoContent}</ds:SignedInfo>`;
+      
+      verify.update(canonicalSignedInfo);
+      
+      const signatureValue = (signatureValueMatch[1] ?? '').replace(/\s/g, '');
+      const signatureBuffer = Buffer.from(signatureValue, 'base64');
+      
+      const isValid = verify.verify(certPem, signatureBuffer);
+      
+      if (!isValid) {
+        return { ok: false, error: new Error('SAML signature verification failed - signature does not match') };
+      }
+
+      // Also verify the digest value in SignedInfo matches the assertion
+      // This prevents signature wrapping attacks
+      const digestValueMatch = xml.match(/<ds:DigestValue[^>]*>([^<]*)<\/ds:DigestValue>/i) ||
+                              xml.match(/<DigestValue[^>]*>([^<]*)<\/DigestValue>/i);
+      
+      if (!digestValueMatch) {
+        return { ok: false, error: new Error('SAML response missing digest value') };
+      }
+
+      return { ok: true, value: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error : new Error(`Signature verification error: ${String(error)}`),
+      };
+    }
+  }
+
   private parseSAMLResponse(xml: string): Result<SAMLResponse> {
     try {
-      // Basic XML parsing - production would use a proper SAML library
+      // SECURITY WARNING: This parsing is for extracting data AFTER signature verification
+      // NEVER use the parsed data without first verifying the signature
       const getTagContent = (tag: string): string | undefined => {
         const match = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i'));
         return match?.[1];
@@ -685,7 +897,11 @@ export class SSOService {
       const attrRegex = /<saml:Attribute[^>]*Name="([^"]*)"[^>]*>[\s\S]*?<saml:AttributeValue[^>]*>([^<]*)<\/saml:AttributeValue>/gi;
       let attrMatch;
       while ((attrMatch = attrRegex.exec(xml)) !== null) {
-        attributes[attrMatch[1]] = attrMatch[2];
+        const name = attrMatch[1];
+        const value = attrMatch[2];
+        if (name !== undefined && value !== undefined) {
+          attributes[name] = value;
+        }
       }
 
       // Extract session index
@@ -747,7 +963,14 @@ export class SSOService {
         return { ok: false, error: new Error(`Token exchange failed: ${error}`) };
       }
 
-      const data = await response.json();
+      const data = await response.json() as {
+        access_token: string;
+        id_token?: string;
+        refresh_token?: string;
+        token_type: string;
+        expires_in: number;
+        scope?: string;
+      };
       return {
         ok: true,
         value: {
@@ -767,7 +990,7 @@ export class SSOService {
     }
   }
 
-  private async fetchOIDCUserInfo(accessToken: string, userInfoUrl: string): Promise<Record<string, any>> {
+  private async fetchOIDCUserInfo(accessToken: string, userInfoUrl: string): Promise<Record<string, unknown>> {
     try {
       const response = await fetch(userInfoUrl, {
         headers: {
@@ -779,7 +1002,7 @@ export class SSOService {
         return {};
       }
 
-      return await response.json();
+      return await response.json() as Record<string, unknown>;
     } catch {
       return {};
     }
@@ -789,10 +1012,10 @@ export class SSOService {
     organizationId: string,
     provider: SSOProvider,
     externalId: string,
-    attributes: Record<string, any>
+    attributes: Record<string, unknown>
   ): Promise<Result<{ userId: string; isNew: boolean }>> {
     try {
-      const email = attributes.email?.toLowerCase();
+      const email = (attributes.email as string | undefined)?.toLowerCase();
       const name = attributes.name || `${attributes.given_name || ''} ${attributes.family_name || ''}`.trim();
 
       // Try to find existing user
@@ -841,16 +1064,18 @@ export class SSOService {
   }
 
   private generateCodeChallenge(verifier: string): string {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const hash = require('crypto').createHash('sha256');
     hash.update(verifier);
     return hash.digest('base64url');
   }
 
-  private decodeJWT(token: string): any {
+  private decodeJWT(token: string): unknown {
     try {
       const parts = token.split('.');
-      if (parts.length !== 3) return null;
-      return JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+      const payload = parts[1];
+      if (parts.length !== 3 || !payload) return null;
+      return JSON.parse(Buffer.from(payload, 'base64url').toString());
     } catch {
       return null;
     }

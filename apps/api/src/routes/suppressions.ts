@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { SuppressionsRepository, AuditLogsRepository, type SuppressionType, type SuppressionScope } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
-import { createHash } from 'crypto';
+import { sha256 } from '@apexmail/lib/crypto';
 
 const addSuppressionSchema = z.object({
   email: z.string().email(),
@@ -624,7 +624,7 @@ function maskEmail(email: string): string {
 }
 
 function hashEmail(email: string): string {
-  return createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
+  return sha256(email.toLowerCase().trim());
 }
 
 import type { Suppression } from '@apexmail/db';

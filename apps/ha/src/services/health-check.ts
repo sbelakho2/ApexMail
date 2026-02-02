@@ -8,8 +8,9 @@
  * - External dependencies
  */
 
-import { Pool, PoolClient } from 'pg';
+import { Pool } from 'pg';
 import Redis from 'ioredis';
+import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
 
 export enum HealthStatus {
@@ -46,8 +47,6 @@ export interface ServiceEndpoint {
   critical: boolean;
 }
 
-type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
-
 export class HealthCheckService {
   private primaryDb: Pool;
   private replicaDb: Pool | null;
@@ -83,20 +82,24 @@ export class HealthCheckService {
   startPeriodicChecks(): void {
     if (this.checkInterval) return;
 
-    this.checkInterval = setInterval(async () => {
-      const health = await this.getClusterHealth();
-      
-      // Notify listeners
-      for (const listener of this.listeners) {
-        try {
-          listener(health);
-        } catch (error) {
-          console.error('[HealthCheck] Listener error:', error);
-        }
-      }
+    this.checkInterval = setInterval(() => {
+      this.getClusterHealth()
+        .then(async (health) => {
+          // Notify listeners
+          for (const listener of this.listeners) {
+            try {
+              listener(health);
+            } catch (error) {
+              console.error('[HealthCheck] Listener error:', error);
+            }
+          }
 
-      // Store in Redis for cluster-wide visibility
-      await this.publishHealth(health);
+          // Store in Redis for cluster-wide visibility
+          await this.publishHealth(health);
+        })
+        .catch(err => {
+          console.error('[HealthCheck] Health check failed:', err instanceof Error ? err.message : err);
+        });
     }, config.healthCheckInterval);
 
     // Run immediately

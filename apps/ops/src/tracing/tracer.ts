@@ -29,7 +29,7 @@ import { Resource } from '@opentelemetry/resources';
 import {
     ATTR_SERVICE_NAME,
     ATTR_SERVICE_VERSION,
-    ATTR_DEPLOYMENT_ENVIRONMENT,
+    SEMRESATTRS_DEPLOYMENT_ENVIRONMENT,
 } from '@opentelemetry/semantic-conventions';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import pino from 'pino';
@@ -79,7 +79,7 @@ export class TracingService {
         const resource = new Resource({
             [ATTR_SERVICE_NAME]: this.config.serviceName,
             [ATTR_SERVICE_VERSION]: this.config.serviceVersion,
-            [ATTR_DEPLOYMENT_ENVIRONMENT]: this.config.environment,
+            [SEMRESATTRS_DEPLOYMENT_ENVIRONMENT]: this.config.environment,
         });
 
         this.provider = new NodeTracerProvider({
@@ -120,6 +120,7 @@ export class TracingService {
      * Creates a local span exporter for debugging
      */
     private createLocalExporter(): SpanExporter {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
         const self = this;
         return {
             export(spans: ReadableSpan[], resultCallback: (result: { code: number }) => void): void {

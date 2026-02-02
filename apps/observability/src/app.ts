@@ -9,7 +9,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 import { config } from './config.js';
 import { TracingService } from './services/tracing.js';
@@ -32,20 +32,20 @@ export interface AppContext {
 export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
   // Initialize database pool
   const db = new Pool({
-    host: config.database.host,
-    port: config.database.port,
-    database: config.database.database,
-    user: config.database.user,
-    password: config.database.password,
-    max: config.database.maxConnections,
+    host: config.dbHost,
+    port: config.dbPort,
+    database: config.database,
+    user: config.dbUser,
+    password: config.dbPassword,
+    max: config.dbPoolMax,
   });
 
   // Initialize Redis
   const redis = new Redis({
-    host: config.redis.host,
-    port: config.redis.port,
-    password: config.redis.password || undefined,
-    db: config.redis.db,
+    host: config.redisHost,
+    port: config.redisPort,
+    password: config.redisPassword || undefined,
+    db: 0,
   });
 
   // Initialize services
@@ -76,7 +76,7 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
 
   // Global middleware
   app.use('*', cors({
-    origin: config.cors.origins,
+    origin: config.corsOrigins,
     credentials: true,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Workspace-ID'],
@@ -91,12 +91,14 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
   app.use('*', async (c, next) => {
     const requestId = c.req.header('X-Request-ID') || `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     c.header('X-Request-ID', requestId);
+    // @ts-expect-error - Hono context extension for request ID
     c.set('requestId', requestId);
     
     const startTime = Date.now();
     
     // Start trace span
-    const span = tracing.startSpan('http.request', {
+    const span = tracing.startSpan({
+      name: 'http.request',
       attributes: {
         'http.method': c.req.method,
         'http.url': c.req.url,
@@ -117,7 +119,7 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
       const duration = Date.now() - startTime;
       metrics.recordHttpRequest(c.req.method, c.req.path, 500, duration);
       
-      span.setStatus({ code: 2, message: (error as Error).message });
+      span.setStatus('error', (error as Error).message);
       span.end();
       
       throw error;
@@ -202,17 +204,16 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
 
   // Error handling
   app.onError((err, c) => {
+    // @ts-expect-error - Hono context extension for request ID
     const requestId = c.get('requestId') || 'unknown';
     
     console.error(`[${requestId}] Error:`, err);
 
     // Log error
-    logging.error('Request error', {
+    logging.error('Request error', err, {
       requestId,
       method: c.req.method,
       path: c.req.path,
-      error: err.message,
-      stack: err.stack,
     });
 
     // Determine status code
@@ -221,10 +222,11 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
     return c.json({
       error: {
         message: status === 500 ? 'Internal server error' : err.message,
+        code: status,
         requestId,
         timestamp: new Date().toISOString(),
       },
-    }, status);
+    }, status as 500);
   });
 
   // 404 handler

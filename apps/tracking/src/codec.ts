@@ -2,10 +2,16 @@
  * Tracking ID Codec - Encode/decode tracking information in URLs
  */
 
-import { createCipheriv, createDecipheriv, randomBytes, createHmac } from 'crypto';
+import {
+  encryptAES128GCM,
+  decryptAES128GCM,
+  deriveKeyHMAC,
+  hmacBuffer,
+  hmacSign,
+  timingSafeCompareBuffers,
+} from '@apexmail/lib/crypto';
 
 // Using a compact binary format for minimal URL length
-const ALGORITHM = 'aes-128-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 
@@ -26,14 +32,8 @@ export class TrackingCodec {
 
   constructor(secretKey: string) {
     // Derive encryption and signature keys from the secret
-    this.encryptionKey = createHmac('sha256', secretKey)
-      .update('encryption')
-      .digest()
-      .subarray(0, 16); // 128 bits for AES-128
-    
-    this.signatureKey = createHmac('sha256', secretKey)
-      .update('signature')
-      .digest();
+    this.encryptionKey = deriveKeyHMAC(secretKey, 'encryption', 16); // 128 bits for AES-128
+    this.signatureKey = deriveKeyHMAC(secretKey, 'signature', 32);
   }
 
   /**
@@ -43,19 +43,11 @@ export class TrackingCodec {
     // Create compact binary representation
     const payload = this.serializeData(data);
     
-    // Encrypt
-    const iv = randomBytes(IV_LENGTH);
-    const cipher = createCipheriv(ALGORITHM, this.encryptionKey, iv);
-    
-    const encrypted = Buffer.concat([
-      cipher.update(payload),
-      cipher.final(),
-    ]);
-    
-    const authTag = cipher.getAuthTag();
+    // Encrypt using AES-128-GCM
+    const { ciphertext, iv, authTag } = encryptAES128GCM(payload, this.encryptionKey);
     
     // Combine: iv + authTag + encrypted
-    const combined = Buffer.concat([iv, authTag, encrypted]);
+    const combined = Buffer.concat([iv, authTag, ciphertext]);
     
     // Base64url encode
     return this.base64UrlEncode(combined);
@@ -74,17 +66,15 @@ export class TrackingCodec {
       
       const iv = combined.subarray(0, IV_LENGTH);
       const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
-      const encrypted = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
+      const ciphertext = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
       
-      const decipher = createDecipheriv(ALGORITHM, this.encryptionKey, iv);
-      decipher.setAuthTag(authTag);
+      const result = decryptAES128GCM(ciphertext, this.encryptionKey, iv, authTag);
       
-      const decrypted = Buffer.concat([
-        decipher.update(encrypted),
-        decipher.final(),
-      ]);
+      if (!result.ok) {
+        return null;
+      }
       
-      return this.deserializeData(decrypted);
+      return this.deserializeData(result.value);
       
     } catch {
       return null;
@@ -96,9 +86,7 @@ export class TrackingCodec {
    */
   generateUnsubscribeToken(tenantId: string, recipient: string): string {
     const payload = `${tenantId}:${recipient}:${Date.now()}`;
-    const signature = createHmac('sha256', this.signatureKey)
-      .update(payload)
-      .digest()
+    const signature = hmacBuffer(this.signatureKey, payload, 'sha256')
       .subarray(0, 16); // Truncate to 128 bits
     
     const combined = Buffer.concat([
@@ -126,12 +114,10 @@ export class TrackingCodec {
       const payload = payloadBuffer.toString('utf-8');
       
       // Verify signature
-      const expectedSig = createHmac('sha256', this.signatureKey)
-        .update(payload)
-        .digest()
+      const expectedSig = hmacBuffer(this.signatureKey, payload, 'sha256')
         .subarray(0, 16);
       
-      if (!this.timingSafeEqual(providedSig, expectedSig)) {
+      if (!this.timingSafeEqualBuffers(providedSig, expectedSig)) {
         return null;
       }
       
@@ -280,20 +266,8 @@ export class TrackingCodec {
     return Buffer.from(str, 'base64url');
   }
 
-  private timingSafeEqual(a: Buffer, b: Buffer): boolean {
-    if (a.length !== b.length) {
-      return false;
-    }
-    
-    let result = 0;
-    for (let i = 0; i < a.length; i++) {
-      const aVal = a[i];
-      const bVal = b[i];
-      if (aVal !== undefined && bVal !== undefined) {
-        result |= aVal ^ bVal;
-      }
-    }
-    return result === 0;
+  private timingSafeEqualBuffers(a: Buffer, b: Buffer): boolean {
+    return timingSafeCompareBuffers(a, b);
   }
 }
 
@@ -351,9 +325,7 @@ export class LinkRewriter {
    * Generate a link ID from URL and position
    */
   generateLinkId(url: string, position: number): string {
-    const hash = createHmac('sha256', 'link-id')
-      .update(`${url}:${position}`)
-      .digest('hex')
+    const hash = hmacSign('link-id', `${url}:${position}`, 'sha256')
       .substring(0, 8);
     return `lnk_${hash}`;
   }
