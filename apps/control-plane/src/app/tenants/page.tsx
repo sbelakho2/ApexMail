@@ -176,14 +176,14 @@ export default function TenantsPage() {
                     <table className="w-full">
                         <thead>
                             <tr className="border-b border-surface-200 text-left bg-surface-50/50">
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Tenant</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Plan</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Status</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Risk</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Emails/Mo</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">MRR</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Last Active</th>
-                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Actions</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Tenant</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Plan</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Status</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Risk</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Emails/Mo</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">MRR</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Last Active</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-600 uppercase">Actions</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-surface-100">
@@ -194,17 +194,17 @@ export default function TenantsPage() {
                                         <div className="text-sm text-surface-500">{tenant.domain}</div>
                                     </td>
                                     <td className="px-4 py-4">
-                                        <span className={cn('px-2 py-1 rounded text-xs font-medium', PLAN_COLORS[tenant.plan])}>
+                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', PLAN_COLORS[tenant.plan])}>
                                             {tenant.plan}
                                         </span>
                                     </td>
                                     <td className="px-4 py-4">
-                                        <span className={cn('px-2 py-1 rounded text-xs font-medium', STATUS_COLORS[tenant.status])}>
+                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', STATUS_COLORS[tenant.status])}>
                                             {tenant.status}
                                         </span>
                                     </td>
                                     <td className="px-4 py-4">
-                                        <span className={cn('px-2 py-1 rounded text-xs font-medium', getRiskColor(tenant.riskLevel))}>
+                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', getRiskColor(tenant.riskLevel))}>
                                             {tenant.riskLevel}
                                         </span>
                                     </td>
@@ -275,7 +275,7 @@ export default function TenantsPage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Plan</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Plan</label>
                                 <div className="mt-1">
                                     <div className={cn('inline-block px-2.5 py-0.5 rounded-full text-sm font-medium', PLAN_COLORS[selectedTenant.plan])}>
                                         {selectedTenant.plan}
@@ -283,7 +283,7 @@ export default function TenantsPage() {
                                 </div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Status</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Status</label>
                                 <div className="mt-1">
                                     <div className={cn('inline-block px-2.5 py-0.5 rounded-full text-sm font-medium', STATUS_COLORS[selectedTenant.status])}>
                                         {selectedTenant.status}
@@ -291,29 +291,47 @@ export default function TenantsPage() {
                                 </div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">MRR</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">MRR</label>
                                 <div className="font-medium text-surface-900 mt-1">{selectedTenant.billing.mrr > 0 ? formatCurrency(selectedTenant.billing.mrr) : 'N/A'}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Payment Method</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Payment Method</label>
                                 <div className="font-medium text-surface-900 mt-1">{selectedTenant.billing.paymentMethod || 'None'}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Contact Email</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Contact Email</label>
                                 <div className="font-medium text-surface-900 mt-1">{selectedTenant.email}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Customer Since</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Customer Since</label>
                                 <div className="font-medium text-surface-900 mt-1">{formatDate(selectedTenant.createdAt)}</div>
                             </div>
                         </div>
 
                         <div className="flex gap-3 pt-6 border-t border-surface-100">
+                            <button
+                                onClick={() => {
+                                    // In production: Generate impersonation token and redirect to console
+                                    const impersonateUrl = `${process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000'}?impersonate=${selectedTenant.id}`;
+                                    window.open(impersonateUrl, '_blank');
+                                }}
+                                className="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg text-center hover:bg-amber-700 font-medium transition-colors flex items-center justify-center gap-2"
+                            >
+                                <span>👁️</span> Impersonate User
+                            </button>
+                            <Link
+                                href={`/support?tenant=${selectedTenant.id}`}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
+                            >
+                                Support
+                            </Link>
+                        </div>
+                        <div className="flex gap-3 pt-3">
                             <Link
                                 href={`/risk?tenant=${selectedTenant.id}`}
-                                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-center hover:bg-blue-700 font-medium transition-colors"
+                                className="flex-1 px-4 py-2 bg-surface-100 text-surface-700 rounded-lg text-center hover:bg-surface-200 font-medium transition-colors"
                             >
-                                View Risk Profile
+                                Risk Profile
                             </Link>
                             <Link
                                 href={`/audit?tenant=${selectedTenant.id}`}

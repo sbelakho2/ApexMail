@@ -55,7 +55,7 @@ export function ForensicCTA() {
  ].map((item) => (
  <div key={item.label}>
  <div className="text-2xl font-bold text-surface-900 tabular-nums mb-1">{item.value}</div>
- <div className="text-[10px] font-bold text-surface-500 uppercase tracking-widest">{item.label}</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{item.label}</div>
  </div>
  ))}
  </div>

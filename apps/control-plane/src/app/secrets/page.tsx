@@ -207,12 +207,12 @@ export default function SecretsPage() {
                                         <div className="text-xs text-surface-500">{secret.description}</div>
                                     </td>
                                     <td className="px-4 py-3">
-                                        <span className={cn('px-2 py-1 rounded text-xs font-medium', typeConfig.color)}>
+                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', typeConfig.color)}>
                                             {typeConfig.icon} {typeConfig.label}
                                         </span>
                                     </td>
                                     <td className="px-4 py-3">
-                                        <span className={cn('px-2 py-1 rounded text-xs font-medium', statusConfig.color)}>
+                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', statusConfig.color)}>
                                             {statusConfig.label}
                                         </span>
                                     </td>
@@ -262,13 +262,13 @@ export default function SecretsPage() {
                         <div className="space-y-4 mb-6">
                             <div className="flex justify-between py-2 border-b border-surface-100">
                                 <span className="text-surface-500">Type</span>
-                                <span className={cn('px-2 py-0.5 rounded text-xs font-medium', SECRET_TYPES[selectedSecret.type].color)}>
+                                <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', SECRET_TYPES[selectedSecret.type].color)}>
                                     {SECRET_TYPES[selectedSecret.type].icon} {SECRET_TYPES[selectedSecret.type].label}
                                 </span>
                             </div>
                             <div className="flex justify-between py-2 border-b border-surface-100">
                                 <span className="text-surface-500">Status</span>
-                                <span className={cn('px-2 py-0.5 rounded text-xs font-medium', STATUS_CONFIG[selectedSecret.status].color)}>
+                                <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', STATUS_CONFIG[selectedSecret.status].color)}>
                                     {STATUS_CONFIG[selectedSecret.status].label}
                                 </span>
                             </div>

@@ -39,7 +39,7 @@ export function ConsentLedger() {
  {/* Header */}
  <div className="flex items-center gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50">
  <Database className="w-4 h-4 text-primary-600" />
- <span className="text-[10px] font-bold text-surface-500 uppercase tracking-widest font-mono">Consent Ledger Entry</span>
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">Consent Ledger Entry</span>
  </div>
  <div className="bg-surface-900 overflow-hidden shadow-inner">
  <CodeBlock code={ledgerCode} language="json" />

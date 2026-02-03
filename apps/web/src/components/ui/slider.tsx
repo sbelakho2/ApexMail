@@ -100,7 +100,7 @@ const Slider = React.forwardRef<
  className={cn(sliderThumbVariants({ size }), 'relative')}
  >
  {showTooltip && showValue && (
- <span className="absolute -top-8 left-1/2 -translate-x-1/2 rounded bg-primary px-2 py-1 text-xs text-primary-foreground">
+ <span className="absolute -top-8 left-1/2 -translate-x-1/2 rounded bg-primary px-2.5 py-1 text-xs text-primary-foreground">
  {(props.value || props.defaultValue)?.[index]}
  </span>
  )}

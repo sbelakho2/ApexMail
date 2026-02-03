@@ -200,7 +200,7 @@ export function LiveAPIConsole() {
               <span className="text-[11px] font-bold text-surface-400 uppercase tracking-widest">cURL command</span>
               <button
                 onClick={handleCopy}
-                className="flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700 transition-colors bg-white px-2 py-1 rounded-md border border-surface-200 shadow-sm"
+                className="flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700 transition-colors bg-white px-2.5 py-1 rounded-md border border-surface-200 shadow-sm"
               >
                 {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                 {copied ? 'Copied!' : 'Copy'}

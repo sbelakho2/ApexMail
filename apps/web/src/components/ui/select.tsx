@@ -23,7 +23,7 @@ const selectTriggerVariants = cva(
         ghost: 'border-transparent bg-transparent shadow-none hover:bg-muted/50',
       },
       size: {
-        sm: 'h-8 px-2 text-xs',
+        sm: 'h-8 px-2.5 text-xs',
         default: 'h-10 px-3',
         lg: 'h-12 px-4 text-[16px]',
       },

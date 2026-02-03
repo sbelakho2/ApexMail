@@ -191,13 +191,13 @@ export function AuditTrail() {
  />
  <span className="text-surface-900 font-bold font-mono text-xs uppercase tracking-tight">{event.action}</span>
  </div>
- <span className="text-[10px] font-bold text-surface-400 uppercase tracking-widest font-mono">
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">
  {new Date(event.timestamp).toLocaleTimeString()}
  </span>
  </div>
  <div className="text-sm text-surface-700 font-medium mb-3 leading-relaxed">{event.details}</div>
  <div className="flex items-center gap-4">
- <div className="flex items-center gap-1.5 px-2 py-1 bg-white border border-surface-200 rounded-md ">
+ <div className="flex items-center gap-1.5 px-2.5 py-1 bg-white border border-surface-200 rounded-md ">
  <User className="w-3 h-3 text-surface-400" />
  <span className="text-[10px] font-bold text-surface-600 font-mono tracking-tight">{event.actor}</span>
  </div>
@@ -212,7 +212,7 @@ export function AuditTrail() {
  className="mt-6 pt-6 border-t border-surface-100"
  >
  <div className="bg-surface-900 rounded-lg p-4 font-mono text-xs shadow-inner">
- <div className="text-surface-500 mb-3 font-bold uppercase tracking-widest text-[9px] border-b border-surface-800 pb-2">// Full Event Payload</div>
+ <div className="text-surface-600 mb-3 font-bold uppercase tracking-widest text-[9px] border-b border-surface-800 pb-2">// Full Event Payload</div>
  <pre className="text-surface-300 whitespace-pre-wrap overflow-auto max-h-64">
 {JSON.stringify(
  {
@@ -245,7 +245,7 @@ export function AuditTrail() {
 
  {/* Footer */}
  <div className="p-4 bg-white border-t border-surface-200 text-center">
- <span className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">
  Showing {filteredEvents.length} of 2,847,392 events
  </span>
  </div>

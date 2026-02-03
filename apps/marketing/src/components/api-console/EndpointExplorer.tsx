@@ -238,7 +238,7 @@ export function EndpointExplorer() {
  <div className="flex items-center gap-3 mb-2">
  <span
  className={cn(
- 'px-2 py-0.5 text-[10px] font-bold uppercase tracking-tight rounded',
+ 'px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-tight rounded',
  endpoint.method === 'GET'
  ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
  : endpoint.method === 'POST'

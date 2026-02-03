@@ -149,7 +149,7 @@ export function FeaturesSection() {
                 <div className="w-12 h-12 rounded-lg bg-primary-50 flex items-center justify-center border border-primary-100 group-hover:bg-primary-100 transition-colors">
                   <feature.icon className="w-6 h-6 text-primary-600" />
                 </div>
-                <span className="inline-flex items-center px-2 py-1 rounded-md bg-white text-surface-600 border border-surface-200 text-[10px] font-bold uppercase tracking-widest">
+                <span className="inline-flex items-center px-2.5 py-1 rounded-md bg-white text-surface-600 border border-surface-200 text-[10px] font-bold uppercase tracking-widest">
                   {feature.badge}
                 </span>
               </div>
@@ -183,7 +183,7 @@ export function FeaturesSection() {
     ].map((stat) => (
       <div key={stat.label} className="text-center premium-card py-6 bg-surface-50">
         <div className="text-3xl lg:text-4xl font-bold text-primary-600 mb-1 tabular-nums">{stat.value}</div>
-        <div className="text-[10px] font-bold text-surface-500 uppercase tracking-widest">{stat.label}</div>
+        <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
       </div>
     ))}
   </motion.div>

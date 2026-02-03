@@ -188,7 +188,7 @@ export default function CRMPipelinePage() {
                                             )}
                                             <div className="flex flex-wrap gap-1.5 mb-3">
                                                 {lead.tags.slice(0, 2).map(tag => (
-                                                    <span key={tag} className="px-2 py-0.5 bg-surface-50 border border-surface-200 rounded text-[10px] text-surface-600 font-medium">
+                                                    <span key={tag} className="px-2.5 py-0.5 bg-surface-50 border border-surface-200 rounded text-[10px] text-surface-600 font-medium">
                                                         {tag}
                                                     </span>
                                                 ))}
@@ -227,13 +227,13 @@ export default function CRMPipelinePage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
                             <div>
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Lead Score</label>
-                                <div className={cn('text-lg font-bold inline-block px-2 py-0.5 rounded', getScoreColor(selectedLead.score))}>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Lead Score</label>
+                                <div className={cn('text-lg font-bold inline-block px-2.5 py-0.5 rounded', getScoreColor(selectedLead.score))}>
                                     {selectedLead.score}/100
                                 </div>
                             </div>
                             <div>
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Source</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Source</label>
                                 <div className="text-surface-900 font-medium">{selectedLead.source}</div>
                             </div>
                             <div>

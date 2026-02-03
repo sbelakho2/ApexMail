@@ -316,19 +316,19 @@ export default function RiskMonitoringPage() {
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
                             <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
                                 <div className={cn("text-xl font-bold", selectedTenant.metrics.bounceRate > 0.1 ? "text-red-600" : "text-surface-900")}>{(selectedTenant.metrics.bounceRate * 100).toFixed(2)}%</div>
-                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Bounce Rate</div>
+                                <div className="text-xs font-semibold text-surface-600 uppercase tracking-wider mt-1">Bounce Rate</div>
                             </div>
                             <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
                                 <div className="text-xl font-bold text-surface-900">{(selectedTenant.metrics.complaintRate * 100).toFixed(3)}%</div>
-                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Complaint Rate</div>
+                                <div className="text-xs font-semibold text-surface-600 uppercase tracking-wider mt-1">Complaint Rate</div>
                             </div>
                             <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
                                 <div className="text-xl font-bold text-surface-900">{formatNumber(selectedTenant.metrics.dailyVolume)}</div>
-                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Daily Volume</div>
+                                <div className="text-xs font-semibold text-surface-600 uppercase tracking-wider mt-1">Daily Volume</div>
                             </div>
                             <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
                                 <div className="text-xl font-bold text-surface-900">{formatNumber(selectedTenant.metrics.monthlyVolume)}</div>
-                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Monthly Volume</div>
+                                <div className="text-xs font-semibold text-surface-600 uppercase tracking-wider mt-1">Monthly Volume</div>
                             </div>
                         </div>
 
@@ -337,7 +337,7 @@ export default function RiskMonitoringPage() {
                             <div className="mb-8">
                                 <h3 className="font-semibold text-surface-900 mb-4 flex items-center gap-2">
                                     <span>Active Risk Flags</span>
-                                    <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs">{selectedTenant.flags.filter(f => !f.resolved).length}</span>
+                                    <span className="bg-red-100 text-red-700 px-2.5 py-0.5 rounded-full text-xs">{selectedTenant.flags.filter(f => !f.resolved).length}</span>
                                 </h3>
                                 <div className="space-y-3">
                                     {selectedTenant.flags.filter(f => !f.resolved).map(flag => (
@@ -374,7 +374,7 @@ export default function RiskMonitoringPage() {
                             <h3 className="font-semibold text-surface-900 mb-4">Enforcement & Limits</h3>
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                                 <div>
-                                    <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">Daily Limit</div>
+                                    <div className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2">Daily Limit</div>
                                     <div className="flex items-center gap-2 bg-surface-0 p-1 rounded-lg border border-surface-300 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all">
                                         <input
                                             type="number"
@@ -387,7 +387,7 @@ export default function RiskMonitoringPage() {
                                     </div>
                                 </div>
                                 <div>
-                                    <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">Hourly Limit</div>
+                                    <div className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2">Hourly Limit</div>
                                     <div className="flex items-center gap-2 bg-surface-0 p-1 rounded-lg border border-surface-300 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all">
                                         <input
                                             type="number"

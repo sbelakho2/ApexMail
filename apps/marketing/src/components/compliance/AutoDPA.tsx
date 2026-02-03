@@ -59,7 +59,7 @@ export function AutoDPA() {
  </div>
  <div>
  <div className="font-bold text-surface-900">Data Processing Agreement</div>
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">Generated: Feb 15, 2024</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">Generated: Feb 15, 2024</div>
  </div>
  </div>
  <div className="space-y-3 mb-6">
@@ -68,10 +68,10 @@ export function AutoDPA() {
  <div className="h-2 bg-surface-50 rounded-full w-4/5" />
  </div>
  <div className="mt-6 pt-6 border-t border-surface-100">
- <div className="text-[10px] font-bold text-surface-400 mb-3 uppercase tracking-widest">Included Clauses:</div>
+ <div className="text-[10px] font-bold text-surface-600 mb-3 uppercase tracking-widest">Included Clauses:</div>
  <div className="flex flex-wrap gap-2">
  {['GDPR Art. 28', 'SCCs', 'Sub-processors', 'Security Measures'].map((item) => (
- <span key={item} className="px-2 py-1 bg-surface-100 text-surface-600 text-[10px] font-bold uppercase tracking-tight rounded-md border border-surface-200">
+ <span key={item} className="px-2.5 py-1 bg-surface-100 text-surface-600 text-[10px] font-bold uppercase tracking-tight rounded-md border border-surface-200">
  {item}
  </span>
  ))}

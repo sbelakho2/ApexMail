@@ -193,11 +193,11 @@ export default function GDPRPage() {
                                             <div>
                                                 <div className="flex items-center gap-2 mb-1">
                                                     <span className="font-medium text-surface-900">{typeInfo.label}</span>
-                                                    <span className={cn('px-2 py-0.5 rounded text-xs font-medium', getStatusColor(request.status))}>
+                                                    <span className={cn('px-2.5 py-0.5 rounded text-xs font-medium', getStatusColor(request.status))}>
                                                         {request.status}
                                                     </span>
                                                     {overdue && (
-                                                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                                                        <span className="px-2.5 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
                                                             OVERDUE
                                                         </span>
                                                     )}
@@ -256,29 +256,29 @@ export default function GDPRPage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Request ID</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Request ID</label>
                                 <div className="font-mono text-sm text-surface-700">{selectedRequest.id}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Status</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Status</label>
                                 <div className={cn('font-medium', getStatusColor(selectedRequest.status).split(' ')[0])}>
                                     {selectedRequest.status}
                                 </div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Data Subject</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Data Subject</label>
                                 <div className="font-medium text-surface-900">{selectedRequest.email}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Tenant</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Tenant</label>
                                 <div className="font-medium text-surface-900">{selectedRequest.tenantName}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">Created</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">Created</label>
                                 <div className="text-surface-700">{formatDate(selectedRequest.createdAt)}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-surface-500 uppercase font-semibold">SLA Deadline</label>
+                                <label className="text-xs text-surface-600 uppercase font-semibold">SLA Deadline</label>
                                 <div className={cn('text-surface-700', isOverdue(selectedRequest) && 'text-red-600 font-medium')}>
                                     {formatDate(selectedRequest.slaDeadline)}
                                 </div>
@@ -287,7 +287,7 @@ export default function GDPRPage() {
 
                         {selectedRequest.notes && (
                             <div className="mb-6 p-3 bg-surface-50 rounded-lg border border-surface-100">
-                                <label className="text-xs text-surface-500 uppercase mb-1 block font-semibold">Notes</label>
+                                <label className="text-xs text-surface-600 uppercase mb-1 block font-semibold">Notes</label>
                                 <div className="text-sm text-surface-700">{selectedRequest.notes}</div>
                             </div>
                         )}

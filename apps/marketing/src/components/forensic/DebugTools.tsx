@@ -86,7 +86,7 @@ export function DebugTools() {
  {tool.features.map((feature) => (
  <span
  key={feature}
- className="px-2 py-1 bg-white text-surface-600 text-[10px] font-bold uppercase tracking-tight rounded-md border border-surface-200"
+ className="px-2.5 py-1 bg-white text-surface-600 text-[10px] font-bold uppercase tracking-tight rounded-md border border-surface-200"
  >
  {feature}
  </span>
@@ -111,7 +111,7 @@ export function DebugTools() {
  <div className="w-3 h-3 rounded-full bg-surface-600" />
  <div className="w-3 h-3 rounded-full bg-surface-600" />
  </div>
- <span className="ml-4 text-[10px] font-bold text-surface-400 uppercase tracking-widest font-mono">apexmail-cli</span>
+ <span className="ml-4 text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">apexmail-cli</span>
  </div>
  <div className="p-8 font-mono text-sm leading-relaxed">
  <div className="text-surface-500 mb-2">$ apexmail inspect msg_7f3d8a2b</div>

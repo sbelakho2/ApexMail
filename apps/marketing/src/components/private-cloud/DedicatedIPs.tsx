@@ -68,7 +68,7 @@ export function DedicatedIPs() {
  <div className="premium-card p-8 bg-surface-50">
  <div className="flex items-center justify-between mb-8">
  <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">IP Pool Dashboard</div>
- <div className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-tight rounded-md">
+ <div className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-tight rounded-md">
  All Healthy
  </div>
  </div>
@@ -114,7 +114,7 @@ export function DedicatedIPs() {
  </div>
  </div>
  <div
- className={`px-2 py-0.5 text-[9px] font-bold uppercase tracking-tight rounded-md ${
+ className={`px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-tight rounded-md ${
  ipData.status === 'active'
  ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
  : ipData.status === 'warming'

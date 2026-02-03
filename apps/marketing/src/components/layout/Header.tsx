@@ -142,7 +142,7 @@ export function Header() {
  {navigation.map((item) => (
  'items' in item ? (
  <div key={item.name} className="space-y-2">
- <div className="text-xs font-bold text-surface-400 uppercase tracking-widest">{item.name}</div>
+ <div className="text-xs font-bold text-surface-600 uppercase tracking-widest">{item.name}</div>
  {item.items?.map((subItem) => (
  <Link
  key={subItem.name}

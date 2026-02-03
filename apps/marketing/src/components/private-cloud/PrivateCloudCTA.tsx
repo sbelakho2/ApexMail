@@ -57,7 +57,7 @@ export function PrivateCloudCTA() {
  <div key={step.day} className="text-center relative">
  <div className="text-primary-600 font-bold text-[10px] uppercase tracking-widest mb-1">{step.day}</div>
  <div className="text-surface-900 font-bold text-sm mb-1">{step.title}</div>
- <div className="text-[10px] text-surface-500 font-bold uppercase tracking-tight">{step.description}</div>
+ <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight">{step.description}</div>
  </div>
  ))}
  </div>
@@ -101,7 +101,7 @@ export function PrivateCloudCTA() {
  transition={{ delay: 0.4 }}
  className="text-center mt-12"
  >
- <p className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-6">
+ <p className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-6">
  Trusted by security-conscious enterprises
  </p>
  <div className="flex flex-wrap justify-center gap-12 opacity-40 grayscale">

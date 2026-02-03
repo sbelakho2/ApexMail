@@ -59,7 +59,7 @@ export function ComplianceCTA() {
  <item.icon className="w-5 h-5 text-primary-600" />
  </div>
  <div className="text-surface-900 font-bold text-sm mb-1">{item.label}</div>
- <div className="text-[10px] text-surface-400 font-bold uppercase tracking-tight">{item.sublabel}</div>
+ <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight">{item.sublabel}</div>
  </div>
  ))}
  </div>

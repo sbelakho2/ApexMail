@@ -230,7 +230,7 @@ export function PricingCalculator() {
                       {(prices.apexmail / (volume / 1000)).toFixed(3)}/1K emails
                     </div>
                     {savings > 0 && (
-                      <div className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-bold uppercase tracking-tight border border-emerald-100">
+                      <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-bold uppercase tracking-tight border border-emerald-100">
                         Save {formatCurrency(savings)}/mo
                       </div>
                     )}

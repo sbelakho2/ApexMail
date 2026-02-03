@@ -115,10 +115,10 @@ export function PricingPlans() {
               )}
 
               <div className="text-center mb-10">
-                <h3 className="text-[13px] font-bold text-surface-400 uppercase tracking-[0.2em] mb-4">{plan.name}</h3>
+                <h3 className="text-[13px] font-bold text-surface-600 uppercase tracking-[0.2em] mb-4">{plan.name}</h3>
                 <div className="flex items-baseline justify-center gap-1">
                   <span className="text-5xl font-bold text-surface-900 tabular-nums tracking-tighter">{plan.price}</span>
-                  <span className="text-[11px] font-bold text-surface-400 uppercase tracking-widest">{plan.period}</span>
+                  <span className="text-[11px] font-bold text-surface-600 uppercase tracking-widest">{plan.period}</span>
                 </div>
                 <p className="text-[14px] font-medium text-surface-500 mt-6 leading-relaxed h-12">{plan.description}</p>
               </div>
@@ -183,7 +183,7 @@ export function PricingPlans() {
               </div>
             </div>
             <div className="w-full lg:w-[400px] text-center bg-white/5 backdrop-blur-sm p-10 rounded-2xl border border-white/10 shadow-2xl">
-              <div className="text-[12px] font-bold text-surface-500 uppercase tracking-widest mb-3">Custom pricing</div>
+              <div className="text-[12px] font-bold text-surface-600 uppercase tracking-widest mb-3">Custom pricing</div>
               <div className="text-6xl font-bold text-white mb-10 tracking-tighter tabular-nums">Tailored</div>
               <Link
                 href="/contact/enterprise"

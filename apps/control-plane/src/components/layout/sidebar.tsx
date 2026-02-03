@@ -27,6 +27,12 @@ const navSections: NavSection[] = [
         ],
     },
     {
+        title: 'Customer Success',
+        items: [
+            { href: '/support', label: 'Support Tickets', icon: '🎫' },
+        ],
+    },
+    {
         title: 'Platform Governance',
         items: [
             { href: '/compliance', label: 'Compliance Admin', icon: '🛡️' },
@@ -39,7 +45,9 @@ const navSections: NavSection[] = [
     {
         title: 'Infrastructure',
         items: [
+            { href: '/system', label: 'System Health', icon: '💓' },
             { href: '/ip-warmer', label: 'IP Warmer', icon: '🔥' },
+            { href: '/features', label: 'Feature Flags', icon: '🚩' },
         ],
     },
     {
@@ -48,7 +56,7 @@ const navSections: NavSection[] = [
             { href: '/tenants', label: 'Tenant Overview', icon: '🏢' },
             { href: '/revenue', label: 'Revenue Metrics', icon: '💰' },
             { href: '/analytics', label: 'Analytics & Insights', icon: '📈' },
-            { href: '/promos', label: 'Ad Injection', icon: '📢' },
+            { href: '/content', label: 'Content & CMS', icon: '✍️' },
             { href: '/settings', label: 'Platform Settings', icon: '⚙️' },
         ],
     },
@@ -91,7 +99,7 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
                 <nav className="space-y-4 md:space-y-6">
                     {navSections.map((section) => (
                         <div key={section.title}>
-                            <h3 className="text-xs font-semibold uppercase tracking-wider text-surface-400 mb-2 md:mb-3 px-3">
+                            <h3 className="text-xs font-semibold uppercase tracking-wider text-surface-600 mb-2 md:mb-3 px-3">
                                 {section.title}
                             </h3>
                             <ul className="space-y-1">

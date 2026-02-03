@@ -80,7 +80,7 @@ export function ComplianceHero() {
  className="relative"
  >
  <div className="premium-card p-10 bg-white">
- <h3 className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-10 text-center">
+ <h3 className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-10 text-center">
  Compliance Certifications
  </h3>
  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">

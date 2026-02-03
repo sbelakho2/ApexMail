@@ -85,7 +85,7 @@ export function Footer() {
 
  {/* Product */}
  <div>
-   <h3 className="text-[11px] font-bold text-surface-400 uppercase tracking-widest mb-4">Product</h3>
+   <h3 className="text-[11px] font-bold text-surface-600 uppercase tracking-widest mb-4">Product</h3>
    <ul className="space-y-3">
      {footerLinks.product.map((link) => (
        <li key={link.name}>
@@ -99,7 +99,7 @@ export function Footer() {
 
  {/* Developers */}
  <div>
-   <h3 className="text-[11px] font-bold text-surface-400 uppercase tracking-widest mb-4">Developers</h3>
+   <h3 className="text-[11px] font-bold text-surface-600 uppercase tracking-widest mb-4">Developers</h3>
    <ul className="space-y-3">
      {footerLinks.developers.map((link) => (
        <li key={link.name}>
@@ -113,7 +113,7 @@ export function Footer() {
 
  {/* Resources */}
  <div>
-   <h3 className="text-[11px] font-bold text-surface-400 uppercase tracking-widest mb-4">Resources</h3>
+   <h3 className="text-[11px] font-bold text-surface-600 uppercase tracking-widest mb-4">Resources</h3>
    <ul className="space-y-3">
      {footerLinks.resources.map((link) => (
        <li key={link.name}>
@@ -127,7 +127,7 @@ export function Footer() {
 
  {/* Company */}
  <div>
-   <h3 className="text-[11px] font-bold text-surface-400 uppercase tracking-widest mb-4">Company</h3>
+   <h3 className="text-[11px] font-bold text-surface-600 uppercase tracking-widest mb-4">Company</h3>
    <ul className="space-y-3">
      {footerLinks.company.map((link) => (
        <li key={link.name}>
@@ -141,7 +141,7 @@ export function Footer() {
 
  {/* Legal */}
  <div>
-   <h3 className="text-[11px] font-bold text-surface-400 uppercase tracking-widest mb-4">Legal</h3>
+   <h3 className="text-[11px] font-bold text-surface-600 uppercase tracking-widest mb-4">Legal</h3>
    <ul className="space-y-3">
      {footerLinks.legal.map((link) => (
        <li key={link.name}>

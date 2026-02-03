@@ -106,9 +106,9 @@ export function TimeTravelDemo() {
  <div className="flex items-center justify-between mb-6">
  <div className="flex items-center gap-2 px-3 py-1 bg-white border border-surface-200 rounded-md ">
  <span className="text-[10px] font-bold text-surface-900 uppercase tracking-widest">{currentSnapshot.client}</span>
- <span className="text-[10px] font-bold text-surface-400 uppercase tracking-widest font-mono">({currentSnapshot.viewport})</span>
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">({currentSnapshot.viewport})</span>
  </div>
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest font-mono">{currentSnapshot.id}</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">{currentSnapshot.id}</div>
  </div>
  <motion.div
  key={currentSnapshot.id}
@@ -150,7 +150,7 @@ export function TimeTravelDemo() {
 
  {/* Changes Panel */}
  <div className="p-8 border-l border-surface-200 bg-white">
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-6">Render Changes</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-6">Render Changes</div>
  <div className="space-y-4">
  {currentSnapshot.changes.map((change, i) => (
  <motion.div
@@ -169,7 +169,7 @@ export function TimeTravelDemo() {
  </div>
 
  <div className="mt-8 pt-8 border-t border-surface-100">
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-2">Timestamp</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-2">Timestamp</div>
  <div className="text-surface-900 font-mono font-bold text-xs bg-surface-50 p-2 rounded-sm border border-surface-100">
  {new Date(currentSnapshot.timestamp).toLocaleString()}
  </div>

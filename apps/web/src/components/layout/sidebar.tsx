@@ -150,7 +150,7 @@ export function Sidebar({ className }: SidebarProps) {
                           ? 'bg-primary/5 text-primary shadow-[inset_0_0_0_1px_rgba(37,99,235,0.1)]'
                           : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                         item.disabled && 'cursor-not-allowed opacity-50',
-                        collapsed && 'justify-center px-2'
+                        collapsed && 'justify-center px-2.5'
                       )}
                     >
                       <Icon className={cn('h-[18px] w-[18px]', isActive ? 'text-primary' : 'text-muted-foreground/70')} />

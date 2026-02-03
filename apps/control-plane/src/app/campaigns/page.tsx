@@ -322,7 +322,7 @@ export default function CampaignsPage() {
                         {/* Sequence Details */}
                         <h3 className="font-semibold text-surface-900 mb-4 flex items-center gap-2">
                             <span>Sequence Flow</span>
-                            <span className="text-xs font-normal text-surface-500 bg-surface-100 px-2 py-0.5 rounded-full">{selectedCampaign.sequence.length} steps</span>
+                            <span className="text-xs font-normal text-surface-500 bg-surface-100 px-2.5 py-0.5 rounded-full">{selectedCampaign.sequence.length} steps</span>
                         </h3>
                         <div className="space-y-4 mb-8">
                             {selectedCampaign.sequence.map((step, index) => (
@@ -343,7 +343,7 @@ export default function CampaignsPage() {
                                                     <div className="text-xs font-semibold text-blue-600 mb-1 uppercase tracking-wider">Email</div>
                                                     <div className="font-medium text-surface-900">{step.subject}</div>
                                                 </div>
-                                                <div className="text-xs text-surface-500 text-right bg-surface-50 px-2 py-1 rounded border border-surface-100">
+                                                <div className="text-xs text-surface-600 text-right bg-surface-50 px-2.5 py-1 rounded border border-surface-100">
                                                     <div><span className="font-medium text-surface-700">{formatNumber(step.sent || 0)}</span> sent</div>
                                                     <div><span className="font-medium text-surface-700">{formatNumber(step.opened || 0)}</span> opened</div>
                                                 </div>

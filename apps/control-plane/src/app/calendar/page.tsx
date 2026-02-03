@@ -209,7 +209,7 @@ export default function CalendarPage() {
                                         <div className="flex-1">
                                             <div className="flex items-center gap-2 mb-1">
                                                 <span className="font-medium text-surface-900">{event.title}</span>
-                                                <span className={cn('px-2 py-0.5 rounded text-xs font-medium', typeConfig.color)}>
+                                                <span className={cn('px-2.5 py-0.5 rounded text-xs font-medium', typeConfig.color)}>
                                                     {typeConfig.label}
                                                 </span>
                                             </div>

@@ -106,7 +106,7 @@ export function RightToBeForgotten() {
  {/* Subject Request */}
  <div className="flex items-center justify-between mb-10 pb-8 border-b border-surface-200">
  <div>
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-1">Deletion Request</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-1">Deletion Request</div>
  <div className="text-surface-900 font-mono font-bold text-lg">john.doe@example.com</div>
  </div>
  <button
@@ -175,7 +175,7 @@ export function RightToBeForgotten() {
  <span
  key={system}
  className={cn(
- 'text-[9px] px-2 py-0.5 rounded font-bold uppercase tracking-tight',
+ 'text-[9px] px-2.5 py-0.5 rounded font-bold uppercase tracking-tight',
  status === 'complete'
  ? 'bg-emerald-100 text-emerald-700'
  : 'bg-surface-100 text-surface-500'
@@ -234,7 +234,7 @@ export function RightToBeForgotten() {
  ].map((stat) => (
  <div key={stat.label} className="text-center">
  <div className="text-2xl lg:text-4xl font-bold text-surface-900 tabular-nums mb-1">{stat.value}</div>
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">{stat.label}</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
  </div>
  ))}
  </motion.div>

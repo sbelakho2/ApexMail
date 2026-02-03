@@ -139,7 +139,7 @@ export default function AuditLogsPage() {
             <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 mb-8 shadow-sm">
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                     <div>
-                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Search</label>
+                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Search</label>
                         <input
                             type="text"
                             placeholder="Search logs..."
@@ -149,7 +149,7 @@ export default function AuditLogsPage() {
                         />
                     </div>
                     <div>
-                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Action Category</label>
+                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Action Category</label>
                         <select
                             value={filters.action}
                             onChange={(e) => setFilters(prev => ({ ...prev, action: e.target.value }))}
@@ -165,7 +165,7 @@ export default function AuditLogsPage() {
                         </select>
                     </div>
                     <div>
-                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Status</label>
+                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Status</label>
                         <select
                             value={filters.status}
                             onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
@@ -177,7 +177,7 @@ export default function AuditLogsPage() {
                         </select>
                     </div>
                     <div>
-                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Tenant</label>
+                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Tenant</label>
                         <select
                             value={filters.tenantId}
                             onChange={(e) => setFilters(prev => ({ ...prev, tenantId: e.target.value }))}
@@ -219,7 +219,7 @@ export default function AuditLogsPage() {
                                         <div className="flex items-center gap-2.5">
                                             <span className="font-semibold text-surface-900">{log.action}</span>
                                             <span className={cn(
-                                                'px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border',
+                                                'px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border',
                                                 log.status === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'
                                             )}>
                                                 {log.status}
@@ -277,46 +277,46 @@ export default function AuditLogsPage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6 mb-8">
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Timestamp</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Timestamp</label>
                                 <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{formatDate(selectedLog.timestamp)}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Event ID</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Event ID</label>
                                 <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.id}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Resource</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Resource</label>
                                 <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors capitalize">{selectedLog.resource}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Resource ID</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Resource ID</label>
                                 <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.resourceId}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Actor Type</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Actor Type</label>
                                 <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors capitalize">{selectedLog.actorType}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Actor ID</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Actor ID</label>
                                 <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.actorId}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Tenant</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Tenant</label>
                                 <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.tenantId || 'System'}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">IP Address</label>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">IP Address</label>
                                 <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.ipAddress}</div>
                             </div>
                         </div>
 
                         <div className="mb-8">
-                            <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2 block">User Agent</label>
+                            <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2 block">User Agent</label>
                             <div className="font-mono text-sm text-surface-600 bg-surface-50 p-3 rounded-lg border border-surface-200 break-all">{selectedLog.userAgent}</div>
                         </div>
 
                         <div>
-                            <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2 block">Event Details</label>
+                            <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2 block">Event Details</label>
                             <div className="bg-surface-900 rounded-xl overflow-hidden shadow-inner">
                                 <div className="flex items-center justify-between px-4 py-2 bg-surface-800 border-b border-surface-700">
                                     <span className="text-xs font-mono text-surface-400">JSON</span>

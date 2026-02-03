@@ -490,12 +490,12 @@ export default function IPWarmerPage() {
                                     <table className="w-full min-w-[700px]">
                                         <thead className="bg-surface-50 border-b border-surface-200">
                                             <tr>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500 uppercase tracking-wider">IP Address</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500 uppercase tracking-wider">Status</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500 uppercase tracking-wider">Day</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500 uppercase tracking-wider">Progress</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500 uppercase tracking-wider">Limit</th>
-                                                <th className="px-4 py-3 text-right text-xs font-semibold text-surface-500 uppercase tracking-wider">Actions</th>
+                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">IP Address</th>
+                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Status</th>
+                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Day</th>
+                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Progress</th>
+                                                <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Limit</th>
+                                                <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Actions</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-surface-100">
@@ -516,7 +516,7 @@ export default function IPWarmerPage() {
                                                         </td>
                                                         <td className="px-4 py-3">
                                                             <span className={cn(
-                                                                'inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium',
+                                                                'inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium',
                                                                 statusConfig.bgColor,
                                                                 statusConfig.color
                                                             )}>
@@ -569,7 +569,7 @@ export default function IPWarmerPage() {
                                                                     <button
                                                                         onClick={() => handleStartWarmup(ip)}
                                                                         disabled={actionLoading === ip.id}
-                                                                        className="px-2 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors disabled:opacity-50"
+                                                                        className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors disabled:opacity-50"
                                                                     >
                                                                         Start
                                                                     </button>
@@ -577,7 +577,7 @@ export default function IPWarmerPage() {
                                                                     <button
                                                                         onClick={() => handleResumeWarmup(ip)}
                                                                         disabled={actionLoading === ip.id}
-                                                                        className="px-2 py-1 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded transition-colors disabled:opacity-50"
+                                                                        className="px-2.5 py-1 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded transition-colors disabled:opacity-50"
                                                                     >
                                                                         Resume
                                                                     </button>
@@ -585,7 +585,7 @@ export default function IPWarmerPage() {
                                                                     <button
                                                                         onClick={() => handlePauseWarmup(ip)}
                                                                         disabled={actionLoading === ip.id}
-                                                                        className="px-2 py-1 text-xs font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 rounded transition-colors disabled:opacity-50"
+                                                                        className="px-2.5 py-1 text-xs font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 rounded transition-colors disabled:opacity-50"
                                                                     >
                                                                         Pause
                                                                     </button>
@@ -593,7 +593,7 @@ export default function IPWarmerPage() {
                                                                 <button
                                                                     onClick={() => openSetDayModal(ip)}
                                                                     disabled={actionLoading === ip.id}
-                                                                    className="px-2 py-1 text-xs font-medium text-surface-600 bg-surface-100 hover:bg-surface-200 rounded transition-colors disabled:opacity-50"
+                                                                    className="px-2.5 py-1 text-xs font-medium text-surface-600 bg-surface-100 hover:bg-surface-200 rounded transition-colors disabled:opacity-50"
                                                                     title="Set warmup day manually"
                                                                 >
                                                                     Set Day
@@ -601,7 +601,7 @@ export default function IPWarmerPage() {
                                                                 <button
                                                                     onClick={() => handleResetWarmup(ip)}
                                                                     disabled={actionLoading === ip.id}
-                                                                    className="px-2 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition-colors disabled:opacity-50"
+                                                                    className="px-2.5 py-1 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded transition-colors disabled:opacity-50"
                                                                     title="Reset warmup to Day 0"
                                                                 >
                                                                     Reset
@@ -664,9 +664,9 @@ export default function IPWarmerPage() {
                                             {info.schedule.map((limit, day) => (
                                                 <div 
                                                     key={day}
-                                                    className="flex flex-col items-center min-w-[60px] px-2 py-2 bg-surface-50 rounded-lg"
+                                                    className="flex flex-col items-center min-w-[60px] px-2.5 py-2 bg-surface-50 rounded-lg"
                                                 >
-                                                    <span className="text-[10px] font-medium text-surface-400 uppercase">Day {day}</span>
+                                                    <span className="text-[10px] font-medium text-surface-600 uppercase">Day {day}</span>
                                                     <span className="text-sm font-semibold text-surface-900 mt-1">
                                                         {limit >= 1000 ? `${(limit / 1000).toFixed(0)}k` : limit}
                                                     </span>

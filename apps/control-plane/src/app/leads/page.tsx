@@ -286,9 +286,9 @@ export default function LeadDiscoveryPage() {
                                 <div className="flex-1">
                                     <div className="flex items-center gap-3 mb-1.5">
                                         <span className="font-semibold text-slate-900">{lead.companyName}</span>
-                                        <span className="text-xs px-2 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-md font-medium">{lead.source.replace('_', ' ')}</span>
+                                        <span className="text-xs px-2.5 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-md font-medium">{lead.source.replace('_', ' ')}</span>
                                         {lead.imported && (
-                                            <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded-md font-medium flex items-center gap-1">
+                                            <span className="text-xs px-2.5 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded-md font-medium flex items-center gap-1">
                                                 <span>✓</span> Imported
                                             </span>
                                         )}

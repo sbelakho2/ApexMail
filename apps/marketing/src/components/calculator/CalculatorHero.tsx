@@ -42,15 +42,15 @@ export function CalculatorHero() {
             transition={{ delay: 0.3 }}
             className="flex flex-wrap justify-center gap-8"
           >
-            <div className="flex items-center gap-2 text-surface-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2 text-surface-600 font-bold text-[10px] uppercase tracking-widest">
               <DollarSign className="w-5 h-5 text-primary-600" />
               <span>Transparent pricing</span>
             </div>
-            <div className="flex items-center gap-2 text-surface-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2 text-surface-600 font-bold text-[10px] uppercase tracking-widest">
               <TrendingDown className="w-5 h-5 text-primary-600" />
               <span>Up to 60% savings</span>
             </div>
-            <div className="flex items-center gap-2 text-surface-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2 text-surface-600 font-bold text-[10px] uppercase tracking-widest">
               <Calculator className="w-5 h-5 text-primary-600" />
               <span>No hidden fees</span>
             </div>

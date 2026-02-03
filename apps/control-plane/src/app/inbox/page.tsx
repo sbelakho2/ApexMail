@@ -186,7 +186,7 @@ export default function InboxPage() {
                                                 {message.fromName}
                                             </span>
                                             <span className="text-surface-400 text-sm">&lt;{message.from}&gt;</span>
-                                            <span className={cn('px-2 py-0.5 rounded text-xs font-medium', classConfig.color)}>
+                                            <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', classConfig.color)}>
                                                 {classConfig.icon} {classConfig.label}
                                             </span>
                                             {message.confidence < 0.8 && (
@@ -232,7 +232,7 @@ export default function InboxPage() {
                         </div>
 
                         <div className="flex items-center gap-2 mb-4">
-                            <span className={cn('px-2 py-1 rounded text-sm font-medium', CLASSIFICATION_CONFIG[selectedMessage.classification].color)}>
+                            <span className={cn('px-2.5 py-0.5 rounded-full text-sm font-medium', CLASSIFICATION_CONFIG[selectedMessage.classification].color)}>
                                 {CLASSIFICATION_CONFIG[selectedMessage.classification].icon} {CLASSIFICATION_CONFIG[selectedMessage.classification].label}
                             </span>
                             <span className="text-sm text-surface-500 font-medium">

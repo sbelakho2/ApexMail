@@ -75,7 +75,7 @@ export function ForensicHero() {
  ].map((stat) => (
  <div key={stat.label}>
  <div className="text-2xl lg:text-3xl font-bold text-surface-900 tabular-nums">{stat.value}</div>
- <div className="text-[10px] font-bold text-surface-500 uppercase tracking-widest">{stat.label}</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
  </div>
  ))}
  </motion.div>
@@ -97,7 +97,7 @@ export function ForensicHero() {
  </div>
  <div>
  <div className="text-surface-900 font-bold">Render Timeline</div>
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">msg_7f3d8a2b</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">msg_7f3d8a2b</div>
  </div>
  </div>
  </div>
@@ -123,12 +123,12 @@ export function ForensicHero() {
  <div className="bg-surface-50 border border-surface-100 rounded-xl p-4 transition-shadow">
  <div className="flex items-center justify-between mb-1">
  <span className="text-surface-900 font-bold text-sm">{event.client}</span>
- <span className="text-[10px] font-bold text-surface-400 uppercase tracking-widest font-mono">{event.time}</span>
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">{event.time}</span>
  </div>
  <div className="flex items-center gap-3">
  <div className="flex items-center gap-1">
  <Eye className="w-3 h-3 text-primary-500" />
- <span className="text-[10px] font-bold text-surface-500 uppercase tracking-tight">
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-tight">
  {event.status}
  </span>
  </div>
