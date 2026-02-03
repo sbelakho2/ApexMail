@@ -30,6 +30,7 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import { PlanSelector, PaygUsageDashboard, PLANS } from '@/components/billing';
 
 const settingsSections = [
     { id: 'profile', label: 'Profile', icon: User },
@@ -43,6 +44,9 @@ const settingsSections = [
 
 export default function SettingsPage() {
     const [activeSection, setActiveSection] = React.useState('profile');
+    const [currentPlan, setCurrentPlan] = React.useState('pro');
+
+    const activePlanData = PLANS.find(p => p.name === currentPlan);
 
     return (
         <div className="space-y-6">
@@ -477,61 +481,106 @@ export default function SettingsPage() {
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-6">
-                                <div className="rounded-lg border p-6">
-                                    <div className="flex items-center justify-between">
+                                <div className="rounded-xl border p-6 bg-card">
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                         <div>
-                                            <p className="text-sm text-muted-foreground">
+                                            <p className="text-sm font-medium text-muted-foreground mb-1">
                                                 Current Plan
                                             </p>
-                                            <p className="text-2xl font-bold">Pro Plan</p>
-                                            <p className="text-sm text-muted-foreground">
-                                                $49/month • Renews on Jan 15, 2025
+                                            <div className="flex items-baseline gap-2">
+                                                <h3 className="text-2xl font-semibold tracking-tight">
+                                                    {currentPlan === 'payg' ? 'Pay As You Go' : activePlanData?.displayName || 'Free Plan'}
+                                                </h3>
+                                                {currentPlan !== 'payg' && (
+                                                    <Badge variant="secondary" className="font-normal">
+                                                        Monthly
+                                                    </Badge>
+                                                )}
+                                            </div>
+                                            <p className="text-sm text-muted-foreground mt-1">
+                                                {currentPlan === 'payg' 
+                                                    ? 'Usage-based billing' 
+                                                    : `$${(activePlanData?.priceMonthly || 0) / 100}/month • Renews on ${new Date().toLocaleDateString()}`
+                                                }
                                             </p>
                                         </div>
-                                        <Button variant="outline">Change Plan</Button>
+                                        <PlanSelector 
+                                            currentPlan={currentPlan}
+                                            onPlanChange={async (planId) => {
+                                                setCurrentPlan(planId);
+                                            }}
+                                        />
                                     </div>
-                                    <Separator className="my-4" />
-                                    <div className="grid gap-4 sm:grid-cols-3">
-                                        <div>
-                                            <p className="text-sm text-muted-foreground">
-                                                Subscribers
-                                            </p>
-                                            <p className="text-lg font-semibold">
-                                                48,293 / 100,000
-                                            </p>
-                                        </div>
-                                        <div>
-                                            <p className="text-sm text-muted-foreground">
-                                                Emails Sent
-                                            </p>
-                                            <p className="text-lg font-semibold">
-                                                234,567 / 500,000
-                                            </p>
-                                        </div>
-                                        <div>
-                                            <p className="text-sm text-muted-foreground">
-                                                Team Members
-                                            </p>
-                                            <p className="text-lg font-semibold">5 / 10</p>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-4">
-                                    <h3 className="font-medium">Payment Method</h3>
-                                    <div className="flex items-center justify-between rounded-lg border p-4">
-                                        <div className="flex items-center gap-3">
-                                            <div className="rounded bg-muted p-2">
-                                                <CreditCard className="h-4 w-4" />
+                                    
+                                    <Separator className="my-6" />
+                                    
+                                    {currentPlan === 'payg' ? (
+                                        <PaygUsageDashboard 
+                                            initialData={{
+                                                period: {
+                                                    start: new Date(new Date().setDate(1)).toISOString(),
+                                                    end: new Date().toISOString()
+                                                },
+                                                usage: {
+                                                    emailsSent: 45231,
+                                                    apiCalls: 120500
+                                                },
+                                                cost: {
+                                                    emailCost: 45231 * 0.08, // approx
+                                                    apiCost: 20500 * 0.05, // approx
+                                                    totalCost: (45231 * 0.08) + (20500 * 0.05)
+                                                }
+                                            }}
+                                        />
+                                    ) : (
+                                        <div className="grid gap-6 sm:grid-cols-3">
+                                            <div>
+                                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                                                    Emails Sent
+                                                </p>
+                                                <p className="text-xl font-semibold tabular-nums">
+                                                    32,456 <span className="text-sm text-muted-foreground font-normal">/ {activePlanData?.emailLimit.toLocaleString()}</span>
+                                                </p>
+                                                <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
+                                                    <div className="h-full bg-primary rounded-full" style={{ width: '65%' }} />
+                                                </div>
                                             </div>
                                             <div>
-                                                <p className="font-medium">•••• •••• •••• 4242</p>
-                                                <p className="text-sm text-muted-foreground">
+                                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                                                    API Calls
+                                                </p>
+                                                <p className="text-xl font-semibold tabular-nums">
+                                                    234k <span className="text-sm text-muted-foreground font-normal">/ 500k</span>
+                                                </p>
+                                                <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
+                                                    <div className="h-full bg-blue-500 rounded-full" style={{ width: '45%' }} />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                                                    Team Members
+                                                </p>
+                                                <p className="text-xl font-semibold tabular-nums">3 <span className="text-sm text-muted-foreground font-normal">/ 5</span></p>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="space-y-4 pt-2">
+                                    <h3 className="font-medium text-sm">Payment Method</h3>
+                                    <div className="flex items-center justify-between rounded-lg border p-4 bg-card hover:bg-muted/50 transition-colors">
+                                        <div className="flex items-center gap-3">
+                                            <div className="rounded border bg-background p-2">
+                                                <CreditCard className="h-4 w-4 text-muted-foreground" />
+                                            </div>
+                                            <div>
+                                                <p className="font-medium text-sm">Visa ending in 4242</p>
+                                                <p className="text-xs text-muted-foreground">
                                                     Expires 12/26
                                                 </p>
                                             </div>
                                         </div>
-                                        <Button variant="outline" size="sm">
+                                        <Button variant="ghost" size="sm" className="h-8">
                                             Update
                                         </Button>
                                     </div>

@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { CheckCircle } from 'lucide-react';
+import { CheckCircle, Zap } from 'lucide-react';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 
@@ -22,14 +22,13 @@ const plans: Plan[] = [
  name: 'Free',
  price: '$0',
  period: 'forever',
- description: 'Perfect for development and personal projects.',
+ description: 'Perfect for development and testing.',
  features: [
  '1,000 emails/month',
  'RESTful API access',
- 'Standard analytics',
+ '1 sending domain',
+ '7-day data retention',
  'Community support',
- 'Single sending domain',
- 'Standard templates',
  ],
  cta: 'Start Free',
  ctaLink: '/signup',
@@ -38,33 +37,47 @@ const plans: Plan[] = [
  name: 'Starter',
  price: '$29',
  period: '/month',
- description: 'For growing apps with moderate email needs.',
+ description: 'For growing apps with moderate needs.',
  features: [
  '25,000 emails/month',
- 'Everything in Free',
+ 'Webhooks & advanced analytics',
  'Custom templates',
- 'Webhooks',
  '3 sending domains',
+ '3 team members',
  'Email support',
- 'Advanced analytics',
  ],
  cta: 'Start Trial',
  ctaLink: '/signup?plan=starter',
  },
  {
+ name: 'Pro',
+ price: '$49',
+ period: '/month',
+ description: 'For scaling teams needing custom tracking.',
+ features: [
+ '50,000 emails/month',
+ 'Custom tracking domain',
+ '60-day data retention',
+ '5 sending domains',
+ '5 team members',
+ 'Priority onboarding',
+ ],
+ cta: 'Start Trial',
+ ctaLink: '/signup?plan=pro',
+ },
+ {
  name: 'Growth',
  price: '$99',
  period: '/month',
- description: 'For companies serious about deliverability.',
+ description: 'For teams serious about deliverability.',
  features: [
  '100,000 emails/month',
- 'Everything in Starter',
- 'Dedicated IP',
- 'Time-travel debugging',
+ '1 dedicated IP',
+ 'A/B testing & time-travel debug',
  '10 sending domains',
+ '10 team members',
+ 'Audit logs',
  'Priority support',
- 'Custom DKIM',
- 'A/B testing',
  ],
  cta: 'Start Trial',
  ctaLink: '/signup?plan=growth',
@@ -74,16 +87,14 @@ const plans: Plan[] = [
  name: 'Scale',
  price: '$299',
  period: '/month',
- description: 'For high-volume senders needing isolation.',
+ description: 'For high-volume enterprise senders.',
  features: [
  '500,000 emails/month',
- 'Everything in Growth',
- 'Multiple dedicated IPs',
+ '3 dedicated IPs',
  'Unlimited domains',
- 'Phone support',
- 'SLA guarantee',
- 'SSO/SAML included',
- 'Dedicated CSM',
+ 'SSO/SAML & 10 subaccounts',
+ 'SLA guarantee (10% credit)',
+ 'Phone support & dedicated CSM',
  ],
  cta: 'Contact Sales',
  ctaLink: '/contact/sales',
@@ -94,42 +105,45 @@ export function PricingPlans() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
  return (
- <section ref={ref} className="py-12 lg:py-20 relative bg-white">
+ <section ref={ref} className="py-16 lg:py-24 bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
- <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+ {/* Plans Grid - Clean, minimal, functional */}
+ <div className="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 lg:gap-5">
  {plans.map((plan, index) => (
             <motion.div
               key={plan.name}
-              initial={{ opacity: 0, y: 20 }}
+              initial={{ opacity: 0, y: 16 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
-              transition={{ delay: index * 0.1 }}
+              transition={{ delay: index * 0.08, duration: 0.4 }}
               className={cn(
-                'premium-card p-10 bg-white relative flex flex-col group hover:-translate-y-2 transition-all duration-300',
-                plan.popular && 'ring-2 ring-primary-500 z-10 shadow-2xl shadow-primary-500/10'
+                'relative flex flex-col p-6 bg-white rounded-xl border transition-all duration-200',
+                plan.popular 
+                  ? 'border-primary-600 ring-1 ring-primary-600' 
+                  : 'border-surface-200 hover:border-surface-300'
               )}
             >
               {plan.popular && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1.5 bg-primary-600 text-white text-[11px] font-bold uppercase tracking-widest rounded-md shadow-lg shadow-primary-600/30">
-                  Recommended
+                <div className="mb-4">
+                  <span className="inline-block px-2 py-0.5 bg-primary-50 text-primary-700 text-[11px] font-medium uppercase tracking-wide rounded border border-primary-100">
+                    Most Popular
+                  </span>
                 </div>
               )}
 
-              <div className="text-center mb-10">
-                <h3 className="text-[13px] font-bold text-surface-600 uppercase tracking-[0.2em] mb-4">{plan.name}</h3>
-                <div className="flex items-baseline justify-center gap-1">
-                  <span className="text-5xl font-bold text-surface-900 tabular-nums tracking-tighter">{plan.price}</span>
-                  <span className="text-[11px] font-bold text-surface-600 uppercase tracking-widest">{plan.period}</span>
+              <div className="mb-5">
+                <h3 className="text-base font-semibold text-surface-900 mb-2">{plan.name}</h3>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-3xl font-semibold text-surface-900 tabular-nums">{plan.price}</span>
+                  <span className="text-sm text-surface-500">{plan.period}</span>
                 </div>
-                <p className="text-[14px] font-medium text-surface-500 mt-6 leading-relaxed h-12">{plan.description}</p>
+                <p className="text-sm text-surface-500 mt-2 leading-relaxed">{plan.description}</p>
               </div>
 
-              <div className="h-px w-full bg-surface-100 mb-8" />
-
-              <ul className="space-y-4 mb-10 flex-1">
+              <ul className="space-y-2 mb-6 flex-1">
                 {plan.features.map((feature) => (
-                  <li key={feature} className="flex items-start gap-3 text-[14px] text-surface-700 font-medium group-hover:text-surface-900 transition-colors">
-                    <CheckCircle className="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" strokeWidth={2.5} />
-                    {feature}
+                  <li key={feature} className="flex items-start gap-2 text-sm text-surface-600">
+                    <CheckCircle className="w-4 h-4 text-primary-500 flex-shrink-0 mt-0.5" strokeWidth={2} />
+                    <span>{feature}</span>
                   </li>
                 ))}
               </ul>
@@ -137,10 +151,10 @@ export function PricingPlans() {
               <Link
                 href={plan.ctaLink}
                 className={cn(
-                  'block w-full py-4 rounded-xl font-bold text-[14px] text-center transition-all shadow-sm active:scale-[0.98]',
+                  'block w-full py-2.5 rounded-lg text-sm font-medium text-center transition-colors',
                   plan.popular
-                    ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-lg shadow-primary-600/20'
-                    : 'bg-white text-surface-900 border border-surface-200 hover:border-surface-300 hover:bg-surface-50'
+                    ? 'bg-primary-600 text-white hover:bg-primary-700'
+                    : 'bg-surface-100 text-surface-900 hover:bg-surface-200'
                 )}
               >
                 {plan.cta}
@@ -149,50 +163,73 @@ export function PricingPlans() {
           ))}
         </div>
 
-        {/* Enterprise */}
+        {/* Pay As You Go - Distinct, honest */}
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 16 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
-          transition={{ delay: 0.5 }}
-          className="mt-20 premium-card p-1 bg-surface-900 overflow-hidden border-surface-800"
+          transition={{ delay: 0.5, duration: 0.4 }}
+          className="mt-10 rounded-xl border border-amber-200 bg-amber-50/50 overflow-hidden"
         >
-          <div className="p-10 lg:p-14 flex flex-col lg:flex-row items-center justify-between gap-12 bg-gradient-to-br from-surface-900 via-surface-900 to-surface-800">
+          <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
             <div className="flex-1">
-              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-md bg-primary-500/10 text-primary-400 border border-primary-500/20 text-[11px] font-bold uppercase tracking-widest mb-8">
-                Enterprise Infrastructure
+              <div className="inline-flex items-center gap-1.5 text-amber-700 mb-3">
+                <Zap className="w-4 h-4" />
+                <span className="text-xs font-semibold uppercase tracking-wide">Pay As You Go</span>
               </div>
-              <h3 className="text-3xl md:text-4xl font-bold text-white mb-6 tracking-tight leading-tight">Scale Without Compromise</h3>
-              <p className="text-surface-400 text-lg font-medium mb-10 leading-relaxed max-w-2xl">
-                Dedicated infrastructure for organizations with mission-critical email requirements. 
-                Private clouds, extreme isolation, and white-glove support.
+              <p className="text-surface-600 text-sm mb-4 max-w-lg">
+                No monthly commitment. Volume discounts from $0.001 to $0.0003 per email.
               </p>
-              <div className="grid sm:grid-cols-2 gap-x-12 gap-y-5">
+              <div className="flex flex-wrap gap-2">
                 {[
-                  'Private cloud deployment',
-                  'Custom SLA (99.99%+)',
-                  'Dedicated account team',
-                  'Custom integrations',
-                  'HIPAA/SOC2 compliance',
-                  'Priority feature requests',
-                ].map((feature) => (
-                  <div key={feature} className="flex items-center gap-3 text-[15px] text-surface-300 font-semibold group">
-                    <CheckCircle className="w-5 h-5 text-primary-400 flex-shrink-0 group-hover:scale-110 transition-transform" strokeWidth={2.5} />
-                    {feature}
-                  </div>
+                  { label: '0-10k', price: '$0.001' },
+                  { label: '10k-100k', price: '$0.0008' },
+                  { label: '100k-1M', price: '$0.0005' },
+                  { label: '1M+', price: '$0.0003' },
+                ].map((tier) => (
+                  <span key={tier.label} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white rounded-md border border-amber-200 text-xs">
+                    <span className="text-surface-500">{tier.label}:</span>
+                    <span className="font-medium text-amber-700">{tier.price}</span>
+                  </span>
                 ))}
               </div>
             </div>
-            <div className="w-full lg:w-[400px] text-center bg-white/5 backdrop-blur-sm p-10 rounded-2xl border border-white/10 shadow-2xl">
-              <div className="text-[12px] font-bold text-surface-600 uppercase tracking-widest mb-3">Custom pricing</div>
-              <div className="text-6xl font-bold text-white mb-10 tracking-tighter tabular-nums">Tailored</div>
-              <Link
-                href="/contact/enterprise"
-                className="block w-full py-5 text-[16px] font-bold bg-white text-surface-900 rounded-xl hover:bg-surface-50 transition-all shadow-xl active:scale-[0.98]"
-              >
-                Request Access
-              </Link>
-              <p className="mt-6 text-[11px] text-surface-500 font-medium">Talk to an infrastructure expert today.</p>
+            <Link
+              href="/signup?plan=payg"
+              className="shrink-0 px-5 py-2.5 text-sm font-medium bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+            >
+              Get Started
+            </Link>
+          </div>
+        </motion.div>
+
+        {/* Enterprise - Clear, confident */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={inView ? { opacity: 1, y: 0 } : {}}
+          transition={{ delay: 0.6, duration: 0.4 }}
+          className="mt-10 rounded-xl bg-surface-900 overflow-hidden"
+        >
+          <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-white mb-2">Enterprise</h3>
+              <p className="text-surface-400 text-sm mb-4 max-w-lg">
+                Private cloud, custom SLA, HIPAA/SOC2 compliance, and dedicated support.
+              </p>
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {['Dedicated infrastructure', 'Custom integrations', 'Priority support'].map((feature) => (
+                  <span key={feature} className="flex items-center gap-1.5 text-sm text-surface-300">
+                    <CheckCircle className="w-3.5 h-3.5 text-primary-400" strokeWidth={2} />
+                    {feature}
+                  </span>
+                ))}
+              </div>
             </div>
+            <Link
+              href="/contact/enterprise"
+              className="shrink-0 px-5 py-2.5 text-sm font-medium bg-white text-surface-900 rounded-lg hover:bg-surface-100 transition-colors"
+            >
+              Contact Sales
+            </Link>
           </div>
         </motion.div>
  </div>

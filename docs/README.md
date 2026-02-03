@@ -22,7 +22,9 @@ docs/
 │   └── webhooks.md                 ✅
 ├── architecture/           # System Architecture
 │   ├── overview.md                 ✅
-│   └── data-flow.md                ✅
+│   ├── data-flow.md                ✅
+│   ├── control-plane-isolation.md  ✅
+│   └── analytics-data-science.md   ✅ (NEW)
 ├── deployment/             # Deployment Guides
 │   ├── quickstart.md               ✅
 │   ├── docker.md                   ✅
@@ -59,6 +61,14 @@ docs/
 - [Quick Start Guide](deployment/quickstart.md)
 - [API Reference](api/endpoints/messages.md)
 - [Architecture Overview](architecture/overview.md)
+
+### Analytics & Data Science
+- [Analytics Module Overview](architecture/analytics-data-science.md)
+- Send Time Optimizer (Bayesian STO)
+- Churn Prediction Engine
+- Subject Line NLP Analyzer
+- Campaign Autopilot (Thompson Sampling)
+- AI Reply Classification
 
 ### Enterprise Features
 - [Enterprise Overview](enterprise/README.md)

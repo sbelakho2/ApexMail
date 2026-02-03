@@ -9,6 +9,17 @@ import { config } from './config.js';
 import { CompactionWorker } from './compaction.js';
 import { ReconciliationWorker } from './reconciliation.js';
 import { QueryEngine } from './query-engine.js';
+import { SendTimeOptimizer } from './send-time-optimizer.js';
+import { ChurnPredictionEngine } from './churn-prediction.js';
+import { SubjectLineAnalyzer } from './subject-line-analyzer.js';
+import { CampaignAutopilot } from './campaign-autopilot.js';
+
+// Re-export for external use
+export { SendTimeOptimizer } from './send-time-optimizer.js';
+export { ChurnPredictionEngine } from './churn-prediction.js';
+export { SubjectLineAnalyzer } from './subject-line-analyzer.js';
+export { CampaignAutopilot } from './campaign-autopilot.js';
+export { QueryEngine } from './query-engine.js';
 
 const logger = createLogger({
   level: config.logging.level,
@@ -80,6 +91,40 @@ const queryEngine = new QueryEngine({
   redis,
   logger,
 });
+
+// Initialize Data Science modules
+const sendTimeOptimizer = new SendTimeOptimizer({
+  db,
+  redis,
+  logger,
+});
+
+const churnPredictionEngine = new ChurnPredictionEngine({
+  db,
+  redis,
+  logger,
+});
+
+const subjectLineAnalyzer = new SubjectLineAnalyzer({
+  db,
+  redis,
+  logger,
+});
+
+const campaignAutopilot = new CampaignAutopilot({
+  db,
+  redis,
+  logger,
+});
+
+// Export initialized instances for external use
+export {
+  sendTimeOptimizer,
+  churnPredictionEngine,
+  subjectLineAnalyzer,
+  campaignAutopilot,
+  queryEngine as queryEngineInstance,
+};
 
 // =============================================================================
 // CRON SCHEDULER

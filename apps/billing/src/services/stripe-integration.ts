@@ -589,4 +589,118 @@ export class StripeService {
       updatedAt: row.updated_at,
     });
   }
+
+  /**
+   * Cancel subscription
+   */
+  async cancelSubscription(
+    stripeSubscriptionId: string,
+    options: { cancelAtPeriodEnd?: boolean } = {}
+  ): Promise<Result<Stripe.Subscription, Error>> {
+    try {
+      if (options.cancelAtPeriodEnd) {
+        const subscription = await this.stripe.subscriptions.update(stripeSubscriptionId, {
+          cancel_at_period_end: true,
+        });
+        return Result.ok(subscription);
+      } else {
+        const subscription = await this.stripe.subscriptions.cancel(stripeSubscriptionId);
+        return Result.ok(subscription);
+      }
+    } catch (error) {
+      logger.error('Failed to cancel subscription', { error, stripeSubscriptionId });
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  /**
+   * Switch subscription to a different plan
+   */
+  async switchSubscription(
+    tenantId: string,
+    planName: string,
+    billingInterval: 'monthly' | 'yearly' = 'monthly'
+  ): Promise<Result<{ subscription: Stripe.Subscription; prorationAmount: number }, Error>> {
+    // Get current subscription
+    const subscriptionResult = await this.getSubscription(tenantId);
+    if (!subscriptionResult.ok) return Result.err(subscriptionResult.error);
+    
+    if (!subscriptionResult.value) {
+      return Result.err(new Error('No active subscription found'));
+    }
+
+    // Get new plan price ID
+    const planResult = await this.db.query<{
+      stripe_price_id_monthly: string | null;
+      stripe_price_id_yearly: string | null;
+    }>(
+      `SELECT stripe_price_id_monthly, stripe_price_id_yearly FROM plans WHERE name = $1`,
+      [planName]
+    );
+
+    if (!planResult.ok) return Result.err(planResult.error);
+    
+    const plan = planResult.value.rows[0];
+    if (!plan) return Result.err(new Error('Plan not found'));
+
+    const newPriceId = billingInterval === 'yearly' 
+      ? plan.stripe_price_id_yearly 
+      : plan.stripe_price_id_monthly;
+
+    if (!newPriceId) {
+      return Result.err(new Error(`No Stripe price configured for ${planName} (${billingInterval})`));
+    }
+
+    try {
+      // Get the current subscription from Stripe
+      const stripeSubscription = await this.stripe.subscriptions.retrieve(
+        subscriptionResult.value.stripeSubscriptionId
+      );
+
+      // Update the subscription with proration
+      const updatedSubscription = await this.stripe.subscriptions.update(
+        subscriptionResult.value.stripeSubscriptionId,
+        {
+          items: [
+            {
+              id: stripeSubscription.items.data[0]?.id,
+              price: newPriceId,
+            },
+          ],
+          proration_behavior: 'create_prorations',
+        }
+      );
+
+      // Calculate proration amount from upcoming invoice
+      const upcomingInvoice = await this.stripe.invoices.retrieveUpcoming({
+        customer: subscriptionResult.value.stripeCustomerId,
+      });
+
+      const prorationAmount = upcomingInvoice.lines.data
+        .filter(line => line.proration)
+        .reduce((sum, line) => sum + line.amount, 0);
+
+      // Update local database
+      await this.db.query(
+        `UPDATE subscriptions 
+         SET stripe_price_id = $1, billing_interval = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [newPriceId, billingInterval, subscriptionResult.value.id]
+      );
+
+      // Update tenant plan
+      await this.db.query(
+        `UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2`,
+        [planName, tenantId]
+      );
+
+      return Result.ok({
+        subscription: updatedSubscription,
+        prorationAmount,
+      });
+    } catch (error) {
+      logger.error('Failed to switch subscription', { error, tenantId, planName });
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
 }

@@ -9,46 +9,40 @@ export function PricingCTA() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
- <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+ <section ref={ref} className="py-24 bg-surface-50">
+ <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
  <motion.div
- initial={{ opacity: 0, y: 20 }}
+ initial={{ opacity: 0, y: 16 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
- className="premium-card p-8 lg:p-12 text-center bg-white "
+ transition={{ duration: 0.4 }}
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-6">
-            <Calculator className="w-4 h-4" />
-            Pricing Support
-          </div>
-
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
- Still Have Questions?
+ <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
+ Still have questions?
  </h2>
- <p className="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed font-medium">
- Our team is here to help you find the perfect plan for your needs. 
- Schedule a call or calculate your costs with our pricing calculator.
+ <p className="text-lg text-surface-500 mb-10 max-w-2xl mx-auto leading-relaxed">
+ Our team is here to help you find the perfect plan for your needs.
  </p>
 
  <div className="flex flex-col sm:flex-row gap-4 justify-center">
  <Link
  href="/signup"
- className="btn-primary text-lg px-8 py-4 rounded-md"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors shadow-sm"
  >
  Start Free
- <ArrowRight className="w-5 h-5 ml-2" />
+ <ArrowRight className="w-4 h-4 ml-2" />
  </Link>
  <Link
  href="/pricing/calculator"
- className="btn-secondary text-lg px-8 py-4 bg-white rounded-md"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
  >
- <Calculator className="w-5 h-5 mr-2" />
+ <Calculator className="w-4 h-4 mr-2 text-surface-500" />
  Price Calculator
  </Link>
  <Link
  href="/contact/sales"
- className="btn-secondary text-lg px-8 py-4 bg-white rounded-md"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
  >
- <MessageCircle className="w-5 h-5 mr-2" />
+ <MessageCircle className="w-4 h-4 mr-2 text-surface-500" />
  Talk to Sales
  </Link>
  </div>

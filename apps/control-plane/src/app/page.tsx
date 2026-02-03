@@ -12,6 +12,8 @@ import { formatNumber, timeAgo } from '../lib/utils';
  * - Platform health and compliance status
  * - Revenue metrics
  * - Critical alerts requiring attention
+ * 
+ * NOW WIRED TO REAL DATABASE via /api/dashboard/stats
  */
 
 interface DashboardStats {
@@ -40,51 +42,70 @@ interface DashboardStats {
         message: string;
         timestamp: string;
     }>;
+    pipeline?: {
+        prospect: number;
+        outreach: number;
+        engaged: number;
+        demo: number;
+        closed: number;
+    };
 }
 
 export default function ControlPlaneDashboard() {
     const [stats, setStats] = useState<DashboardStats | null>(null);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        // Fetch dashboard stats from APIs
+        // Fetch dashboard stats from real database API
         async function loadStats() {
             try {
-                // In production, these would be real API calls
-                // For now, use realistic placeholder data
+                const response = await fetch('/api/dashboard/stats', {
+                    credentials: 'include',
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch stats: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                setStats(data);
+                setError(null);
+            } catch (err) {
+                console.error('Failed to load dashboard stats:', err);
+                setError(err instanceof Error ? err.message : 'Unknown error');
+                // Set empty stats on error for graceful degradation
                 setStats({
                     sales: {
-                        activeLeads: 247,
-                        leadsThisWeek: 32,
-                        campaignsRunning: 8,
-                        demosScheduled: 5,
-                        conversionRate: 0.12,
+                        activeLeads: 0,
+                        leadsThisWeek: 0,
+                        campaignsRunning: 0,
+                        demosScheduled: 0,
+                        conversionRate: 0,
                     },
                     compliance: {
-                        riskAlerts: 2,
-                        criticalTenants: 1,
-                        gdprPending: 3,
-                        auditEventsToday: 1847,
+                        riskAlerts: 0,
+                        criticalTenants: 0,
+                        gdprPending: 0,
+                        auditEventsToday: 0,
                     },
                     platform: {
-                        activeTenants: 156,
-                        totalEmails: 2847923,
-                        mrr: 45890,
-                        healthStatus: 'healthy',
+                        activeTenants: 0,
+                        totalEmails: 0,
+                        mrr: 0,
+                        healthStatus: 'down',
                     },
-                    recentActivity: [
-                        { id: '1', type: 'lead', message: 'New high-score lead: TechCorp Inc.', timestamp: new Date(Date.now() - 300000).toISOString() },
-                        { id: '2', type: 'risk', message: 'Tenant "spammy.io" flagged for high bounce rate', timestamp: new Date(Date.now() - 1800000).toISOString() },
-                        { id: '3', type: 'campaign', message: 'Campaign "SaaS Founders" reached 1000 emails', timestamp: new Date(Date.now() - 3600000).toISOString() },
-                        { id: '4', type: 'gdpr', message: 'New data deletion request from user@example.com', timestamp: new Date(Date.now() - 7200000).toISOString() },
-                        { id: '5', type: 'revenue', message: 'New enterprise contract signed: €2,500/mo', timestamp: new Date(Date.now() - 14400000).toISOString() },
-                    ],
+                    recentActivity: [],
                 });
             } finally {
                 setLoading(false);
             }
         }
         loadStats();
+        
+        // Auto-refresh every 30 seconds
+        const interval = setInterval(loadStats, 30000);
+        return () => clearInterval(interval);
     }, []);
 
     if (loading) {
@@ -103,10 +124,19 @@ export default function ControlPlaneDashboard() {
     return (
         <div className="max-w-7xl mx-auto">
             <div className="mb-8">
-                <h1 className="text-2xl font-bold text-surface-900">Control Plane Dashboard</h1>
-                <p className="text-surface-500 mt-1">
-                    Business operations overview • Last updated: {new Date().toLocaleTimeString()}
-                </p>
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h1 className="text-2xl font-bold text-surface-900">Control Plane Dashboard</h1>
+                        <p className="text-surface-500 mt-1">
+                            Business operations overview • Last updated: {new Date().toLocaleTimeString()}
+                        </p>
+                    </div>
+                    {error && (
+                        <div className="px-3 py-1.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-700 text-sm">
+                            ⚠️ Using cached data - {error}
+                        </div>
+                    )}
+                </div>
             </div>
 
             {/* Critical Alerts */}
@@ -178,11 +208,11 @@ export default function ControlPlaneDashboard() {
                         </Link>
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                        <PipelineStage label="Prospects" count={89} color="bg-surface-100" />
-                        <PipelineStage label="Outreach" count={64} color="bg-blue-100" />
-                        <PipelineStage label="Engaged" count={47} color="bg-amber-100" />
-                        <PipelineStage label="Demo" count={32} color="bg-violet-100" />
-                        <PipelineStage label="Closed" count={15} color="bg-emerald-100" />
+                        <PipelineStage label="Prospects" count={stats.pipeline?.prospect ?? 0} color="bg-surface-100" />
+                        <PipelineStage label="Outreach" count={stats.pipeline?.outreach ?? 0} color="bg-blue-100" />
+                        <PipelineStage label="Engaged" count={stats.pipeline?.engaged ?? 0} color="bg-amber-100" />
+                        <PipelineStage label="Demo" count={stats.pipeline?.demo ?? 0} color="bg-violet-100" />
+                        <PipelineStage label="Closed" count={stats.pipeline?.closed ?? 0} color="bg-emerald-100" />
                     </div>
                     <div className="mt-6 pt-4 border-t border-surface-100">
                         <div className="flex items-center justify-between text-sm">

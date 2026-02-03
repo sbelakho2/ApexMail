@@ -25,52 +25,162 @@ export interface Plan {
 }
 
 export interface PlanFeatures {
+  // Infrastructure
   dedicatedIp: boolean;
   dedicatedIpCount: number;
+  maxSendingDomains: number;
+  
+  // Authentication & Security
   ssoEnabled: boolean;
+  auditLogs: boolean;
+  
+  // API & Integrations
   apiAccess: boolean;
   webhooksEnabled: boolean;
+  
+  // Analytics & Data
   advancedAnalytics: boolean;
+  abTesting: boolean;
+  timeTravelDebugging: boolean;
+  dataExport: boolean;
+  
+  // Customization
   customTrackingDomain: boolean;
-  prioritySupport: boolean;
+  customTemplates: boolean;
   templateApprovalWorkflow: boolean;
+  whiteLabel: boolean;
+  poweredByFooter: boolean;
+  
+  // Retention
   customRetention: boolean;
   maxRetentionDays: number;
+  
+  // Team & Organization
+  maxTeamMembers: number;
   subaccounts: boolean;
   maxSubaccounts: number;
-  whiteLabel: boolean;
+  
+  // Support
+  supportLevel: 'community' | 'email' | 'priority' | 'phone' | 'dedicated';
+  dedicatedCsm: boolean;
+  priorityOnboarding: boolean;
+  
+  // Enterprise
   byoip: boolean;
   slaGuarantee: boolean;
   slaCreditPercentage: number;
-  maxTeamMembers: number;
-  dataExport: boolean;
-  auditLogs: boolean;
-  poweredByFooter: boolean;
+  hipaaCompliance: boolean;
+  soc2Compliance: boolean;
+  privateCloud: boolean;
 }
 
 const DEFAULT_PLAN_FEATURES: PlanFeatures = {
+  // Infrastructure
   dedicatedIp: false,
   dedicatedIpCount: 0,
+  maxSendingDomains: 1,
+  
+  // Authentication & Security
   ssoEnabled: false,
+  auditLogs: false,
+  
+  // API & Integrations
   apiAccess: true,
   webhooksEnabled: false,
+  
+  // Analytics & Data
   advancedAnalytics: false,
+  abTesting: false,
+  timeTravelDebugging: false,
+  dataExport: false,
+  
+  // Customization
   customTrackingDomain: false,
-  prioritySupport: false,
+  customTemplates: false,
   templateApprovalWorkflow: false,
+  whiteLabel: false,
+  poweredByFooter: true,
+  
+  // Retention
   customRetention: false,
-  maxRetentionDays: 30,
+  maxRetentionDays: 7,
+  
+  // Team & Organization
+  maxTeamMembers: 1,
   subaccounts: false,
   maxSubaccounts: 0,
-  whiteLabel: false,
+  
+  // Support
+  supportLevel: 'community',
+  dedicatedCsm: false,
+  priorityOnboarding: false,
+  
+  // Enterprise
   byoip: false,
   slaGuarantee: false,
   slaCreditPercentage: 0,
-  maxTeamMembers: 1,
-  dataExport: false,
-  auditLogs: false,
-  poweredByFooter: true,
+  hipaaCompliance: false,
+  soc2Compliance: false,
+  privateCloud: false,
 };
+
+/**
+ * Pay As You Go pricing configuration
+ * All prices in cents
+ */
+export const PAYG_PRICING = {
+  // Email pricing tiers (price per email in cents, with volume discounts)
+  emailPricing: [
+    { upTo: 10000, pricePerEmail: 0.10 },      // $0.001/email for first 10k
+    { upTo: 100000, pricePerEmail: 0.08 },     // $0.0008/email for 10k-100k
+    { upTo: 1000000, pricePerEmail: 0.05 },    // $0.0005/email for 100k-1M
+    { upTo: Infinity, pricePerEmail: 0.03 },   // $0.0003/email for 1M+
+  ],
+  // API call pricing (free up to limit, then charged)
+  apiPricing: {
+    freeCallsPerMonth: 100000,
+    pricePerThousandCalls: 10, // $0.10 per 1000 API calls
+  },
+  // Minimum monthly charge
+  minimumMonthlyCharge: 0, // No minimum
+  // Billing precision
+  billingPrecision: 2, // Round to 2 decimal places
+} as const;
+
+/**
+ * Calculate PAYG cost for a given usage
+ */
+export function calculatePaygCost(emailsSent: number, apiCalls: number): {
+  emailCost: number;
+  apiCost: number;
+  totalCost: number;
+} {
+  let emailCost = 0;
+  let remaining = emailsSent;
+
+  for (const tier of PAYG_PRICING.emailPricing) {
+    if (remaining <= 0) break;
+    const previousUpTo = PAYG_PRICING.emailPricing[PAYG_PRICING.emailPricing.indexOf(tier) - 1]?.upTo ?? 0;
+    const tierEmails = Math.min(remaining, tier.upTo - previousUpTo);
+    emailCost += tierEmails * tier.pricePerEmail;
+    remaining -= tierEmails;
+  }
+
+  // API costs (only for calls over free limit)
+  const billableApiCalls = Math.max(0, apiCalls - PAYG_PRICING.apiPricing.freeCallsPerMonth);
+  const apiCost = Math.ceil(billableApiCalls / 1000) * PAYG_PRICING.apiPricing.pricePerThousandCalls;
+
+  const totalCost = Math.max(
+    emailCost + apiCost,
+    PAYG_PRICING.minimumMonthlyCharge
+  );
+
+  return {
+    emailCost: Math.round(emailCost * 100) / 100,
+    apiCost: Math.round(apiCost * 100) / 100,
+    totalCost: Math.round(totalCost * 100) / 100,
+  };
+}
 
 export interface CreatePlanInput {
   name: string;
@@ -98,25 +208,34 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     features: {
       dedicatedIp: false,
       dedicatedIpCount: 0,
+      maxSendingDomains: 1,
       ssoEnabled: false,
+      auditLogs: false,
       apiAccess: true,
       webhooksEnabled: false,
       advancedAnalytics: false,
+      abTesting: false,
+      timeTravelDebugging: false,
+      dataExport: false,
       customTrackingDomain: false,
-      prioritySupport: false,
+      customTemplates: false,
       templateApprovalWorkflow: false,
+      whiteLabel: false,
+      poweredByFooter: true,
       customRetention: false,
       maxRetentionDays: 7,
+      maxTeamMembers: 1,
       subaccounts: false,
       maxSubaccounts: 0,
-      whiteLabel: false,
+      supportLevel: 'community',
+      dedicatedCsm: false,
+      priorityOnboarding: false,
       byoip: false,
       slaGuarantee: false,
       slaCreditPercentage: 0,
-      maxTeamMembers: 1,
-      dataExport: false,
-      auditLogs: false,
-      poweredByFooter: true,
+      hipaaCompliance: false,
+      soc2Compliance: false,
+      privateCloud: false,
     },
     sortOrder: 0,
   },
@@ -131,32 +250,83 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     features: {
       dedicatedIp: false,
       dedicatedIpCount: 0,
+      maxSendingDomains: 3,
       ssoEnabled: false,
+      auditLogs: false,
       apiAccess: true,
       webhooksEnabled: true,
       advancedAnalytics: true,
+      abTesting: false,
+      timeTravelDebugging: false,
+      dataExport: true,
       customTrackingDomain: false,
-      prioritySupport: false,
+      customTemplates: true,
       templateApprovalWorkflow: false,
+      whiteLabel: false,
+      poweredByFooter: false,
       customRetention: false,
       maxRetentionDays: 30,
+      maxTeamMembers: 3,
       subaccounts: false,
       maxSubaccounts: 0,
-      whiteLabel: false,
+      supportLevel: 'email',
+      dedicatedCsm: false,
+      priorityOnboarding: false,
       byoip: false,
       slaGuarantee: false,
       slaCreditPercentage: 0,
-      maxTeamMembers: 3,
-      dataExport: true,
-      auditLogs: false,
-      poweredByFooter: false,
+      hipaaCompliance: false,
+      soc2Compliance: false,
+      privateCloud: false,
     },
     sortOrder: 1,
   },
   {
+    name: 'pro',
+    displayName: 'Pro',
+    description: 'For scaling teams with custom tracking needs',
+    priceMonthly: 4900, // $49
+    priceYearly: 49000, // $490 (~17% discount)
+    emailLimit: 50000,
+    apiCallLimit: 500000,
+    features: {
+      dedicatedIp: false,
+      dedicatedIpCount: 0,
+      maxSendingDomains: 5,
+      ssoEnabled: false,
+      auditLogs: false,
+      apiAccess: true,
+      webhooksEnabled: true,
+      advancedAnalytics: true,
+      abTesting: false,
+      timeTravelDebugging: false,
+      dataExport: true,
+      customTrackingDomain: true,
+      customTemplates: true,
+      templateApprovalWorkflow: false,
+      whiteLabel: false,
+      poweredByFooter: false,
+      customRetention: true,
+      maxRetentionDays: 60,
+      maxTeamMembers: 5,
+      subaccounts: false,
+      maxSubaccounts: 0,
+      supportLevel: 'email',
+      dedicatedCsm: false,
+      priorityOnboarding: true,
+      byoip: false,
+      slaGuarantee: false,
+      slaCreditPercentage: 0,
+      hipaaCompliance: false,
+      soc2Compliance: false,
+      privateCloud: false,
+    },
+    sortOrder: 2,
+  },
+  {
     name: 'growth',
     displayName: 'Growth',
-    description: 'For teams that need advanced features',
+    description: 'For teams that need advanced deliverability features',
     priceMonthly: 9900, // $99
     priceYearly: 99000, // $990 (~17% discount)
     emailLimit: 100000,
@@ -164,32 +334,41 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     features: {
       dedicatedIp: true,
       dedicatedIpCount: 1,
+      maxSendingDomains: 10,
       ssoEnabled: false,
+      auditLogs: true,
       apiAccess: true,
       webhooksEnabled: true,
       advancedAnalytics: true,
+      abTesting: true,
+      timeTravelDebugging: true,
+      dataExport: true,
       customTrackingDomain: true,
-      prioritySupport: true,
+      customTemplates: true,
       templateApprovalWorkflow: false,
+      whiteLabel: false,
+      poweredByFooter: false,
       customRetention: true,
       maxRetentionDays: 90,
+      maxTeamMembers: 10,
       subaccounts: false,
       maxSubaccounts: 0,
-      whiteLabel: false,
+      supportLevel: 'priority',
+      dedicatedCsm: false,
+      priorityOnboarding: true,
       byoip: false,
       slaGuarantee: false,
       slaCreditPercentage: 0,
-      maxTeamMembers: 10,
-      dataExport: true,
-      auditLogs: true,
-      poweredByFooter: false,
+      hipaaCompliance: false,
+      soc2Compliance: false,
+      privateCloud: false,
     },
-    sortOrder: 2,
+    sortOrder: 3,
   },
   {
     name: 'scale',
     displayName: 'Scale',
-    description: 'For high-volume senders',
+    description: 'For high-volume senders needing isolation',
     priceMonthly: 29900, // $299
     priceYearly: 299000, // $2990 (~17% discount)
     emailLimit: 500000,
@@ -197,27 +376,36 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     features: {
       dedicatedIp: true,
       dedicatedIpCount: 3,
+      maxSendingDomains: -1, // Unlimited
       ssoEnabled: true,
+      auditLogs: true,
       apiAccess: true,
       webhooksEnabled: true,
       advancedAnalytics: true,
+      abTesting: true,
+      timeTravelDebugging: true,
+      dataExport: true,
       customTrackingDomain: true,
-      prioritySupport: true,
+      customTemplates: true,
       templateApprovalWorkflow: true,
+      whiteLabel: false,
+      poweredByFooter: false,
       customRetention: true,
       maxRetentionDays: 365,
+      maxTeamMembers: 25,
       subaccounts: true,
       maxSubaccounts: 10,
-      whiteLabel: false,
+      supportLevel: 'phone',
+      dedicatedCsm: true,
+      priorityOnboarding: true,
       byoip: false,
       slaGuarantee: true,
       slaCreditPercentage: 10,
-      maxTeamMembers: 25,
-      dataExport: true,
-      auditLogs: true,
-      poweredByFooter: false,
+      hipaaCompliance: false,
+      soc2Compliance: false,
+      privateCloud: false,
     },
-    sortOrder: 3,
+    sortOrder: 4,
   },
   {
     name: 'enterprise',
@@ -230,27 +418,78 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     features: {
       dedicatedIp: true,
       dedicatedIpCount: 10,
+      maxSendingDomains: -1, // Unlimited
       ssoEnabled: true,
+      auditLogs: true,
       apiAccess: true,
       webhooksEnabled: true,
       advancedAnalytics: true,
+      abTesting: true,
+      timeTravelDebugging: true,
+      dataExport: true,
       customTrackingDomain: true,
-      prioritySupport: true,
+      customTemplates: true,
       templateApprovalWorkflow: true,
+      whiteLabel: true,
+      poweredByFooter: false,
       customRetention: true,
       maxRetentionDays: 730,
+      maxTeamMembers: -1, // Unlimited
       subaccounts: true,
       maxSubaccounts: 100,
-      whiteLabel: true,
+      supportLevel: 'dedicated',
+      dedicatedCsm: true,
+      priorityOnboarding: true,
       byoip: true,
       slaGuarantee: true,
       slaCreditPercentage: 25,
-      maxTeamMembers: -1, // Unlimited
-      dataExport: true,
-      auditLogs: true,
-      poweredByFooter: false,
+      hipaaCompliance: true,
+      soc2Compliance: true,
+      privateCloud: true,
     },
-    sortOrder: 4,
+    sortOrder: 5,
+  },
+  {
+    name: 'payg',
+    displayName: 'Pay As You Go',
+    description: 'Flexible usage-based pricing for variable volume',
+    priceMonthly: 0, // No base fee
+    priceYearly: 0,
+    emailLimit: -1, // Unlimited (billed per use)
+    apiCallLimit: -1, // Unlimited (billed per use)
+    features: {
+      dedicatedIp: false,
+      dedicatedIpCount: 0,
+      maxSendingDomains: 3,
+      ssoEnabled: false,
+      auditLogs: false,
+      apiAccess: true,
+      webhooksEnabled: true,
+      advancedAnalytics: true,
+      abTesting: false,
+      timeTravelDebugging: false,
+      dataExport: true,
+      customTrackingDomain: false,
+      customTemplates: true,
+      templateApprovalWorkflow: false,
+      whiteLabel: false,
+      poweredByFooter: false,
+      customRetention: false,
+      maxRetentionDays: 30,
+      maxTeamMembers: 3,
+      subaccounts: false,
+      maxSubaccounts: 0,
+      supportLevel: 'email',
+      dedicatedCsm: false,
+      priorityOnboarding: false,
+      byoip: false,
+      slaGuarantee: false,
+      slaCreditPercentage: 0,
+      hipaaCompliance: false,
+      soc2Compliance: false,
+      privateCloud: false,
+    },
+    sortOrder: 6,
   },
 ];
 
@@ -461,6 +700,43 @@ export class PlansService {
       apiCallLimit: row.api_call_limit,
       features,
     });
+  }
+
+  /**
+   * Update a tenant's plan
+   */
+  async updateTenantPlan(tenantId: string, planName: string): Promise<Result<void, Error>> {
+    // Verify plan exists
+    const planResult = await this.getPlanByName(planName);
+    if (!planResult.ok) return Result.err(planResult.error);
+    if (!planResult.value) return Result.err(new Error('Plan not found'));
+
+    const result = await this.db.query(
+      `UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2`,
+      [planName, tenantId]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    return Result.ok(undefined);
+  }
+
+  /**
+   * Get tenant's current plan
+   */
+  async getTenantPlan(tenantId: string): Promise<Result<Plan | null, Error>> {
+    const result = await this.db.query<{
+      plan: string;
+    }>(
+      `SELECT plan FROM tenants WHERE id = $1`,
+      [tenantId]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    
+    const row = result.value.rows[0];
+    if (!row) return Result.ok(null);
+
+    return this.getPlanByName(row.plan);
   }
 
   private mapRow(row: {

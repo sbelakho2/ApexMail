@@ -6,54 +6,37 @@ import Link from 'next/link';
 
 export function PricingHero() {
  return (
- <section className="relative min-h-[40vh] flex items-center pt-32 pb-20 bg-surface-50">
- <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
- <div className="text-center max-w-3xl mx-auto">
+ <section className="relative flex items-center pt-24 pb-12 bg-white">
+ <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 w-full">
+ <div className="text-center max-w-2xl mx-auto">
  <motion.div
-            initial={{ opacity: 0, y: 20 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-6"
+            className="inline-flex items-center gap-2 mb-6"
           >
-            <DollarSign className="w-4 h-4" />
-            Simple Pricing
+           <span className="text-sm font-semibold text-primary-600 tracking-wide uppercase">Simple Pricing</span>
           </motion.div>
 
  <motion.h1
- initial={{ opacity: 0, y: 20 }}
+ initial={{ opacity: 0, y: 16 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ delay: 0.1 }}
- className="text-4xl lg:text-6xl font-bold text-surface-900 mb-6 tracking-tight leading-tight"
+ className="text-4xl lg:text-5xl font-bold text-surface-900 mb-4 tracking-tight"
  >
- Start Free.
- <br />
- Scale <span className="text-primary-600">Predictably.</span>
+ Start Free. <span className="text-surface-500">Scale Predictably.</span>
  </motion.h1>
 
  <motion.p
- initial={{ opacity: 0, y: 20 }}
+ initial={{ opacity: 0, y: 16 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ delay: 0.2 }}
- className="text-xl text-surface-600 mb-10 leading-relaxed font-medium"
+ className="text-lg text-surface-500 mb-8 leading-relaxed max-w-xl mx-auto"
  >
- No hidden fees. No surprise charges. Just simple, transparent pricing 
- that grows with your business.
+ Transparent pricing that grows with your business. No hidden fees or surprise charges.
  </motion.p>
-
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ delay: 0.3 }}
- >
- <Link
- href="/pricing/calculator"
- className="text-primary-600 font-bold hover:underline flex items-center justify-center gap-2"
- >
- Compare with competitors
- <span className="text-lg">→</span>
- </Link>
- </motion.div>
  </div>
  </div>
  </section>
  );
 }
+

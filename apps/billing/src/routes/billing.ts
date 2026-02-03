@@ -5,6 +5,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { BillingEnv, BillingContext } from '../app.js';
+import { calculatePaygCost, PAYG_PRICING } from '../services/plans.js';
 
 export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
@@ -298,6 +299,138 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     return c.json(result.value);
+  });
+
+  // Get PAYG pricing info
+  router.get('/payg/pricing', async (c) => {
+    return c.json({
+      emailPricing: PAYG_PRICING.emailPricing,
+      apiPricing: PAYG_PRICING.apiPricing,
+      minimumMonthlyCharge: PAYG_PRICING.minimumMonthlyCharge,
+    });
+  });
+
+  // Calculate PAYG cost estimate
+  router.post('/payg/estimate', async (c) => {
+    const body = await c.req.json();
+
+    const schema = z.object({
+      emailsSent: z.number().min(0),
+      apiCalls: z.number().min(0).optional().default(0),
+    });
+
+    const parsed = schema.parse(body);
+    const cost = calculatePaygCost(parsed.emailsSent, parsed.apiCalls);
+
+    return c.json({
+      usage: {
+        emailsSent: parsed.emailsSent,
+        apiCalls: parsed.apiCalls,
+      },
+      cost,
+      pricing: PAYG_PRICING,
+    });
+  });
+
+  // Get PAYG current period usage and cost
+  router.get('/payg/usage', async (c) => {
+    const tenantId = c.get('tenantId');
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    const usageResult = await ctx.metering.getUsage(tenantId, periodStart, periodEnd);
+
+    if (!usageResult.ok) {
+      return c.json({ error: usageResult.error.message }, 500);
+    }
+
+    const usage = usageResult.value;
+    const emailsSent = usage.metrics.emails_sent ?? 0;
+    const apiCalls = usage.metrics.api_calls ?? 0;
+    const cost = calculatePaygCost(emailsSent, apiCalls);
+
+    return c.json({
+      period: {
+        start: periodStart.toISOString(),
+        end: periodEnd.toISOString(),
+      },
+      usage: {
+        emailsSent,
+        apiCalls,
+      },
+      cost,
+      pricing: PAYG_PRICING,
+    });
+  });
+
+  // Switch plan (handles proration)
+  router.post('/switch-plan', async (c) => {
+    const tenantId = c.get('tenantId');
+    const body = await c.req.json();
+
+    const schema = z.object({
+      planName: z.string(),
+      billingInterval: z.enum(['monthly', 'yearly']).optional().default('monthly'),
+    });
+
+    const parsed = schema.parse(body);
+
+    // Check if switching to PAYG
+    if (parsed.planName === 'payg') {
+      // For PAYG, we need to cancel the current subscription and set up usage-based billing
+      const subscriptionResult = await ctx.stripe.getSubscription(tenantId);
+      
+      if (subscriptionResult.ok && subscriptionResult.value) {
+        // Cancel existing subscription at period end
+        const cancelResult = await ctx.stripe.cancelSubscription(
+          subscriptionResult.value.stripeSubscriptionId,
+          { cancelAtPeriodEnd: true }
+        );
+
+        if (!cancelResult.ok) {
+          return c.json({ error: cancelResult.error.message }, 500);
+        }
+      }
+
+      // Update tenant plan to PAYG
+      const updateResult = await ctx.plans.updateTenantPlan(tenantId, 'payg');
+
+      if (!updateResult.ok) {
+        return c.json({ error: updateResult.error.message }, 500);
+      }
+
+      return c.json({
+        success: true,
+        message: 'Switched to Pay As You Go billing',
+        effectiveDate: subscriptionResult.value?.billingCycleEnd ?? new Date().toISOString(),
+      });
+    }
+
+    // For regular plans, use proration service
+    const previewResult = await ctx.proration.previewProration(tenantId, parsed.planName);
+
+    if (!previewResult.ok) {
+      return c.json({ error: previewResult.error.message }, 500);
+    }
+
+    // Apply the plan change
+    const switchResult = await ctx.stripe.switchSubscription(
+      tenantId,
+      parsed.planName,
+      parsed.billingInterval
+    );
+
+    if (!switchResult.ok) {
+      return c.json({ error: switchResult.error.message }, 500);
+    }
+
+    return c.json({
+      success: true,
+      proration: previewResult.value,
+      newPlan: parsed.planName,
+      billingInterval: parsed.billingInterval,
+    });
   });
 
   return router;

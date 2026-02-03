@@ -175,3 +175,9 @@ packages/lib/
 - Redis cluster for high availability
 - Postfix cluster with IP pooling
 - Worker autoscaling based on queue depth
+
+## Related Documentation
+
+- [Control Plane Isolation](./control-plane-isolation.md) - Security boundaries
+- [Analytics & Data Science](./analytics-data-science.md) - ML modules (STO, Churn, NLP)
+- [Data Flow](./data-flow.md) - Message lifecycle

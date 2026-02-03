@@ -17,73 +17,113 @@ interface PricingOption {
 
 const pricingTiers = {
  apexmail: [
- { max: 1000, price: 0 },
- { max: 25000, price: 29 },
- { max: 100000, price: 99 },
- { max: 500000, price: 299 },
- { max: 1000000, price: 599 },
- { max: 2500000, price: 1199 },
- { max: 5000000, price: 2199 },
- { max: Infinity, pricePerK: 0.35 },
+   { max: 1000, price: 0 },
+   { max: 25000, price: 29 },
+   { max: 50000, price: 49 },
+   { max: 100000, price: 99 },
+   { max: 500000, price: 299 },
+   // Above 500k, use PAYG rate or Enterprise custom pricing. 
+   // For calculator simplicity, we'll continue with PAYG logic in the function.
+   { max: Infinity, pricePerK: 0.45 }, // Fallback
  ],
  sendgrid: [
- { max: 6000, price: 0 },
- { max: 50000, price: 14.95 },
- { max: 100000, price: 29.95 },
- { max: 300000, price: 89.95 },
- { max: 700000, price: 249 },
- { max: 1500000, price: 449 },
- { max: 2500000, price: 749 },
- { max: Infinity, pricePerK: 0.30 },
+   { max: 6000, price: 0 },
+   { max: 50000, price: 19.95 },   // Updated to recent standard pricing approx
+   { max: 100000, price: 34.95 },
+   { max: 300000, price: 89.95 },
+   { max: 700000, price: 249 },
+   { max: 1500000, price: 449 },
+   { max: 2500000, price: 749 },
+   { max: Infinity, pricePerK: 0.45 },
  ],
  mailchimp: [
- { max: 500, price: 0 },
- { max: 5000, price: 13 },
- { max: 10000, price: 20 },
- { max: 50000, price: 75 },
- { max: 100000, price: 270 },
- { max: 200000, price: 540 },
- { max: Infinity, pricePerK: 2.7 },
+   { max: 500, price: 0 },
+   { max: 5000, price: 15 },
+   { max: 10000, price: 25 },
+   { max: 50000, price: 80 },
+   { max: 100000, price: 280 },
+   { max: 200000, price: 550 },
+   { max: Infinity, pricePerK: 3.5 },
  ],
  ses: [
- { max: Infinity, pricePerK: 0.10 },
+   { max: Infinity, pricePerK: 0.10 },
  ],
 };
 
 const addons = {
- dedicatedIP: { apexmail: 50, sendgrid: 85, mailchimp: 150, ses: 25 },
- sso: { apexmail: 0, sendgrid: 500, mailchimp: 300, ses: 0 },
- hipaa: { apexmail: 200, sendgrid: 1000, mailchimp: 0, ses: 0 },
- privateCloud: { apexmail: 3000, sendgrid: 0, mailchimp: 0, ses: 0 },
+ dedicatedIP: { apexmail: 50, sendgrid: 89, mailchimp: 29.95, ses: 24.95 },
+ sso: { apexmail: 0, sendgrid: 900, mailchimp: 0, ses: 0 }, // Scale includes SSO, handled in logic
+ hipaa: { apexmail: 100, sendgrid: 1000, mailchimp: 0, ses: 0 }, // Included in Enterprise
+ privateCloud: { apexmail: 2000, sendgrid: 0, mailchimp: 0, ses: 0 },
 };
 
+function calculateApexMailCost(volume: number, options: PricingOption) {
+  // Calculate PAYG Cost
+  let paygCost = 0;
+  if (volume <= 10000) paygCost = volume * 0.001;
+  else if (volume <= 100000) paygCost = (10000 * 0.001) + ((volume - 10000) * 0.0008);
+  else if (volume <= 1000000) paygCost = (10000 * 0.001) + (90000 * 0.0008) + ((volume - 100000) * 0.0005);
+  else paygCost = (10000 * 0.001) + (90000 * 0.0008) + (900000 * 0.0005) + ((volume - 1000000) * 0.0003);
+
+  // Addons for PAYG
+  if (options.dedicatedIP) paygCost += 50;
+  // SSO/HIPAA/PrivateCloud generally require Enterprise or high tier plans, 
+  // but let's assume standard pricing for calculator transparency
+  if (options.sso) paygCost += 100;
+  if (options.hipaa) paygCost += 500;
+  if (options.privateCloud) paygCost += 2000;
+
+  // Calculate Plan Cost
+  let planCost = Infinity;
+  const plan = pricingTiers.apexmail.find(t => volume <= t.max && t.price !== undefined);
+  
+  if (plan && plan.price !== undefined) {
+    planCost = plan.price;
+    // Addons not included in plan
+    // Growth (99) includes IP. Scale (299) includes IP + SSO.
+    const isGrowthOrHigher = plan.price >= 99;
+    const isScaleOrHigher = plan.price >= 299;
+
+    if (options.dedicatedIP && !isGrowthOrHigher) planCost += 50;
+    if (options.sso && !isScaleOrHigher) planCost += 100;
+    if (options.hipaa) planCost += 500; // Enterprise add-on
+    if (options.privateCloud) planCost += 2000;
+  }
+
+  return Math.min(paygCost, planCost);
+}
+
 function calculatePrice(provider: keyof typeof pricingTiers, volume: number, options: PricingOption): number {
+ if (provider === 'apexmail') {
+   return calculateApexMailCost(volume, options);
+ }
+
  const tiers = pricingTiers[provider];
  let basePrice = 0;
 
  for (const tier of tiers) {
- if (volume <= tier.max) {
- if ('price' in tier && tier.price !== undefined) {
- basePrice = tier.price;
- } else if ('pricePerK' in tier && tier.pricePerK !== undefined) {
- basePrice = (volume / 1000) * tier.pricePerK;
- }
- break;
- }
+   if (volume <= tier.max) {
+     if ('price' in tier && tier.price !== undefined) {
+       basePrice = tier.price;
+     } else if ('pricePerK' in tier && tier.pricePerK !== undefined) {
+       basePrice = (volume / 1000) * tier.pricePerK;
+     }
+     break;
+   }
  }
 
  // Add addons
  if (options.dedicatedIP && addons.dedicatedIP[provider]) {
- basePrice += addons.dedicatedIP[provider];
+   basePrice += addons.dedicatedIP[provider];
  }
  if (options.sso && addons.sso[provider]) {
- basePrice += addons.sso[provider];
+   basePrice += addons.sso[provider];
  }
  if (options.hipaa && addons.hipaa[provider] && provider !== 'mailchimp' && provider !== 'ses') {
- basePrice += addons.hipaa[provider];
+   basePrice += addons.hipaa[provider];
  }
  if (options.privateCloud && provider === 'apexmail') {
- basePrice += addons.privateCloud[provider];
+   basePrice += addons.privateCloud[provider];
  }
 
  return Math.round(basePrice);
@@ -139,16 +179,19 @@ export function PricingCalculator() {
 
  {/* Calculator Card */}
  <motion.div
- initial={{ opacity: 0, y: 20 }}
+ initial={{ opacity: 0, y: 16 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
- className="premium-card p-6 lg:p-8 bg-surface-50"
+ className="rounded-2xl border border-surface-200 bg-white p-6 lg:p-10 shadow-sm"
  >
  {/* Volume Slider */}
- <div className="mb-8">
- <div className="flex items-center justify-between mb-4">
- <label className="text-lg font-bold text-surface-900">Monthly Email Volume</label>
- <span className="text-2xl font-bold text-primary-600 tabular-nums">{formatNumber(volume)}</span>
+ <div className="mb-10">
+ <div className="flex items-end justify-between mb-6">
+ <label className="text-sm font-semibold text-surface-900 uppercase tracking-wide">Monthly Email Volume</label>
+ <div className="text-right">
+ <span className="text-3xl font-bold text-primary-600 tabular-nums tracking-tight">{formatNumber(volume)}</span>
+ <span className="text-sm text-surface-500 font-medium ml-1">emails</span>
+ </div>
  </div>
  <input
  type="range"
@@ -157,83 +200,77 @@ export function PricingCalculator() {
  step="1000"
  value={volume}
  onChange={(e) => setVolume(Number(e.target.value))}
- className="w-full h-2 bg-surface-200 rounded-sm appearance-none cursor-pointer accent-primary-600"
+ className="w-full h-1.5 bg-surface-100 rounded-full appearance-none cursor-pointer accent-primary-600 hover:accent-primary-700 transition-all"
  />
- <div className="flex justify-between mt-2">
+ <div className="flex justify-between mt-3">
  {volumeMarks.map((mark) => (
- <span
+ <button
  key={mark.value}
  className={cn(
- 'text-[10px] font-bold uppercase tracking-tight cursor-pointer transition-colors',
- Math.abs(volume - mark.value) < 50000 ? 'text-primary-600' : 'text-surface-400'
+ 'text-xs font-semibold uppercase tracking-wide transition-colors focus:outline-none',
+ Math.abs(volume - mark.value) < 50000 ? 'text-primary-600' : 'text-surface-400 hover:text-surface-600'
  )}
  onClick={() => setVolume(mark.value)}
  >
  {mark.label}
- </span>
+ </button>
  ))}
  </div>
  </div>
 
  {/* Options Checkboxes */}
- <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+ <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
  {[
  { key: 'dedicatedIP', label: 'Dedicated IP', tip: 'Improve deliverability' },
- { key: 'sso', label: 'SSO/SAML', tip: 'Enterprise single sign-on' },
- { key: 'hipaa', label: 'HIPAA Compliance', tip: 'Healthcare data ready' },
+ { key: 'sso', label: 'SSO/SAML', tip: 'Enterprise security' },
+ { key: 'hipaa', label: 'HIPAA Compliance', tip: 'Healthcare ready' },
  { key: 'privateCloud', label: 'Private Cloud', tip: 'Isolated infrastructure' },
  ].map((option) => (
  <label
  key={option.key}
  className={cn(
- 'flex items-center gap-3 p-4 rounded-md border cursor-pointer transition-all bg-white',
+ 'flex flex-col p-4 rounded-lg border cursor-pointer transition-all duration-200',
  options[option.key as keyof PricingOption]
- ? 'border-primary-500 ring-1 ring-primary-500'
- : 'border-surface-200 hover:border-surface-300'
+ ? 'border-primary-600 bg-primary-50/10'
+ : 'border-surface-200 hover:border-surface-300 bg-white'
  )}
  >
+ <div className="flex justify-between items-start mb-2">
+ <span className="font-semibold text-sm text-surface-900">{option.label}</span>
  <input
  type="checkbox"
  checked={options[option.key as keyof PricingOption]}
  onChange={(e) => setOptions({ ...options, [option.key]: e.target.checked })}
- className="sr-only"
+ className="w-4 h-4 text-primary-600 border-surface-300 rounded focus:ring-primary-500 transition-colors"
  />
- <div
- className={cn(
-                        'w-5 h-5 rounded-md border flex items-center justify-center transition-colors',
-                        options[option.key as keyof PricingOption]
-                          ? 'bg-primary-600 border-primary-600'
-                          : 'border-surface-300'
-                      )}
-                    >
-                      {options[option.key as keyof PricingOption] && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
-                    </div>
-                    <div>
-                      <div className="text-sm font-bold text-surface-900">{option.label}</div>
-                      <div className="text-[10px] text-surface-600 font-medium uppercase tracking-tight">{option.tip}</div>
-                    </div>
-                  </label>
+ </div>
+ <span className="text-xs text-surface-500 font-medium">{option.tip}</span>
+ </label>
                 ))}
               </div>
 
               {/* Price Comparison */}
               <div className="grid md:grid-cols-4 gap-4">
                 {/* ApexMail - Featured */}
-                <div className="md:col-span-1 rounded-xl border-2 border-primary-600 bg-white p-6 relative overflow-hidden shadow-xl shadow-primary-500/10">
-                  <div className="relative">
-                    <div className="text-[10px] text-primary-600 font-bold uppercase tracking-widest mb-1">ApexMail</div>
-                    <div className="text-4xl font-bold text-surface-900 mb-1 tabular-nums">
-                      {formatCurrency(prices.apexmail)}
-                      <span className="text-lg text-surface-400 font-medium">/mo</span>
+                <div className="md:col-span-1 p-6 rounded-xl bg-surface-900 text-white relative overflow-hidden group">
+                  <div className="relative z-10">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-primary-400">ApexMail</span>
+                      {savings > 0 && (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-primary-500 text-white shadow-sm">
+                          Save {formatCurrency(savings)}
+                        </span>
+                      )}
                     </div>
-                    <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight mb-4 tabular-nums">
-                      {(prices.apexmail / (volume / 1000)).toFixed(3)}/1K emails
+                    <div className="flex items-baseline gap-1 mb-1">
+                      <span className="text-3xl font-bold tabular-nums tracking-tight">
+                        {formatCurrency(prices.apexmail)}
+                      </span>
+                      <span className="text-sm text-surface-400 font-medium">/mo</span>
                     </div>
-                    {savings > 0 && (
-                      <div className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-bold uppercase tracking-tight border border-emerald-100">
-                        Save {formatCurrency(savings)}/mo
-                      </div>
-                    )}
+                    <div className="text-xs text-surface-400 font-medium tabular-nums">
+                      {(prices.apexmail / (volume / 1000)).toFixed(3)} per 1K
+                    </div>
                   </div>
                 </div>
 
@@ -245,75 +282,61 @@ export function PricingCalculator() {
                 ].map((competitor) => (
                   <div
                     key={competitor.name}
-                    className="premium-card p-6 bg-white"
+                    className="p-6 rounded-xl border border-surface-200 bg-surface-50/50 flex flex-col justify-center"
                   >
-                    <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest mb-1">{competitor.name}</div>
-                    <div className="text-3xl font-bold text-surface-700 mb-1 tabular-nums">
-                      {formatCurrency(competitor.price)}
-                      <span className="text-lg text-surface-400 font-medium">/mo</span>
+                    <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">{competitor.name}</div>
+                    <div className="flex items-baseline gap-1 mb-1">
+                      <span className="text-2xl font-semibold text-surface-900 tabular-nums tracking-tight">
+                        {formatCurrency(competitor.price)}
+                      </span>
                     </div>
-                    <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight tabular-nums">
-                      {(competitor.price / (volume / 1000)).toFixed(3)}/1K emails
+                    <div className="text-xs text-surface-400 font-medium tabular-nums">
+                       {(competitor.price / (volume / 1000)).toFixed(3)} per 1K
                     </div>
-                    {options.privateCloud && competitor.name !== 'ApexMail' && (
-                      <div className="mt-4 text-[10px] text-red-500 font-bold uppercase tracking-tight flex items-center gap-1">
-                        <Info className="w-3 h-3" />
-                        Not available
-                      </div>
-                    )}
                   </div>
                 ))}
               </div>
 
  {/* Bottom Note */}
- <div className="mt-6 flex items-center justify-between flex-wrap gap-4">
- <p className="text-xs text-surface-500 font-medium">
- * Prices shown are estimates. Enterprise plans get custom pricing.
- </p>
- <Link href="/pricing" className="btn-primary flex items-center gap-2">
- See Full Pricing
- <ArrowRight className="w-4 h-4" />
+ <div className="mt-8 flex items-center justify-center">
+ <Link href="/pricing" className="text-sm font-semibold text-primary-600 hover:text-primary-700 flex items-center gap-1.5 transition-colors">
+ See full feature comparison <ArrowRight className="w-4 h-4" />
  </Link>
  </div>
  </motion.div>
 
  {/* Pricing Tiers Quick View */}
  <motion.div
- initial={{ opacity: 0, y: 20 }}
+ initial={{ opacity: 0, y: 16 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: 0.4 }}
- className="mt-12 grid sm:grid-cols-2 lg:grid-cols-4 gap-6"
+ transition={{ delay: 0.3 }}
+ className="mt-12 grid sm:grid-cols-2 lg:grid-cols-4 gap-4"
  >
  {[
- { name: 'Free', price: '$0', volume: '1,000 emails/mo', features: ['Shared IP (High Reputation)', 'Full API Access', 'Forensic Logs (24h)'] },
- { name: 'Starter', price: '$29', volume: '25,000 emails/mo', features: ['Remove Branding', 'Webhooks', '30-Day Forensic Logs'] },
- { name: 'Growth', price: '$99', volume: '100,000 emails/mo', features: ['Dedicated IP', 'Priority Queue', 'HIPAA Add-on Available'], popular: true },
- { name: 'Scale', price: '$299', volume: '500,000 emails/mo', features: ['Multiple IPs', 'SSO Included', '99.99% SLA Guarantee'] },
+ { name: 'Free', price: '$0', volume: '1,000/mo', features: ['1 sending domain', '7-day retention', 'REST API'] },
+ { name: 'Starter', price: '$29', volume: '25,000/mo', features: ['3 sending domains', 'Advanced analytics', 'Email support'] },
+ { name: 'Growth', price: '$99', volume: '100,000/mo', features: ['Dedicated IP', 'A/B testing', 'Priority support'] },
+ { name: 'Scale', price: '$299', volume: '500,000/mo', features: ['3 Dedicated IPs', 'SSO/SAML', 'Phone support'] },
  ].map((tier) => (
- <div
+ <Link
+ href="/pricing"
  key={tier.name}
- className={cn(
- 'premium-card relative bg-white p-6',
- tier.popular && 'ring-2 ring-primary-600'
- )}
+ className="group block p-5 rounded-lg border border-surface-200 bg-white hover:border-primary-200 hover:shadow-sm transition-all duration-200"
  >
- {tier.popular && (
- <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-primary-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-md">
- Most Popular
+ <div className="flex items-center justify-between mb-2">
+ <span className="text-sm font-semibold text-surface-900">{tier.name}</span>
+ <span className="text-sm font-bold text-primary-600">{tier.price}</span>
  </div>
- )}
- <div className="text-lg font-bold text-surface-900 mb-1">{tier.name}</div>
- <div className="text-3xl font-bold text-primary-600 mb-1 tabular-nums">{tier.price}</div>
- <div className="text-xs text-surface-600 font-bold uppercase tracking-tight mb-4">{tier.volume}</div>
- <ul className="space-y-2">
+ <div className="text-xs text-surface-500 font-medium uppercase tracking-wide mb-3">{tier.volume}</div>
+ <ul className="space-y-1.5">
  {tier.features.map((feature) => (
- <li key={feature} className="flex items-center gap-2 text-sm text-surface-600 font-medium">
- <Check className="w-4 h-4 text-primary-600 flex-shrink-0" strokeWidth={3} />
+ <li key={feature} className="flex items-start gap-2 text-xs text-surface-600">
+ <Check className="w-3.5 h-3.5 text-primary-500 flex-shrink-0" strokeWidth={2.5} />
  {feature}
  </li>
  ))}
  </ul>
- </div>
+ </Link>
  ))}
  </motion.div>
  </div>
