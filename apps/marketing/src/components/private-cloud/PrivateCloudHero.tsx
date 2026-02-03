@@ -68,7 +68,7 @@ export function PrivateCloudHero() {
  initial={{ opacity: 0, y: 20 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ delay: 0.4 }}
- className="grid grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200"
+ className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200"
  >
  {[
  { value: '< 1ms', label: 'Internal Latency' },
@@ -103,7 +103,7 @@ export function PrivateCloudHero() {
  {/* Private Subnet */}
  <div className="bg-white rounded-lg p-4 border border-dashed border-surface-300 mb-4 ">
  <div className="text-[10px] font-bold text-surface-400 mb-3 uppercase tracking-tight text-center">Private Subnet (10.0.1.0/24)</div>
- <div className="grid grid-cols-3 gap-3">
+ <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
  {[
  { icon: Server, label: 'API Cluster', count: '3x' },
  { icon: Server, label: 'Workers', count: '5x' },
@@ -121,7 +121,7 @@ export function PrivateCloudHero() {
  {/* Public Subnet */}
  <div className="bg-white rounded-lg p-4 border border-dashed border-surface-300 ">
  <div className="text-[10px] font-bold text-surface-400 mb-3 uppercase tracking-tight text-center">Public Subnet (10.0.0.0/24)</div>
- <div className="grid grid-cols-2 gap-3">
+ <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
  {[
  { icon: Shield, label: 'Load Balancer' },
  { icon: Zap, label: 'NAT Gateway' },

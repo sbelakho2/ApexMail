@@ -41,8 +41,8 @@ export function RenderHistory() {
  "type": "css_override",
  "selector": ".cta-button",
  "property": "background-color",
- "base_value": "#6366f1",
- "compare_value": "#4f46e5"
+ "base_value": "#3b82f6",
+ "compare_value": "#2563eb"
  }
  ]
 }`,

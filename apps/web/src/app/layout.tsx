@@ -25,7 +25,7 @@ export const metadata: Metadata = {
     openGraph: {
         type: 'website',
         locale: 'en_US',
-        url: 'https://apexmail.io',
+        url: 'https://apexmail.ee',
         siteName: 'ApexMail',
         title: 'ApexMail - Enterprise Email Infrastructure',
         description:

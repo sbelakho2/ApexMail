@@ -37,18 +37,18 @@ SSO allows your organization to:
 1. **Get ApexMail SAML Metadata**
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/sso/saml/metadata/{account_id}
+curl https://api.apexmail.ee/enterprise/v1/sso/saml/metadata/{account_id}
 ```
 
 Response:
 ```xml
 <?xml version="1.0"?>
 <EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" 
-                  entityID="https://api.apexmail.io/saml/{account_id}">
+                  entityID="https://api.apexmail.ee/saml/{account_id}">
   <SPSSODescriptor>
     <AssertionConsumerService 
       Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
-      Location="https://api.apexmail.io/enterprise/v1/sso/saml/callback"/>
+      Location="https://api.apexmail.ee/enterprise/v1/sso/saml/callback"/>
   </SPSSODescriptor>
 </EntityDescriptor>
 ```
@@ -56,14 +56,14 @@ Response:
 2. **Configure Your IdP**
 
 Add ApexMail as a SAML application in your IdP with:
-- **ACS URL**: `https://api.apexmail.io/enterprise/v1/sso/saml/callback`
-- **Entity ID**: `https://api.apexmail.io/saml/{account_id}`
+- **ACS URL**: `https://api.apexmail.ee/enterprise/v1/sso/saml/callback`
+- **Entity ID**: `https://api.apexmail.ee/saml/{account_id}`
 - **Name ID Format**: Email address
 
 3. **Upload IdP Metadata to ApexMail**
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/sso/configure \
+curl -X POST https://api.apexmail.ee/enterprise/v1/sso/configure \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -86,13 +86,13 @@ curl -X POST https://api.apexmail.io/enterprise/v1/sso/configure \
 1. **Register ApexMail in Your IdP**
 
 Create an OIDC application with:
-- **Redirect URI**: `https://api.apexmail.io/enterprise/v1/sso/oidc/callback`
+- **Redirect URI**: `https://api.apexmail.ee/enterprise/v1/sso/oidc/callback`
 - **Scopes**: `openid email profile`
 
 2. **Configure ApexMail**
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/sso/configure \
+curl -X POST https://api.apexmail.ee/enterprise/v1/sso/configure \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -130,11 +130,11 @@ For advanced user lifecycle management, enable SCIM:
 
 ```bash
 # Get SCIM endpoint
-curl https://api.apexmail.io/enterprise/v1/scim/config
+curl https://api.apexmail.ee/enterprise/v1/scim/config
 
 # Response
 {
-  "scimBaseUrl": "https://api.apexmail.io/enterprise/v1/scim",
+  "scimBaseUrl": "https://api.apexmail.ee/enterprise/v1/scim",
   "authMethod": "bearer",
   "token": "scim_xxx"
 }
@@ -220,7 +220,7 @@ POST /enterprise/v1/sso/logout
 Enable debug logging for SSO:
 
 ```bash
-curl -X PUT https://api.apexmail.io/enterprise/v1/sso/config/{account_id} \
+curl -X PUT https://api.apexmail.ee/enterprise/v1/sso/config/{account_id} \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{"debugMode": true}'
 ```

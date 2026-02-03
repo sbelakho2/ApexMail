@@ -37,35 +37,61 @@ const navSections: NavSection[] = [
         ],
     },
     {
+        title: 'Infrastructure',
+        items: [
+            { href: '/ip-warmer', label: 'IP Warmer', icon: '🔥' },
+        ],
+    },
+    {
         title: 'Business Operations',
         items: [
             { href: '/tenants', label: 'Tenant Overview', icon: '🏢' },
             { href: '/revenue', label: 'Revenue Metrics', icon: '💰' },
+            { href: '/analytics', label: 'Analytics & Insights', icon: '📈' },
             { href: '/promos', label: 'Ad Injection', icon: '📢' },
             { href: '/settings', label: 'Platform Settings', icon: '⚙️' },
         ],
     },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+    onNavigate?: () => void;
+    className?: string;
+}
+
+export function Sidebar({ onNavigate, className }: SidebarProps) {
     const pathname = usePathname();
 
+    const handleLinkClick = () => {
+        if (onNavigate) {
+            onNavigate();
+        }
+    };
+
     return (
-        <aside className="w-64 border-r border-surface-200 bg-surface-50/80 backdrop-blur-xl min-h-screen fixed left-0 top-0 overflow-y-auto">
-            <div className="p-6">
+        <aside className={cn("w-64 border-r border-surface-200 bg-surface-0 min-h-screen overflow-y-auto print:hidden", className)}>
+            {/* Control Plane Header */}
+            <div className="bg-gradient-to-r from-amber-500 to-orange-500 text-white text-xs font-medium py-1.5 px-4 text-center">
+                🔐 Control Plane
+            </div>
+            
+            <div className="p-4 md:p-6">
                 {/* Logo */}
-                <Link href="/" className="flex items-center gap-2 mb-8">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white font-bold">
+                <Link href="/" className="flex items-center gap-3 mb-6 md:mb-8" onClick={handleLinkClick}>
+                    <div className="flex h-9 w-9 md:h-10 md:w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 text-white font-bold text-base md:text-lg shadow-md">
                         A
                     </div>
-                    <span className="text-lg font-bold">Control Plane</span>
+                    <div>
+                        <span className="text-base md:text-lg font-bold text-surface-900">ApexMail</span>
+                        <div className="text-xs text-surface-500">Platform Admin</div>
+                    </div>
                 </Link>
 
                 {/* Navigation */}
-                <nav className="space-y-6">
+                <nav className="space-y-4 md:space-y-6">
                     {navSections.map((section) => (
                         <div key={section.title}>
-                            <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">
+                            <h3 className="text-xs font-semibold uppercase tracking-wider text-surface-400 mb-2 md:mb-3 px-3">
                                 {section.title}
                             </h3>
                             <ul className="space-y-1">
@@ -73,14 +99,15 @@ export function Sidebar() {
                                     <li key={item.href}>
                                         <Link
                                             href={item.href}
+                                            onClick={handleLinkClick}
                                             className={cn(
-                                                'flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors',
+                                                'flex items-center gap-3 px-3 py-2 md:py-2.5 rounded-lg text-sm transition-all',
                                                 pathname === item.href
-                                                    ? 'bg-indigo-100 text-indigo-900 font-medium'
-                                                    : 'hover:bg-gray-100 text-gray-700'
+                                                    ? 'bg-blue-50 text-blue-700 font-medium border border-blue-100'
+                                                    : 'hover:bg-surface-50 text-surface-600 hover:text-surface-900'
                                             )}
                                         >
-                                            <span>{item.icon}</span>
+                                            <span className="text-base">{item.icon}</span>
                                             {item.label}
                                         </Link>
                                     </li>
@@ -90,15 +117,20 @@ export function Sidebar() {
                     ))}
                 </nav>
 
-                {/* Security Notice */}
-                <div className="mt-8 p-4 bg-indigo-50 rounded-lg border border-indigo-100">
-                    <div className="flex items-center gap-2 text-sm text-indigo-800 font-medium mb-1">
+                {/* Security Notice - Hidden on mobile for space */}
+                <div className="hidden md:block mt-8 p-4 bg-surface-50 rounded-xl border border-surface-200">
+                    <div className="flex items-center gap-2 text-sm text-surface-700 font-medium mb-1">
                         🔒 Secure Environment
                     </div>
-                    <div className="text-xs text-indigo-600">
+                    <div className="text-xs text-surface-500">
                         Control Plane is isolated from customer console.
                         IP-restricted access only.
                     </div>
+                </div>
+
+                {/* Version */}
+                <div className="mt-6 text-center">
+                    <span className="text-xs text-surface-400">v1.0.0</span>
                 </div>
             </div>
         </aside>

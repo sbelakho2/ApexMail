@@ -30,13 +30,13 @@ interface InboxMessage {
 }
 
 const CLASSIFICATION_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
-    interested: { label: 'Interested', color: 'bg-green-100 text-green-700', icon: '🎯' },
+    interested: { label: 'Interested', color: 'bg-emerald-100 text-emerald-700', icon: '🎯' },
     not_interested: { label: 'Not Interested', color: 'bg-red-100 text-red-700', icon: '👎' },
-    out_of_office: { label: 'Out of Office', color: 'bg-yellow-100 text-yellow-700', icon: '🏖️' },
+    out_of_office: { label: 'Out of Office', color: 'bg-amber-100 text-amber-700', icon: '🏖️' },
     unsubscribe: { label: 'Unsubscribe', color: 'bg-orange-100 text-orange-700', icon: '🚫' },
     question: { label: 'Question', color: 'bg-blue-100 text-blue-700', icon: '❓' },
-    spam: { label: 'Spam', color: 'bg-gray-100 text-gray-700', icon: '🗑️' },
-    unclassified: { label: 'Unclassified', color: 'bg-purple-100 text-purple-700', icon: '📋' },
+    spam: { label: 'Spam', color: 'bg-surface-100 text-surface-700', icon: '🗑️' },
+    unclassified: { label: 'Unclassified', color: 'bg-violet-100 text-violet-700', icon: '📋' },
 };
 
 const DEMO_MESSAGES: InboxMessage[] = [
@@ -98,7 +98,7 @@ export default function InboxPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -107,16 +107,16 @@ export default function InboxPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Inbox Sentinel</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Inbox Sentinel</h1>
+                    <p className="text-surface-600 mt-1">
                         AI-classified campaign replies • {unreadCount} unread • {interestedCount} interested
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <button className="px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm hover:bg-gray-50">
+                    <button className="px-4 py-2 bg-surface-0 border border-surface-200 rounded-lg text-sm hover:bg-surface-50 font-medium text-surface-700 transition-colors">
                         🔄 Sync Inbox
                     </button>
-                    <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                    <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors">
                         ⚙️ Configure AI
                     </button>
                 </div>
@@ -129,8 +129,8 @@ export default function InboxPage() {
                     className={cn(
                         'px-3 py-1.5 rounded-full text-sm font-medium transition-colors',
                         !filterClassification
-                            ? 'bg-indigo-600 text-white'
-                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-surface-100 text-surface-700 hover:bg-surface-200'
                     )}
                 >
                     All ({messages.length})
@@ -145,7 +145,7 @@ export default function InboxPage() {
                             className={cn(
                                 'px-3 py-1.5 rounded-full text-sm font-medium transition-colors',
                                 filterClassification === key
-                                    ? 'bg-indigo-600 text-white'
+                                    ? 'bg-blue-600 text-white'
                                     : `${config.color} hover:opacity-80`
                             )}
                         >
@@ -156,10 +156,10 @@ export default function InboxPage() {
             </div>
 
             {/* Message List */}
-            <div className="bg-white rounded-xl border border-gray-200">
-                <div className="divide-y divide-gray-100">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm">
+                <div className="divide-y divide-surface-100">
                     {filteredMessages.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-surface-500">
                             No messages found
                         </div>
                     ) : (
@@ -169,39 +169,39 @@ export default function InboxPage() {
                                 <div
                                     key={message.id}
                                     className={cn(
-                                        'p-4 hover:bg-gray-50 cursor-pointer flex items-start gap-4',
+                                        'p-4 hover:bg-surface-50 cursor-pointer flex items-start gap-4 transition-colors',
                                         !message.read && 'bg-blue-50/50'
                                     )}
                                     onClick={() => { setSelectedMessage(message); markAsRead(message.id); }}
                                 >
                                     <button
                                         onClick={(e) => { e.stopPropagation(); toggleStar(message.id); }}
-                                        className={cn('text-lg', message.starred ? 'text-yellow-500' : 'text-gray-300 hover:text-yellow-400')}
+                                        className={cn('text-lg transition-colors', message.starred ? 'text-amber-500' : 'text-surface-300 hover:text-amber-400')}
                                     >
                                         {message.starred ? '★' : '☆'}
                                     </button>
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-2 mb-1">
-                                            <span className={cn('font-medium', !message.read && 'text-gray-900')}>
+                                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                                            <span className={cn('font-medium', !message.read && 'text-surface-900', message.read && 'text-surface-700')}>
                                                 {message.fromName}
                                             </span>
-                                            <span className="text-gray-400 text-sm">&lt;{message.from}&gt;</span>
+                                            <span className="text-surface-400 text-sm">&lt;{message.from}&gt;</span>
                                             <span className={cn('px-2 py-0.5 rounded text-xs font-medium', classConfig.color)}>
                                                 {classConfig.icon} {classConfig.label}
                                             </span>
                                             {message.confidence < 0.8 && (
-                                                <span className="text-xs text-orange-500">Low confidence</span>
+                                                <span className="text-xs text-amber-500 font-medium">Low confidence</span>
                                             )}
                                         </div>
-                                        <div className={cn('text-sm mb-1', !message.read ? 'font-medium text-gray-900' : 'text-gray-700')}>
+                                        <div className={cn('text-sm mb-1', !message.read ? 'font-medium text-surface-900' : 'text-surface-700')}>
                                             {message.subject}
                                         </div>
-                                        <div className="text-sm text-gray-500 truncate">{message.preview}</div>
+                                        <div className="text-sm text-surface-500 truncate">{message.preview}</div>
                                         {message.campaignName && (
-                                            <div className="text-xs text-indigo-600 mt-1">📧 {message.campaignName}</div>
+                                            <div className="text-xs text-blue-600 mt-1 font-medium">📧 {message.campaignName}</div>
                                         )}
                                     </div>
-                                    <div className="text-sm text-gray-500">
+                                    <div className="text-sm text-surface-500">
                                         {formatDate(message.receivedAt)}
                                     </div>
                                 </div>
@@ -213,16 +213,20 @@ export default function InboxPage() {
 
             {/* Message Detail Modal */}
             {selectedMessage && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedMessage(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/50 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setSelectedMessage(null)}>
+                    <div className="bg-surface-0 rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-gray-900">{selectedMessage.subject}</h2>
-                                <div className="text-sm text-gray-500 mt-1">
+                                <h2 className="text-xl font-bold text-surface-900">{selectedMessage.subject}</h2>
+                                <div className="text-sm text-surface-500 mt-1">
                                     From: {selectedMessage.fromName} &lt;{selectedMessage.from}&gt;
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedMessage(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedMessage(null)} 
+                                className="text-surface-400 hover:text-surface-600 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
@@ -231,28 +235,28 @@ export default function InboxPage() {
                             <span className={cn('px-2 py-1 rounded text-sm font-medium', CLASSIFICATION_CONFIG[selectedMessage.classification].color)}>
                                 {CLASSIFICATION_CONFIG[selectedMessage.classification].icon} {CLASSIFICATION_CONFIG[selectedMessage.classification].label}
                             </span>
-                            <span className="text-sm text-gray-500">
+                            <span className="text-sm text-surface-500 font-medium">
                                 ({(selectedMessage.confidence * 100).toFixed(0)}% confidence)
                             </span>
                         </div>
 
-                        <div className="bg-gray-50 rounded-lg p-4 mb-6">
-                            <p className="text-gray-700 whitespace-pre-wrap">{selectedMessage.preview}</p>
+                        <div className="bg-surface-50 rounded-lg p-4 mb-6 border border-surface-100">
+                            <p className="text-surface-700 whitespace-pre-wrap">{selectedMessage.preview}</p>
                         </div>
 
                         {/* Reclassify */}
                         <div className="mb-6">
-                            <label className="text-sm text-gray-500 mb-2 block">Reclassify this message:</label>
+                            <label className="text-sm text-surface-500 mb-2 block font-medium">Reclassify this message:</label>
                             <div className="flex flex-wrap gap-2">
                                 {Object.entries(CLASSIFICATION_CONFIG).map(([key, config]) => (
                                     <button
                                         key={key}
                                         onClick={() => reclassify(selectedMessage.id, key as InboxMessage['classification'])}
                                         className={cn(
-                                            'px-3 py-1.5 rounded text-sm font-medium',
+                                            'px-3 py-1.5 rounded text-sm font-medium transition-all',
                                             selectedMessage.classification === key
-                                                ? 'ring-2 ring-indigo-500'
-                                                : '',
+                                                ? 'ring-2 ring-blue-500 shadow-sm'
+                                                : 'hover:opacity-80',
                                             config.color
                                         )}
                                     >
@@ -265,15 +269,15 @@ export default function InboxPage() {
                         {/* Actions */}
                         <div className="flex gap-2">
                             {selectedMessage.classification === 'interested' && (
-                                <button className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                                <button className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-medium transition-colors">
                                     📅 Schedule Demo
                                 </button>
                             )}
-                            <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                            <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors">
                                 ↩️ Reply
                             </button>
                             {selectedMessage.leadId && (
-                                <button className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
+                                <button className="px-4 py-2 bg-surface-100 text-surface-700 rounded-lg hover:bg-surface-200 font-medium transition-colors">
                                     👤 View Lead
                                 </button>
                             )}

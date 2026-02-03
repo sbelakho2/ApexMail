@@ -22,8 +22,8 @@ const securityFeatures = [
  },
  {
  icon: Eye,
- title: 'Zero-Knowledge Architecture',
- description: 'With zero-retention mode enabled, we process your emails without ever storing content.',
+ title: 'Zero-Retention Mode',
+ description: 'Process emails entirely in RAM. No logs, no content storage, no risk. Perfect for PII processing.',
  },
  {
  icon: Server,

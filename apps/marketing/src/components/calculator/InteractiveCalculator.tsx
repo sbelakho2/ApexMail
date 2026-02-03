@@ -48,7 +48,7 @@ const providers: Record<string, PricingTier> = {
  if (contacts <= 100000) return 605;
  return 605 + Math.ceil((contacts - 100000) / 10000) * 50;
  },
- color: 'bg-yellow-600',
+ color: 'bg-amber-600',
  },
  ses: {
  name: 'AWS SES',

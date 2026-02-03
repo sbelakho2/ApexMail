@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
-import { Sidebar } from '../components/layout/sidebar';
+import { ControlPlaneShell } from '../components/layout/control-plane-shell';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -34,16 +34,7 @@ export default function RootLayout({
     return (
         <html lang="en">
             <body className={inter.className}>
-                {/* Control Plane Indicator Banner */}
-                <div className="fixed top-0 left-0 right-0 z-50 bg-indigo-600 text-white text-center text-xs py-1 font-medium">
-                    🔒 ApexMail Control Plane — Internal Use Only
-                </div>
-                <div className="pt-6 min-h-screen bg-gray-50">
-                    <Sidebar />
-                    <main className="ml-64 p-8">
-                        {children}
-                    </main>
-                </div>
+                <ControlPlaneShell>{children}</ControlPlaneShell>
             </body>
         </html>
     );

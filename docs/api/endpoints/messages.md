@@ -436,7 +436,7 @@ Templates use Handlebars syntax:
 ### Node.js
 
 ```javascript
-const response = await fetch('https://api.apexmail.io/api/v1/messages', {
+const response = await fetch('https://api.apexmail.ee/api/v1/messages', {
   method: 'POST',
   headers: {
     'Authorization': `Bearer ${API_KEY}`,
@@ -460,7 +460,7 @@ console.log(`Message sent: ${message.id}`);
 import requests
 
 response = requests.post(
-    'https://api.apexmail.io/api/v1/messages',
+    'https://api.apexmail.ee/api/v1/messages',
     headers={
         'Authorization': f'Bearer {API_KEY}',
         'Content-Type': 'application/json',
@@ -480,7 +480,7 @@ print(f"Message sent: {message['id']}")
 ### cURL
 
 ```bash
-curl -X POST https://api.apexmail.io/api/v1/messages \
+curl -X POST https://api.apexmail.ee/api/v1/messages \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{

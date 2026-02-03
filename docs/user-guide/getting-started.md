@@ -22,7 +22,7 @@ Before sending emails, you need to verify your domain:
 
 | Record Type | Host | Value |
 |-------------|------|-------|
-| TXT | `@` | `v=spf1 include:_spf.apexmail.io ~all` |
+| TXT | `@` | `v=spf1 include:_spf.apexmail.ee ~all` |
 | TXT | `apexmail._domainkey` | `v=DKIM1; k=rsa; p=...` |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; ...` |
 
@@ -50,7 +50,7 @@ Before sending emails, you need to verify your domain:
 #### Basic Email
 
 ```bash
-curl -X POST https://api.apexmail.io/api/v1/messages \
+curl -X POST https://api.apexmail.ee/api/v1/messages \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -65,7 +65,7 @@ curl -X POST https://api.apexmail.io/api/v1/messages \
 #### With Template
 
 ```bash
-curl -X POST https://api.apexmail.io/api/v1/messages \
+curl -X POST https://api.apexmail.ee/api/v1/messages \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -351,8 +351,8 @@ function verifyWebhook(payload, signature, secret) {
 ## Getting Help
 
 - **Documentation**: [Full API Reference](../api/authentication.md)
-- **Status Page**: https://status.apexmail.io
-- **Support**: support@apexmail.io
+- **Status Page**: https://status.apexmail.ee
+- **Support**: support@apexmail.ee
 - **Community**: [GitHub Discussions](https://github.com/yourorg/apexmail/discussions)
 
 ### Troubleshooting

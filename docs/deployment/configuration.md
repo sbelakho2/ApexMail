@@ -181,7 +181,7 @@ To send emails from your domain, configure these DNS records:
 ```dns
 Type: TXT
 Host: @
-Value: v=spf1 include:_spf.apexmail.io ~all
+Value: v=spf1 include:_spf.apexmail.ee ~all
 ```
 
 #### DKIM Record

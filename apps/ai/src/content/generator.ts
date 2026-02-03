@@ -6,6 +6,7 @@
  */
 
 import { InferenceEngine } from '../inference/engine.js';
+import { SentimentAnalyzer } from './sentiment.js';
 import type {
     ContentGenerationRequest,
     ContentGenerationResult,
@@ -18,7 +19,6 @@ import type {
     SubjectLineIssue,
     SentimentRequest,
     SentimentResult,
-    EmotionScores,
 } from '../types.js';
 
 /**
@@ -118,11 +118,20 @@ const CTA_PATTERNS = {
 export class ContentGenerator {
     private engine: InferenceEngine;
     private config: ContentGeneratorConfig;
+    private sentimentAnalyzer: SentimentAnalyzer;
 
     constructor(config?: Partial<ContentGeneratorConfig>) {
         this.config = { ...DEFAULT_CONTENT_CONFIG, ...config };
         this.engine = new InferenceEngine({
             temperature: 0.8, // Higher creativity for content
+        });
+        this.sentimentAnalyzer = new SentimentAnalyzer();
+        
+        // Add email marketing specific words to lexicon
+        this.sentimentAnalyzer.addCustomWords({
+            'sale': 1, 'deal': 1, 'offer': 1, 'promo': 1, 'coupon': 1,
+            'clearance': 1, 'flash': 1, 'membership': 1, 'vip': 2,
+            'premium': 1, 'upgrade': 1, 'unlock': 1, 'access': 1,
         });
     }
 
@@ -240,76 +249,52 @@ export class ContentGenerator {
     }
 
     /**
-     * Analyze content sentiment
+     * Analyze content sentiment using ML-based analyzer
+     * 
+     * Uses AFINN lexicon with negation handling, intensifiers,
+     * and NRC emotion detection for comprehensive sentiment analysis.
      */
     async analyzeSentiment(request: SentimentRequest): Promise<SentimentResult> {
-        const startTime = Date.now();
-        const text = request.text;
-
-        // Simple rule-based sentiment analysis
-        // In production, use the inference engine for more accurate results
-        const positiveWords = [
-            'great', 'amazing', 'excellent', 'wonderful', 'fantastic', 'love',
-            'best', 'perfect', 'happy', 'excited', 'thrilled', 'delighted',
-            'free', 'save', 'discount', 'exclusive', 'special', 'bonus',
-        ];
-
-        const negativeWords = [
-            'bad', 'terrible', 'awful', 'horrible', 'worst', 'hate',
-            'disappointing', 'frustrated', 'angry', 'annoyed', 'spam',
-            'unsubscribe', 'problem', 'issue', 'error', 'failed',
-        ];
-
-        const urgencyWords = [
-            'now', 'today', 'hurry', 'limited', 'last', 'final',
-            'expires', 'deadline', 'urgent', 'immediately', 'act fast',
-        ];
-
-        const lowerText = text.toLowerCase();
-        const words = lowerText.split(/\s+/);
-
-        let positiveCount = 0;
-        let negativeCount = 0;
-        let urgencyCount = 0;
-
-        for (const word of words) {
-            if (positiveWords.some((p) => word.includes(p))) positiveCount++;
-            if (negativeWords.some((n) => word.includes(n))) negativeCount++;
-            if (urgencyWords.some((u) => word.includes(u))) urgencyCount++;
+        // Use the enhanced ML-based sentiment analyzer
+        const result = this.sentimentAnalyzer.analyze(request.text);
+        
+        // If granularity is specified, add additional analysis
+        if (request.granularity === 'sentence') {
+            const sentences = this.sentimentAnalyzer.analyzeBySentence(request.text);
+            return {
+                ...result,
+                sentences: sentences.map((s, idx) => ({
+                    text: s.sentence,
+                    sentiment: {
+                        label: s.sentiment,
+                        score: s.score,
+                        confidence: result.confidence ?? 0,
+                    },
+                    span: { start: idx, end: idx },
+                })),
+            };
         }
 
-        const totalSentimentWords = positiveCount + negativeCount;
-        const sentimentScore = totalSentimentWords > 0
-            ? (positiveCount - negativeCount) / totalSentimentWords
-            : 0;
+        if (request.granularity === 'aspect' && request.aspects) {
+            const aspects = this.sentimentAnalyzer.analyzeAspects(
+                request.text,
+                request.aspects
+            );
+            return {
+                ...result,
+                aspects: aspects.map((a) => ({
+                    aspect: a.aspect,
+                    sentiment: {
+                        label: a.sentiment,
+                        score: a.score,
+                        confidence: result.confidence ?? 0,
+                    },
+                    mentions: [a.aspect],
+                })),
+            };
+        }
 
-        const sentiment: 'positive' | 'negative' | 'neutral' =
-            sentimentScore > 0.2 ? 'positive' :
-            sentimentScore < -0.2 ? 'negative' : 'neutral';
-
-        const confidence = Math.min(totalSentimentWords / 5, 1);
-
-        // Build emotion scores
-        const emotions: EmotionScores = {
-            joy: positiveCount > 2 ? 0.6 + Math.random() * 0.3 : Math.random() * 0.3,
-            trust: positiveCount > 0 ? 0.4 + Math.random() * 0.3 : Math.random() * 0.2,
-            fear: negativeCount > 0 ? 0.3 + Math.random() * 0.2 : Math.random() * 0.1,
-            surprise: text.includes('!') || text.includes('?') ? 0.4 + Math.random() * 0.3 : Math.random() * 0.2,
-            sadness: negativeCount > 2 ? 0.3 + Math.random() * 0.2 : Math.random() * 0.1,
-            disgust: negativeCount > 3 ? 0.2 + Math.random() * 0.2 : Math.random() * 0.05,
-            anger: negativeCount > 2 && urgencyCount > 0 ? 0.2 + Math.random() * 0.2 : Math.random() * 0.1,
-            anticipation: urgencyCount > 0 ? 0.5 + Math.random() * 0.3 : 0.3 + Math.random() * 0.2,
-        };
-
-        return {
-            sentiment,
-            score: sentimentScore,
-            confidence,
-            emotions,
-            keywords: [...positiveWords.filter((w) => lowerText.includes(w)),
-                       ...negativeWords.filter((w) => lowerText.includes(w))],
-            latencyMs: Date.now() - startTime,
-        };
+        return result;
     }
 
     /**

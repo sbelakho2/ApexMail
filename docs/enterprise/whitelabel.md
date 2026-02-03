@@ -17,7 +17,7 @@ White-label features include:
 ### 1. Configure Custom Domain
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/whitelabel \
+curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -33,8 +33,8 @@ Add these DNS records to your domain:
 
 | Type | Name | Value | Purpose |
 |------|------|-------|---------|
-| CNAME | mail | proxy.apexmail.io | Dashboard |
-| CNAME | api.mail | api-proxy.apexmail.io | API Gateway |
+| CNAME | mail | proxy.apexmail.ee | Dashboard |
+| CNAME | api.mail | api-proxy.apexmail.ee | API Gateway |
 | TXT | _apexmail-verify | verify_token_xxx | Domain verification |
 
 ### 3. SSL Certificate
@@ -42,7 +42,7 @@ Add these DNS records to your domain:
 ApexMail automatically provisions SSL certificates via Let's Encrypt. Alternatively, upload your own:
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/whitelabel/ssl \
+curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel/ssl \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -F "certificate=@certificate.pem" \
   -F "privateKey=@private-key.pem" \
@@ -54,7 +54,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/whitelabel/ssl \
 ### Complete Branding Example
 
 ```bash
-curl -X PUT https://api.apexmail.io/enterprise/v1/whitelabel/branding \
+curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/branding \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -120,7 +120,7 @@ Configure light and dark mode themes:
 Customize all system-generated emails:
 
 ```bash
-curl -X PUT https://api.apexmail.io/enterprise/v1/whitelabel/emails \
+curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/emails \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "welcomeEmail": {
@@ -157,7 +157,7 @@ curl -X PUT https://api.apexmail.io/enterprise/v1/whitelabel/emails \
 ### Custom CSS Injection
 
 ```bash
-curl -X PUT https://api.apexmail.io/enterprise/v1/whitelabel/custom-css \
+curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-css \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: text/css" \
   -d '
@@ -182,7 +182,7 @@ curl -X PUT https://api.apexmail.io/enterprise/v1/whitelabel/custom-css \
 ### Custom JavaScript
 
 ```bash
-curl -X PUT https://api.apexmail.io/enterprise/v1/whitelabel/custom-js \
+curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-js \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/javascript" \
   -d '
@@ -288,7 +288,7 @@ Remove ApexMail branding from API responses:
 ### Check White-Label Status
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/whitelabel/status/{account_id} \
+curl https://api.apexmail.ee/enterprise/v1/whitelabel/status/{account_id} \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
@@ -316,7 +316,7 @@ Response:
 ### Verify Custom Domain
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/whitelabel/verify \
+curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel/verify \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{"accountId": "acc_xxx"}'
 ```

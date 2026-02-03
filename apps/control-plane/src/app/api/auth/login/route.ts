@@ -117,8 +117,8 @@ function verifyCredentials(email: string, password: string): { valid: boolean; u
 }
 
 /**
- * Verifies MFA code
- * In production, this would use TOTP verification
+ * Verifies MFA code using TOTP (Time-based One-Time Password)
+ * Implements RFC 6238 TOTP algorithm
  */
 function verifyMfaCode(userId: string, code: string): boolean {
     // SECURITY: In production, implement proper TOTP verification
@@ -136,11 +136,93 @@ function verifyMfaCode(userId: string, code: string): boolean {
         return false;
     }
     
-    // TODO: Implement actual TOTP verification
-    // const totp = new TOTP({ secret: MFA_SECRET });
-    // return totp.validate({ token: code, window: 1 }) !== null;
+    // Validate code format (6 digits)
+    if (!/^\d{6}$/.test(code)) {
+        return false;
+    }
+    
+    // TOTP implementation (RFC 6238)
+    const timeStep = 30; // 30-second window
+    const digits = 6;
+    const currentTime = Math.floor(Date.now() / 1000);
+    
+    // Check current window and ±1 window for clock drift tolerance
+    for (const drift of [0, -1, 1]) {
+        const counter = Math.floor((currentTime / timeStep) + drift);
+        const expectedCode = generateTOTP(MFA_SECRET, counter, digits);
+        
+        if (timingSafeEqual(code, expectedCode)) {
+            return true;
+        }
+    }
     
     return false;
+}
+
+/**
+ * Generates a TOTP code using HMAC-SHA1
+ * RFC 6238 compliant implementation
+ */
+function generateTOTP(secret: string, counter: number, digits: number): string {
+    // Decode base32 secret
+    const key = base32Decode(secret);
+    
+    // Convert counter to 8-byte buffer (big-endian)
+    const counterBuffer = Buffer.alloc(8);
+    counterBuffer.writeBigUInt64BE(BigInt(counter));
+    
+    // Generate HMAC-SHA1
+    const hmac = crypto.createHmac('sha1', key);
+    hmac.update(counterBuffer);
+    const hash = hmac.digest();
+    
+    // Dynamic truncation (RFC 4226)
+    const offset = hash[hash.length - 1] & 0x0f;
+    const truncatedHash = 
+        ((hash[offset] & 0x7f) << 24) |
+        ((hash[offset + 1] & 0xff) << 16) |
+        ((hash[offset + 2] & 0xff) << 8) |
+        (hash[offset + 3] & 0xff);
+    
+    // Generate the OTP code
+    const otp = truncatedHash % Math.pow(10, digits);
+    return otp.toString().padStart(digits, '0');
+}
+
+/**
+ * Decodes a Base32 encoded string (RFC 4648)
+ * Used for TOTP secrets
+ */
+function base32Decode(encoded: string): Buffer {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    const cleaned = encoded.toUpperCase().replace(/[^A-Z2-7]/g, '');
+    
+    let bits = '';
+    for (const char of cleaned) {
+        const val = alphabet.indexOf(char);
+        if (val === -1) continue;
+        bits += val.toString(2).padStart(5, '0');
+    }
+    
+    const bytes: number[] = [];
+    for (let i = 0; i + 8 <= bits.length; i += 8) {
+        bytes.push(parseInt(bits.substring(i, i + 8), 2));
+    }
+    
+    return Buffer.from(bytes);
+}
+
+/**
+ * Timing-safe string comparison to prevent timing attacks
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+    if (a.length !== b.length) {
+        // Still do the comparison to avoid timing leak on length
+        const dummy = '0'.repeat(a.length);
+        crypto.timingSafeEqual(Buffer.from(dummy), Buffer.from(dummy));
+        return false;
+    }
+    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 /**

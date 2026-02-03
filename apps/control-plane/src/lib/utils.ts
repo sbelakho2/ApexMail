@@ -32,8 +32,8 @@ export function formatPercentage(value: number): string {
 
 export function getRiskColor(level: 'low' | 'medium' | 'high' | 'critical'): string {
     const colors = {
-        low: 'text-green-600 bg-green-50',
-        medium: 'text-yellow-600 bg-yellow-50',
+        low: 'text-emerald-600 bg-emerald-50',
+        medium: 'text-amber-600 bg-amber-50',
         high: 'text-orange-600 bg-orange-50',
         critical: 'text-red-600 bg-red-50',
     };
@@ -42,16 +42,16 @@ export function getRiskColor(level: 'low' | 'medium' | 'high' | 'critical'): str
 
 export function getStatusColor(status: string): string {
     const colors: Record<string, string> = {
-        active: 'text-green-600 bg-green-50',
-        paused: 'text-yellow-600 bg-yellow-50',
+        active: 'text-emerald-600 bg-emerald-50',
+        paused: 'text-amber-600 bg-amber-50',
         completed: 'text-blue-600 bg-blue-50',
-        draft: 'text-gray-600 bg-gray-50',
-        pending: 'text-yellow-600 bg-yellow-50',
+        draft: 'text-slate-600 bg-slate-50',
+        pending: 'text-amber-600 bg-amber-50',
         processing: 'text-blue-600 bg-blue-50',
-        success: 'text-green-600 bg-green-50',
+        success: 'text-emerald-600 bg-emerald-50',
         failed: 'text-red-600 bg-red-50',
     };
-    return colors[status] || 'text-gray-600 bg-gray-50';
+    return colors[status] || 'text-slate-600 bg-slate-50';
 }
 
 export function truncate(str: string, length: number): string {

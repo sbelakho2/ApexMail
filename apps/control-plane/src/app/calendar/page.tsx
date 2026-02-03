@@ -38,16 +38,16 @@ interface AvailabilitySlot {
 
 const EVENT_TYPE_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
     discovery: { label: 'Discovery Call', color: 'bg-blue-100 text-blue-700', icon: '🔍' },
-    demo: { label: 'Product Demo', color: 'bg-purple-100 text-purple-700', icon: '🎬' },
-    follow_up: { label: 'Follow-up', color: 'bg-green-100 text-green-700', icon: '📞' },
+    demo: { label: 'Product Demo', color: 'bg-violet-100 text-violet-700', icon: '🎬' },
+    follow_up: { label: 'Follow-up', color: 'bg-emerald-100 text-emerald-700', icon: '📞' },
 };
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
     scheduled: { label: 'Scheduled', color: 'text-blue-600' },
-    completed: { label: 'Completed', color: 'text-green-600' },
+    completed: { label: 'Completed', color: 'text-emerald-600' },
     no_show: { label: 'No Show', color: 'text-red-600' },
-    rescheduled: { label: 'Rescheduled', color: 'text-yellow-600' },
-    cancelled: { label: 'Cancelled', color: 'text-gray-600' },
+    rescheduled: { label: 'Rescheduled', color: 'text-amber-600' },
+    cancelled: { label: 'Cancelled', color: 'text-surface-600' },
 };
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -120,7 +120,7 @@ export default function CalendarPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -129,44 +129,44 @@ export default function CalendarPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Demo Calendar</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Demo Calendar</h1>
+                    <p className="text-surface-600 mt-1">
                         Schedule and manage discovery calls and demos
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <button className="px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm hover:bg-gray-50">
+                    <button className="px-4 py-2 bg-surface-0 border border-surface-200 rounded-lg text-sm hover:bg-surface-50 font-medium text-surface-700 transition-colors">
                         🔗 Connect Calendar
                     </button>
-                    <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                    <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors">
                         📋 Copy Booking Link
                     </button>
                 </div>
             </div>
 
             {/* Stats */}
-            <div className="grid grid-cols-4 gap-4 mb-6">
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Upcoming</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Upcoming</div>
                     <div className="text-2xl font-bold text-blue-600">{scheduledCount}</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Completed</div>
-                    <div className="text-2xl font-bold text-green-600">{completedCount}</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Completed</div>
+                    <div className="text-2xl font-bold text-emerald-600">{completedCount}</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">No Shows</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">No Shows</div>
                     <div className="text-2xl font-bold text-red-600">{noShowCount}</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Show Rate</div>
-                    <div className="text-2xl font-bold text-indigo-600">{showRate}%</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Show Rate</div>
+                    <div className="text-2xl font-bold text-blue-600">{showRate}%</div>
                 </div>
             </div>
 
             {/* Tabs */}
-            <div className="border-b border-gray-200 mb-6">
-                <nav className="flex gap-4">
+            <div className="border-b border-surface-200 mb-6 overflow-x-auto">
+                <nav className="flex gap-4 min-w-max">
                     {[
                         { key: 'upcoming', label: `Upcoming (${upcomingEvents.length})` },
                         { key: 'past', label: `Past (${pastEvents.length})` },
@@ -176,10 +176,10 @@ export default function CalendarPage() {
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key as typeof activeTab)}
                             className={cn(
-                                'pb-3 text-sm font-medium transition-colors',
+                                'pb-3 text-sm font-medium transition-colors border-b-2',
                                 activeTab === tab.key
-                                    ? 'border-b-2 border-indigo-600 text-indigo-600'
-                                    : 'text-gray-500 hover:text-gray-700'
+                                    ? 'border-blue-600 text-blue-600'
+                                    : 'border-transparent text-surface-500 hover:text-surface-700 hover:border-surface-300'
                             )}
                         >
                             {tab.label}
@@ -190,38 +190,38 @@ export default function CalendarPage() {
 
             {/* Upcoming Events */}
             {activeTab === 'upcoming' && (
-                <div className="bg-white rounded-xl border border-gray-200">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm">
                     {upcomingEvents.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-surface-500">
                             No upcoming meetings scheduled
                         </div>
                     ) : (
-                        <div className="divide-y divide-gray-100">
+                        <div className="divide-y divide-surface-100">
                             {upcomingEvents.map(event => {
                                 const typeConfig = EVENT_TYPE_CONFIG[event.type];
                                 return (
                                     <div
                                         key={event.id}
-                                        className="p-4 hover:bg-gray-50 cursor-pointer flex items-center gap-4"
+                                        className="p-4 hover:bg-surface-50 cursor-pointer flex items-center gap-4 transition-colors"
                                         onClick={() => setSelectedEvent(event)}
                                     >
                                         <div className="text-2xl">{typeConfig.icon}</div>
                                         <div className="flex-1">
                                             <div className="flex items-center gap-2 mb-1">
-                                                <span className="font-medium text-gray-900">{event.title}</span>
+                                                <span className="font-medium text-surface-900">{event.title}</span>
                                                 <span className={cn('px-2 py-0.5 rounded text-xs font-medium', typeConfig.color)}>
                                                     {typeConfig.label}
                                                 </span>
                                             </div>
-                                            <div className="text-sm text-gray-500">
+                                            <div className="text-sm text-surface-500">
                                                 {event.leadName} • {event.leadCompany}
                                             </div>
                                         </div>
                                         <div className="text-right">
-                                            <div className="text-sm font-medium text-gray-900">
+                                            <div className="text-sm font-medium text-surface-900">
                                                 {formatDate(event.startTime)}
                                             </div>
-                                            <div className="text-sm text-gray-500">
+                                            <div className="text-sm text-surface-500">
                                                 {new Date(event.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} -
                                                 {new Date(event.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                             </div>
@@ -231,7 +231,7 @@ export default function CalendarPage() {
                                             target="_blank"
                                             rel="noopener noreferrer"
                                             onClick={(e) => e.stopPropagation()}
-                                            className="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700"
+                                            className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 font-medium transition-colors"
                                         >
                                             Join
                                         </a>
@@ -245,35 +245,35 @@ export default function CalendarPage() {
 
             {/* Past Events */}
             {activeTab === 'past' && (
-                <div className="bg-white rounded-xl border border-gray-200">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm">
                     {pastEvents.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-surface-500">
                             No past meetings
                         </div>
                     ) : (
-                        <div className="divide-y divide-gray-100">
+                        <div className="divide-y divide-surface-100">
                             {pastEvents.map(event => {
                                 const typeConfig = EVENT_TYPE_CONFIG[event.type];
                                 const statusConfig = STATUS_CONFIG[event.status];
                                 return (
                                     <div
                                         key={event.id}
-                                        className="p-4 hover:bg-gray-50 cursor-pointer flex items-center gap-4"
+                                        className="p-4 hover:bg-surface-50 cursor-pointer flex items-center gap-4 transition-colors"
                                         onClick={() => setSelectedEvent(event)}
                                     >
                                         <div className="text-2xl opacity-50">{typeConfig.icon}</div>
                                         <div className="flex-1">
                                             <div className="flex items-center gap-2 mb-1">
-                                                <span className="font-medium text-gray-700">{event.title}</span>
+                                                <span className="font-medium text-surface-700">{event.title}</span>
                                                 <span className={cn('text-sm font-medium', statusConfig.color)}>
                                                     {statusConfig.label}
                                                 </span>
                                             </div>
-                                            <div className="text-sm text-gray-500">
+                                            <div className="text-sm text-surface-500">
                                                 {event.leadName} • {event.leadCompany}
                                             </div>
                                         </div>
-                                        <div className="text-sm text-gray-500">
+                                        <div className="text-sm text-surface-500">
                                             {formatDate(event.startTime)}
                                         </div>
                                     </div>
@@ -286,9 +286,9 @@ export default function CalendarPage() {
 
             {/* Availability */}
             {activeTab === 'availability' && (
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <h3 className="text-lg font-semibold text-gray-900 mb-4">Weekly Availability</h3>
-                    <p className="text-sm text-gray-500 mb-6">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6">
+                    <h3 className="text-lg font-semibold text-surface-900 mb-4">Weekly Availability</h3>
+                    <p className="text-sm text-surface-500 mb-6">
                         Set the times when prospects can book meetings with you.
                     </p>
                     <div className="space-y-4">
@@ -296,7 +296,7 @@ export default function CalendarPage() {
                             const daySlots = availability.filter(s => s.dayOfWeek === day);
                             return (
                                 <div key={day} className="flex items-center gap-4">
-                                    <div className="w-24 font-medium text-gray-700">{DAYS[day]}</div>
+                                    <div className="w-24 font-medium text-surface-700">{DAYS[day]}</div>
                                     <div className="flex-1 flex flex-wrap gap-2">
                                         {daySlots.map(slot => (
                                             <button
@@ -305,14 +305,14 @@ export default function CalendarPage() {
                                                 className={cn(
                                                     'px-3 py-1.5 rounded text-sm font-medium transition-colors',
                                                     slot.enabled
-                                                        ? 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'
-                                                        : 'bg-gray-100 text-gray-400 line-through hover:bg-gray-200'
+                                                        ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                                                        : 'bg-surface-100 text-surface-400 line-through hover:bg-surface-200'
                                                 )}
                                             >
                                                 {slot.startTime} - {slot.endTime}
                                             </button>
                                         ))}
-                                        <button className="px-3 py-1.5 border border-dashed border-gray-300 rounded text-sm text-gray-400 hover:border-gray-400 hover:text-gray-500">
+                                        <button className="px-3 py-1.5 border border-dashed border-surface-300 rounded text-sm text-surface-400 hover:border-surface-400 hover:text-surface-500">
                                             + Add
                                         </button>
                                     </div>
@@ -320,36 +320,36 @@ export default function CalendarPage() {
                             );
                         })}
                     </div>
-                    <div className="mt-6 pt-6 border-t border-gray-200">
-                        <h4 className="text-sm font-medium text-gray-700 mb-3">Meeting Settings</h4>
-                        <div className="grid grid-cols-2 gap-4">
+                    <div className="mt-6 pt-6 border-t border-surface-200">
+                        <h4 className="text-sm font-medium text-surface-700 mb-3">Meeting Settings</h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
-                                <label className="text-sm text-gray-500">Discovery Call Duration</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <label className="text-sm text-surface-500">Discovery Call Duration</label>
+                                <select className="mt-1 w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                                     <option>15 minutes</option>
                                     <option selected>30 minutes</option>
                                     <option>45 minutes</option>
                                 </select>
                             </div>
                             <div>
-                                <label className="text-sm text-gray-500">Demo Duration</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <label className="text-sm text-surface-500">Demo Duration</label>
+                                <select className="mt-1 w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                                     <option>30 minutes</option>
                                     <option>45 minutes</option>
                                     <option selected>60 minutes</option>
                                 </select>
                             </div>
                             <div>
-                                <label className="text-sm text-gray-500">Buffer Between Meetings</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <label className="text-sm text-surface-500">Buffer Between Meetings</label>
+                                <select className="mt-1 w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                                     <option>No buffer</option>
                                     <option selected>15 minutes</option>
                                     <option>30 minutes</option>
                                 </select>
                             </div>
                             <div>
-                                <label className="text-sm text-gray-500">Booking Notice</label>
-                                <select className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <label className="text-sm text-surface-500">Booking Notice</label>
+                                <select className="mt-1 w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                                     <option>1 hour</option>
                                     <option selected>4 hours</option>
                                     <option>24 hours</option>
@@ -362,43 +362,47 @@ export default function CalendarPage() {
 
             {/* Event Detail Modal */}
             {selectedEvent && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedEvent(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedEvent(null)}>
+                    <div className="bg-surface-0 rounded-xl p-6 w-full max-w-lg shadow-xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-gray-900">{selectedEvent.title}</h2>
-                                <div className="text-sm text-gray-500 mt-1">
+                                <h2 className="text-xl font-bold text-surface-900">{selectedEvent.title}</h2>
+                                <div className="text-sm text-surface-500 mt-1">
                                     {formatDate(selectedEvent.startTime)} • {new Date(selectedEvent.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedEvent(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedEvent(null)} 
+                                className="text-surface-400 hover:text-surface-600 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
                         <div className="space-y-4 mb-6">
                             <div className="flex items-center gap-3">
-                                <span className="text-gray-500 w-20">Lead:</span>
-                                <span className="font-medium">{selectedEvent.leadName}</span>
+                                <span className="text-surface-500 w-20">Lead:</span>
+                                <span className="font-medium text-surface-900">{selectedEvent.leadName}</span>
                             </div>
                             <div className="flex items-center gap-3">
-                                <span className="text-gray-500 w-20">Company:</span>
-                                <span>{selectedEvent.leadCompany}</span>
+                                <span className="text-surface-500 w-20">Company:</span>
+                                <span className="text-surface-700">{selectedEvent.leadCompany}</span>
                             </div>
                             <div className="flex items-center gap-3">
-                                <span className="text-gray-500 w-20">Email:</span>
-                                <span>{selectedEvent.leadEmail}</span>
+                                <span className="text-surface-500 w-20">Email:</span>
+                                <span className="text-surface-700">{selectedEvent.leadEmail}</span>
                             </div>
                             <div className="flex items-center gap-3">
-                                <span className="text-gray-500 w-20">Status:</span>
+                                <span className="text-surface-500 w-20">Status:</span>
                                 <span className={STATUS_CONFIG[selectedEvent.status].color}>
                                     {STATUS_CONFIG[selectedEvent.status].label}
                                 </span>
                             </div>
                             {selectedEvent.notes && (
                                 <div>
-                                    <span className="text-gray-500 block mb-1">Notes:</span>
-                                    <p className="text-sm bg-gray-50 rounded-lg p-3">{selectedEvent.notes}</p>
+                                    <span className="text-surface-500 block mb-1">Notes:</span>
+                                    <p className="text-sm bg-surface-50 rounded-lg p-3 text-surface-700 border border-surface-100">{selectedEvent.notes}</p>
                                 </div>
                             )}
                         </div>
@@ -410,19 +414,19 @@ export default function CalendarPage() {
                                         href={selectedEvent.meetingLink}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg text-center hover:bg-indigo-700"
+                                        className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-center hover:bg-blue-700 font-medium transition-colors"
                                     >
                                         🔗 Join Meeting
                                     </a>
                                     <button
                                         onClick={() => updateEventStatus(selectedEvent.id, 'completed')}
-                                        className="px-4 py-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200"
+                                        className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200 font-medium transition-colors"
                                     >
                                         ✓ Mark Complete
                                     </button>
                                     <button
                                         onClick={() => updateEventStatus(selectedEvent.id, 'no_show')}
-                                        className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200"
+                                        className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 font-medium transition-colors"
                                     >
                                         ✗ No Show
                                     </button>
@@ -431,7 +435,7 @@ export default function CalendarPage() {
                             {selectedEvent.status !== 'scheduled' && (
                                 <button
                                     onClick={() => setSelectedEvent(null)}
-                                    className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                                    className="flex-1 px-4 py-2 bg-surface-100 text-surface-700 rounded-lg hover:bg-surface-200 font-medium transition-colors"
                                 >
                                     Close
                                 </button>

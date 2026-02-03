@@ -241,18 +241,18 @@ export default function ContactsPage() {
                     <CardContent className="p-4">
                         {/* Filters */}
                         <div className="mb-4 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                            <div className="flex items-center gap-2">
+                            <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center">
                                 <div className="relative">
                                     <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                                     <Input
                                         placeholder="Search contacts..."
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
-                                        className="w-64 pl-9"
+                                        className="w-full sm:w-64 pl-9"
                                     />
                                 </div>
                                 <Select value={statusFilter} onValueChange={setStatusFilter}>
-                                    <SelectTrigger className="w-40">
+                                    <SelectTrigger className="w-full sm:w-40">
                                         <SelectValue placeholder="Status" />
                                     </SelectTrigger>
                                     <SelectContent>
@@ -285,7 +285,8 @@ export default function ContactsPage() {
                         </div>
 
                         {/* Table */}
-                        <Table>
+                        <div className="overflow-x-auto">
+                            <Table className="min-w-[800px]">
                             <TableHeader>
                                 <TableRow>
                                     <TableHead className="w-12">
@@ -425,6 +426,7 @@ export default function ContactsPage() {
                                 )}
                             </TableBody>
                         </Table>
+                        </div>
 
                         {/* Pagination */}
                         <div className="mt-4 flex items-center justify-between">
@@ -460,7 +462,7 @@ export default function ContactsPage() {
                             <Label htmlFor="email">Email *</Label>
                             <Input id="email" type="email" placeholder="john@example.com" />
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div className="grid gap-2">
                                 <Label htmlFor="firstName">First Name</Label>
                                 <Input id="firstName" placeholder="John" />

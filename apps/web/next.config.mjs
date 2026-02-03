@@ -6,7 +6,7 @@ const nextConfig = {
         remotePatterns: [
             {
                 protocol: 'https',
-                hostname: '*.apexmail.io',
+                hostname: '*.apexmail.ee',
             },
             {
                 protocol: 'https',

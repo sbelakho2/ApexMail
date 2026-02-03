@@ -1,0 +1,578 @@
+/**
+ * Email Validation Service
+ * 
+ * Comprehensive email address validation including:
+ * - Syntax validation (RFC 5322)
+ * - MX record verification
+ * - Disposable email detection
+ * - Role-based email detection
+ * - Common typo detection and suggestions
+ */
+
+import * as dns from 'dns';
+import { promisify } from 'util';
+import { createLogger } from '../logger/index.js';
+
+const logger = createLogger({ name: 'email-validation' });
+
+const resolveMx = promisify(dns.resolveMx);
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export interface EmailValidationResult {
+    valid: boolean;
+    email: string;
+    normalized: string;
+    local: string;
+    domain: string;
+    checks: {
+        syntax: boolean;
+        mxRecord: boolean;
+        notDisposable: boolean;
+        notRoleBased: boolean;
+    };
+    mxRecords?: dns.MxRecord[];
+    suggestions?: string[];
+    warnings?: string[];
+    errors?: string[];
+}
+
+export interface EmailValidationOptions {
+    /** Check MX records (default: true) */
+    checkMx?: boolean;
+    /** Check for disposable email domains (default: true) */
+    checkDisposable?: boolean;
+    /** Check for role-based emails (default: false) */
+    checkRoleBased?: boolean;
+    /** Suggest corrections for typos (default: true) */
+    suggestCorrections?: boolean;
+    /** Timeout for DNS lookups in ms (default: 5000) */
+    timeout?: number;
+    /** Allow subaddressing like user+tag@domain.com (default: true) */
+    allowSubaddressing?: boolean;
+}
+
+// ============================================================================
+// Known Lists
+// ============================================================================
+
+// Common disposable email domains
+const DISPOSABLE_DOMAINS = new Set([
+    'mailinator.com',
+    'guerrillamail.com',
+    'guerrillamail.net',
+    'guerrillamail.org',
+    'sharklasers.com',
+    'grr.la',
+    'guerrillamailblock.com',
+    'pokemail.net',
+    'spam4.me',
+    'tempmail.com',
+    'temp-mail.org',
+    'tempmail.net',
+    'throwaway.email',
+    'throwawaymail.com',
+    '10minutemail.com',
+    '10minutemail.net',
+    'minutemail.com',
+    'dispostable.com',
+    'fakeinbox.com',
+    'mailnesia.com',
+    'maildrop.cc',
+    'getnada.com',
+    'yopmail.com',
+    'yopmail.fr',
+    'trashmail.com',
+    'trashmail.net',
+    'mailcatch.com',
+    'tempr.email',
+    'discard.email',
+    'discardmail.com',
+    'spamgourmet.com',
+    'mytemp.email',
+    'mohmal.com',
+    'tempail.com',
+    'emailondeck.com',
+    'fakemailgenerator.com',
+    'getairmail.com',
+    'mailsac.com',
+]);
+
+// Role-based email prefixes
+const ROLE_BASED_PREFIXES = new Set([
+    'admin',
+    'administrator',
+    'abuse',
+    'billing',
+    'compliance',
+    'devnull',
+    'dns',
+    'ftp',
+    'hostmaster',
+    'info',
+    'inoc',
+    'ispfeedback',
+    'ispsupport',
+    'list-request',
+    'list',
+    'maildaemon',
+    'marketing',
+    'noc',
+    'no-reply',
+    'noreply',
+    'null',
+    'operations',
+    'phishing',
+    'postmaster',
+    'privacy',
+    'registrar',
+    'root',
+    'sales',
+    'security',
+    'spam',
+    'support',
+    'sysadmin',
+    'tech',
+    'undisclosed-recipients',
+    'unsubscribe',
+    'usenet',
+    'uucp',
+    'webmaster',
+    'www',
+]);
+
+// Common typos in email domains
+const DOMAIN_TYPOS: Record<string, string> = {
+    'gmial.com': 'gmail.com',
+    'gmai.com': 'gmail.com',
+    'gmal.com': 'gmail.com',
+    'gnail.com': 'gmail.com',
+    'gmail.co': 'gmail.com',
+    'gmail.cm': 'gmail.com',
+    'gmail.om': 'gmail.com',
+    'gamil.com': 'gmail.com',
+    'gmil.com': 'gmail.com',
+    'gmail.con': 'gmail.com',
+    'gmail.comm': 'gmail.com',
+    'yaho.com': 'yahoo.com',
+    'yahooo.com': 'yahoo.com',
+    'yahoo.co': 'yahoo.com',
+    'yahoo.cm': 'yahoo.com',
+    'yahoo.om': 'yahoo.com',
+    'yhaoo.com': 'yahoo.com',
+    'hotmal.com': 'hotmail.com',
+    'hotmai.com': 'hotmail.com',
+    'hotmial.com': 'hotmail.com',
+    'hotmail.co': 'hotmail.com',
+    'hotmail.cm': 'hotmail.com',
+    'hotmail.om': 'hotmail.com',
+    'outlok.com': 'outlook.com',
+    'outloo.com': 'outlook.com',
+    'outlook.co': 'outlook.com',
+    'outlook.cm': 'outlook.com',
+    'icloud.co': 'icloud.com',
+    'icoud.com': 'icloud.com',
+    'iclould.com': 'icloud.com',
+    'protonmal.com': 'protonmail.com',
+    'protonmai.com': 'protonmail.com',
+    'portonmail.com': 'protonmail.com',
+};
+
+// ============================================================================
+// Validation Functions
+// ============================================================================
+
+/**
+ * Validate email syntax according to RFC 5322
+ */
+function validateSyntax(email: string): { valid: boolean; local: string; domain: string } {
+    // Basic regex for email validation
+    // More permissive than RFC 5322 but catches most common issues
+    const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+    
+    if (!emailRegex.test(email)) {
+        return { valid: false, local: '', domain: '' };
+    }
+    
+    const [local, domain] = email.split('@');
+    
+    if (!local || !domain) {
+        return { valid: false, local: '', domain: '' };
+    }
+    
+    // Local part validation
+    if (local.length > 64) {
+        return { valid: false, local, domain };
+    }
+    
+    // Check for consecutive dots
+    if (local.includes('..') || domain.includes('..')) {
+        return { valid: false, local, domain };
+    }
+    
+    // Check for leading/trailing dots
+    if (local.startsWith('.') || local.endsWith('.')) {
+        return { valid: false, local, domain };
+    }
+    
+    // Domain validation
+    if (domain.length > 253) {
+        return { valid: false, local, domain };
+    }
+    
+    // Check TLD exists (at least 2 chars)
+    const tld = domain.split('.').pop();
+    if (!tld || tld.length < 2) {
+        return { valid: false, local, domain };
+    }
+    
+    return { valid: true, local, domain };
+}
+
+/**
+ * Check MX records for domain
+ */
+async function checkMxRecords(domain: string, timeout: number): Promise<{ valid: boolean; records?: dns.MxRecord[] }> {
+    try {
+        const records = await Promise.race([
+            resolveMx(domain),
+            new Promise<never>((_, reject) => 
+                setTimeout(() => reject(new Error('DNS timeout')), timeout)
+            ),
+        ]);
+        
+        if (records && records.length > 0) {
+            return { valid: true, records: records.sort((a, b) => a.priority - b.priority) };
+        }
+        
+        return { valid: false };
+    } catch (err) {
+        // Try resolving A record as fallback (some domains accept mail without MX)
+        try {
+            const aRecords = await promisify(dns.resolve4)(domain);
+            if (aRecords && aRecords.length > 0) {
+                return { valid: true, records: [{ exchange: domain, priority: 10 }] };
+            }
+        } catch {
+            // Ignore A record errors
+        }
+        
+        logger.debug('MX lookup failed', { domain, error: err instanceof Error ? err.message : 'Unknown error' });
+        return { valid: false };
+    }
+}
+
+/**
+ * Check if domain is a disposable email provider
+ */
+function checkDisposable(domain: string): boolean {
+    return DISPOSABLE_DOMAINS.has(domain.toLowerCase());
+}
+
+/**
+ * Check if email is a role-based address
+ */
+function checkRoleBased(local: string): boolean {
+    const normalizedLocal = local.toLowerCase().split('+')[0] || local.toLowerCase();
+    return ROLE_BASED_PREFIXES.has(normalizedLocal);
+}
+
+/**
+ * Suggest corrections for common typos
+ */
+function suggestCorrections(email: string, domain: string): string[] {
+    const suggestions: string[] = [];
+    const lowerDomain = domain.toLowerCase();
+    
+    // Check for known typos
+    const correction = DOMAIN_TYPOS[lowerDomain];
+    if (correction) {
+        const local = email.split('@')[0];
+        suggestions.push(`${local}@${correction}`);
+    }
+    
+    // Check Levenshtein distance for common domains
+    const commonDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'protonmail.com'];
+    for (const commonDomain of commonDomains) {
+        if (commonDomain !== lowerDomain && levenshteinDistance(lowerDomain, commonDomain) <= 2) {
+            const local = email.split('@')[0];
+            const suggestion = `${local}@${commonDomain}`;
+            if (!suggestions.includes(suggestion)) {
+                suggestions.push(suggestion);
+            }
+        }
+    }
+    
+    return suggestions;
+}
+
+/**
+ * Calculate Levenshtein distance between two strings
+ */
+function levenshteinDistance(a: string, b: string): number {
+    const matrix: number[][] = [];
+    
+    for (let i = 0; i <= b.length; i++) {
+        matrix[i] = [i];
+    }
+    
+    for (let j = 0; j <= a.length; j++) {
+        matrix[0]![j] = j;
+    }
+    
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            const cost = a[j - 1] === b[i - 1] ? 0 : 1;
+            matrix[i]![j] = Math.min(
+                (matrix[i - 1]?.[j] ?? 0) + 1,
+                (matrix[i]?.[j - 1] ?? 0) + 1,
+                (matrix[i - 1]?.[j - 1] ?? 0) + cost
+            );
+        }
+    }
+    
+    return matrix[b.length]?.[a.length] ?? 0;
+}
+
+/**
+ * Normalize email address
+ */
+function normalizeEmail(email: string, allowSubaddressing: boolean): string {
+    const [local, domain] = email.toLowerCase().split('@');
+    if (!local || !domain) return email.toLowerCase();
+    
+    let normalizedLocal = local;
+    
+    // Remove subaddressing if not allowed
+    if (!allowSubaddressing && local.includes('+')) {
+        normalizedLocal = local.split('+')[0] || local;
+    }
+    
+    // Gmail-specific: remove dots (they're ignored by Gmail)
+    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+        normalizedLocal = normalizedLocal.replace(/\./g, '');
+    }
+    
+    return `${normalizedLocal}@${domain}`;
+}
+
+// ============================================================================
+// Main Validation Function
+// ============================================================================
+
+/**
+ * Validate an email address
+ */
+export async function validateEmail(
+    email: string,
+    options: EmailValidationOptions = {}
+): Promise<EmailValidationResult> {
+    const {
+        checkMx = true,
+        checkDisposable: checkDisp = true,
+        checkRoleBased: checkRole = false,
+        suggestCorrections: suggest = true,
+        timeout = 5000,
+        allowSubaddressing = true,
+    } = options;
+    
+    const trimmedEmail = email.trim();
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    
+    // Step 1: Syntax validation
+    const syntaxResult = validateSyntax(trimmedEmail);
+    
+    if (!syntaxResult.valid) {
+        return {
+            valid: false,
+            email: trimmedEmail,
+            normalized: trimmedEmail.toLowerCase(),
+            local: syntaxResult.local,
+            domain: syntaxResult.domain,
+            checks: {
+                syntax: false,
+                mxRecord: false,
+                notDisposable: true,
+                notRoleBased: true,
+            },
+            errors: ['Invalid email syntax'],
+        };
+    }
+    
+    const { local, domain } = syntaxResult;
+    const normalized = normalizeEmail(trimmedEmail, allowSubaddressing);
+    
+    // Step 2: MX record check
+    let mxValid = true;
+    let mxRecords: dns.MxRecord[] | undefined;
+    
+    if (checkMx) {
+        const mxResult = await checkMxRecords(domain, timeout);
+        mxValid = mxResult.valid;
+        mxRecords = mxResult.records;
+        
+        if (!mxValid) {
+            errors.push(`No MX records found for domain: ${domain}`);
+        }
+    }
+    
+    // Step 3: Disposable email check
+    let notDisposable = true;
+    if (checkDisp) {
+        notDisposable = !checkDisposable(domain);
+        if (!notDisposable) {
+            warnings.push('Disposable email address detected');
+        }
+    }
+    
+    // Step 4: Role-based email check
+    let notRoleBased = true;
+    if (checkRole) {
+        notRoleBased = !checkRoleBased(local);
+        if (!notRoleBased) {
+            warnings.push('Role-based email address detected');
+        }
+    }
+    
+    // Step 5: Suggest corrections
+    let suggestions: string[] | undefined;
+    if (suggest) {
+        suggestions = suggestCorrections(trimmedEmail, domain);
+        if (suggestions.length > 0) {
+            warnings.push(`Did you mean: ${suggestions[0]}?`);
+        }
+    }
+    
+    // Determine overall validity
+    const valid = syntaxResult.valid && mxValid && notDisposable;
+    
+    return {
+        valid,
+        email: trimmedEmail,
+        normalized,
+        local,
+        domain,
+        checks: {
+            syntax: syntaxResult.valid,
+            mxRecord: mxValid,
+            notDisposable,
+            notRoleBased,
+        },
+        mxRecords,
+        suggestions: suggestions && suggestions.length > 0 ? suggestions : undefined,
+        warnings: warnings.length > 0 ? warnings : undefined,
+        errors: errors.length > 0 ? errors : undefined,
+    };
+}
+
+/**
+ * Quick validation - syntax only, no DNS
+ */
+export function validateEmailSyntax(email: string): boolean {
+    return validateSyntax(email.trim()).valid;
+}
+
+/**
+ * Batch validate multiple emails
+ */
+export async function validateEmails(
+    emails: string[],
+    options: EmailValidationOptions = {}
+): Promise<EmailValidationResult[]> {
+    // Process in batches to avoid overwhelming DNS
+    const batchSize = 10;
+    const results: EmailValidationResult[] = [];
+    
+    for (let i = 0; i < emails.length; i += batchSize) {
+        const batch = emails.slice(i, i + batchSize);
+        const batchResults = await Promise.all(
+            batch.map(email => validateEmail(email, options))
+        );
+        results.push(...batchResults);
+    }
+    
+    return results;
+}
+
+/**
+ * Check if domain accepts email (has MX records)
+ */
+export async function domainAcceptsEmail(domain: string, timeout = 5000): Promise<boolean> {
+    const result = await checkMxRecords(domain, timeout);
+    return result.valid;
+}
+
+/**
+ * Check if email is from a disposable provider
+ */
+export function isDisposableEmail(email: string): boolean {
+    const domain = email.split('@')[1];
+    return domain ? checkDisposable(domain) : false;
+}
+
+/**
+ * Check if email is role-based
+ */
+export function isRoleBasedEmail(email: string): boolean {
+    const local = email.split('@')[0];
+    return local ? checkRoleBased(local) : false;
+}
+
+// ============================================================================
+// Email Validator Class
+// ============================================================================
+
+export class EmailValidator {
+    private options: EmailValidationOptions;
+    private cache: Map<string, { result: EmailValidationResult; timestamp: number }>;
+    private cacheMaxAge: number;
+    
+    constructor(options: EmailValidationOptions = {}, cacheMaxAgeMs = 3600000) {
+        this.options = options;
+        this.cache = new Map();
+        this.cacheMaxAge = cacheMaxAgeMs;
+    }
+    
+    async validate(email: string): Promise<EmailValidationResult> {
+        const normalizedEmail = email.toLowerCase().trim();
+        
+        // Check cache
+        const cached = this.cache.get(normalizedEmail);
+        if (cached && Date.now() - cached.timestamp < this.cacheMaxAge) {
+            return cached.result;
+        }
+        
+        // Validate
+        const result = await validateEmail(email, this.options);
+        
+        // Cache result
+        this.cache.set(normalizedEmail, { result, timestamp: Date.now() });
+        
+        return result;
+    }
+    
+    async validateBatch(emails: string[]): Promise<EmailValidationResult[]> {
+        return validateEmails(emails, this.options);
+    }
+    
+    clearCache(): void {
+        this.cache.clear();
+    }
+    
+    getCacheSize(): number {
+        return this.cache.size;
+    }
+}
+
+/**
+ * Create a new email validator instance
+ */
+export function createEmailValidator(
+    options: EmailValidationOptions = {},
+    cacheMaxAgeMs = 3600000
+): EmailValidator {
+    return new EmailValidator(options, cacheMaxAgeMs);
+}

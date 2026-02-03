@@ -16,7 +16,7 @@ export function AutoDPA() {
  initial={{ opacity: 0, x: -20 }}
  animate={inView ? { opacity: 1, x: 0 } : {}}
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-green-50 text-green-700 border border-green-100 text-[10px] font-bold uppercase tracking-widest mb-4">
+ <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-widest mb-4">
             <FileText className="w-4 h-4" />
             Auto-DPA
           </div>

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { formatNumber, cn, getRiskColor } from '../../lib/utils';
+import { formatNumber, cn } from '../../lib/utils';
 
 /**
  * Compliance Admin - Unified compliance dashboard
@@ -101,7 +101,7 @@ export default function CompliancePage() {
     if (loading || !overview) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -110,27 +110,27 @@ export default function CompliancePage() {
 
     return (
         <div className="max-w-7xl mx-auto">
-            <div className="mb-6">
-                <h1 className="text-2xl font-bold text-gray-900">Compliance Admin</h1>
-                <p className="text-gray-600 mt-1">
+            <div className="mb-8">
+                <h1 className="text-2xl font-bold text-surface-900">Compliance Admin</h1>
+                <p className="text-surface-500 mt-1">
                     Platform-wide compliance monitoring and governance
                 </p>
             </div>
 
             {/* Alert Banner */}
             {(overview.riskSummary.critical > 0 || overview.gdprRequests.overdue > 0) && (
-                <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+                <div className="mb-8 p-4 bg-red-50 border border-red-200 rounded-xl shadow-sm">
                     <div className="flex items-center gap-2 text-red-800 font-medium mb-2">
                         🚨 Critical Issues Requiring Immediate Attention
                     </div>
                     <div className="flex gap-4 text-sm text-red-700">
                         {overview.riskSummary.critical > 0 && (
-                            <Link href="/risk" className="hover:underline">
+                            <Link href="/risk" className="hover:underline hover:text-red-900 decoration-red-300">
                                 {overview.riskSummary.critical} tenant(s) with critical risk
                             </Link>
                         )}
                         {overview.gdprRequests.overdue > 0 && (
-                            <Link href="/gdpr" className="hover:underline">
+                            <Link href="/gdpr" className="hover:underline hover:text-red-900 decoration-red-300">
                                 {overview.gdprRequests.overdue} overdue GDPR request(s)
                             </Link>
                         )}
@@ -140,53 +140,53 @@ export default function CompliancePage() {
 
             {/* Quick Navigation */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-                <Link href="/risk" className="block bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow">
+                <Link href="/risk" className="block bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm hover:shadow-md transition-all hover:border-surface-300 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl">⚠️</span>
-                        <span className="font-semibold text-gray-900">Risk Monitoring</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">⚠️</span>
+                        <span className="font-semibold text-surface-900">Risk Monitoring</span>
                     </div>
-                    <div className="text-2xl font-bold text-orange-600">
+                    <div className="text-2xl font-bold text-amber-600">
                         {overview.riskSummary.high + overview.riskSummary.critical}
                     </div>
-                    <div className="text-sm text-gray-500">High-risk tenants</div>
+                    <div className="text-sm text-surface-500">High-risk tenants</div>
                 </Link>
-                <Link href="/audit" className="block bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow">
+                <Link href="/audit" className="block bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm hover:shadow-md transition-all hover:border-surface-300 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl">📜</span>
-                        <span className="font-semibold text-gray-900">Audit Logs</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">📜</span>
+                        <span className="font-semibold text-surface-900">Audit Logs</span>
                     </div>
                     <div className="text-2xl font-bold text-blue-600">
                         {formatNumber(overview.auditStats.todayEvents)}
                     </div>
-                    <div className="text-sm text-gray-500">Events today</div>
+                    <div className="text-sm text-surface-500">Events today</div>
                 </Link>
-                <Link href="/gdpr" className="block bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow">
+                <Link href="/gdpr" className="block bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm hover:shadow-md transition-all hover:border-surface-300 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl">🇪🇺</span>
-                        <span className="font-semibold text-gray-900">GDPR Requests</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">🇪🇺</span>
+                        <span className="font-semibold text-surface-900">GDPR Requests</span>
                     </div>
-                    <div className="text-2xl font-bold text-indigo-600">
+                    <div className="text-2xl font-bold text-blue-600">
                         {overview.gdprRequests.pending + overview.gdprRequests.processing}
                     </div>
-                    <div className="text-sm text-gray-500">Pending requests</div>
+                    <div className="text-sm text-surface-500">Pending requests</div>
                 </Link>
-                <Link href="/secrets" className="block bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md transition-shadow">
+                <Link href="/secrets" className="block bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm hover:shadow-md transition-all hover:border-surface-300 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl">🔐</span>
-                        <span className="font-semibold text-gray-900">Secrets Vault</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">🔐</span>
+                        <span className="font-semibold text-surface-900">Secrets Vault</span>
                     </div>
-                    <div className="text-2xl font-bold text-green-600">
+                    <div className="text-2xl font-bold text-emerald-600">
                         Secure
                     </div>
-                    <div className="text-sm text-gray-500">All secrets encrypted</div>
+                    <div className="text-sm text-surface-500">All secrets encrypted</div>
                 </Link>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Risk Distribution */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold mb-4">Tenant Risk Distribution</h2>
-                    <div className="space-y-4">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <h2 className="text-lg font-semibold text-surface-900 mb-6">Tenant Risk Distribution</h2>
+                    <div className="space-y-5">
                         {[
                             { level: 'low' as const, count: overview.riskSummary.low, label: 'Low Risk' },
                             { level: 'medium' as const, count: overview.riskSummary.medium, label: 'Medium Risk' },
@@ -194,52 +194,52 @@ export default function CompliancePage() {
                             { level: 'critical' as const, count: overview.riskSummary.critical, label: 'Critical' },
                         ].map(({ level, count, label }) => (
                             <div key={level} className="flex items-center gap-4">
-                                <div className="w-24 text-sm text-gray-600">{label}</div>
-                                <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
+                                <div className="w-24 text-sm font-medium text-surface-600">{label}</div>
+                                <div className="flex-1 bg-surface-100 rounded-full h-3 overflow-hidden">
                                     <div
                                         className={cn(
-                                            'h-full rounded-full',
-                                            level === 'low' && 'bg-green-500',
-                                            level === 'medium' && 'bg-yellow-500',
+                                            'h-full rounded-full transition-all duration-500',
+                                            level === 'low' && 'bg-emerald-500',
+                                            level === 'medium' && 'bg-amber-400',
                                             level === 'high' && 'bg-orange-500',
                                             level === 'critical' && 'bg-red-500'
                                         )}
                                         style={{ width: `${(count / totalTenants) * 100}%` }}
                                     />
                                 </div>
-                                <div className="w-16 text-right font-medium">{count}</div>
+                                <div className="w-16 text-right font-medium text-surface-700">{count}</div>
                             </div>
                         ))}
                     </div>
-                    <div className="mt-4 pt-4 border-t border-gray-100 text-sm text-gray-500">
+                    <div className="mt-4 pt-4 border-t border-surface-100 text-sm text-surface-500">
                         {totalTenants} total tenants monitored
                     </div>
                 </div>
 
                 {/* Policy Compliance */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold mb-4">Policy Compliance</h2>
-                    <div className="space-y-3">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <h2 className="text-lg font-semibold text-surface-900 mb-6">Policy Compliance</h2>
+                    <div className="space-y-4">
                         {overview.policyCompliance.map((policy) => (
                             <div key={policy.name} className="flex items-center justify-between">
-                                <div className="text-sm text-gray-700">{policy.name}</div>
-                                <div className="flex items-center gap-2">
-                                    <div className="w-32 bg-gray-100 rounded-full h-2 overflow-hidden">
+                                <div className="text-sm font-medium text-surface-700">{policy.name}</div>
+                                <div className="flex items-center gap-3">
+                                    <div className="w-32 bg-surface-100 rounded-full h-2 overflow-hidden">
                                         <div
                                             className={cn(
-                                                'h-full rounded-full',
-                                                policy.compliant / policy.total >= 0.95 && 'bg-green-500',
-                                                policy.compliant / policy.total >= 0.8 && policy.compliant / policy.total < 0.95 && 'bg-yellow-500',
+                                                'h-full rounded-full transition-all duration-500',
+                                                policy.compliant / policy.total >= 0.95 && 'bg-emerald-500',
+                                                policy.compliant / policy.total >= 0.8 && policy.compliant / policy.total < 0.95 && 'bg-amber-400',
                                                 policy.compliant / policy.total < 0.8 && 'bg-red-500'
                                             )}
                                             style={{ width: `${(policy.compliant / policy.total) * 100}%` }}
                                         />
                                     </div>
                                     <span className={cn(
-                                        'text-sm font-medium',
-                                        policy.compliant / policy.total >= 0.95 && 'text-green-600',
-                                        policy.compliant / policy.total >= 0.8 && policy.compliant / policy.total < 0.95 && 'text-yellow-600',
-                                        policy.compliant / policy.total < 0.8 && 'text-red-600'
+                                        'text-sm font-bold w-12 text-right',
+                                        policy.compliant / policy.total >= 0.95 && 'text-emerald-700',
+                                        policy.compliant / policy.total >= 0.8 && policy.compliant / policy.total < 0.95 && 'text-amber-700',
+                                        policy.compliant / policy.total < 0.8 && 'text-red-700'
                                     )}>
                                         {Math.round((policy.compliant / policy.total) * 100)}%
                                     </span>
@@ -250,29 +250,34 @@ export default function CompliancePage() {
                 </div>
 
                 {/* Recent Alerts */}
-                <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-6">
-                    <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-lg font-semibold">Recent Compliance Alerts</h2>
-                        <Link href="/audit" className="text-sm text-indigo-600 hover:underline">
+                <div className="lg:col-span-2 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <div className="flex items-center justify-between mb-6">
+                        <h2 className="text-lg font-semibold text-surface-900">Recent Compliance Alerts</h2>
+                        <Link href="/audit" className="text-sm font-medium text-blue-600 hover:text-blue-700 hover:underline">
                             View all →
                         </Link>
                     </div>
-                    <div className="space-y-3">
+                    <div className="space-y-2">
                         {overview.recentAlerts.map((alert) => (
-                            <div key={alert.id} className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50">
+                            <div key={alert.id} className="flex items-start gap-4 p-4 rounded-xl hover:bg-surface-50 transition-colors border border-transparent hover:border-surface-200">
                                 <span className={cn(
-                                    'px-2 py-0.5 rounded text-xs font-medium',
-                                    getRiskColor(alert.severity)
+                                    'px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border',
+                                    alert.severity === 'critical' ? 'bg-red-50 text-red-700 border-red-200' :
+                                    alert.severity === 'high' ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                                    alert.severity === 'medium' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                                    'bg-blue-50 text-blue-700 border-blue-200'
                                 )}>
                                     {alert.severity}
                                 </span>
-                                <div className="flex-1">
-                                    <div className="text-sm text-gray-900">{alert.message}</div>
-                                    <div className="text-xs text-gray-500 mt-1">
-                                        {alert.type} • {new Date(alert.timestamp).toLocaleString()}
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-sm font-medium text-surface-900">{alert.message}</div>
+                                    <div className="text-xs text-surface-500 mt-1 flex items-center gap-2">
+                                        <span className="font-semibold">{alert.type}</span>
+                                        <span>•</span>
+                                        <span>{new Date(alert.timestamp).toLocaleString()}</span>
                                     </div>
                                 </div>
-                                <button className="text-sm text-indigo-600 hover:underline">
+                                <button className="text-sm font-medium text-blue-600 hover:text-blue-800 whitespace-nowrap">
                                     Investigate
                                 </button>
                             </div>

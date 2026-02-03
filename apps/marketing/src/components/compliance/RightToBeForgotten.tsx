@@ -140,7 +140,7 @@ export function RightToBeForgotten() {
  status === 'active'
  ? 'bg-red-50 border-red-200 ring-1 ring-red-500'
  : status === 'complete'
- ? 'bg-green-50 border-green-200'
+ ? 'bg-emerald-50 border-emerald-200'
  : 'bg-white border-surface-200'
  )}
  >
@@ -150,7 +150,7 @@ export function RightToBeForgotten() {
  status === 'active'
  ? 'bg-red-100 text-red-600 border-red-200'
  : status === 'complete'
- ? 'bg-green-100 text-green-600 border-green-200'
+ ? 'bg-emerald-100 text-emerald-600 border-emerald-200'
  : 'bg-surface-50 text-surface-400 border-surface-200'
  )}
  >
@@ -177,7 +177,7 @@ export function RightToBeForgotten() {
  className={cn(
  'text-[9px] px-2 py-0.5 rounded font-bold uppercase tracking-tight',
  status === 'complete'
- ? 'bg-green-100 text-green-700'
+ ? 'bg-emerald-100 text-emerald-700'
  : 'bg-surface-100 text-surface-500'
  )}
  >
@@ -193,7 +193,7 @@ export function RightToBeForgotten() {
  status === 'active'
  ? 'text-red-600 animate-pulse'
  : status === 'complete'
- ? 'text-green-600'
+ ? 'text-emerald-600'
  : 'text-surface-400'
  )}
  >
@@ -209,11 +209,11 @@ export function RightToBeForgotten() {
  <motion.div
  initial={{ opacity: 0, scale: 0.9 }}
  animate={{ opacity: 1, scale: 1 }}
- className="mt-8 p-6 bg-green-50 border border-green-200 rounded-xl text-center "
+ className="mt-8 p-6 bg-emerald-50 border border-emerald-200 rounded-xl text-center "
  >
- <CheckCircle2 className="w-10 h-10 text-green-600 mx-auto mb-3" strokeWidth={3} />
- <div className="text-green-800 font-bold uppercase tracking-widest text-xs mb-1">Erasure Complete</div>
- <div className="text-sm text-green-700 font-medium">
+ <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto mb-3" strokeWidth={3} />
+ <div className="text-emerald-800 font-bold uppercase tracking-widest text-xs mb-1">Erasure Complete</div>
+ <div className="text-sm text-emerald-700 font-medium">
  Certificate of deletion generated and logged to immutable audit trail
  </div>
  </motion.div>
@@ -225,7 +225,7 @@ export function RightToBeForgotten() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.4 }}
- className="grid grid-cols-3 gap-8 max-w-3xl mx-auto mt-16 pt-12 border-t border-surface-100"
+ className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8 max-w-3xl mx-auto mt-16 pt-12 border-t border-surface-100"
  >
  {[
  { value: '< 72h', label: 'Complete Erasure' },

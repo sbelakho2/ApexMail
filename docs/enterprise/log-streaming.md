@@ -30,7 +30,7 @@ Log streaming enables:
 ### Create Log Stream
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/log-streams \
+curl -X POST https://api.apexmail.ee/enterprise/v1/log-streams \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -392,7 +392,7 @@ Automatically redact sensitive data:
 ### Check Stream Status
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/log-streams/{stream_id}/status \
+curl https://api.apexmail.ee/enterprise/v1/log-streams/{stream_id}/status \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
@@ -418,7 +418,7 @@ Response:
 ### Stream Metrics
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/log-streams/{stream_id}/metrics \
+curl https://api.apexmail.ee/enterprise/v1/log-streams/{stream_id}/metrics \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -G -d "period=24h"
 ```

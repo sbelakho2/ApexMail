@@ -143,7 +143,7 @@ export default function LeadDiscoveryPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -152,10 +152,10 @@ export default function LeadDiscoveryPage() {
 
     return (
         <div className="max-w-6xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Lead Discovery</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-slate-900">Lead Discovery</h1>
+                    <p className="text-slate-500 mt-1">
                         Automatically discover potential customers from multiple sources
                     </p>
                 </div>
@@ -163,10 +163,10 @@ export default function LeadDiscoveryPage() {
                     onClick={runDiscovery}
                     disabled={isRunning || sources.filter(s => s.enabled).length === 0}
                     className={cn(
-                        'px-6 py-2 rounded-lg font-medium transition-colors',
+                        'px-6 py-2.5 rounded-lg font-semibold transition-all shadow-sm',
                         isRunning || sources.filter(s => s.enabled).length === 0
-                            ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                            : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                            ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                            : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-md'
                     )}
                 >
                     {isRunning ? (
@@ -182,22 +182,24 @@ export default function LeadDiscoveryPage() {
             {/* Configuration */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
                 {/* Sources */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold mb-4">Discovery Sources</h2>
+                <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Discovery Sources</h2>
                     <div className="space-y-3">
                         {sources.map(source => (
                             <div
                                 key={source.id}
                                 className={cn(
-                                    'flex items-center justify-between p-3 rounded-lg border',
-                                    source.enabled ? 'border-indigo-200 bg-indigo-50' : 'border-gray-200 bg-gray-50'
+                                    'flex items-center justify-between p-4 rounded-xl border transition-colors',
+                                    source.enabled 
+                                        ? 'border-blue-200 bg-blue-50/50' 
+                                        : 'border-slate-200 bg-slate-50'
                                 )}
                             >
-                                <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-4">
                                     <span className="text-2xl">{source.icon}</span>
                                     <div>
-                                        <div className="font-medium text-gray-900">{source.name}</div>
-                                        <div className="text-xs text-gray-500">
+                                        <div className="font-semibold text-slate-900">{source.name}</div>
+                                        <div className="text-xs text-slate-500 mt-0.5">
                                             {source.lastRun ? `Last run: ${new Date(source.lastRun).toLocaleString()}` : 'Never run'}
                                             {source.leadsFound > 0 && ` • ${source.leadsFound} leads found`}
                                         </div>
@@ -205,18 +207,18 @@ export default function LeadDiscoveryPage() {
                                 </div>
                                 <div className="flex items-center gap-3">
                                     {source.status === 'running' && (
-                                        <span className="text-indigo-600 animate-pulse text-sm">Running...</span>
+                                        <span className="text-blue-600 animate-pulse text-xs font-medium uppercase tracking-wider">Running...</span>
                                     )}
                                     <button
                                         onClick={() => toggleSource(source.id)}
                                         className={cn(
                                             'w-12 h-6 rounded-full transition-colors relative',
-                                            source.enabled ? 'bg-indigo-600' : 'bg-gray-300'
+                                            source.enabled ? 'bg-blue-600' : 'bg-slate-300'
                                         )}
                                     >
                                         <span
                                             className={cn(
-                                                'absolute top-1 w-4 h-4 rounded-full bg-white transition-transform',
+                                                'absolute top-1 w-4 h-4 rounded-full bg-white transition-transform shadow-sm',
                                                 source.enabled ? 'translate-x-7' : 'translate-x-1'
                                             )}
                                         />
@@ -228,75 +230,80 @@ export default function LeadDiscoveryPage() {
                 </div>
 
                 {/* Categories */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold mb-4">Target Categories</h2>
+                <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Target Categories</h2>
                     <div className="flex flex-wrap gap-2">
                         {CATEGORIES.map(category => (
                             <button
                                 key={category}
                                 onClick={() => toggleCategory(category)}
                                 className={cn(
-                                    'px-3 py-1.5 rounded-full text-sm font-medium transition-colors',
+                                    'px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors border',
                                     selectedCategories.includes(category)
-                                        ? 'bg-indigo-600 text-white'
-                                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                        ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300'
                                 )}
                             >
                                 {category}
                             </button>
                         ))}
                     </div>
-                    <div className="mt-4 p-3 bg-yellow-50 rounded-lg border border-yellow-200">
-                        <div className="text-sm text-yellow-800">
-                            💡 <strong>Tip:</strong> Select categories related to email marketing to find prospects who may benefit from ApexMail.
+                    <div className="mt-6 p-4 bg-amber-50 rounded-xl border border-amber-200">
+                        <div className="flex gap-3">
+                            <span className="text-amber-600">💡</span>
+                            <div className="text-sm text-amber-800">
+                                <strong>Tip:</strong> Select categories related to email marketing to find prospects who may benefit from ApexMail.
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
 
             {/* Discovered Leads */}
-            <div className="bg-white rounded-xl border border-gray-200">
-                <div className="flex items-center justify-between p-6 border-b border-gray-200">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between p-6 border-b border-slate-200 bg-slate-50/50">
                     <div>
-                        <h2 className="text-lg font-semibold">Discovered Leads</h2>
-                        <p className="text-sm text-gray-500">{unimportedCount} leads pending import</p>
+                        <h2 className="text-lg font-semibold text-slate-900">Discovered Leads</h2>
+                        <p className="text-sm text-slate-500 mt-0.5">{unimportedCount} leads pending import</p>
                     </div>
                     {unimportedCount > 0 && (
                         <button
                             onClick={importAllLeads}
-                            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700"
+                            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 shadow-sm transition-colors"
                         >
                             Import All ({unimportedCount})
                         </button>
                     )}
                 </div>
-                <div className="divide-y divide-gray-100">
+                <div className="divide-y divide-slate-100">
                     {discoveredLeads.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-12 text-center text-slate-500">
                             No leads discovered yet. Run a discovery job to find prospects.
                         </div>
                     ) : (
                         discoveredLeads.map(lead => (
-                            <div key={lead.id} className="p-4 hover:bg-gray-50 flex items-center justify-between">
+                            <div key={lead.id} className="p-4 hover:bg-slate-50 transition-colors flex items-center justify-between group">
                                 <div className="flex-1">
-                                    <div className="flex items-center gap-2 mb-1">
-                                        <span className="font-medium text-gray-900">{lead.companyName}</span>
-                                        <span className="text-xs px-2 py-0.5 bg-gray-100 rounded text-gray-600">{lead.source}</span>
+                                    <div className="flex items-center gap-3 mb-1.5">
+                                        <span className="font-semibold text-slate-900">{lead.companyName}</span>
+                                        <span className="text-xs px-2 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-md font-medium">{lead.source.replace('_', ' ')}</span>
                                         {lead.imported && (
-                                            <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded">Imported</span>
+                                            <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded-md font-medium flex items-center gap-1">
+                                                <span>✓</span> Imported
+                                            </span>
                                         )}
                                     </div>
-                                    <div className="text-sm text-gray-600 mb-1">{lead.description}</div>
-                                    <div className="flex items-center gap-4 text-xs text-gray-500">
-                                        <span>🌐 {lead.domain}</span>
-                                        <span>📁 {lead.category}</span>
-                                        <span>⏰ {new Date(lead.foundAt).toLocaleString()}</span>
+                                    <div className="text-sm text-slate-600 mb-2">{lead.description}</div>
+                                    <div className="flex items-center gap-4 text-xs text-slate-400">
+                                        <span className="flex items-center gap-1"><span className="opacity-70">🌐</span> {lead.domain}</span>
+                                        <span className="flex items-center gap-1"><span className="opacity-70">📁</span> {lead.category}</span>
+                                        <span className="flex items-center gap-1"><span className="opacity-70">⏰</span> {new Date(lead.foundAt).toLocaleString()}</span>
                                     </div>
                                 </div>
                                 {!lead.imported && (
                                     <button
                                         onClick={() => importLead(lead.id)}
-                                        className="ml-4 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
+                                        className="ml-4 px-4 py-2 bg-white border border-blue-200 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-50 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100"
                                     >
                                         Import to CRM
                                     </button>

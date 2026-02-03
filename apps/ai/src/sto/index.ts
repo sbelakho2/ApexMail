@@ -7,3 +7,9 @@ export {
     DEFAULT_STO_CONFIG,
     type STOConfig,
 } from './optimizer.js';
+
+export {
+    STOCache,
+    createSTOCacheKey,
+    type STOCacheConfig,
+} from './cache.js';

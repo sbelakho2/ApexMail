@@ -1,0 +1,141 @@
+//! Outbound Queue Service
+//!
+//! Handles outbound email delivery with retry logic and direct SMTP sending.
+//! NO THIRD-PARTY EMAIL SERVICES - sends directly via SMTP with DKIM signing.
+
+pub mod smtp_sender;
+pub mod queue;
+pub mod dkim;
+pub mod service;
+
+use std::sync::Arc;
+use anyhow::Result;
+use clap::Parser;
+use tokio::sync::mpsc;
+use tonic::transport::Server;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+
+use mail_proto::generated::outbound_service_server::OutboundServiceServer;
+use crate::dkim::{DkimConfig, DkimSigner};
+use crate::queue::{EmailQueue, QueueConfig};
+use crate::service::OutboundServiceImpl;
+use crate::smtp_sender::SmtpSender;
+
+#[derive(Parser)]
+#[command(name = "outbound-queue")]
+#[command(about = "Outbound Queue - Email delivery service (NO THIRD-PARTY SERVICES)")]
+struct Cli {
+    /// gRPC listen address
+    #[arg(short, long, default_value = "0.0.0.0:50052")]
+    listen: String,
+    
+    /// Database URL
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
+    
+    /// Default from domain
+    #[arg(long, default_value = "apexmail.ee")]
+    from_domain: String,
+    
+    /// DKIM selector
+    #[arg(long, default_value = "apexmail2026")]
+    dkim_selector: String,
+    
+    /// DKIM private key path
+    #[arg(long)]
+    dkim_key_path: Option<String>,
+    
+    /// Number of worker threads for queue processing
+    #[arg(long, default_value = "4")]
+    workers: usize,
+    
+    /// Batch size for queue processing
+    #[arg(long, default_value = "100")]
+    batch_size: usize,
+    
+    /// Log level
+    #[arg(long, default_value = "info")]
+    log_level: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    
+    // Initialize logging
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+    
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .json()
+        .init();
+    
+    info!("Starting Outbound Queue Service (SELF-HOSTED - NO THIRD-PARTY SERVICES)");
+    info!("Listen address: {}", cli.listen);
+    info!("From domain: {}", cli.from_domain);
+    info!("DKIM selector: {}", cli.dkim_selector);
+    
+    // Connect to database
+    let pool = sqlx::PgPool::connect(&cli.database_url).await?;
+    info!("Connected to database");
+    
+    // Create SMTP sender
+    let smtp_sender = SmtpSender::new(cli.from_domain.clone());
+    
+    // Create queue
+    let queue_config = QueueConfig {
+        worker_count: cli.workers,
+        batch_size: cli.batch_size,
+        ..Default::default()
+    };
+    let mut queue = EmailQueue::new(pool.clone(), queue_config, smtp_sender);
+    
+    // Load DKIM signer if configured
+    if let Some(ref key_path) = cli.dkim_key_path {
+        match DkimSigner::from_file(&cli.from_domain, &cli.dkim_selector, key_path).await {
+            Ok(signer) => {
+                info!("DKIM signer loaded from {}", key_path);
+                queue = queue.with_dkim_signer(signer);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load DKIM key: {}. Sending without DKIM.", e);
+            }
+        }
+    }
+    
+    // Initialize queue tables
+    queue.initialize().await?;
+    
+    let queue = Arc::new(queue);
+    
+    // Start queue processor
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
+    let processor_queue = Arc::clone(&queue);
+    let processor_handle = tokio::spawn(async move {
+        processor_queue.start_processing(shutdown_rx).await;
+    });
+    
+    // Create gRPC service
+    let service = OutboundServiceImpl::new(Arc::clone(&queue));
+    
+    // Start gRPC server
+    let addr = cli.listen.parse()?;
+    info!("Starting gRPC server on {}", addr);
+    
+    Server::builder()
+        .add_service(OutboundServiceServer::new(service))
+        .serve_with_shutdown(addr, async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Shutdown signal received");
+            let _ = shutdown_tx.send(()).await;
+        })
+        .await?;
+    
+    // Wait for processor to finish
+    processor_handle.await?;
+    
+    info!("Outbound Queue Service stopped");
+    Ok(())
+}

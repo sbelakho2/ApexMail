@@ -129,15 +129,15 @@ export function TimeTravelDemo() {
  </p>
  <ul className="space-y-3 mb-8">
  <li className="flex items-center gap-3">
- <div className="w-2 h-2 bg-green-500 rounded-full" />
+ <div className="w-2 h-2 bg-emerald-500 rounded-full" />
  <span className="text-surface-700 font-bold text-sm">Send your first email</span>
  </li>
  <li className="flex items-center gap-3">
- <div className="w-2 h-2 bg-green-500 rounded-full" />
+ <div className="w-2 h-2 bg-emerald-500 rounded-full" />
  <span className="text-surface-700 font-bold text-sm">Set up your domain</span>
  </li>
  <li className="flex items-center gap-3">
- <div className="w-2 h-2 bg-green-500 rounded-full" />
+ <div className="w-2 h-2 bg-emerald-500 rounded-full" />
  <span className="text-surface-700 font-bold text-sm">Explore the API</span>
  </li>
  </ul>
@@ -160,8 +160,8 @@ export function TimeTravelDemo() {
  transition={{ delay: i * 0.1 }}
  className="flex items-center gap-3"
  >
- <div className="w-5 h-5 rounded-md bg-green-50 flex items-center justify-center border border-green-100">
- <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+ <div className="w-5 h-5 rounded-md bg-emerald-50 flex items-center justify-center border border-emerald-100">
+ <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
  </div>
  <span className="text-sm text-surface-700 font-bold">{change}</span>
  </motion.div>

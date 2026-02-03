@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { formatNumber, formatDate, cn, getRiskColor } from '../../lib/utils';
+import { formatNumber, formatDate, cn } from '../../lib/utils';
 
 /**
  * Risk Monitoring - Tenant risk assessment and management
@@ -159,7 +159,7 @@ export default function RiskMonitoringPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -173,104 +173,107 @@ export default function RiskMonitoringPage() {
 
     return (
         <div className="max-w-7xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Risk Monitoring</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Risk Monitoring</h1>
+                    <p className="text-surface-500 mt-1">
                         Monitor and manage tenant sending behavior and compliance risks
                     </p>
                 </div>
-                <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                <button className="px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium shadow-sm hover:bg-blue-700 transition-all hover:shadow-md">
                     Run Risk Assessment
                 </button>
             </div>
 
             {/* Risk Summary */}
-            <div className="grid grid-cols-4 gap-4 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                 {[
-                    { level: 'critical', label: 'Critical', count: riskCounts.critical, color: 'bg-red-50 border-red-200 text-red-700' },
-                    { level: 'high', label: 'High Risk', count: riskCounts.high, color: 'bg-orange-50 border-orange-200 text-orange-700' },
-                    { level: 'medium', label: 'Medium', count: riskCounts.medium, color: 'bg-yellow-50 border-yellow-200 text-yellow-700' },
-                    { level: 'low', label: 'Low Risk', count: riskCounts.low, color: 'bg-green-50 border-green-200 text-green-700' },
+                    { level: 'critical', label: 'Critical', count: riskCounts.critical, color: 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100' },
+                    { level: 'high', label: 'High Risk', count: riskCounts.high, color: 'bg-orange-50 border-orange-200 text-orange-700 hover:bg-orange-100' },
+                    { level: 'medium', label: 'Medium', count: riskCounts.medium, color: 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100' },
+                    { level: 'low', label: 'Low Risk', count: riskCounts.low, color: 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100' },
                 ].map(({ level, label, count, color }) => (
                     <button
                         key={level}
                         onClick={() => setFilterLevel(filterLevel === level ? 'all' : level)}
                         className={cn(
-                            'rounded-xl border p-4 text-left transition-all',
+                            'rounded-xl border p-5 text-left transition-all',
                             color,
-                            filterLevel === level && 'ring-2 ring-offset-2 ring-indigo-500'
+                            filterLevel === level ? 'ring-2 ring-offset-2 ring-blue-500 scale-105' : 'hover:scale-102'
                         )}
                     >
-                        <div className="text-3xl font-bold">{count}</div>
-                        <div className="text-sm">{label}</div>
+                        <div className="text-3xl font-bold mb-1">{count}</div>
+                        <div className="text-sm font-medium opacity-90">{label}</div>
                     </button>
                 ))}
             </div>
 
             {/* Tenant List */}
-            <div className="bg-white rounded-xl border border-gray-200">
-                <div className="p-4 border-b border-gray-200">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-surface-100 bg-surface-50/50">
                     <div className="flex items-center justify-between">
-                        <h2 className="font-semibold">Monitored Tenants</h2>
+                        <h2 className="font-semibold text-surface-900">Monitored Tenants</h2>
                         {filterLevel !== 'all' && (
                             <button
                                 onClick={() => setFilterLevel('all')}
-                                className="text-sm text-indigo-600 hover:underline"
+                                className="text-sm font-medium text-blue-600 hover:text-blue-700 hover:underline"
                             >
                                 Clear filter
                             </button>
                         )}
                     </div>
                 </div>
-                <div className="divide-y divide-gray-100">
+                <div className="divide-y divide-surface-100">
                     {filteredTenants.map(tenant => (
                         <div
                             key={tenant.tenantId}
-                            className="p-4 hover:bg-gray-50 cursor-pointer"
+                            className="p-5 hover:bg-surface-50/80 cursor-pointer transition-colors"
                             onClick={() => setSelectedTenant(tenant)}
                         >
                             <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-4">
                                     <div className={cn(
-                                        'w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg',
-                                        getRiskColor(tenant.riskLevel)
+                                        'w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg border-2 bg-surface-0', 
+                                        tenant.riskLevel === 'critical' ? 'border-red-500 text-red-600' :
+                                        tenant.riskLevel === 'high' ? 'border-orange-500 text-orange-600' :
+                                        tenant.riskLevel === 'medium' ? 'border-amber-400 text-amber-600' :
+                                        'border-emerald-500 text-emerald-600'
                                     )}>
                                         {tenant.riskScore}
                                     </div>
                                     <div>
-                                        <div className="font-medium text-gray-900">{tenant.tenantName}</div>
-                                        <div className="text-sm text-gray-500">{tenant.domain}</div>
+                                        <div className="font-bold text-surface-900 text-lg">{tenant.tenantName}</div>
+                                        <div className="text-sm text-surface-500 font-mono">{tenant.domain}</div>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-6">
+                                <div className="flex items-center gap-8">
                                     <div className="text-right">
-                                        <div className="text-sm text-gray-500">Daily Volume</div>
-                                        <div className="font-medium">{formatNumber(tenant.metrics.dailyVolume)}</div>
+                                        <div className="text-xs font-medium text-surface-400 uppercase tracking-wider mb-0.5">Daily Volume</div>
+                                        <div className="font-semibold text-surface-900">{formatNumber(tenant.metrics.dailyVolume)}</div>
                                     </div>
                                     <div className="text-right">
-                                        <div className="text-sm text-gray-500">Bounce Rate</div>
+                                        <div className="text-xs font-medium text-surface-400 uppercase tracking-wider mb-0.5">Bounce Rate</div>
                                         <div className={cn(
-                                            'font-medium',
-                                            tenant.metrics.bounceRate > 0.1 && 'text-red-600',
-                                            tenant.metrics.bounceRate > 0.05 && tenant.metrics.bounceRate <= 0.1 && 'text-yellow-600',
-                                            tenant.metrics.bounceRate <= 0.05 && 'text-green-600'
+                                            'font-semibold px-1.5 rounded',
+                                            tenant.metrics.bounceRate > 0.1 ? 'text-red-600 bg-red-50' :
+                                            tenant.metrics.bounceRate > 0.05 ? 'text-amber-600 bg-amber-50' :
+                                            'text-emerald-600 bg-emerald-50'
                                         )}>
                                             {(tenant.metrics.bounceRate * 100).toFixed(2)}%
                                         </div>
                                     </div>
                                     <div className="text-right">
-                                        <div className="text-sm text-gray-500">Flags</div>
+                                        <div className="text-xs font-medium text-surface-400 uppercase tracking-wider mb-0.5">Flags</div>
                                         <div className={cn(
-                                            'font-medium',
-                                            tenant.flags.filter(f => !f.resolved).length > 0 ? 'text-red-600' : 'text-green-600'
+                                            'font-semibold',
+                                            tenant.flags.filter(f => !f.resolved).length > 0 ? 'text-red-600' : 'text-surface-400'
                                         )}>
                                             {tenant.flags.filter(f => !f.resolved).length} active
                                         </div>
                                     </div>
                                     {tenant.limits.daily && (
-                                        <span className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs">
-                                            Limited
+                                        <span className="px-2.5 py-1 bg-amber-100 text-amber-800 rounded-md text-xs font-bold border border-amber-200">
+                                            LIMITED
                                         </span>
                                     )}
                                 </div>
@@ -282,70 +285,81 @@ export default function RiskMonitoringPage() {
 
             {/* Tenant Detail Modal */}
             {selectedTenant && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedTenant(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-start justify-between mb-6">
-                            <div className="flex items-center gap-4">
+                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedTenant(null)}>
+                    <div className="bg-surface-0 rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-surface-200 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-start justify-between mb-8 border-b border-surface-100 pb-6">
+                            <div className="flex items-center gap-5">
                                 <div className={cn(
-                                    'w-16 h-16 rounded-full flex items-center justify-center font-bold text-2xl',
-                                    getRiskColor(selectedTenant.riskLevel)
+                                    'w-16 h-16 rounded-full flex items-center justify-center font-bold text-2xl border-4 bg-surface-0 shadow-sm',
+                                    selectedTenant.riskLevel === 'critical' ? 'border-red-500 text-red-600' :
+                                    selectedTenant.riskLevel === 'high' ? 'border-orange-500 text-orange-600' :
+                                    selectedTenant.riskLevel === 'medium' ? 'border-amber-400 text-amber-600' :
+                                    'border-emerald-500 text-emerald-600'
                                 )}>
                                     {selectedTenant.riskScore}
                                 </div>
                                 <div>
-                                    <h2 className="text-xl font-bold text-gray-900">{selectedTenant.tenantName}</h2>
-                                    <div className="text-gray-500">{selectedTenant.domain}</div>
+                                    <h2 className="text-2xl font-bold text-surface-900">{selectedTenant.tenantName}</h2>
+                                    <div className="text-surface-500 font-mono mt-1">{selectedTenant.domain}</div>
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedTenant(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedTenant(null)} 
+                                className="text-surface-400 hover:text-surface-600 p-2 rounded-lg hover:bg-surface-100 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
                         {/* Metrics */}
-                        <div className="grid grid-cols-4 gap-4 mb-6">
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-lg font-bold">{(selectedTenant.metrics.bounceRate * 100).toFixed(2)}%</div>
-                                <div className="text-xs text-gray-500">Bounce Rate</div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                            <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
+                                <div className={cn("text-xl font-bold", selectedTenant.metrics.bounceRate > 0.1 ? "text-red-600" : "text-surface-900")}>{(selectedTenant.metrics.bounceRate * 100).toFixed(2)}%</div>
+                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Bounce Rate</div>
                             </div>
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-lg font-bold">{(selectedTenant.metrics.complaintRate * 100).toFixed(3)}%</div>
-                                <div className="text-xs text-gray-500">Complaint Rate</div>
+                            <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
+                                <div className="text-xl font-bold text-surface-900">{(selectedTenant.metrics.complaintRate * 100).toFixed(3)}%</div>
+                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Complaint Rate</div>
                             </div>
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-lg font-bold">{formatNumber(selectedTenant.metrics.dailyVolume)}</div>
-                                <div className="text-xs text-gray-500">Daily Volume</div>
+                            <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
+                                <div className="text-xl font-bold text-surface-900">{formatNumber(selectedTenant.metrics.dailyVolume)}</div>
+                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Daily Volume</div>
                             </div>
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-lg font-bold">{formatNumber(selectedTenant.metrics.monthlyVolume)}</div>
-                                <div className="text-xs text-gray-500">Monthly Volume</div>
+                            <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-200">
+                                <div className="text-xl font-bold text-surface-900">{formatNumber(selectedTenant.metrics.monthlyVolume)}</div>
+                                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mt-1">Monthly Volume</div>
                             </div>
                         </div>
 
                         {/* Active Flags */}
                         {selectedTenant.flags.filter(f => !f.resolved).length > 0 && (
-                            <div className="mb-6">
-                                <h3 className="font-semibold mb-3">Active Risk Flags</h3>
-                                <div className="space-y-2">
+                            <div className="mb-8">
+                                <h3 className="font-semibold text-surface-900 mb-4 flex items-center gap-2">
+                                    <span>Active Risk Flags</span>
+                                    <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full text-xs">{selectedTenant.flags.filter(f => !f.resolved).length}</span>
+                                </h3>
+                                <div className="space-y-3">
                                     {selectedTenant.flags.filter(f => !f.resolved).map(flag => (
-                                        <div key={flag.id} className="flex items-center justify-between p-3 bg-red-50 rounded-lg border border-red-200">
+                                        <div key={flag.id} className="flex items-center justify-between p-4 bg-surface-0 rounded-xl border border-red-200 shadow-sm relative overflow-hidden group">
+                                            <div className="absolute left-0 top-0 bottom-0 w-1 bg-red-500"></div>
                                             <div>
-                                                <div className="flex items-center gap-2">
+                                                <div className="flex items-center gap-3">
                                                     <span className={cn(
-                                                        'px-2 py-0.5 rounded text-xs font-medium',
-                                                        flag.severity === 'critical' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
+                                                        'px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border',
+                                                        flag.severity === 'critical' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-amber-50 text-amber-700 border-amber-200'
                                                     )}>
                                                         {flag.severity}
                                                     </span>
-                                                    <span className="font-medium text-gray-900">{flag.message}</span>
+                                                    <span className="font-medium text-surface-900">{flag.message}</span>
                                                 </div>
-                                                <div className="text-xs text-gray-500 mt-1">
-                                                    Created {formatDate(flag.createdAt)}
+                                                <div className="text-xs text-surface-500 mt-1.5 ml-1">
+                                                    Detected {formatDate(flag.createdAt)}
                                                 </div>
                                             </div>
                                             <button
                                                 onClick={() => resolveFlag(selectedTenant.tenantId, flag.id)}
-                                                className="px-3 py-1 bg-green-100 text-green-700 rounded text-sm hover:bg-green-200"
+                                                className="px-4 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-100 transition-colors shadow-sm"
                                             >
                                                 Resolve
                                             </button>
@@ -356,44 +370,44 @@ export default function RiskMonitoringPage() {
                         )}
 
                         {/* Sending Limits */}
-                        <div className="mb-6">
-                            <h3 className="font-semibold mb-3">Sending Limits</h3>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="p-4 border border-gray-200 rounded-lg">
-                                    <div className="text-sm text-gray-500 mb-2">Daily Limit</div>
-                                    <div className="flex items-center gap-2">
+                        <div className="mb-8 p-6 bg-surface-50 rounded-xl border border-surface-200">
+                            <h3 className="font-semibold text-surface-900 mb-4">Enforcement & Limits</h3>
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                <div>
+                                    <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">Daily Limit</div>
+                                    <div className="flex items-center gap-2 bg-surface-0 p-1 rounded-lg border border-surface-300 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all">
                                         <input
                                             type="number"
                                             value={selectedTenant.limits.daily || ''}
                                             placeholder="Unlimited"
                                             onChange={(e) => applyLimit(selectedTenant.tenantId, 'daily', e.target.value ? parseInt(e.target.value) : null)}
-                                            className="flex-1 px-3 py-2 border border-gray-200 rounded"
+                                            className="flex-1 px-3 py-2 bg-transparent outline-none text-surface-900 font-medium placeholder:text-surface-300"
                                         />
-                                        <span className="text-gray-500">/day</span>
+                                        <span className="text-surface-400 text-sm pr-3">/day</span>
                                     </div>
                                 </div>
-                                <div className="p-4 border border-gray-200 rounded-lg">
-                                    <div className="text-sm text-gray-500 mb-2">Hourly Limit</div>
-                                    <div className="flex items-center gap-2">
+                                <div>
+                                    <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">Hourly Limit</div>
+                                    <div className="flex items-center gap-2 bg-surface-0 p-1 rounded-lg border border-surface-300 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all">
                                         <input
                                             type="number"
                                             value={selectedTenant.limits.hourly || ''}
                                             placeholder="Unlimited"
                                             onChange={(e) => applyLimit(selectedTenant.tenantId, 'hourly', e.target.value ? parseInt(e.target.value) : null)}
-                                            className="flex-1 px-3 py-2 border border-gray-200 rounded"
+                                            className="flex-1 px-3 py-2 bg-transparent outline-none text-surface-900 font-medium placeholder:text-surface-300"
                                         />
-                                        <span className="text-gray-500">/hr</span>
+                                        <span className="text-surface-400 text-sm pr-3">/hr</span>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
                         {/* Actions */}
-                        <div className="flex gap-2">
-                            <button className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                        <div className="flex gap-3 pt-4 border-t border-surface-100">
+                            <button className="flex-1 px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 shadow-sm transition-all hover:shadow-md">
                                 View Full Audit History
                             </button>
-                            <button className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200">
+                            <button className="px-5 py-2.5 bg-surface-0 border border-red-200 text-red-700 rounded-lg font-medium hover:bg-red-50 hover:border-red-300 shadow-sm transition-all">
                                 Suspend Tenant
                             </button>
                         </div>

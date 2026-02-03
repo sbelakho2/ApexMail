@@ -257,10 +257,10 @@ export async function main(): Promise<void> {
         tracingEnabled: process.env.TRACING_ENABLED !== 'false',
         tracingEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
         tracingSampleRate: parseFloat(process.env.TRACING_SAMPLE_RATE || '0.1'),
-        statusPageUrl: process.env.STATUS_PAGE_URL || 'https://status.apexmail.io',
+        statusPageUrl: process.env.STATUS_PAGE_URL || 'https://status.apexmail.ee',
         companyName: process.env.COMPANY_NAME || 'ApexMail',
-        supportEmail: process.env.SUPPORT_EMAIL || 'support@apexmail.io',
-        dpoEmail: process.env.DPO_EMAIL || 'dpo@apexmail.io',
+        supportEmail: process.env.SUPPORT_EMAIL || 'support@apexmail.ee',
+        dpoEmail: process.env.DPO_EMAIL || 'dpo@apexmail.ee',
     };
 
     logger.info({ config: { ...config, tracingEndpoint: '***' } }, 'Starting ops services');

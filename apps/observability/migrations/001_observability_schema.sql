@@ -487,7 +487,7 @@ $$ LANGUAGE plpgsql;
 -- ============================================
 
 INSERT INTO obs_notification_channels (id, name, type, config, enabled) VALUES
-('channel_default_email', 'Default Email', 'email', '{"recipients": ["alerts@apexmail.io"]}', true),
+('channel_default_email', 'Default Email', 'email', '{"recipients": ["alerts@apexmail.ee"]}', true),
 ('channel_default_slack', 'Default Slack', 'slack', '{"channel": "#alerts"}', false)
 ON CONFLICT (id) DO NOTHING;
 
@@ -496,10 +496,10 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================
 
 INSERT INTO obs_alert_rules (id, name, description, expression, duration, severity, notification_channels, runbook) VALUES
-('rule_high_error_rate', 'High Error Rate', 'Error rate exceeds 5%', 'avg(apexmail_error_rate) > 0.05', 300, 'critical', '["channel_default_email"]', 'https://docs.apexmail.io/runbooks/high-error-rate'),
-('rule_high_latency', 'High Latency', 'P99 latency exceeds 5 seconds', 'histogram_quantile(0.99, apexmail_request_duration_bucket) > 5', 300, 'warning', '["channel_default_email"]', 'https://docs.apexmail.io/runbooks/high-latency'),
-('rule_low_delivery_rate', 'Low Delivery Rate', 'Email delivery rate below 95%', 'avg(apexmail_delivery_rate) < 0.95', 600, 'warning', '["channel_default_email"]', 'https://docs.apexmail.io/runbooks/low-delivery'),
-('rule_queue_backup', 'Queue Backup', 'Queue depth exceeds 10000', 'apexmail_queue_depth > 10000', 300, 'critical', '["channel_default_email"]', 'https://docs.apexmail.io/runbooks/queue-backup')
+('rule_high_error_rate', 'High Error Rate', 'Error rate exceeds 5%', 'avg(apexmail_error_rate) > 0.05', 300, 'critical', '["channel_default_email"]', 'https://docs.apexmail.ee/runbooks/high-error-rate'),
+('rule_high_latency', 'High Latency', 'P99 latency exceeds 5 seconds', 'histogram_quantile(0.99, apexmail_request_duration_bucket) > 5', 300, 'warning', '["channel_default_email"]', 'https://docs.apexmail.ee/runbooks/high-latency'),
+('rule_low_delivery_rate', 'Low Delivery Rate', 'Email delivery rate below 95%', 'avg(apexmail_delivery_rate) < 0.95', 600, 'warning', '["channel_default_email"]', 'https://docs.apexmail.ee/runbooks/low-delivery'),
+('rule_queue_backup', 'Queue Backup', 'Queue depth exceeds 10000', 'apexmail_queue_depth > 10000', 300, 'critical', '["channel_default_email"]', 'https://docs.apexmail.ee/runbooks/queue-backup')
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================

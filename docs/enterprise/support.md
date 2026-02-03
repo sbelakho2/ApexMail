@@ -22,7 +22,7 @@ ApexMail offers comprehensive support tiers designed to meet the needs of organi
 ### Create Ticket
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/tickets \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -92,7 +92,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/support/tickets \
 ### Get Ticket Status
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/support/tickets/{ticket_id} \
+curl https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id} \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
@@ -150,7 +150,7 @@ Response:
 ### Add Comment to Ticket
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/tickets/{ticket_id}/comments \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id}/comments \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "message": "I have noticed this is affecting emails to Gmail specifically. Here are the bounce codes we are seeing...",
@@ -166,7 +166,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/support/tickets/{ticket_id}/c
 ### List Tickets
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/support/tickets \
+curl https://api.apexmail.ee/enterprise/v1/support/tickets \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -G -d "status=open" -d "priority=high"
 ```
@@ -176,7 +176,7 @@ curl https://api.apexmail.io/enterprise/v1/support/tickets \
 ### Escalate Ticket
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/tickets/{ticket_id}/escalate \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id}/escalate \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "reason": "Impact has expanded to transactional emails. Revenue impact estimated at $50K/day.",
@@ -218,7 +218,7 @@ Response:
 ### Schedule CSM Meeting
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/csm/meetings \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/csm/meetings \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -269,7 +269,7 @@ Enterprise customers receive quarterly business reviews covering:
 ### Request QBR
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/qbr/request \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/qbr/request \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -287,7 +287,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/support/qbr/request \
 ### Schedule Training
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/training \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/training \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -343,7 +343,7 @@ Enterprise customers with TAM receive:
 ### Request TAM Consultation
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/tam/consultation \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/tam/consultation \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "topic": "architecture_review",
@@ -377,7 +377,7 @@ Enterprise customers get a dedicated Slack channel:
 For critical issues outside business hours:
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/support/emergency \
+curl -X POST https://api.apexmail.ee/enterprise/v1/support/emergency \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -396,7 +396,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/support/emergency \
 ### Check SLA Status
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/support/sla/status \
+curl https://api.apexmail.ee/enterprise/v1/support/sla/status \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -G -d "period=2024-01"
 ```

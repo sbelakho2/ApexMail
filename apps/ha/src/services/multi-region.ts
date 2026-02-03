@@ -105,7 +105,7 @@ export class MultiRegionService {
       const region: RegionInfo = {
         id: regionId,
         name: regionId,
-        endpoint: `https://${regionId}.apexmail.io`,
+        endpoint: `https://${regionId}.apexmail.ee`,
         status: RegionStatus.HEALTHY,
         role: isPrimary ? RegionRole.PRIMARY : RegionRole.SECONDARY,
         weight: isPrimary ? 2 : 1,

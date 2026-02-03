@@ -68,7 +68,7 @@ export function DedicatedIPs() {
  <div className="premium-card p-8 bg-surface-50">
  <div className="flex items-center justify-between mb-8">
  <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">IP Pool Dashboard</div>
- <div className="px-2 py-1 bg-green-50 text-green-700 border border-green-100 text-[10px] font-bold uppercase tracking-tight rounded-md">
+ <div className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-tight rounded-md">
  All Healthy
  </div>
  </div>
@@ -90,9 +90,9 @@ export function DedicatedIPs() {
  <div
  className={`w-2 h-2 rounded-full ${
  ipData.status === 'active'
- ? 'bg-green-500'
+ ? 'bg-emerald-500'
  : ipData.status === 'warming'
- ? 'bg-yellow-500'
+ ? 'bg-amber-500'
  : 'bg-surface-300'
  }`}
  />
@@ -104,9 +104,9 @@ export function DedicatedIPs() {
  <div
  className={`text-sm font-bold ${
  ipData.reputation >= 90
- ? 'text-green-600'
+ ? 'text-emerald-600'
  : ipData.reputation >= 70
- ? 'text-yellow-600'
+ ? 'text-amber-600'
  : 'text-surface-400'
  }`}
  >
@@ -116,9 +116,9 @@ export function DedicatedIPs() {
  <div
  className={`px-2 py-0.5 text-[9px] font-bold uppercase tracking-tight rounded-md ${
  ipData.status === 'active'
- ? 'bg-green-50 text-green-700 border border-green-100'
+ ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
  : ipData.status === 'warming'
- ? 'bg-yellow-50 text-yellow-700 border border-yellow-100'
+ ? 'bg-amber-50 text-amber-700 border border-amber-100'
  : 'bg-surface-100 text-surface-500 border border-surface-200'
  }`}
  >
@@ -132,7 +132,7 @@ export function DedicatedIPs() {
  {/* Features */}
  <div className="mt-8 pt-8 border-t border-surface-200">
  <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-4">Included Protection</div>
- <div className="grid grid-cols-2 gap-3">
+ <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
  {[
  'Automatic failover',
  'Load balancing',
@@ -142,7 +142,7 @@ export function DedicatedIPs() {
  'SPF/DKIM/DMARC setup',
  ].map((feature) => (
  <div key={feature} className="flex items-center gap-2 text-xs font-bold text-surface-700">
- <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0" strokeWidth={3} />
+ <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0" strokeWidth={3} />
  {feature}
  </div>
  ))}

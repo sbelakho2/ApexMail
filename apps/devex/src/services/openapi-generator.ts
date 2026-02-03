@@ -210,7 +210,7 @@ export class OpenApiGenerator {
         tags: this.generateTags(),
         externalDocs: {
           description: 'Full API Documentation',
-          url: 'https://docs.apexmail.dev',
+          url: 'https://docs.apexmail.ee',
         },
       };
 
@@ -259,15 +259,15 @@ Current version: ${this.version}
 
 For POST requests, you can include an \`Idempotency-Key\` header to ensure idempotent operations. The same key will return the same response for 24 hours.
       `.trim(),
-      termsOfService: 'https://apexmail.dev/terms',
+      termsOfService: 'https://apexmail.ee/terms',
       contact: {
         name: 'ApexMail Support',
-        url: 'https://apexmail.dev/support',
-        email: 'support@apexmail.dev',
+        url: 'https://apexmail.ee/support',
+        email: 'contact@apexmail.ee',
       },
       license: {
         name: 'Proprietary',
-        url: 'https://apexmail.dev/license',
+        url: 'https://apexmail.ee/license',
       },
     };
   }
@@ -275,11 +275,11 @@ For POST requests, you can include an \`Idempotency-Key\` header to ensure idemp
   private generateServers(): OpenApiServer[] {
     return [
       {
-        url: 'https://api.apexmail.dev/v1',
+        url: 'https://api.apexmail.ee/v1',
         description: 'Production API',
       },
       {
-        url: 'https://sandbox.apexmail.dev/v1',
+        url: 'https://sandbox.apexmail.ee/v1',
         description: 'Sandbox API (for testing)',
       },
       {
@@ -287,7 +287,7 @@ For POST requests, you can include an \`Idempotency-Key\` header to ensure idemp
         description: 'Custom server',
         variables: {
           protocol: { default: 'https', enum: ['https', 'http'] },
-          host: { default: 'api.apexmail.dev' },
+          host: { default: 'api.apexmail.ee' },
         },
       },
     ];
@@ -1829,47 +1829,47 @@ For POST requests, you can include an \`Idempotency-Key\` header to ensure idemp
       {
         name: 'Emails',
         description: 'Send and manage transactional emails',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/emails' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/emails' },
       },
       {
         name: 'Batch',
         description: 'Send multiple emails in a single request',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/batch' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/batch' },
       },
       {
         name: 'Domains',
         description: 'Manage sending domains',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/domains' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/domains' },
       },
       {
         name: 'Templates',
         description: 'Manage email templates',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/templates' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/templates' },
       },
       {
         name: 'Webhooks',
         description: 'Manage webhook endpoints for event notifications',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/webhooks' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/webhooks' },
       },
       {
         name: 'API Keys',
         description: 'Manage API keys',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/api-keys' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/api-keys' },
       },
       {
         name: 'Analytics',
         description: 'View email analytics and metrics',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/analytics' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/analytics' },
       },
       {
         name: 'Suppressions',
         description: 'Manage suppression list',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/suppressions' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/suppressions' },
       },
       {
         name: 'Account',
         description: 'Account information and usage',
-        externalDocs: { url: 'https://docs.apexmail.dev/api/account' },
+        externalDocs: { url: 'https://docs.apexmail.ee/api/account' },
       },
     ];
   }

@@ -20,15 +20,15 @@ const features = [
  items: [
  {
  icon: Shield,
- title: 'Compliance-as-Code',
- description: 'Native GDPR consent ledger, auto-generated DPAs, instant "Right-to-be-Forgotten" cascades. Be audit-ready in minutes, not months.',
+ title: 'Automated Compliance Ledger',
+      description: 'Automated GDPR & HIPAA compliance. Native consent ledgers, auto-generated DPAs, and instant deletion cascades make you audit-ready in minutes.',
  badge: 'GDPR / HIPAA',
  gradient: 'bg-primary-500',
  },
  {
  icon: FileCheck,
  title: 'Cryptographic Proof of Delivery',
- description: 'Every log entry is cryptographically signed in an immutable hash chain. Prove delivery in court, not just claim it.',
+      description: 'Court-admissible delivery logs. Every email event is cryptographically signed, proving exactly when and what was delivered.',
  badge: 'Verifiable',
  gradient: 'bg-primary-500',
  },
@@ -47,7 +47,7 @@ const features = [
  {
  icon: Zap,
  title: 'Priority Pass Traffic Shaping',
- description: 'Automatic classification puts transactional mail in a fast lane. Your OTPs never wait for your newsletter.',
+      description: 'Deliver OTPs in < 500ms. Intelligent traffic isolation ensures your password resets never get blocked by your marketing blasts.',
  badge: '< 2s OTP',
  gradient: 'bg-primary-500',
  },

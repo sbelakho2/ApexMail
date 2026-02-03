@@ -120,7 +120,7 @@ export function TestimonialsSection() {
  </div>
  <div className="ml-auto hidden sm:flex items-center gap-0.5">
  {[...Array(5)].map((_, i) => (
- <Star key={i} className="w-4 h-4 fill-yellow-400 text-yellow-400" />
+ <Star key={i} className="w-4 h-4 fill-amber-400 text-amber-400" />
  ))}
  </div>
  </div>

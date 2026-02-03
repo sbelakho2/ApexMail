@@ -6,6 +6,7 @@
  * - GET /health/ready - Readiness probe (checks dependencies)
  * - GET /health/live - Liveness probe (lightweight check)
  * - GET /health/version - Version and build info
+ * - GET /health/deep - Comprehensive check including database, redis cache, and schema validation
  */
 
 import { Hono } from 'hono';

@@ -71,8 +71,8 @@ const stats = [
         change: 0.8,
         changeType: 'positive' as const,
         icon: MousePointer,
-        color: 'text-error',
-        bgColor: 'bg-error/10',
+        color: 'text-danger',
+        bgColor: 'bg-danger/10',
         isPercent: true,
     },
 ];

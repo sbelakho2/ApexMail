@@ -65,13 +65,11 @@ export function HeroSection() {
 
  {/* subheadline */}
  <p className="text-[17px] lg:text-xl text-surface-600 mb-8 max-w-xl leading-relaxed">
- EU-compliant email infrastructure with cryptographic proof of delivery, 
- private cloud options, and a developer experience so good you&apos;ll actually 
- enjoy reading the docs.
- </p>
-
+                Ship <strong className="text-surface-900 font-semibold">HIPAA & GDPR-ready</strong> transactional emails with 99.99% deliverability.
+                The only infrastructure designed for developers who value sleep over debugging spam filters.
+              </p>
  {/* Benefits List */}
- <ul className="grid grid-cols-2 gap-4 mb-8">
+ <ul className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
    {benefits.map((benefit) => (
      <li
        key={benefit}
@@ -91,7 +89,7 @@ export function HeroSection() {
             href="https://app.apexmail.ee/signup" 
             className="btn-primary flex items-center gap-2 group shadow-lg shadow-primary-500/20 active:scale-[0.98] transition-all"
           >
-            Start Sending Free
+            Get API Keys
             <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
           </Link>
           <Link 

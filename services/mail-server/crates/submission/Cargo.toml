@@ -1,0 +1,48 @@
+[package]
+name = "submission"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "submission-server"
+path = "src/main.rs"
+
+[dependencies]
+mail-common = { path = "../mail-common" }
+mail-proto = { path = "../mail-proto" }
+outbound-queue = { path = "../outbound-queue" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+
+# SMTP
+trust-dns-resolver.workspace = true
+
+# TLS
+tokio-rustls.workspace = true
+rustls-pemfile = "2"
+
+# Authentication
+base64.workspace = true
+
+# gRPC client
+tonic.workspace = true
+
+# Database
+sqlx.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Utilities
+anyhow.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true

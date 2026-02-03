@@ -240,11 +240,11 @@ export function EndpointExplorer() {
  className={cn(
  'px-2 py-0.5 text-[10px] font-bold uppercase tracking-tight rounded',
  endpoint.method === 'GET'
- ? 'bg-green-50 text-green-700 border border-green-100'
+ ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
  : endpoint.method === 'POST'
  ? 'bg-primary-50 text-primary-700 border border-primary-100'
  : endpoint.method === 'PUT'
- ? 'bg-yellow-50 text-yellow-700 border border-yellow-100'
+ ? 'bg-amber-50 text-amber-700 border border-amber-100'
  : 'bg-red-50 text-red-700 border border-red-100'
  )}
  >

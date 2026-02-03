@@ -65,14 +65,14 @@ export function CTASection() {
      href="https://app.apexmail.ee/signup"
      className="btn-primary text-[17px] font-bold px-8 py-4 flex items-center gap-2 group w-full sm:w-auto justify-center rounded-xl shadow-xl shadow-primary-500/20 hover:shadow-2xl hover:shadow-primary-500/30 active:scale-[0.98] transition-all"
    >
-     Start Sending Free
+     Deploy to Production
      <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
    </Link>
    <Link
      href="/contact"
      className="btn-secondary text-[17px] font-bold px-8 py-4 w-full sm:w-auto justify-center bg-white hover:bg-surface-50 rounded-xl border-surface-200 active:scale-[0.98] transition-all"
    >
-     Talk to Sales
+     Book Architecture Review
    </Link>
  </motion.div>
 
@@ -84,7 +84,7 @@ export function CTASection() {
  className="flex flex-wrap items-center justify-center gap-6 text-surface-500 text-sm font-medium"
  >
  <span className="flex items-center gap-2">
- <span className="w-2 h-2 rounded-full bg-green-500"></span>
+ <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
  99.99% Uptime SLA
  </span>
  <span className="flex items-center gap-2">

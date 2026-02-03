@@ -87,9 +87,10 @@ export function ComparisonSection() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
- className="premium-card overflow-hidden bg-white"
+ className="premium-card overflow-x-auto bg-white"
  >
  {/* Table Header */}
+ <div className="min-w-[900px]">
  <div className="grid grid-cols-5 gap-4 p-4 lg:p-6 border-b border-surface-200 bg-surface-50">
    <div className="font-bold text-surface-400 uppercase tracking-widest text-[11px] flex items-center">Feature</div>
    <div className="text-center">
@@ -149,6 +150,7 @@ export function ComparisonSection() {
  ))}
  </div>
  ))}
+ </div>
  </motion.div>
 
  {/* Bottom CTA */}

@@ -83,7 +83,7 @@ export function ComplianceHero() {
  <h3 className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-10 text-center">
  Compliance Certifications
  </h3>
- <div className="grid grid-cols-3 gap-6">
+ <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
  {badges.map((badge, index) => (
  <motion.div
  key={badge.name}
@@ -99,9 +99,9 @@ export function ComplianceHero() {
  </motion.div>
  ))}
  </div>
- <div className="mt-10 p-4 rounded-lg bg-green-50 border border-green-100 ">
- <div className="flex items-center gap-3 text-green-700 text-[10px] font-bold uppercase tracking-widest">
- <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+ <div className="mt-10 p-4 rounded-lg bg-emerald-50 border border-emerald-100 ">
+ <div className="flex items-center gap-3 text-emerald-700 text-[10px] font-bold uppercase tracking-widest">
+ <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
  Verified and Current
  </div>
  </div>

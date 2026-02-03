@@ -1,0 +1,469 @@
+syntax = "proto3";
+
+package apexmail.mail.v1;
+
+// =============================================================================
+// Mailstore Service - Message and mailbox management
+// =============================================================================
+
+service MailstoreService {
+    // Message operations
+    rpc StoreMessage(StoreMessageRequest) returns (StoreMessageResponse);
+    rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
+    rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+    rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+    rpc SetFlags(SetFlagsRequest) returns (SetFlagsResponse);
+    rpc GetFlags(GetFlagsRequest) returns (GetFlagsResponse);
+    rpc MoveMessage(MoveMessageRequest) returns (MoveMessageResponse);
+    rpc CopyMessage(CopyMessageRequest) returns (CopyMessageResponse);
+    
+    // Mailbox operations
+    rpc CreateMailbox(CreateMailboxRequest) returns (CreateMailboxResponse);
+    rpc DeleteMailbox(DeleteMailboxRequest) returns (DeleteMailboxResponse);
+    rpc ListMailboxes(ListMailboxesRequest) returns (ListMailboxesResponse);
+    rpc GetMailboxStatus(GetMailboxStatusRequest) returns (GetMailboxStatusResponse);
+    rpc Expunge(ExpungeRequest) returns (ExpungeResponse);
+    
+    // Account operations
+    rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+    rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+    rpc AuthenticateAccount(AuthenticateRequest) returns (AuthenticateResponse);
+    rpc GetQuota(GetQuotaRequest) returns (GetQuotaResponse);
+    
+    // Streaming
+    rpc SubscribeMailbox(SubscribeMailboxRequest) returns (stream MailboxEvent);
+}
+
+// =============================================================================
+// Outbound Service - Email sending
+// =============================================================================
+
+service OutboundService {
+    // Queue email for delivery
+    rpc QueueEmail(QueueEmailRequest) returns (QueueEmailResponse);
+    
+    // Send email immediately (bypassing queue)
+    rpc SendEmailNow(SendEmailRequest) returns (SendEmailResponse);
+    
+    // Check delivery status
+    rpc GetDeliveryStatus(GetDeliveryStatusRequest) returns (GetDeliveryStatusResponse);
+    
+    // Cancel queued email
+    rpc CancelEmail(CancelEmailRequest) returns (CancelEmailResponse);
+    
+    // Bulk operations
+    rpc QueueBulkEmails(QueueBulkEmailsRequest) returns (QueueBulkEmailsResponse);
+    
+    // Statistics
+    rpc GetQueueStats(GetQueueStatsRequest) returns (GetQueueStatsResponse);
+}
+
+// =============================================================================
+// Message Types
+// =============================================================================
+
+message EmailEnvelope {
+    string from = 1;
+    repeated string to = 2;
+    repeated string cc = 3;
+    repeated string bcc = 4;
+    string reply_to = 5;
+    string subject = 6;
+    string message_id = 7;
+    string in_reply_to = 8;
+    repeated string references = 9;
+    int64 date = 10; // Unix timestamp
+}
+
+message MessageFlags {
+    bool seen = 1;
+    bool answered = 2;
+    bool flagged = 3;
+    bool deleted = 4;
+    bool draft = 5;
+    bool recent = 6;
+    repeated string custom = 7;
+}
+
+message MessageMeta {
+    string id = 1;
+    string account_id = 2;
+    string mailbox = 3;
+    uint64 uid = 4;
+    string blob_hash = 5;
+    uint64 size = 6;
+    EmailEnvelope envelope = 7;
+    MessageFlags flags = 8;
+    int64 internal_date = 9;
+}
+
+message Mailbox {
+    string name = 1;
+    string delimiter = 2;
+    repeated string attributes = 3;
+    uint64 uidvalidity = 4;
+    uint64 uidnext = 5;
+    uint32 exists = 6;
+    uint32 recent = 7;
+    uint32 unseen = 8;
+}
+
+message Quota {
+    uint64 used_bytes = 1;
+    uint64 max_bytes = 2;
+    uint64 used_messages = 3;
+    uint64 max_messages = 4;
+}
+
+message Attachment {
+    string filename = 1;
+    string content_type = 2;
+    bytes content = 3;
+    string content_id = 4; // For inline attachments
+}
+
+// =============================================================================
+// Mailstore Requests/Responses
+// =============================================================================
+
+message StoreMessageRequest {
+    string account_id = 1;
+    string mailbox = 2;
+    bytes raw_message = 3;
+    MessageFlags flags = 4;
+    int64 internal_date = 5;
+}
+
+message StoreMessageResponse {
+    string message_id = 1;
+    uint64 uid = 2;
+    string blob_hash = 3;
+}
+
+message GetMessageRequest {
+    string account_id = 1;
+    string mailbox = 2;
+    uint64 uid = 3;
+    bool include_body = 4;
+}
+
+message GetMessageResponse {
+    MessageMeta meta = 1;
+    bytes body = 2;
+}
+
+message ListMessagesRequest {
+    string account_id = 1;
+    string mailbox = 2;
+    uint64 uid_min = 3;
+    uint64 uid_max = 4;
+    int32 limit = 5;
+}
+
+message ListMessagesResponse {
+    repeated MessageMeta messages = 1;
+}
+
+message SearchMessagesRequest {
+    string account_id = 1;
+    string mailbox = 2;
+    string query = 3;
+    int32 limit = 4;
+    int32 offset = 5;
+}
+
+message SearchMessagesResponse {
+    repeated MessageMeta messages = 1;
+    int32 total = 2;
+}
+
+message SetFlagsRequest {
+    string account_id = 1;
+    string mailbox = 2;
+    repeated uint64 uids = 3;
+    MessageFlags flags = 4;
+    FlagOperation operation = 5;
+}
+
+enum FlagOperation {
+    FLAG_OPERATION_UNSPECIFIED = 0;
+    FLAG_OPERATION_SET = 1;
+    FLAG_OPERATION_ADD = 2;
+    FLAG_OPERATION_REMOVE = 3;
+}
+
+message SetFlagsResponse {
+    uint32 updated_count = 1;
+}
+
+message GetFlagsRequest {
+    string account_id = 1;
+    string mailbox = 2;
+    repeated uint64 uids = 3;
+}
+
+message GetFlagsResponse {
+    map<uint64, MessageFlags> flags = 1;
+}
+
+message MoveMessageRequest {
+    string account_id = 1;
+    string source_mailbox = 2;
+    string dest_mailbox = 3;
+    repeated uint64 uids = 4;
+}
+
+message MoveMessageResponse {
+    map<uint64, uint64> uid_mapping = 1; // old_uid -> new_uid
+}
+
+message CopyMessageRequest {
+    string account_id = 1;
+    string source_mailbox = 2;
+    string dest_mailbox = 3;
+    repeated uint64 uids = 4;
+}
+
+message CopyMessageResponse {
+    map<uint64, uint64> uid_mapping = 1;
+}
+
+message CreateMailboxRequest {
+    string account_id = 1;
+    string name = 2;
+    string special_use = 3; // \Sent, \Drafts, \Trash, \Junk, etc.
+}
+
+message CreateMailboxResponse {
+    Mailbox mailbox = 1;
+}
+
+message DeleteMailboxRequest {
+    string account_id = 1;
+    string name = 2;
+}
+
+message DeleteMailboxResponse {
+    bool success = 1;
+}
+
+message ListMailboxesRequest {
+    string account_id = 1;
+    string pattern = 2; // IMAP LIST pattern
+}
+
+message ListMailboxesResponse {
+    repeated Mailbox mailboxes = 1;
+}
+
+message GetMailboxStatusRequest {
+    string account_id = 1;
+    string mailbox = 2;
+}
+
+message GetMailboxStatusResponse {
+    Mailbox mailbox = 1;
+    uint64 highest_modseq = 2;
+}
+
+message ExpungeRequest {
+    string account_id = 1;
+    string mailbox = 2;
+}
+
+message ExpungeResponse {
+    repeated uint64 expunged_uids = 1;
+}
+
+message CreateAccountRequest {
+    string email = 1;
+    string password = 2;
+    string display_name = 3;
+    Quota initial_quota = 4;
+}
+
+message CreateAccountResponse {
+    string account_id = 1;
+}
+
+message GetAccountRequest {
+    string account_id = 1;
+    string email = 2; // Alternative lookup
+}
+
+message GetAccountResponse {
+    string account_id = 1;
+    string email = 2;
+    string display_name = 3;
+    int64 created_at = 4;
+    bool active = 5;
+}
+
+message AuthenticateRequest {
+    string email = 1;
+    string password = 2;
+}
+
+message AuthenticateResponse {
+    bool success = 1;
+    string account_id = 2;
+    string error = 3;
+}
+
+message GetQuotaRequest {
+    string account_id = 1;
+}
+
+message GetQuotaResponse {
+    Quota quota = 1;
+}
+
+message SubscribeMailboxRequest {
+    string account_id = 1;
+    string mailbox = 2;
+}
+
+message MailboxEvent {
+    oneof event {
+        MessageAdded message_added = 1;
+        MessageRemoved message_removed = 2;
+        FlagsChanged flags_changed = 3;
+        MailboxUpdated mailbox_updated = 4;
+    }
+}
+
+message MessageAdded {
+    MessageMeta message = 1;
+}
+
+message MessageRemoved {
+    uint64 uid = 1;
+}
+
+message FlagsChanged {
+    uint64 uid = 1;
+    MessageFlags flags = 2;
+}
+
+message MailboxUpdated {
+    Mailbox mailbox = 1;
+}
+
+// =============================================================================
+// Outbound Requests/Responses
+// =============================================================================
+
+message QueueEmailRequest {
+    string tenant_id = 1;
+    string from = 2;
+    repeated string to = 3;
+    repeated string cc = 4;
+    repeated string bcc = 5;
+    string reply_to = 6;
+    string subject = 7;
+    string text_body = 8;
+    string html_body = 9;
+    repeated Attachment attachments = 10;
+    map<string, string> headers = 11;
+    int64 scheduled_at = 12; // Unix timestamp, 0 for immediate
+    string campaign_id = 13;
+    repeated string tags = 14;
+    map<string, string> metadata = 15;
+}
+
+message QueueEmailResponse {
+    string email_id = 1;
+    string status = 2;
+}
+
+message SendEmailRequest {
+    string tenant_id = 1;
+    string from = 2;
+    repeated string to = 3;
+    string subject = 4;
+    string text_body = 5;
+    string html_body = 6;
+    repeated Attachment attachments = 7;
+    map<string, string> headers = 8;
+}
+
+message SendEmailResponse {
+    string email_id = 1;
+    string message_id = 2; // SMTP Message-ID
+    bool success = 3;
+    string error = 4;
+    repeated RecipientResult recipients = 5;
+}
+
+message RecipientResult {
+    string email = 1;
+    bool accepted = 2;
+    string error = 3;
+}
+
+message GetDeliveryStatusRequest {
+    string email_id = 1;
+}
+
+message GetDeliveryStatusResponse {
+    string email_id = 1;
+    DeliveryStatus status = 2;
+    int64 queued_at = 3;
+    int64 sent_at = 4;
+    int64 delivered_at = 5;
+    int64 bounced_at = 6;
+    int32 attempts = 7;
+    string last_error = 8;
+    repeated DeliveryAttempt attempts_detail = 9;
+}
+
+enum DeliveryStatus {
+    DELIVERY_STATUS_UNSPECIFIED = 0;
+    DELIVERY_STATUS_QUEUED = 1;
+    DELIVERY_STATUS_SENDING = 2;
+    DELIVERY_STATUS_SENT = 3;
+    DELIVERY_STATUS_DELIVERED = 4;
+    DELIVERY_STATUS_BOUNCED = 5;
+    DELIVERY_STATUS_FAILED = 6;
+    DELIVERY_STATUS_CANCELLED = 7;
+}
+
+message DeliveryAttempt {
+    int64 timestamp = 1;
+    bool success = 2;
+    string smtp_response = 3;
+    string error = 4;
+}
+
+message CancelEmailRequest {
+    string email_id = 1;
+}
+
+message CancelEmailResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message QueueBulkEmailsRequest {
+    string tenant_id = 1;
+    repeated QueueEmailRequest emails = 2;
+}
+
+message QueueBulkEmailsResponse {
+    repeated QueueEmailResponse results = 1;
+    int32 queued_count = 2;
+    int32 failed_count = 3;
+}
+
+message GetQueueStatsRequest {
+    string tenant_id = 1; // Optional, empty for global stats
+}
+
+message GetQueueStatsResponse {
+    int64 pending_count = 1;
+    int64 sending_count = 2;
+    int64 sent_today = 3;
+    int64 failed_today = 4;
+    int64 bounced_today = 5;
+    double average_delivery_time_ms = 6;
+}

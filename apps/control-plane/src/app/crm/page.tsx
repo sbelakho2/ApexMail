@@ -30,14 +30,14 @@ interface Lead {
 type PipelineStage = 'prospect' | 'outreach' | 'engaged' | 'demo_scheduled' | 'proposal' | 'negotiation' | 'closed_won' | 'closed_lost';
 
 const STAGES: { key: PipelineStage; label: string; color: string }[] = [
-    { key: 'prospect', label: 'Prospects', color: 'bg-gray-100 border-gray-300' },
-    { key: 'outreach', label: 'Outreach', color: 'bg-blue-50 border-blue-300' },
-    { key: 'engaged', label: 'Engaged', color: 'bg-yellow-50 border-yellow-300' },
-    { key: 'demo_scheduled', label: 'Demo Scheduled', color: 'bg-purple-50 border-purple-300' },
-    { key: 'proposal', label: 'Proposal', color: 'bg-indigo-50 border-indigo-300' },
-    { key: 'negotiation', label: 'Negotiation', color: 'bg-orange-50 border-orange-300' },
-    { key: 'closed_won', label: 'Closed Won', color: 'bg-green-50 border-green-300' },
-    { key: 'closed_lost', label: 'Lost', color: 'bg-red-50 border-red-300' },
+    { key: 'prospect', label: 'Prospects', color: 'bg-surface-50 border-surface-200' },
+    { key: 'outreach', label: 'Outreach', color: 'bg-blue-50 border-blue-200' },
+    { key: 'engaged', label: 'Engaged', color: 'bg-amber-50 border-amber-200' },
+    { key: 'demo_scheduled', label: 'Demo Scheduled', color: 'bg-violet-50 border-violet-200' },
+    { key: 'proposal', label: 'Proposal', color: 'bg-sky-50 border-sky-200' },
+    { key: 'negotiation', label: 'Negotiation', color: 'bg-orange-50 border-orange-200' },
+    { key: 'closed_won', label: 'Closed Won', color: 'bg-emerald-50 border-emerald-200' },
+    { key: 'closed_lost', label: 'Lost', color: 'bg-red-50 border-red-200' },
 ];
 
 export default function CRMPipelinePage() {
@@ -102,57 +102,57 @@ export default function CRMPipelinePage() {
     }
 
     function getScoreColor(score: number): string {
-        if (score >= 90) return 'text-green-600 bg-green-50';
-        if (score >= 70) return 'text-yellow-600 bg-yellow-50';
-        if (score >= 50) return 'text-orange-600 bg-orange-50';
-        return 'text-red-600 bg-red-50';
+        if (score >= 90) return 'text-emerald-700 bg-emerald-50 border border-emerald-100';
+        if (score >= 70) return 'text-amber-700 bg-amber-50 border border-amber-100';
+        if (score >= 50) return 'text-orange-700 bg-orange-50 border border-orange-100';
+        return 'text-red-700 bg-red-50 border border-red-100';
     }
 
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
             </div>
         );
     }
 
     return (
         <div className="max-w-full">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">CRM Pipeline</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">CRM Pipeline</h1>
+                    <p className="text-surface-500 mt-1">
                         Manage your sales pipeline • {leads.length} total leads
                     </p>
                 </div>
-                <div className="flex gap-2">
-                    <button className="px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm hover:bg-gray-50">
+                <div className="flex gap-3">
+                    <button className="px-4 py-2 bg-surface-0 border border-surface-200 text-surface-700 font-medium rounded-lg text-sm hover:bg-surface-50 shadow-sm transition-colors">
                         Export CSV
                     </button>
-                    <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                    <button className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg text-sm hover:bg-blue-700 shadow-sm transition-colors">
                         + Add Lead
                     </button>
                 </div>
             </div>
 
             {/* Pipeline Kanban */}
-            <div className="overflow-x-auto pb-4">
-                <div className="flex gap-4 min-w-max">
+            <div className="overflow-x-auto pb-6">
+                <div className="flex gap-6 min-w-max px-1">
                     {STAGES.map(stage => {
                         const stageLeads = getLeadsByStage(stage.key);
                         return (
                             <div
                                 key={stage.key}
                                 className={cn(
-                                    'w-72 rounded-xl border-2 p-4 min-h-[600px]',
+                                    'w-80 rounded-2xl border-2 p-4 min-h-[calc(100vh-200px)]',
                                     stage.color
                                 )}
                                 onDragOver={handleDragOver}
                                 onDrop={(e) => handleDrop(e, stage.key)}
                             >
-                                <div className="flex items-center justify-between mb-4">
-                                    <h3 className="font-semibold text-gray-700">{stage.label}</h3>
-                                    <span className="px-2 py-0.5 bg-white rounded-full text-xs font-medium text-gray-600">
+                                <div className="flex items-center justify-between mb-4 px-1">
+                                    <h3 className="font-semibold text-surface-700">{stage.label}</h3>
+                                    <span className="px-2.5 py-0.5 bg-surface-0/60 rounded-full text-xs font-bold text-surface-600 shadow-sm border border-black/5">
                                         {stageLeads.length}
                                     </span>
                                 </div>
@@ -164,34 +164,37 @@ export default function CRMPipelinePage() {
                                             onDragStart={(e) => handleDragStart(e, lead)}
                                             onClick={() => setSelectedLead(lead)}
                                             className={cn(
-                                                'bg-white rounded-lg p-4 shadow-sm border border-gray-100 cursor-pointer',
-                                                'hover:shadow-md transition-shadow',
+                                                'bg-surface-0 rounded-xl p-4 shadow-sm border border-surface-100 cursor-pointer',
+                                                'hover:shadow-md transition-all duration-200 group',
                                                 draggedLead?.id === lead.id && 'opacity-50'
                                             )}
                                         >
                                             <div className="flex items-start justify-between mb-2">
-                                                <div className="font-medium text-gray-900 text-sm">
+                                                <div className="font-semibold text-surface-900 text-sm line-clamp-1 group-hover:text-blue-600 transition-colors">
                                                     {truncate(lead.companyName, 20)}
                                                 </div>
-                                                <span className={cn('px-1.5 py-0.5 rounded text-xs font-medium', getScoreColor(lead.score))}>
+                                                <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-bold', getScoreColor(lead.score))}>
                                                     {lead.score}
                                                 </span>
                                             </div>
-                                            <div className="text-xs text-gray-500 mb-2">{lead.domain}</div>
+                                            <div className="text-xs text-surface-500 mb-3 flex items-center gap-1">
+                                                <span>🌐</span> {lead.domain}
+                                            </div>
                                             {lead.contactName && (
-                                                <div className="text-xs text-gray-600 mb-2">
-                                                    👤 {lead.contactName}
+                                                <div className="text-xs text-surface-600 mb-3 flex items-center gap-1">
+                                                    <span className="w-5 h-5 rounded-full bg-surface-100 flex items-center justify-center text-[10px]">👤</span>
+                                                    {lead.contactName}
                                                 </div>
                                             )}
-                                            <div className="flex flex-wrap gap-1 mb-2">
+                                            <div className="flex flex-wrap gap-1.5 mb-3">
                                                 {lead.tags.slice(0, 2).map(tag => (
-                                                    <span key={tag} className="px-1.5 py-0.5 bg-gray-100 rounded text-xs text-gray-600">
+                                                    <span key={tag} className="px-2 py-0.5 bg-surface-50 border border-surface-200 rounded text-[10px] text-surface-600 font-medium">
                                                         {tag}
                                                     </span>
                                                 ))}
                                             </div>
-                                            <div className="text-xs text-gray-400">
-                                                {formatDate(lead.lastActivity)}
+                                            <div className="text-[10px] text-surface-400 flex items-center gap-1 border-t border-surface-50 pt-2 mt-2">
+                                                <span>🕒</span> {formatDate(lead.lastActivity)}
                                             </div>
                                         </div>
                                     ))}
@@ -204,60 +207,64 @@ export default function CRMPipelinePage() {
 
             {/* Lead Detail Modal */}
             {selectedLead && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedLead(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-start justify-between mb-4">
+                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLead(null)}>
+                    <div className="bg-surface-0 rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-start justify-between mb-6 border-b border-surface-100 pb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-gray-900">{selectedLead.companyName}</h2>
-                                <a href={`https://${selectedLead.domain}`} target="_blank" rel="noopener noreferrer" className="text-indigo-600 text-sm hover:underline">
-                                    {selectedLead.domain} ↗
+                                <h2 className="text-xl font-bold text-surface-900">{selectedLead.companyName}</h2>
+                                <a href={`https://${selectedLead.domain}`} target="_blank" rel="noopener noreferrer" className="text-blue-600 text-sm hover:underline font-medium inline-flex items-center gap-1">
+                                    {selectedLead.domain} <span>↗</span>
                                 </a>
                             </div>
-                            <button onClick={() => setSelectedLead(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedLead(null)} 
+                                className="text-surface-400 hover:text-surface-600 p-1 rounded-lg hover:bg-surface-100 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4 mb-6">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Lead Score</label>
-                                <div className={cn('text-lg font-bold', getScoreColor(selectedLead.score).split(' ')[0])}>
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Lead Score</label>
+                                <div className={cn('text-lg font-bold inline-block px-2 py-0.5 rounded', getScoreColor(selectedLead.score))}>
                                     {selectedLead.score}/100
                                 </div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Source</label>
-                                <div className="text-gray-900">{selectedLead.source}</div>
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Source</label>
+                                <div className="text-surface-900 font-medium">{selectedLead.source}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Contact</label>
-                                <div className="text-gray-900">{selectedLead.contactName || 'Unknown'}</div>
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Contact</label>
+                                <div className="text-surface-900 font-medium">{selectedLead.contactName || 'Unknown'}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Email</label>
-                                <div className="text-gray-900">{selectedLead.contactEmail || 'Not found'}</div>
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Email</label>
+                                <div className="text-surface-900 font-medium">{selectedLead.contactEmail || 'Not found'}</div>
                             </div>
                         </div>
 
-                        <div className="mb-6">
-                            <label className="text-xs text-gray-500 uppercase mb-2 block">Tags</label>
+                        <div className="mb-8">
+                            <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2 block">Tags</label>
                             <div className="flex flex-wrap gap-2">
                                 {selectedLead.tags.map(tag => (
-                                    <span key={tag} className="px-2 py-1 bg-indigo-50 text-indigo-700 rounded text-sm">
+                                    <span key={tag} className="px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-sm font-medium">
                                         {tag}
                                     </span>
                                 ))}
                             </div>
                         </div>
 
-                        <div className="flex gap-2">
-                            <button className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
+                        <div className="flex gap-3">
+                            <button className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 shadow-md transition-all hover:shadow-lg">
                                 Add to Campaign
                             </button>
-                            <button className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">
+                            <button className="px-4 py-2.5 bg-surface-0 border border-surface-200 text-surface-700 rounded-xl font-medium hover:bg-surface-50 shadow-sm">
                                 Edit
                             </button>
-                            <button className="px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100">
+                            <button className="px-4 py-2.5 bg-surface-0 border border-red-200 text-red-600 rounded-xl font-medium hover:bg-red-50 shadow-sm">
                                 Delete
                             </button>
                         </div>

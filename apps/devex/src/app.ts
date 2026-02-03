@@ -165,11 +165,11 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
 
   // Public documentation routes
   app.get('/docs', (c) => {
-    return c.redirect('https://docs.apexmail.dev');
+    return c.redirect('https://docs.apexmail.ee');
   });
 
   app.get('/docs/api', (c) => {
-    return c.redirect('https://docs.apexmail.dev/api');
+    return c.redirect('https://docs.apexmail.ee/api');
   });
 
   // OpenAPI spec (public, no auth)

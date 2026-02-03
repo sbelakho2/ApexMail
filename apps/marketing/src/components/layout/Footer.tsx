@@ -163,7 +163,7 @@ export function Footer() {
  <div className="flex items-center gap-6 text-sm text-surface-500 font-medium">
  <span>Made with ❤️ in Estonia 🇪🇪</span>
  <span className="flex items-center gap-2">
- <span className="w-2 h-2 rounded-full bg-green-500"></span>
+ <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
  All systems operational
  </span>
  </div>

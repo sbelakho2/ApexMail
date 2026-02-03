@@ -156,7 +156,7 @@ export function AuditTrail() {
  placeholder="Search audit logs..."
  value={searchQuery}
  onChange={(e) => setSearchQuery(e.target.value)}
- className="w-full pl-10 pr-4 py-2 bg-surface-50 border border-surface-200 rounded-sm text-surface-900 text-sm font-medium placeholder-surface-400 focus:outline-none focus:border-primary-500 transition-colors "
+ className="w-full pl-10 pr-4 py-2 bg-surface-50 border border-surface-200 rounded-sm text-surface-900 text-sm font-medium placeholder-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
  />
  </div>
  <button className="p-2 bg-white border border-surface-200 rounded-md text-surface-500 hover:text-primary-600 hover:border-primary-200 transition-all ">
@@ -183,9 +183,9 @@ export function AuditTrail() {
  <div
  className={`w-2 h-2 rounded-full ${
  event.outcome === 'success'
- ? 'bg-green-500'
+ ? 'bg-emerald-500'
  : event.outcome === 'warning'
- ? 'bg-yellow-500'
+ ? 'bg-amber-500'
  : 'bg-red-500'
  }`}
  />

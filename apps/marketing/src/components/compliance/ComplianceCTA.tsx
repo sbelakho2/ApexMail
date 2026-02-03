@@ -75,8 +75,8 @@ export function ComplianceCTA() {
  All compliance documentation, audit reports, and certifications available upon request.
  <br />
  Contact{' '}
- <a href="mailto:compliance@apexmail.io" className="text-primary-600 font-bold hover:underline">
- compliance@apexmail.io
+ <a href="mailto:compliance@apexmail.ee" className="text-primary-600 font-bold hover:underline">
+ compliance@apexmail.ee
  </a>{' '}
  for custom security questionnaires.
  </motion.p>

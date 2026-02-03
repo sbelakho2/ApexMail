@@ -76,8 +76,8 @@ const configSchema = z.object({
         deletionGracePeriodDays: z.coerce.number().default(30),
         requestExpirationDays: z.coerce.number().default(30),
         exportExpirationDays: z.coerce.number().default(7),
-        exportBaseUrl: z.string().default('https://exports.apexmail.io'),
-        verifyBaseUrl: z.string().default('https://gdpr.apexmail.io'),
+        exportBaseUrl: z.string().default('https://exports.apexmail.ee'),
+        verifyBaseUrl: z.string().default('https://gdpr.apexmail.ee'),
     }),
 
     secrets: z.object({

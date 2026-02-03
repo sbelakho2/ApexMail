@@ -9,3 +9,8 @@ export {
     CTA_PATTERNS,
     type ContentGeneratorConfig,
 } from './generator.js';
+export {
+    SentimentAnalyzer,
+    NaiveBayesSentiment,
+    sentimentAnalyzer,
+} from './sentiment.js';

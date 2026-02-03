@@ -47,7 +47,7 @@ export function CalculatorCTA() {
  </div>
 
  {/* Trust Signals */}
- <div className="grid grid-cols-3 gap-6 pt-10 border-t border-surface-100">
+ <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-10 border-t border-surface-100">
  {[
  { value: '10K', label: 'Free emails/month' },
  { value: '$0', label: 'Setup fees' },

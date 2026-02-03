@@ -90,7 +90,7 @@ export function InteractiveConsole() {
  };
 
  const copyCode = () => {
- const code = `curl -X POST https://api.apexmail.io/v1/send \\
+ const code = `curl -X POST https://api.apexmail.ee/v1/send \\
  -H "Authorization: Bearer YOUR_API_KEY" \\
  -H "Content-Type: application/json" \\
  -d '${JSON.stringify(requestBody, null, 2)}'`;
@@ -174,7 +174,7 @@ export function InteractiveConsole() {
  type="email"
                       value={requestBody.to}
                       onChange={(e) => setRequestBody({ ...requestBody, to: e.target.value })}
-                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-md text-surface-900 text-sm font-medium focus:outline-none focus:border-primary-500 transition-colors"
+                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-md text-surface-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
                     />
                   </div>
                   <div>
@@ -183,7 +183,7 @@ export function InteractiveConsole() {
                       type="text"
                       value={requestBody.subject}
                       onChange={(e) => setRequestBody({ ...requestBody, subject: e.target.value })}
-                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-md text-surface-900 text-sm font-medium focus:outline-none focus:border-primary-500 transition-colors"
+                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-md text-surface-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
                     />
                   </div>
                   <div>
@@ -192,7 +192,7 @@ export function InteractiveConsole() {
                       value={requestBody.html}
                       onChange={(e) => setRequestBody({ ...requestBody, html: e.target.value })}
                       rows={6}
-                      className="w-full px-4 py-3 bg-surface-50 border border-surface-200 rounded-md text-surface-900 text-sm font-mono focus:outline-none focus:border-primary-500 transition-colors"
+                      className="w-full px-4 py-3 bg-surface-50 border border-surface-200 rounded-md text-surface-900 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
                     />
  </div>
  </div>
@@ -207,7 +207,7 @@ export function InteractiveConsole() {
  </div>
  ) : response ? (
  <div className="space-y-4">
- <div className="flex items-center gap-2 text-green-600">
+ <div className="flex items-center gap-2 text-emerald-600">
  <CheckCircle className="w-5 h-5" strokeWidth={3} />
  <span className="text-xs font-bold uppercase tracking-widest">200 OK</span>
  </div>

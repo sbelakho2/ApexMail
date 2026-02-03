@@ -103,7 +103,7 @@ export default function GDPRPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -112,23 +112,23 @@ export default function GDPRPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">GDPR Requests</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">GDPR Requests</h1>
+                    <p className="text-surface-600 mt-1">
                         Manage data subject requests for GDPR compliance
                     </p>
                 </div>
-                <div className="text-sm text-gray-500">
+                <div className="text-sm text-surface-500">
                     SLA: 30 days to complete requests
                 </div>
             </div>
 
             {/* Status Overview */}
-            <div className="grid grid-cols-4 gap-4 mb-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                 {[
-                    { status: 'pending', label: 'Pending Verification', count: statusCounts.pending, color: 'bg-yellow-50 border-yellow-200 text-yellow-700' },
+                    { status: 'pending', label: 'Pending Verification', count: statusCounts.pending, color: 'bg-amber-50 border-amber-200 text-amber-700' },
                     { status: 'verified', label: 'Verified', count: statusCounts.verified, color: 'bg-blue-50 border-blue-200 text-blue-700' },
-                    { status: 'processing', label: 'Processing', count: statusCounts.processing, color: 'bg-indigo-50 border-indigo-200 text-indigo-700' },
-                    { status: 'completed', label: 'Completed', count: statusCounts.completed, color: 'bg-green-50 border-green-200 text-green-700' },
+                    { status: 'processing', label: 'Processing', count: statusCounts.processing, color: 'bg-violet-50 border-violet-200 text-violet-700' },
+                    { status: 'completed', label: 'Completed', count: statusCounts.completed, color: 'bg-emerald-50 border-emerald-200 text-emerald-700' },
                 ].map(({ status, label, count, color }) => (
                     <button
                         key={status}
@@ -136,7 +136,7 @@ export default function GDPRPage() {
                         className={cn(
                             'rounded-xl border p-4 text-left transition-all',
                             color,
-                            filterStatus === status && 'ring-2 ring-offset-2 ring-indigo-500'
+                            filterStatus === status && 'ring-2 ring-offset-2 ring-blue-500'
                         )}
                     >
                         <div className="text-2xl font-bold">{count}</div>
@@ -155,21 +155,21 @@ export default function GDPRPage() {
             )}
 
             {/* Request List */}
-            <div className="bg-white rounded-xl border border-gray-200">
-                <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-                    <h2 className="font-semibold">Data Subject Requests</h2>
+            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm">
+                <div className="p-4 border-b border-surface-200 flex items-center justify-between">
+                    <h2 className="font-semibold text-surface-900">Data Subject Requests</h2>
                     {filterStatus && (
                         <button
                             onClick={() => setFilterStatus('')}
-                            className="text-sm text-indigo-600 hover:underline"
+                            className="text-sm text-blue-600 hover:underline"
                         >
                             Clear filter
                         </button>
                     )}
                 </div>
-                <div className="divide-y divide-gray-100">
+                <div className="divide-y divide-surface-100">
                     {filteredRequests.length === 0 ? (
-                        <div className="p-8 text-center text-gray-500">
+                        <div className="p-8 text-center text-surface-500">
                             No GDPR requests found
                         </div>
                     ) : (
@@ -182,7 +182,7 @@ export default function GDPRPage() {
                                 <div
                                     key={request.id}
                                     className={cn(
-                                        'p-4 hover:bg-gray-50 cursor-pointer',
+                                        'p-4 hover:bg-surface-50 cursor-pointer transition-colors',
                                         overdue && 'bg-red-50'
                                     )}
                                     onClick={() => setSelectedRequest(request)}
@@ -192,7 +192,7 @@ export default function GDPRPage() {
                                             <span className="text-2xl">{typeInfo.icon}</span>
                                             <div>
                                                 <div className="flex items-center gap-2 mb-1">
-                                                    <span className="font-medium text-gray-900">{typeInfo.label}</span>
+                                                    <span className="font-medium text-surface-900">{typeInfo.label}</span>
                                                     <span className={cn('px-2 py-0.5 rounded text-xs font-medium', getStatusColor(request.status))}>
                                                         {request.status}
                                                     </span>
@@ -202,22 +202,22 @@ export default function GDPRPage() {
                                                         </span>
                                                     )}
                                                 </div>
-                                                <div className="text-sm text-gray-500">
+                                                <div className="text-sm text-surface-500">
                                                     {request.email} • {request.tenantName}
                                                 </div>
                                             </div>
                                         </div>
                                         <div className="text-right">
-                                            <div className="text-sm text-gray-900">
+                                            <div className="text-sm text-surface-900">
                                                 {request.status !== 'completed' && request.status !== 'rejected' ? (
                                                     <span className={cn(daysLeft < 7 && 'text-red-600 font-medium')}>
                                                         {daysLeft > 0 ? `${daysLeft} days left` : `${Math.abs(daysLeft)} days overdue`}
                                                     </span>
                                                 ) : (
-                                                    <span className="text-green-600">Completed</span>
+                                                    <span className="text-emerald-600 font-medium">Completed</span>
                                                 )}
                                             </div>
-                                            <div className="text-xs text-gray-500">
+                                            <div className="text-xs text-surface-500">
                                                 Created {formatDate(request.createdAt)}
                                             </div>
                                         </div>
@@ -231,60 +231,64 @@ export default function GDPRPage() {
 
             {/* Request Detail Modal */}
             {selectedRequest && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedRequest(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedRequest(null)}>
+                    <div className="bg-surface-0 rounded-xl p-6 w-full max-w-lg shadow-xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-6">
                             <div className="flex items-center gap-3">
                                 <span className="text-3xl">{REQUEST_TYPE_LABELS[selectedRequest.type].icon}</span>
                                 <div>
-                                    <h2 className="text-xl font-bold text-gray-900">
+                                    <h2 className="text-xl font-bold text-surface-900">
                                         {REQUEST_TYPE_LABELS[selectedRequest.type].label}
                                     </h2>
-                                    <p className="text-sm text-gray-500">
+                                    <p className="text-sm text-surface-500">
                                         {REQUEST_TYPE_LABELS[selectedRequest.type].description}
                                     </p>
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedRequest(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedRequest(null)} 
+                                className="text-surface-400 hover:text-surface-600 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4 mb-6">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Request ID</label>
-                                <div className="font-mono text-sm">{selectedRequest.id}</div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Request ID</label>
+                                <div className="font-mono text-sm text-surface-700">{selectedRequest.id}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Status</label>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Status</label>
                                 <div className={cn('font-medium', getStatusColor(selectedRequest.status).split(' ')[0])}>
                                     {selectedRequest.status}
                                 </div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Data Subject</label>
-                                <div className="font-medium">{selectedRequest.email}</div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Data Subject</label>
+                                <div className="font-medium text-surface-900">{selectedRequest.email}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Tenant</label>
-                                <div className="font-medium">{selectedRequest.tenantName}</div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Tenant</label>
+                                <div className="font-medium text-surface-900">{selectedRequest.tenantName}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">Created</label>
-                                <div>{formatDate(selectedRequest.createdAt)}</div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Created</label>
+                                <div className="text-surface-700">{formatDate(selectedRequest.createdAt)}</div>
                             </div>
                             <div>
-                                <label className="text-xs text-gray-500 uppercase">SLA Deadline</label>
-                                <div className={cn(isOverdue(selectedRequest) && 'text-red-600 font-medium')}>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">SLA Deadline</label>
+                                <div className={cn('text-surface-700', isOverdue(selectedRequest) && 'text-red-600 font-medium')}>
                                     {formatDate(selectedRequest.slaDeadline)}
                                 </div>
                             </div>
                         </div>
 
                         {selectedRequest.notes && (
-                            <div className="mb-6 p-3 bg-gray-50 rounded-lg">
-                                <label className="text-xs text-gray-500 uppercase mb-1 block">Notes</label>
-                                <div className="text-sm">{selectedRequest.notes}</div>
+                            <div className="mb-6 p-3 bg-surface-50 rounded-lg border border-surface-100">
+                                <label className="text-xs text-surface-500 uppercase mb-1 block font-semibold">Notes</label>
+                                <div className="text-sm text-surface-700">{selectedRequest.notes}</div>
                             </div>
                         )}
 
@@ -294,13 +298,13 @@ export default function GDPRPage() {
                                 <>
                                     <button
                                         onClick={() => updateRequestStatus(selectedRequest.id, 'verified')}
-                                        className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                                        className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
                                     >
                                         ✓ Mark as Verified
                                     </button>
                                     <button
                                         onClick={() => updateRequestStatus(selectedRequest.id, 'rejected')}
-                                        className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200"
+                                        className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 font-medium transition-colors"
                                     >
                                         Reject
                                     </button>
@@ -309,7 +313,7 @@ export default function GDPRPage() {
                             {selectedRequest.status === 'verified' && (
                                 <button
                                     onClick={() => updateRequestStatus(selectedRequest.id, 'processing')}
-                                    className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                                    className="flex-1 px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-700 font-medium transition-colors"
                                 >
                                     🚀 Start Processing
                                 </button>
@@ -317,13 +321,13 @@ export default function GDPRPage() {
                             {selectedRequest.status === 'processing' && (
                                 <button
                                     onClick={() => updateRequestStatus(selectedRequest.id, 'completed')}
-                                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                                    className="flex-1 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-medium transition-colors"
                                 >
                                     ✓ Mark as Completed
                                 </button>
                             )}
                             {(selectedRequest.status === 'completed' || selectedRequest.status === 'rejected') && (
-                                <div className="flex-1 text-center text-gray-500 py-2">
+                                <div className="flex-1 text-center text-surface-500 py-2">
                                     This request has been {selectedRequest.status}
                                 </div>
                             )}

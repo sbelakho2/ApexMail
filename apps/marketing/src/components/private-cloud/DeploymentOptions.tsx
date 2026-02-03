@@ -160,7 +160,7 @@ export function DeploymentOptions() {
  </div>
  <div>
  <h3 className="text-2xl font-bold text-surface-900">{selected.name}</h3>
- <span className="text-[10px] font-bold text-green-600 uppercase tracking-widest">{selected.availability}</span>
+ <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{selected.availability}</span>
  </div>
  </div>
  <p className="text-surface-600 font-medium mb-8 leading-relaxed">{selected.description}</p>

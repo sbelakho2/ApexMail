@@ -29,17 +29,17 @@ interface Secret {
 
 const SECRET_TYPES: Record<string, { label: string; icon: string; color: string }> = {
     api_key: { label: 'API Key', icon: '🔑', color: 'bg-blue-100 text-blue-700' },
-    database: { label: 'Database', icon: '🗄️', color: 'bg-green-100 text-green-700' },
-    oauth: { label: 'OAuth', icon: '🔐', color: 'bg-purple-100 text-purple-700' },
-    certificate: { label: 'Certificate', icon: '📜', color: 'bg-yellow-100 text-yellow-700' },
-    encryption: { label: 'Encryption', icon: '🔒', color: 'bg-gray-100 text-gray-700' },
+    database: { label: 'Database', icon: '🗄️', color: 'bg-emerald-100 text-emerald-700' },
+    oauth: { label: 'OAuth', icon: '🔐', color: 'bg-violet-100 text-violet-700' },
+    certificate: { label: 'Certificate', icon: '📜', color: 'bg-amber-100 text-amber-700' },
+    encryption: { label: 'Encryption', icon: '🔒', color: 'bg-surface-100 text-surface-700' },
 };
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
-    active: { label: 'Active', color: 'bg-green-100 text-green-700' },
-    expiring_soon: { label: 'Expiring Soon', color: 'bg-yellow-100 text-yellow-700' },
+    active: { label: 'Active', color: 'bg-emerald-100 text-emerald-700' },
+    expiring_soon: { label: 'Expiring Soon', color: 'bg-amber-100 text-amber-700' },
     expired: { label: 'Expired', color: 'bg-red-100 text-red-700' },
-    revoked: { label: 'Revoked', color: 'bg-gray-100 text-gray-500' },
+    revoked: { label: 'Revoked', color: 'bg-surface-100 text-surface-500' },
 };
 
 const DEMO_SECRETS: Secret[] = [
@@ -100,7 +100,7 @@ export default function SecretsPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -109,43 +109,43 @@ export default function SecretsPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Secrets Vault</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Secrets Vault</h1>
+                    <p className="text-surface-600 mt-1">
                         Manage API keys, credentials, and encryption keys
                     </p>
                 </div>
                 <button
                     onClick={() => setShowAddModal(true)}
-                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors"
                 >
                     + Add Secret
                 </button>
             </div>
 
             {/* Stats */}
-            <div className="grid grid-cols-4 gap-4 mb-6">
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Total Secrets</div>
-                    <div className="text-2xl font-bold text-gray-900">{secrets.length}</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Total Secrets</div>
+                    <div className="text-2xl font-bold text-surface-900">{secrets.length}</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Active</div>
-                    <div className="text-2xl font-bold text-green-600">{activeCount}</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Active</div>
+                    <div className="text-2xl font-bold text-emerald-600">{activeCount}</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Expiring Soon</div>
-                    <div className="text-2xl font-bold text-yellow-600">{expiringCount}</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Expiring Soon</div>
+                    <div className="text-2xl font-bold text-amber-600">{expiringCount}</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500">Expired/Revoked</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                    <div className="text-sm text-surface-500 font-medium">Expired/Revoked</div>
                     <div className="text-2xl font-bold text-red-600">{expiredCount + secrets.filter(s => s.status === 'revoked').length}</div>
                 </div>
             </div>
 
             {/* Alerts */}
             {expiringCount > 0 && (
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
-                    <div className="flex items-center gap-2 text-yellow-700">
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+                    <div className="flex items-center gap-2 text-amber-700">
                         <span>⚠️</span>
                         <span className="font-medium">{expiringCount} secret(s) expiring soon - rotation recommended</span>
                     </div>
@@ -159,8 +159,8 @@ export default function SecretsPage() {
                     className={cn(
                         'px-3 py-1.5 rounded-full text-sm font-medium transition-colors',
                         !filterType
-                            ? 'bg-indigo-600 text-white'
-                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-surface-100 text-surface-700 hover:bg-surface-200'
                     )}
                 >
                     All Types
@@ -172,7 +172,7 @@ export default function SecretsPage() {
                         className={cn(
                             'px-3 py-1.5 rounded-full text-sm font-medium transition-colors',
                             filterType === key
-                                ? 'bg-indigo-600 text-white'
+                                ? 'bg-blue-600 text-white'
                                 : `${config.color} hover:opacity-80`
                         )}
                     >
@@ -182,28 +182,29 @@ export default function SecretsPage() {
             </div>
 
             {/* Secrets Table */}
-            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-                <table className="w-full">
-                    <thead className="bg-gray-50 border-b border-gray-200">
-                        <tr>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Name</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Type</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Status</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Last Rotated</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Expires</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-500">Access</th>
-                            <th className="px-4 py-3 text-right text-sm font-medium text-gray-500">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
+                <div className="overflow-x-auto">
+                    <table className="w-full min-w-[800px]">
+                        <thead className="bg-surface-50 border-b border-surface-200">
+                            <tr>
+                                <th className="px-4 py-3 text-left text-sm font-medium text-surface-500">Name</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium text-surface-500">Type</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium text-surface-500">Status</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium text-surface-500">Last Rotated</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium text-surface-500">Expires</th>
+                                <th className="px-4 py-3 text-left text-sm font-medium text-surface-500">Access</th>
+                                <th className="px-4 py-3 text-right text-sm font-medium text-surface-500">Actions</th>
+                            </tr>
+                        </thead>
+                    <tbody className="divide-y divide-surface-100">
                         {filteredSecrets.map(secret => {
                             const typeConfig = SECRET_TYPES[secret.type];
                             const statusConfig = STATUS_CONFIG[secret.status];
                             return (
-                                <tr key={secret.id} className="hover:bg-gray-50">
+                                <tr key={secret.id} className="hover:bg-surface-50 transition-colors">
                                     <td className="px-4 py-3">
-                                        <div className="font-medium text-gray-900 font-mono text-sm">{secret.name}</div>
-                                        <div className="text-xs text-gray-500">{secret.description}</div>
+                                        <div className="font-medium text-surface-900 font-mono text-sm">{secret.name}</div>
+                                        <div className="text-xs text-surface-500">{secret.description}</div>
                                     </td>
                                     <td className="px-4 py-3">
                                         <span className={cn('px-2 py-1 rounded text-xs font-medium', typeConfig.color)}>
@@ -215,19 +216,19 @@ export default function SecretsPage() {
                                             {statusConfig.label}
                                         </span>
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-gray-500">
+                                    <td className="px-4 py-3 text-sm text-surface-500">
                                         {formatDate(secret.lastRotated)}
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-gray-500">
+                                    <td className="px-4 py-3 text-sm text-surface-500">
                                         {secret.expiresAt ? formatDate(secret.expiresAt) : 'Never'}
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-gray-500">
+                                    <td className="px-4 py-3 text-sm text-surface-500">
                                         {secret.accessCount.toLocaleString()} accesses
                                     </td>
                                     <td className="px-4 py-3 text-right">
                                         <button
                                             onClick={() => setSelectedSecret(secret)}
-                                            className="text-indigo-600 hover:text-indigo-800 text-sm font-medium"
+                                            className="text-blue-600 hover:text-blue-800 text-sm font-medium transition-colors"
                                         >
                                             Manage
                                         </button>
@@ -237,65 +238,70 @@ export default function SecretsPage() {
                         })}
                     </tbody>
                 </table>
+                </div>
             </div>
 
             {/* Secret Detail Modal */}
             {selectedSecret && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedSecret(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedSecret(null)}>
+                    <div className="bg-surface-0 rounded-xl p-6 w-full max-w-lg shadow-xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-gray-900 font-mono">{selectedSecret.name}</h2>
-                                <div className="text-sm text-gray-500 mt-1">{selectedSecret.description}</div>
+                                <h2 className="text-xl font-bold text-surface-900 font-mono">{selectedSecret.name}</h2>
+                                <div className="text-sm text-surface-500 mt-1">{selectedSecret.description}</div>
                             </div>
-                            <button onClick={() => setSelectedSecret(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedSecret(null)} 
+                                className="text-surface-400 hover:text-surface-600 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
                         <div className="space-y-4 mb-6">
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Type</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Type</span>
                                 <span className={cn('px-2 py-0.5 rounded text-xs font-medium', SECRET_TYPES[selectedSecret.type].color)}>
                                     {SECRET_TYPES[selectedSecret.type].icon} {SECRET_TYPES[selectedSecret.type].label}
                                 </span>
                             </div>
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Status</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Status</span>
                                 <span className={cn('px-2 py-0.5 rounded text-xs font-medium', STATUS_CONFIG[selectedSecret.status].color)}>
                                     {STATUS_CONFIG[selectedSecret.status].label}
                                 </span>
                             </div>
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Created</span>
-                                <span className="text-gray-900">{formatDate(selectedSecret.createdAt)}</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Created</span>
+                                <span className="text-surface-900">{formatDate(selectedSecret.createdAt)}</span>
                             </div>
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Last Rotated</span>
-                                <span className="text-gray-900">{formatDate(selectedSecret.lastRotated)}</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Last Rotated</span>
+                                <span className="text-surface-900">{formatDate(selectedSecret.lastRotated)}</span>
                             </div>
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Expires</span>
-                                <span className="text-gray-900">{selectedSecret.expiresAt ? formatDate(selectedSecret.expiresAt) : 'Never'}</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Expires</span>
+                                <span className="text-surface-900">{selectedSecret.expiresAt ? formatDate(selectedSecret.expiresAt) : 'Never'}</span>
                             </div>
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Rotation Policy</span>
-                                <span className="text-gray-900">{selectedSecret.rotationPolicy === 'manual' ? 'Manual' : `Every ${selectedSecret.rotationPolicy}`}</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Rotation Policy</span>
+                                <span className="text-surface-900">{selectedSecret.rotationPolicy === 'manual' ? 'Manual' : `Every ${selectedSecret.rotationPolicy}`}</span>
                             </div>
-                            <div className="flex justify-between py-2 border-b border-gray-100">
-                                <span className="text-gray-500">Access Count</span>
-                                <span className="text-gray-900">{selectedSecret.accessCount.toLocaleString()}</span>
+                            <div className="flex justify-between py-2 border-b border-surface-100">
+                                <span className="text-surface-500">Access Count</span>
+                                <span className="text-surface-900">{selectedSecret.accessCount.toLocaleString()}</span>
                             </div>
                             <div className="flex justify-between py-2">
-                                <span className="text-gray-500">Last Accessed</span>
-                                <span className="text-gray-900">{formatDate(selectedSecret.lastAccessed)}</span>
+                                <span className="text-surface-500">Last Accessed</span>
+                                <span className="text-surface-900">{formatDate(selectedSecret.lastAccessed)}</span>
                             </div>
                         </div>
 
                         <div className="flex gap-2">
                             <button
                                 onClick={() => navigator.clipboard.writeText(`${selectedSecret.name}=***MASKED***`)}
-                                className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                                className="flex-1 px-4 py-2 bg-surface-100 text-surface-700 rounded-lg hover:bg-surface-200 font-medium transition-colors"
                             >
                                 📋 Copy Reference
                             </button>
@@ -303,13 +309,13 @@ export default function SecretsPage() {
                                 <>
                                     <button
                                         onClick={() => rotateSecret(selectedSecret.id)}
-                                        className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                                        className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
                                     >
                                         🔄 Rotate
                                     </button>
                                     <button
                                         onClick={() => revokeSecret(selectedSecret.id)}
-                                        className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200"
+                                        className="px-4 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 font-medium transition-colors"
                                     >
                                         ⛔ Revoke
                                     </button>
@@ -322,51 +328,55 @@ export default function SecretsPage() {
 
             {/* Add Secret Modal */}
             {showAddModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAddModal(false)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setShowAddModal(false)}>
+                    <div className="bg-surface-0 rounded-xl p-6 w-full max-w-lg shadow-xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-6">
-                            <h2 className="text-xl font-bold text-gray-900">Add New Secret</h2>
-                            <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600">
+                            <h2 className="text-xl font-bold text-surface-900">Add New Secret</h2>
+                            <button 
+                                onClick={() => setShowAddModal(false)} 
+                                className="text-surface-400 hover:text-surface-600 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
                         <div className="space-y-4">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Name</label>
+                                <label className="block text-sm font-medium text-surface-700 mb-2">Name</label>
                                 <input
                                     type="text"
                                     placeholder="MY_API_KEY"
-                                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono"
+                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm font-mono bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Type</label>
-                                <select className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <label className="block text-sm font-medium text-surface-700 mb-2">Type</label>
+                                <select className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                                     {Object.entries(SECRET_TYPES).map(([key, config]) => (
                                         <option key={key} value={key}>{config.icon} {config.label}</option>
                                     ))}
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                                <label className="block text-sm font-medium text-surface-700 mb-2">Description</label>
                                 <input
                                     type="text"
                                     placeholder="What is this secret used for?"
-                                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Value</label>
+                                <label className="block text-sm font-medium text-surface-700 mb-2">Value</label>
                                 <textarea
                                     placeholder="Paste secret value here..."
                                     rows={3}
-                                    className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-mono"
+                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm font-mono bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Rotation Policy</label>
-                                <select className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <label className="block text-sm font-medium text-surface-700 mb-2">Rotation Policy</label>
+                                <select className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm bg-surface-0 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all">
                                     <option value="manual">Manual</option>
                                     <option value="30d">Every 30 days</option>
                                     <option value="60d">Every 60 days</option>
@@ -379,13 +389,13 @@ export default function SecretsPage() {
                         <div className="flex gap-2 mt-6">
                             <button
                                 onClick={() => setShowAddModal(false)}
-                                className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                                className="flex-1 px-4 py-2 bg-surface-100 text-surface-700 rounded-lg hover:bg-surface-200 font-medium transition-colors"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={() => setShowAddModal(false)}
-                                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+                                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
                             >
                                 Add Secret
                             </button>

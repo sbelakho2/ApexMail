@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { formatNumber, formatDate, cn, getStatusColor } from '../../lib/utils';
+import { formatNumber, formatDate, cn } from '../../lib/utils';
 
 /**
  * Campaigns Management - Drip campaign automation
@@ -148,89 +148,93 @@ export default function CampaignsPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
             </div>
         );
     }
 
     return (
         <div className="max-w-6xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Drip Campaigns</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Drip Campaigns</h1>
+                    <p className="text-surface-500 mt-1">
                         Manage automated email sequences for lead nurturing
                     </p>
                 </div>
-                <button className="px-6 py-2 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700">
+                <button className="px-6 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 shadow-sm transition-all hover:shadow-md">
                     + Create Campaign
                 </button>
             </div>
 
             {/* Campaign Stats Overview */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500 mb-1">Total Campaigns</div>
-                    <div className="text-2xl font-bold text-gray-900">{campaigns.length}</div>
-                    <div className="text-xs text-green-600">{campaigns.filter(c => c.status === 'active').length} active</div>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm">
+                    <div className="text-sm font-medium text-surface-500 mb-1">Total Campaigns</div>
+                    <div className="text-2xl font-bold text-surface-900">{campaigns.length}</div>
+                    <div className="text-xs font-semibold text-emerald-600 mt-1 bg-emerald-50 inline-block px-1.5 py-0.5 rounded">{campaigns.filter(c => c.status === 'active').length} active</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500 mb-1">Total Enrolled</div>
-                    <div className="text-2xl font-bold text-gray-900">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm">
+                    <div className="text-sm font-medium text-surface-500 mb-1">Total Enrolled</div>
+                    <div className="text-2xl font-bold text-surface-900">
                         {formatNumber(campaigns.reduce((acc, c) => acc + c.stats.enrolled, 0))}
                     </div>
-                    <div className="text-xs text-gray-500">Leads in sequences</div>
+                    <div className="text-xs text-surface-400 mt-1">Leads in sequences</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500 mb-1">Emails Sent</div>
-                    <div className="text-2xl font-bold text-gray-900">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm">
+                    <div className="text-sm font-medium text-surface-500 mb-1">Emails Sent</div>
+                    <div className="text-2xl font-bold text-surface-900">
                         {formatNumber(campaigns.reduce((acc, c) => acc + c.stats.emailsSent, 0))}
                     </div>
-                    <div className="text-xs text-gray-500">Total across all campaigns</div>
+                    <div className="text-xs text-surface-400 mt-1">Total across all campaigns</div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="text-sm text-gray-500 mb-1">Total Replies</div>
-                    <div className="text-2xl font-bold text-green-600">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 shadow-sm">
+                    <div className="text-sm font-medium text-surface-500 mb-1">Total Replies</div>
+                    <div className="text-2xl font-bold text-emerald-600">
                         {formatNumber(campaigns.reduce((acc, c) => acc + c.stats.replied, 0))}
                     </div>
-                    <div className="text-xs text-gray-500">Interested prospects</div>
+                    <div className="text-xs text-surface-400 mt-1">Interested prospects</div>
                 </div>
             </div>
 
             {/* Campaign List */}
-            <div className="bg-white rounded-xl border border-gray-200">
-                <div className="divide-y divide-gray-100">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm overflow-hidden">
+                <div className="divide-y divide-surface-100">
                     {campaigns.map(campaign => (
                         <div
                             key={campaign.id}
-                            className="p-6 hover:bg-gray-50 cursor-pointer"
+                            className="p-6 hover:bg-surface-50/80 cursor-pointer transition-colors"
                             onClick={() => setSelectedCampaign(campaign)}
                         >
                             <div className="flex items-start justify-between">
                                 <div className="flex-1">
                                     <div className="flex items-center gap-3 mb-2">
-                                        <h3 className="font-semibold text-gray-900">{campaign.name}</h3>
-                                        <span className={cn('px-2 py-0.5 rounded text-xs font-medium', getStatusColor(campaign.status))}>
-                                            {campaign.status}
+                                        <h3 className="text-lg font-semibold text-surface-900">{campaign.name}</h3>
+                                        <span className={cn('px-2.5 py-0.5 rounded-md text-xs font-semibold border', 
+                                            campaign.status === 'active' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                                            campaign.status === 'paused' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                                            'bg-surface-100 text-surface-600 border-surface-200'
+                                        )}>
+                                            {campaign.status.toUpperCase()}
                                         </span>
                                     </div>
-                                    <p className="text-sm text-gray-600 mb-3">{campaign.description}</p>
-                                    <div className="flex items-center gap-6 text-sm">
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-gray-500">Enrolled:</span>
-                                            <span className="font-medium">{formatNumber(campaign.stats.enrolled)}</span>
+                                    <p className="text-sm text-surface-600 mb-4">{campaign.description}</p>
+                                    <div className="flex items-center gap-8 text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-surface-500">Enrolled:</span>
+                                            <span className="font-semibold text-surface-900">{formatNumber(campaign.stats.enrolled)}</span>
                                         </div>
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-gray-500">Sent:</span>
-                                            <span className="font-medium">{formatNumber(campaign.stats.emailsSent)}</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-surface-500">Sent:</span>
+                                            <span className="font-semibold text-surface-900">{formatNumber(campaign.stats.emailsSent)}</span>
                                         </div>
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-gray-500">Open Rate:</span>
-                                            <span className="font-medium text-green-600">{getOpenRate(campaign)}</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-surface-500">Open Rate:</span>
+                                            <span className="font-semibold text-emerald-600 bg-emerald-50 px-1.5 rounded">{getOpenRate(campaign)}</span>
                                         </div>
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-gray-500">Reply Rate:</span>
-                                            <span className="font-medium text-indigo-600">{getReplyRate(campaign)}</span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-surface-500">Reply Rate:</span>
+                                            <span className="font-semibold text-blue-600 bg-blue-50 px-1.5 rounded">{getReplyRate(campaign)}</span>
                                         </div>
                                     </div>
                                 </div>
@@ -239,38 +243,38 @@ export default function CampaignsPage() {
                                         <button
                                             onClick={() => toggleCampaignStatus(campaign.id)}
                                             className={cn(
-                                                'px-4 py-2 rounded-lg text-sm font-medium',
+                                                'px-4 py-2 rounded-lg text-sm font-medium transition-colors border',
                                                 campaign.status === 'active'
-                                                    ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
-                                                    : 'bg-green-100 text-green-700 hover:bg-green-200'
+                                                    ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
                                             )}
                                         >
                                             {campaign.status === 'active' ? 'Pause' : 'Resume'}
                                         </button>
                                     )}
                                     {campaign.status === 'draft' && (
-                                        <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
+                                        <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
                                             Start
                                         </button>
                                     )}
-                                    <button className="px-3 py-2 text-gray-400 hover:text-gray-600">
+                                    <button className="p-2 text-surface-400 hover:text-surface-600 hover:bg-surface-100 rounded-lg transition-colors">
                                         ⚙️
                                     </button>
                                 </div>
                             </div>
 
                             {/* Sequence Preview */}
-                            <div className="mt-4 flex items-center gap-2 overflow-x-auto pb-2">
+                            <div className="mt-5 flex items-center gap-2 overflow-x-auto pb-2 scrollbar-hide">
                                 {campaign.sequence.map((step, index) => (
-                                    <div key={step.id} className="flex items-center">
-                                        {index > 0 && <div className="w-4 h-px bg-gray-300 mx-1" />}
+                                    <div key={step.id} className="flex items-center flex-shrink-0">
+                                        {index > 0 && <div className="w-6 h-px bg-surface-300 mx-2" />}
                                         {step.type === 'email' ? (
-                                            <div className="flex-shrink-0 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded text-xs">
-                                                📧 {step.subject?.substring(0, 25)}...
+                                            <div className="flex-shrink-0 px-3 py-1.5 bg-surface-0 border border-blue-200 rounded-lg text-xs font-medium text-surface-700 shadow-sm flex items-center gap-1.5">
+                                                <span className="text-blue-500">📧</span> {step.subject?.substring(0, 25)}...
                                             </div>
                                         ) : step.type === 'delay' ? (
-                                            <div className="flex-shrink-0 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
-                                                ⏱️ {step.delayDays}d
+                                            <div className="flex-shrink-0 px-3 py-1.5 bg-surface-50 border border-surface-200 rounded-lg text-xs font-medium text-surface-500 flex items-center gap-1.5">
+                                                <span>⏱️</span> {step.delayDays}d
                                             </div>
                                         ) : null}
                                     </div>
@@ -283,52 +287,72 @@ export default function CampaignsPage() {
 
             {/* Campaign Detail Modal */}
             {selectedCampaign && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedCampaign(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-start justify-between mb-6">
+                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedCampaign(null)}>
+                    <div className="bg-surface-0 rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-surface-200 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-start justify-between mb-6 border-b border-surface-100 pb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-gray-900">{selectedCampaign.name}</h2>
-                                <p className="text-sm text-gray-600">{selectedCampaign.description}</p>
+                                <h2 className="text-xl font-bold text-surface-900">{selectedCampaign.name}</h2>
+                                <p className="text-sm text-surface-500 mt-1">{selectedCampaign.description}</p>
                             </div>
-                            <button onClick={() => setSelectedCampaign(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedCampaign(null)} 
+                                className="text-surface-400 hover:text-surface-600 p-1 rounded-lg hover:bg-surface-100 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
                         {/* Stats Grid */}
-                        <div className="grid grid-cols-3 gap-4 mb-6">
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-2xl font-bold text-gray-900">{formatNumber(selectedCampaign.stats.emailsSent)}</div>
-                                <div className="text-xs text-gray-500">Emails Sent</div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                            <div className="bg-surface-50 rounded-xl p-4 text-center border border-surface-100">
+                                <div className="text-2xl font-bold text-surface-900">{formatNumber(selectedCampaign.stats.emailsSent)}</div>
+                                <div className="text-xs font-medium text-surface-500 mt-1">Emails Sent</div>
                             </div>
-                            <div className="bg-green-50 rounded-lg p-3 text-center">
-                                <div className="text-2xl font-bold text-green-600">{getOpenRate(selectedCampaign)}</div>
-                                <div className="text-xs text-gray-500">Open Rate</div>
+                            <div className="bg-emerald-50 rounded-xl p-4 text-center border border-emerald-100">
+                                <div className="text-2xl font-bold text-emerald-700">{getOpenRate(selectedCampaign)}</div>
+                                <div className="text-xs font-medium text-emerald-600 mt-1">Open Rate</div>
                             </div>
-                            <div className="bg-indigo-50 rounded-lg p-3 text-center">
-                                <div className="text-2xl font-bold text-indigo-600">{getReplyRate(selectedCampaign)}</div>
-                                <div className="text-xs text-gray-500">Reply Rate</div>
+                            <div className="bg-blue-50 rounded-xl p-4 text-center border border-blue-100">
+                                <div className="text-2xl font-bold text-blue-700">{getReplyRate(selectedCampaign)}</div>
+                                <div className="text-xs font-medium text-blue-600 mt-1">Reply Rate</div>
                             </div>
                         </div>
 
                         {/* Sequence Details */}
-                        <h3 className="font-semibold mb-4">Email Sequence</h3>
-                        <div className="space-y-3 mb-6">
+                        <h3 className="font-semibold text-surface-900 mb-4 flex items-center gap-2">
+                            <span>Sequence Flow</span>
+                            <span className="text-xs font-normal text-surface-500 bg-surface-100 px-2 py-0.5 rounded-full">{selectedCampaign.sequence.length} steps</span>
+                        </h3>
+                        <div className="space-y-4 mb-8">
                             {selectedCampaign.sequence.map((step, index) => (
-                                <div key={step.id} className="flex items-center gap-4">
-                                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-sm font-medium text-gray-600">
+                                <div key={step.id} className="relative pl-8">
+                                    {/* Connectivity Line */}
+                                    {index < selectedCampaign.sequence.length - 1 && (
+                                        <div className="absolute left-3 top-8 bottom-[-24px] w-0.5 bg-surface-200"></div>
+                                    )}
+                                    
+                                    <div className="absolute left-0 top-0 w-6 h-6 rounded-full bg-surface-100 border border-surface-200 flex items-center justify-center text-xs font-medium text-surface-600 z-10">
                                         {index + 1}
                                     </div>
+                                    
                                     {step.type === 'email' ? (
-                                        <div className="flex-1 p-3 bg-blue-50 rounded-lg border border-blue-200">
-                                            <div className="font-medium text-gray-900">{step.subject}</div>
-                                            <div className="text-xs text-gray-500 mt-1">
-                                                Sent: {formatNumber(step.sent || 0)} • Opened: {formatNumber(step.opened || 0)}
+                                        <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
+                                            <div className="flex items-start justify-between">
+                                                <div>
+                                                    <div className="text-xs font-semibold text-blue-600 mb-1 uppercase tracking-wider">Email</div>
+                                                    <div className="font-medium text-surface-900">{step.subject}</div>
+                                                </div>
+                                                <div className="text-xs text-surface-500 text-right bg-surface-50 px-2 py-1 rounded border border-surface-100">
+                                                    <div><span className="font-medium text-surface-700">{formatNumber(step.sent || 0)}</span> sent</div>
+                                                    <div><span className="font-medium text-surface-700">{formatNumber(step.opened || 0)}</span> opened</div>
+                                                </div>
                                             </div>
                                         </div>
                                     ) : (
-                                        <div className="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                                            <div className="text-gray-600">Wait {step.delayDays} days</div>
+                                        <div className="bg-surface-50 rounded-xl border border-surface-200 p-3 flex items-center gap-3 text-surface-600">
+                                            <span className="text-lg">⏱️</span>
+                                            <span className="font-medium">Wait {step.delayDays} days</span>
                                         </div>
                                     )}
                                 </div>
@@ -336,14 +360,14 @@ export default function CampaignsPage() {
                         </div>
 
                         {/* Campaign Info */}
-                        <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 text-sm bg-surface-50 p-4 rounded-xl border border-surface-200">
                             <div>
-                                <label className="text-gray-500">From</label>
-                                <div className="font-medium">{selectedCampaign.fromName} &lt;{selectedCampaign.fromEmail}&gt;</div>
+                                <label className="text-surface-500 font-medium block mb-1">From Sender</label>
+                                <div className="font-medium text-surface-900">{selectedCampaign.fromName} &lt;{selectedCampaign.fromEmail}&gt;</div>
                             </div>
                             <div>
-                                <label className="text-gray-500">Created</label>
-                                <div className="font-medium">{formatDate(selectedCampaign.createdAt)}</div>
+                                <label className="text-surface-500 font-medium block mb-1">Created Date</label>
+                                <div className="font-medium text-surface-900">{formatDate(selectedCampaign.createdAt)}</div>
                             </div>
                         </div>
                     </div>

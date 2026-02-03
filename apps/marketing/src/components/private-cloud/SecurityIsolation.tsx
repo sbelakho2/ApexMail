@@ -59,7 +59,7 @@ export function SecurityIsolation() {
  <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-green-50 text-green-700 border border-green-100 text-[10px] font-bold uppercase tracking-widest mb-4"
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-widest mb-4"
           >
             <Shield className="w-4 h-4" />
             Security Isolation
@@ -90,17 +90,17 @@ export function SecurityIsolation() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.1 * index }}
- className="premium-card p-8 bg-white group hover:border-green-500/30"
+ className="premium-card p-8 bg-white group hover:border-emerald-500/30"
  >
- <div className="w-12 h-12 rounded-xl bg-green-50 flex items-center justify-center border border-green-100 mb-6 group-hover:bg-green-100 transition-colors">
- <feature.icon className="w-6 h-6 text-green-600" />
+ <div className="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center border border-emerald-100 mb-6 group-hover:bg-emerald-100 transition-colors">
+ <feature.icon className="w-6 h-6 text-emerald-600" />
  </div>
  <h3 className="text-xl font-bold text-surface-900 mb-2">{feature.title}</h3>
  <p className="text-sm text-surface-500 font-medium mb-6 leading-relaxed">{feature.description}</p>
  <div className="space-y-2">
  {feature.details.map((detail) => (
  <div key={detail} className="flex items-center gap-2 text-[10px] font-bold text-surface-400 uppercase tracking-tight">
- <div className="w-1 h-1 rounded-full bg-green-500" />
+ <div className="w-1 h-1 rounded-full bg-emerald-500" />
  {detail}
  </div>
  ))}
@@ -125,7 +125,7 @@ export function SecurityIsolation() {
  <tr className="border-b border-surface-100">
  <th className="text-left py-4 px-6 text-[10px] font-bold text-surface-400 uppercase tracking-widest">Security Aspect</th>
  <th className="text-center py-4 px-6 text-[10px] font-bold text-surface-400 uppercase tracking-widest">Shared Cloud</th>
- <th className="text-center py-4 px-6 text-[10px] font-bold text-green-600 uppercase tracking-widest bg-green-50/30">Private Cloud</th>
+ <th className="text-center py-4 px-6 text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50/30">Private Cloud</th>
  </tr>
  </thead>
  <tbody className="divide-y divide-surface-100">
@@ -141,7 +141,7 @@ export function SecurityIsolation() {
  <tr key={aspect} className="hover:bg-surface-50 transition-colors">
  <td className="py-4 px-6 text-surface-900 font-bold">{aspect}</td>
  <td className="py-4 px-6 text-center text-surface-500 font-medium">{shared}</td>
- <td className="py-4 px-6 text-center text-green-700 font-bold bg-green-50/30">{privateCloud}</td>
+ <td className="py-4 px-6 text-center text-emerald-700 font-bold bg-emerald-50/30">{privateCloud}</td>
  </tr>
  ))}
  </tbody>

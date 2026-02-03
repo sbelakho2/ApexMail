@@ -299,4 +299,4 @@ pnpm build
 - 📖 [Full Documentation](../README.md)
 - 💬 [GitHub Discussions](https://github.com/yourorg/apexmail/discussions)
 - 🐛 [Issue Tracker](https://github.com/yourorg/apexmail/issues)
-- 📧 [Email Support](mailto:support@apexmail.io)
+- 📧 [Email Support](mailto:support@apexmail.ee)

@@ -14,10 +14,10 @@ interface LatencyData {
 }
 
 const latencyComparisons: LatencyData[] = [
- { provider: 'ApexMail Private', scenario: 'Same VPC', latency: 0.3, color: 'bg-green-500' },
- { provider: 'ApexMail Private', scenario: 'Same Region', latency: 2.1, color: 'bg-green-500' },
+ { provider: 'ApexMail Private', scenario: 'Same VPC', latency: 0.3, color: 'bg-emerald-500' },
+ { provider: 'ApexMail Private', scenario: 'Same Region', latency: 2.1, color: 'bg-emerald-500' },
  { provider: 'SendGrid', scenario: 'External API', latency: 45, color: 'bg-red-500' },
- { provider: 'AWS SES', scenario: 'Same Region', latency: 12, color: 'bg-yellow-500' },
+ { provider: 'AWS SES', scenario: 'Same Region', latency: 12, color: 'bg-amber-500' },
  { provider: 'Mailchimp', scenario: 'External API', latency: 120, color: 'bg-red-500' },
 ];
 
@@ -65,7 +65,7 @@ export function LatencyComparison() {
  <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-yellow-50 text-yellow-700 border border-yellow-100 text-[10px] font-bold uppercase tracking-widest mb-4"
+            className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-amber-50 text-amber-700 border border-amber-100 text-[10px] font-bold uppercase tracking-widest mb-4"
           >
             <Gauge className="w-4 h-4" />
             Latencimeter™
@@ -123,11 +123,11 @@ export function LatencyComparison() {
  {/* Legend */}
  <div className="flex flex-wrap justify-center gap-8 mt-10 pt-10 border-t border-surface-200">
  <div className="flex items-center gap-2">
- <div className="w-3 h-3 rounded-full bg-green-500" />
+ <div className="w-3 h-3 rounded-full bg-emerald-500" />
  <span className="text-xs font-bold text-surface-500 uppercase tracking-widest">Private Cloud</span>
  </div>
  <div className="flex items-center gap-2">
- <div className="w-3 h-3 rounded-full bg-yellow-500" />
+ <div className="w-3 h-3 rounded-full bg-amber-500" />
  <span className="text-xs font-bold text-surface-500 uppercase tracking-widest">Same Region</span>
  </div>
  <div className="flex items-center gap-2">
@@ -162,8 +162,8 @@ export function LatencyComparison() {
  },
  ].map((item) => (
  <div key={item.title} className="premium-card p-8 text-center bg-white">
- <div className="w-12 h-12 rounded-full bg-yellow-50 flex items-center justify-center mx-auto mb-4 border border-yellow-100">
- <item.icon className="w-6 h-6 text-yellow-600" />
+ <div className="w-12 h-12 rounded-full bg-amber-50 flex items-center justify-center mx-auto mb-4 border border-amber-100">
+ <item.icon className="w-6 h-6 text-amber-600" />
  </div>
  <div className="text-xl font-bold text-surface-900 mb-2">{item.title}</div>
  <div className="text-sm text-surface-500 font-medium leading-relaxed">{item.description}</div>

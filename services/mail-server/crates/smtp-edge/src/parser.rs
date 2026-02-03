@@ -1,0 +1,86 @@
+//! SMTP Command Parser
+
+use std::collections::HashMap;
+
+/// Parsed SMTP command
+#[derive(Debug, Clone)]
+pub struct SmtpCommand {
+    pub verb: String,
+    pub args: String,
+    pub params: HashMap<String, String>,
+}
+
+impl SmtpCommand {
+    /// Parse an SMTP command line
+    pub fn parse(line: &str) -> Option<Self> {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        
+        let (verb, rest) = match line.find(' ') {
+            Some(pos) => (&line[..pos], &line[pos + 1..]),
+            None => (line, ""),
+        };
+        
+        let mut args = String::new();
+        let mut params = HashMap::new();
+        
+        // Parse ESMTP parameters (key=value pairs after the address)
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if !parts.is_empty() {
+            args = parts[0].to_string();
+            
+            for part in parts.iter().skip(1) {
+                if let Some(eq_pos) = part.find('=') {
+                    let key = part[..eq_pos].to_uppercase();
+                    let value = part[eq_pos + 1..].to_string();
+                    params.insert(key, value);
+                }
+            }
+        }
+        
+        Some(Self {
+            verb: verb.to_uppercase(),
+            args,
+            params,
+        })
+    }
+    
+    /// Get SIZE parameter if present
+    pub fn get_size(&self) -> Option<usize> {
+        self.params.get("SIZE").and_then(|s| s.parse().ok())
+    }
+    
+    /// Get BODY parameter (7BIT, 8BITMIME, BINARYMIME)
+    pub fn get_body(&self) -> Option<&str> {
+        self.params.get("BODY").map(|s| s.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_parse_ehlo() {
+        let cmd = SmtpCommand::parse("EHLO example.com").unwrap();
+        assert_eq!(cmd.verb, "EHLO");
+        assert_eq!(cmd.args, "example.com");
+    }
+    
+    #[test]
+    fn test_parse_mail_from() {
+        let cmd = SmtpCommand::parse("MAIL FROM:<user@example.com> SIZE=1024").unwrap();
+        assert_eq!(cmd.verb, "MAIL");
+        assert_eq!(cmd.args, "FROM:<user@example.com>");
+        assert_eq!(cmd.get_size(), Some(1024));
+    }
+    
+    #[test]
+    fn test_parse_rcpt_to() {
+        let cmd = SmtpCommand::parse("RCPT TO:<dest@example.com>").unwrap();
+        assert_eq!(cmd.verb, "RCPT");
+        assert_eq!(cmd.args, "TO:<dest@example.com>");
+    }
+}

@@ -301,10 +301,10 @@ CREATE TRIGGER trigger_ha_scheduled_tasks_updated_at
 
 -- Insert default regions
 INSERT INTO ha_regions (id, name, endpoint, role, status) VALUES
-    ('us-east-1', 'US East (N. Virginia)', 'https://us-east-1.ha.apexmail.io', 'primary', 'healthy'),
-    ('us-west-2', 'US West (Oregon)', 'https://us-west-2.ha.apexmail.io', 'secondary', 'healthy'),
-    ('eu-west-1', 'EU (Ireland)', 'https://eu-west-1.ha.apexmail.io', 'secondary', 'healthy'),
-    ('ap-northeast-1', 'Asia Pacific (Tokyo)', 'https://ap-northeast-1.ha.apexmail.io', 'standby', 'healthy')
+    ('us-east-1', 'US East (N. Virginia)', 'https://us-east-1.ha.apexmail.ee', 'primary', 'healthy'),
+    ('us-west-2', 'US West (Oregon)', 'https://us-west-2.ha.apexmail.ee', 'secondary', 'healthy'),
+    ('eu-west-1', 'EU (Ireland)', 'https://eu-west-1.ha.apexmail.ee', 'secondary', 'healthy'),
+    ('ap-northeast-1', 'Asia Pacific (Tokyo)', 'https://ap-northeast-1.ha.apexmail.ee', 'standby', 'healthy')
 ON CONFLICT (id) DO NOTHING;
 
 -- Insert default geo-routing rules

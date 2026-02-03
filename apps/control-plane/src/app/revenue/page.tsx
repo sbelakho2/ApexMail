@@ -100,7 +100,7 @@ export default function RevenuePage() {
     if (loading || !stats) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -111,8 +111,8 @@ export default function RevenuePage() {
         <div className="max-w-7xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Revenue Metrics</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Revenue Metrics</h1>
+                    <p className="text-surface-600 mt-1">
                         Financial performance and subscription analytics
                     </p>
                 </div>
@@ -122,10 +122,10 @@ export default function RevenuePage() {
                             key={p}
                             onClick={() => setPeriod(p)}
                             className={cn(
-                                'px-4 py-2 rounded-lg text-sm font-medium',
+                                'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                                 period === p
-                                    ? 'bg-indigo-600 text-white'
-                                    : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'
+                                    ? 'bg-blue-600 text-white'
+                                    : 'bg-surface-0 border border-surface-200 text-surface-700 hover:bg-surface-50'
                             )}
                         >
                             {p === 'month' ? 'This Month' : p === 'quarter' ? 'This Quarter' : 'This Year'}
@@ -136,31 +136,31 @@ export default function RevenuePage() {
 
             {/* Key Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <div className="text-sm text-gray-500 mb-1">Monthly Recurring Revenue</div>
-                    <div className="text-3xl font-bold text-gray-900">{formatCurrency(stats.mrr)}</div>
-                    <div className={cn('text-sm mt-1', stats.mrrGrowth >= 0 ? 'text-green-600' : 'text-red-600')}>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <div className="text-sm text-surface-500 mb-1">Monthly Recurring Revenue</div>
+                    <div className="text-3xl font-bold text-surface-900">{formatCurrency(stats.mrr)}</div>
+                    <div className={cn('text-sm mt-1 font-medium', stats.mrrGrowth >= 0 ? 'text-emerald-600' : 'text-red-600')}>
                         {stats.mrrGrowth >= 0 ? '↑' : '↓'} {Math.abs(stats.mrrGrowth * 100).toFixed(1)}% vs last month
                     </div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <div className="text-sm text-gray-500 mb-1">Annual Recurring Revenue</div>
-                    <div className="text-3xl font-bold text-gray-900">{formatCurrency(stats.arr)}</div>
-                    <div className={cn('text-sm mt-1', stats.arrGrowth >= 0 ? 'text-green-600' : 'text-red-600')}>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <div className="text-sm text-surface-500 mb-1">Annual Recurring Revenue</div>
+                    <div className="text-3xl font-bold text-surface-900">{formatCurrency(stats.arr)}</div>
+                    <div className={cn('text-sm mt-1 font-medium', stats.arrGrowth >= 0 ? 'text-emerald-600' : 'text-red-600')}>
                         {stats.arrGrowth >= 0 ? '↑' : '↓'} {Math.abs(stats.arrGrowth * 100).toFixed(1)}% YoY
                     </div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <div className="text-sm text-gray-500 mb-1">Customer Lifetime Value</div>
-                    <div className="text-3xl font-bold text-gray-900">{formatCurrency(stats.ltv)}</div>
-                    <div className="text-sm text-gray-500 mt-1">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <div className="text-sm text-surface-500 mb-1">Customer Lifetime Value</div>
+                    <div className="text-3xl font-bold text-surface-900">{formatCurrency(stats.ltv)}</div>
+                    <div className="text-sm text-surface-500 mt-1">
                         LTV/CAC: {(stats.ltv / stats.cac).toFixed(1)}x
                     </div>
                 </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <div className="text-sm text-gray-500 mb-1">Monthly Churn Rate</div>
-                    <div className="text-3xl font-bold text-gray-900">{(stats.churnRate * 100).toFixed(2)}%</div>
-                    <div className="text-sm text-gray-500 mt-1">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <div className="text-sm text-surface-500 mb-1">Monthly Churn Rate</div>
+                    <div className="text-3xl font-bold text-surface-900">{(stats.churnRate * 100).toFixed(2)}%</div>
+                    <div className="text-sm text-surface-500 mt-1">
                         {stats.churned} customers churned
                     </div>
                 </div>
@@ -168,97 +168,97 @@ export default function RevenuePage() {
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
                 {/* MRR Trend Chart */}
-                <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold mb-4">MRR Trend</h2>
+                <div className="lg:col-span-2 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <h2 className="text-lg font-bold text-surface-900 mb-4">MRR Trend</h2>
                     <div className="flex items-end gap-2 h-48">
                         {monthlyData.map((month) => (
-                            <div key={month.month} className="flex-1 flex flex-col items-center">
+                            <div key={month.month} className="flex-1 flex flex-col items-center group">
                                 <div
-                                    className="w-full bg-indigo-500 rounded-t"
+                                    className="w-full bg-blue-500 rounded-t group-hover:bg-blue-600 transition-colors"
                                     style={{ height: `${(month.mrr / maxMrr) * 160}px` }}
                                 />
-                                <div className="text-xs text-gray-500 mt-2">{month.month}</div>
-                                <div className="text-xs font-medium">{formatCurrency(month.mrr)}</div>
+                                <div className="text-xs text-surface-500 mt-2 font-medium">{month.month}</div>
+                                <div className="text-xs font-medium text-surface-900 mt-1 opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-8 bg-surface-0 shadow-md p-1 rounded border border-surface-200 pointer-events-none transform -translate-y-full">{formatCurrency(month.mrr)}</div>
                             </div>
                         ))}
                     </div>
                 </div>
 
                 {/* Customer Movement */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
-                    <h2 className="text-lg font-semibold mb-4">Customer Movement</h2>
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                    <h2 className="text-lg font-bold text-surface-900 mb-4">Customer Movement</h2>
                     <div className="space-y-4">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                                <span className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
+                                <span className="w-8 h-8 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600">
                                     ➕
                                 </span>
-                                <span className="text-gray-700">New Customers</span>
+                                <span className="text-surface-700 font-medium">New Customers</span>
                             </div>
-                            <span className="font-bold text-green-600">+{stats.newCustomers}</span>
+                            <span className="font-bold text-emerald-600">+{stats.newCustomers}</span>
                         </div>
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                                <span className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                                <span className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-600">
                                     ⬆️
                                 </span>
-                                <span className="text-gray-700">Upgrades</span>
+                                <span className="text-surface-700 font-medium">Upgrades</span>
                             </div>
                             <span className="font-bold text-blue-600">+{stats.upgrades}</span>
                         </div>
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                                <span className="w-8 h-8 bg-yellow-100 rounded-full flex items-center justify-center">
+                                <span className="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center text-amber-600">
                                     ⬇️
                                 </span>
-                                <span className="text-gray-700">Downgrades</span>
+                                <span className="text-surface-700 font-medium">Downgrades</span>
                             </div>
-                            <span className="font-bold text-yellow-600">-{stats.downgrades}</span>
+                            <span className="font-bold text-amber-600">-{stats.downgrades}</span>
                         </div>
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                                <span className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center">
+                                <span className="w-8 h-8 bg-red-100 rounded-full flex items-center justify-center text-red-600">
                                     🚪
                                 </span>
-                                <span className="text-gray-700">Churned</span>
+                                <span className="text-surface-700 font-medium">Churned</span>
                             </div>
                             <span className="font-bold text-red-600">-{stats.churned}</span>
                         </div>
                     </div>
-                    <div className="mt-6 pt-4 border-t border-gray-100">
+                    <div className="mt-6 pt-4 border-t border-surface-100">
                         <div className="flex items-center justify-between">
-                            <span className="text-gray-500">Expansion Revenue</span>
-                            <span className="font-bold text-green-600">+{formatCurrency(stats.expansionRevenue)}</span>
+                            <span className="text-surface-500 font-medium">Expansion Revenue</span>
+                            <span className="font-bold text-emerald-600">+{formatCurrency(stats.expansionRevenue)}</span>
                         </div>
                     </div>
                 </div>
             </div>
 
             {/* Revenue by Plan */}
-            <div className="bg-white rounded-xl border border-gray-200 p-6">
-                <h2 className="text-lg font-semibold mb-4">Revenue by Plan</h2>
+            <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                <h2 className="text-lg font-bold text-surface-900 mb-4">Revenue by Plan</h2>
                 <div className="overflow-x-auto">
                     <table className="w-full">
                         <thead>
-                            <tr className="border-b border-gray-200 text-left">
-                                <th className="pb-3 text-sm font-medium text-gray-500">Plan</th>
-                                <th className="pb-3 text-sm font-medium text-gray-500">Customers</th>
-                                <th className="pb-3 text-sm font-medium text-gray-500">MRR</th>
-                                <th className="pb-3 text-sm font-medium text-gray-500">% of Total</th>
-                                <th className="pb-3 text-sm font-medium text-gray-500">Distribution</th>
+                            <tr className="border-b border-surface-200 text-left">
+                                <th className="pb-3 text-sm font-semibold text-surface-500">Plan</th>
+                                <th className="pb-3 text-sm font-semibold text-surface-500">Customers</th>
+                                <th className="pb-3 text-sm font-semibold text-surface-500">MRR</th>
+                                <th className="pb-3 text-sm font-semibold text-surface-500">% of Total</th>
+                                <th className="pb-3 text-sm font-semibold text-surface-500">Distribution</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-100">
+                        <tbody className="divide-y divide-surface-100">
                             {revenueByPlan.map((plan) => (
                                 <tr key={plan.plan}>
-                                    <td className="py-4 font-medium text-gray-900">{plan.plan}</td>
-                                    <td className="py-4 text-gray-700">{formatNumber(plan.customers)}</td>
-                                    <td className="py-4 font-medium">{formatCurrency(plan.mrr)}</td>
-                                    <td className="py-4 text-gray-700">{(plan.percentage * 100).toFixed(1)}%</td>
+                                    <td className="py-4 font-medium text-surface-900">{plan.plan}</td>
+                                    <td className="py-4 text-surface-700">{formatNumber(plan.customers)}</td>
+                                    <td className="py-4 font-medium text-surface-900">{formatCurrency(plan.mrr)}</td>
+                                    <td className="py-4 text-surface-700">{(plan.percentage * 100).toFixed(1)}%</td>
                                     <td className="py-4">
-                                        <div className="w-32 bg-gray-100 rounded-full h-2 overflow-hidden">
+                                        <div className="w-32 bg-surface-100 rounded-full h-2 overflow-hidden">
                                             <div
-                                                className="h-full bg-indigo-500 rounded-full"
+                                                className="h-full bg-blue-500 rounded-full"
                                                 style={{ width: `${plan.percentage * 100}%` }}
                                             />
                                         </div>
@@ -272,26 +272,26 @@ export default function RevenuePage() {
 
             {/* MRR Breakdown */}
             <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-green-50 rounded-xl border border-green-200 p-4">
-                    <div className="text-sm text-green-700 mb-1">New MRR</div>
-                    <div className="text-2xl font-bold text-green-800">
+                <div className="bg-emerald-50 rounded-xl border border-emerald-200 p-4">
+                    <div className="text-sm text-emerald-700 mb-1 font-medium">New MRR</div>
+                    <div className="text-2xl font-bold text-emerald-900">
                         +{formatCurrency(monthlyData[monthlyData.length - 1].newMrr)}
                     </div>
-                    <div className="text-xs text-green-600 mt-1">From new customers</div>
+                    <div className="text-xs text-emerald-600 mt-1 font-medium">From new customers</div>
                 </div>
                 <div className="bg-blue-50 rounded-xl border border-blue-200 p-4">
-                    <div className="text-sm text-blue-700 mb-1">Expansion MRR</div>
-                    <div className="text-2xl font-bold text-blue-800">
+                    <div className="text-sm text-blue-700 mb-1 font-medium">Expansion MRR</div>
+                    <div className="text-2xl font-bold text-blue-900">
                         +{formatCurrency(monthlyData[monthlyData.length - 1].expansionMrr)}
                     </div>
-                    <div className="text-xs text-blue-600 mt-1">From upgrades</div>
+                    <div className="text-xs text-blue-600 mt-1 font-medium">From upgrades</div>
                 </div>
                 <div className="bg-red-50 rounded-xl border border-red-200 p-4">
-                    <div className="text-sm text-red-700 mb-1">Churned MRR</div>
-                    <div className="text-2xl font-bold text-red-800">
+                    <div className="text-sm text-red-700 mb-1 font-medium">Churned MRR</div>
+                    <div className="text-2xl font-bold text-red-900">
                         -{formatCurrency(monthlyData[monthlyData.length - 1].churnedMrr)}
                     </div>
-                    <div className="text-xs text-red-600 mt-1">From cancellations</div>
+                    <div className="text-xs text-red-600 mt-1 font-medium">From cancellations</div>
                 </div>
             </div>
         </div>

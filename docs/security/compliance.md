@@ -393,7 +393,7 @@ function createAuditEntry(action: AuditAction, previousEntry: AuditEntry | null)
 
 ### Responsible Disclosure
 
-Report security vulnerabilities to: security@apexmail.io
+Report security vulnerabilities to: security@apexmail.ee
 
 We commit to:
 - Acknowledging reports within 24 hours
@@ -450,7 +450,7 @@ Notification template:
 [STEPS DATA SUBJECTS SHOULD TAKE]
 
 ### Contact Information
-Data Protection Officer: dpo@apexmail.io
+Data Protection Officer: dpo@apexmail.ee
 ```
 
 ---

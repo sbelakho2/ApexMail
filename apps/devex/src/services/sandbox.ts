@@ -658,7 +658,7 @@ export class SandboxService {
   async createTestInbox(sandboxId: string): Promise<Result<{ email: string; inboxId: string }>> {
     try {
       const inboxId = `inbox_${generateUUID().replace(/-/g, '')}`;
-      const email = `test-${inboxId.slice(0, 8)}@sandbox.apexmail.dev`;
+      const email = `test-${inboxId.slice(0, 8)}@sandbox.apexmail.ee`;
 
       await this.db.query(`
         INSERT INTO sandbox_test_inboxes (id, sandbox_id, email, created_at)
@@ -985,7 +985,7 @@ export class SandboxService {
             {
               type: 'TXT',
               name: '_dmarc',
-              value: 'v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.dev',
+              value: 'v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee',
             },
           ],
         },

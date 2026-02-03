@@ -56,6 +56,7 @@ export function Header({ className, onMenuClick }: HeaderProps) {
           size="icon"
           className="md:hidden"
           onClick={onMenuClick}
+          aria-label="Toggle menu"
         >
           <Menu className="h-5 w-5" />
         </Button>
@@ -79,41 +80,42 @@ export function Header({ className, onMenuClick }: HeaderProps) {
  size="icon"
  className="md:hidden"
  onClick={() => setSearchOpen(!searchOpen)}
- >
- <Search className="h-5 w-5" />
- </Button>
- </div>
+          aria-label="Toggle search"
+        >
+          <Search className="h-5 w-5" />
+        </Button>
+      </div>
 
- {/* Right side */}
- <div className="flex items-center gap-2">
- {/* Quick action */}
- <SimpleTooltip content="Create Campaign">
- <Button size="sm" className="hidden sm:flex">
- <Plus className="h-4 w-4 mr-2" />
- New Campaign
- </Button>
- </SimpleTooltip>
- <SimpleTooltip content="Create Campaign">
- <Button size="icon" className="sm:hidden">
- <Plus className="h-5 w-5" />
- </Button>
- </SimpleTooltip>
+      {/* Right side */}
+      <div className="flex items-center gap-2">
+        {/* Quick action */}
+        <SimpleTooltip content="Create Campaign">
+          <Button size="sm" className="hidden sm:flex" aria-label="Create Campaign">
+            <Plus className="h-4 w-4 mr-2" />
+            New Campaign
+          </Button>
+        </SimpleTooltip>
+        <SimpleTooltip content="Create Campaign">
+          <Button size="icon" className="sm:hidden" aria-label="Create Campaign">
+            <Plus className="h-5 w-5" />
+          </Button>
+        </SimpleTooltip>
 
- {/* Theme toggle */}
- <SimpleTooltip content={theme === 'light' ? 'Dark mode' : 'Light mode'}>
- <Button variant="ghost" size="icon" onClick={toggleTheme}>
- {theme === 'light' ? (
- <Moon className="h-5 w-5" />
- ) : (
- <Sun className="h-5 w-5" />
- )}
- </Button>
- </SimpleTooltip>
+        {/* Theme toggle */}
+        <SimpleTooltip content={theme === 'light' ? 'Dark mode' : 'Light mode'}>
+          <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
+            {theme === 'light' ? (
+              <Moon className="h-5 w-5" />
+            ) : (
+              <Sun className="h-5 w-5" />
+            )}
+          </Button>
+        </SimpleTooltip>
 
  {/* Notifications */}
  <DropdownMenu>
  <DropdownMenuTrigger asChild>
- <Button variant="ghost" size="icon" className="relative">
+ <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
  <Bell className="h-5 w-5" />
  <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-[10px] font-bold text-destructive-foreground">
  3
@@ -167,7 +169,7 @@ export function Header({ className, onMenuClick }: HeaderProps) {
  {/* User menu */}
  <DropdownMenu>
  <DropdownMenuTrigger asChild>
- <Button variant="ghost" className="relative h-9 w-9 rounded-full">
+ <Button variant="ghost" className="relative h-9 w-9 rounded-full" aria-label="User menu">
  <Avatar size="sm">
  <AvatarImage src="/avatar.png" alt="User" />
  <AvatarFallback>JD</AvatarFallback>

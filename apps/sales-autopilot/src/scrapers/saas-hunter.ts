@@ -13,9 +13,10 @@ import {
     resolveMxRecords,
     identifyEmailProvider,
 } from './dns-resolver.js';
-import type { Lead, LeadSource, MxRecord } from '../types.js';
+import { LeadScoringModel, extractFeatures } from './hunter-training.js';
+import type { Lead, LeadSource, MxRecord, EnrichmentResult } from '../types.js';
 
-const logger = createLogger({ name: 'saas-hunter', level: 'info' });
+const hunterLogger = createLogger({ name: 'saas-hunter', level: 'info' });
 
 interface ScrapedCompany {
     name: string;
@@ -35,6 +36,105 @@ interface ScrapeResult {
     errors: string[];
 }
 
+// Global trained model instance (lazy initialized)
+let trainedModel: LeadScoringModel | null = null;
+let modelLoadAttempted = false;
+
+/**
+ * Initializes or retrieves the trained lead scoring model
+ */
+export function getLeadScoringModel(): LeadScoringModel {
+    if (trainedModel) {
+        return trainedModel;
+    }
+
+    if (!modelLoadAttempted) {
+        modelLoadAttempted = true;
+
+        // Try to load from stored model
+        try {
+            // In production, this would load from file/database
+            // For now, create a default model
+            trainedModel = new LeadScoringModel({
+                learningRate: 0.1,
+                numTrees: 100,
+                maxDepth: 4,
+            });
+
+            hunterLogger.info('Lead scoring model initialized');
+        } catch (error) {
+            hunterLogger.warn('Failed to load trained model, using defaults', { error });
+            trainedModel = new LeadScoringModel();
+        }
+    }
+
+    return trainedModel || new LeadScoringModel();
+}
+
+/**
+ * Sets a pre-trained model instance
+ */
+export function setLeadScoringModel(model: LeadScoringModel): void {
+    trainedModel = model;
+    hunterLogger.info('Lead scoring model updated');
+}
+
+/**
+ * Calculates lead score using the ML model
+ */
+export function calculateLeadScore(
+    company: ScrapedCompany,
+    enrichment?: EnrichmentResult | null
+): number {
+    // Create a partial lead for feature extraction
+    const partialLead: Lead = {
+        id: 'temp',
+        tenantId: 'temp',
+        companyName: company.name,
+        domain: company.domain,
+        website: company.website,
+        email: null,
+        emailVerified: false,
+        phone: null,
+        industry: company.category,
+        employeeCount: null,
+        revenue: null,
+        technologies: [],
+        socialProfiles: [],
+        location: null,
+        source: company.source,
+        sourceUrl: company.sourceUrl,
+        score: 0,
+        status: 'new',
+        stage: 'prospect',
+        assignedTo: null,
+        tags: company.tags,
+        customFields: company.description ? { description: company.description } : {},
+        mxRecords: [],
+        emailProvider: null,
+        lastContactedAt: null,
+        nextFollowUpAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+    };
+
+    const features = extractFeatures(partialLead, enrichment ?? null);
+    const model = getLeadScoringModel();
+
+    // Calculate raw ML score (0-1)
+    const rawScore = model.predict(features);
+
+    // Convert to 0-100 scale
+    return Math.round(rawScore * 100);
+}
+
+interface ScrapeResult {
+    companies: ScrapedCompany[];
+    nextPageUrl: string | null;
+    totalFound: number;
+    errors: string[];
+}
+
 /**
  * Fetches a page with proper rate limiting and headers
  */
@@ -42,7 +142,7 @@ async function fetchPage(url: string): Promise<string | null> {
     // Check robots.txt
     const allowed = await isUrlAllowed(url);
     if (!allowed) {
-        logger.info('URL blocked by robots.txt', { url });
+        hunterLogger.info('URL blocked by robots.txt', { url });
         return null;
     }
 
@@ -71,13 +171,13 @@ async function fetchPage(url: string): Promise<string | null> {
         clearTimeout(timeoutId);
 
         if (!response.ok) {
-            logger.warn('Failed to fetch page', { url, status: response.status });
+            hunterLogger.warn('Failed to fetch page', { url, status: response.status });
             return null;
         }
 
         return await response.text();
     } catch (error) {
-        logger.error('Error fetching page', { url, error });
+        hunterLogger.error('Error fetching page', { url, error });
         return null;
     }
 }
@@ -150,7 +250,7 @@ export async function scrapeProductHunt(
             nextPageUrl = `${baseUrl}?page=${page + 1}`;
         }
 
-        logger.info('Scraped Product Hunt page', { page, found: companies.length });
+        hunterLogger.info('Scraped Product Hunt page', { page, found: companies.length });
     }
 
     return {
@@ -212,7 +312,7 @@ export async function scrapeG2(
             nextPageUrl = `https://www.g2.com/categories/${category}?page=${page + 1}`;
         }
 
-        logger.info('Scraped G2 page', { page, category, found: companies.length });
+        hunterLogger.info('Scraped G2 page', { page, category, found: companies.length });
     }
 
     return {
@@ -270,7 +370,7 @@ export async function scrapeCapterra(
             nextPageUrl = `https://www.capterra.com/categories/${category}/?page=${page + 1}`;
         }
 
-        logger.info('Scraped Capterra page', { page, category, found: companies.length });
+        hunterLogger.info('Scraped Capterra page', { page, category, found: companies.length });
     }
 
     return {
@@ -324,7 +424,7 @@ export async function scrapeCrunchbase(
         }
     });
 
-    logger.info('Scraped Crunchbase', { query, found: companies.length });
+    hunterLogger.info('Scraped Crunchbase', { query, found: companies.length });
 
     return {
         companies,
@@ -363,12 +463,12 @@ export async function enrichWithMxRecords(
                 emailProvider,
             });
 
-            logger.debug('Enriched company with MX records', {
+            hunterLogger.debug('Enriched company with MX records', {
                 domain: company.domain,
                 provider: emailProvider,
             });
         } catch (error) {
-            logger.warn('Failed to enrich MX records', { domain: company.domain, error });
+            hunterLogger.warn('Failed to enrich MX records', { domain: company.domain, error });
             enriched.push({
                 ...company,
                 mxRecords: [],
@@ -384,20 +484,28 @@ export async function enrichWithMxRecords(
 }
 
 /**
- * Converts scraped companies to lead format
+ * Converts scraped companies to lead format with ML-based scoring
  */
 export function scrapedToLeads(
     scrapedCompanies: Array<
         ScrapedCompany & { mxRecords: MxRecord[]; emailProvider: string | null }
     >,
-    tenantId: string
+    tenantId: string,
+    enrichmentData?: Map<string, EnrichmentResult>
 ): Partial<Lead>[] {
-    return scrapedCompanies.map((company) => ({
-        id: generateId('lead'),
-        tenantId,
-        companyName: company.name,
-        domain: company.domain,
-        website: company.website || null,
+    return scrapedCompanies.map((company) => {
+        // Get enrichment data for this company if available
+        const enrichment = enrichmentData?.get(company.domain) || null;
+
+        // Calculate ML-based lead score
+        const score = calculateLeadScore(company, enrichment);
+
+        return {
+            id: generateId('lead'),
+            tenantId,
+            companyName: company.name,
+            domain: company.domain,
+            website: company.website || null,
         email: null,
         emailVerified: false,
         phone: null,
@@ -409,7 +517,7 @@ export function scrapedToLeads(
         location: null,
         source: company.source,
         sourceUrl: company.sourceUrl,
-        score: 0,
+        score, // ML-based score (0-100)
         status: 'new',
         stage: 'prospect',
         assignedTo: null,
@@ -421,7 +529,8 @@ export function scrapedToLeads(
         emailProvider: company.emailProvider,
         lastContactedAt: null,
         nextFollowUpAt: null,
-    }));
+    };
+    });
 }
 
 /**

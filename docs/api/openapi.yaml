@@ -1,0 +1,1232 @@
+openapi: 3.1.0
+info:
+  title: ApexMail API
+  description: |
+    The ApexMail API is a modern, developer-friendly transactional email API.
+    
+    ## Authentication
+    
+    All API requests require authentication using an API key. Include your API key in the `Authorization` header:
+    
+    ```
+    Authorization: Bearer am_live_xxxxxxxxxxxxx
+    ```
+    
+    ## Rate Limits
+    
+    The API enforces rate limits based on your plan:
+    - Free: 100 requests/minute
+    - Pro: 1,000 requests/minute
+    - Enterprise: Custom limits
+    
+    Rate limit headers are included in all responses:
+    - `X-RateLimit-Limit`: Maximum requests allowed
+    - `X-RateLimit-Remaining`: Requests remaining in window
+    - `X-RateLimit-Reset`: Unix timestamp when limit resets
+    
+    ## Errors
+    
+    The API uses conventional HTTP response codes:
+    - `2xx` - Success
+    - `4xx` - Client error (bad request, unauthorized, etc.)
+    - `5xx` - Server error
+  version: 1.0.0
+  contact:
+    name: ApexMail Support
+    email: contact@apexmail.ee
+    url: https://apexmail.ee/support
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  x-logo:
+    url: https://apexmail.ee/logo.png
+    altText: ApexMail Logo
+
+servers:
+  - url: https://api.apexmail.ee/v1
+    description: Production API
+  - url: https://sandbox.api.apexmail.ee/v1
+    description: Sandbox API (for testing)
+
+tags:
+  - name: Emails
+    description: Send and manage transactional emails
+  - name: Domains
+    description: Configure sending domains with DNS verification
+  - name: Webhooks
+    description: Receive real-time event notifications
+  - name: API Keys
+    description: Manage API keys for authentication
+  - name: Analytics
+    description: Email delivery and engagement analytics
+
+security:
+  - BearerAuth: []
+
+paths:
+  /emails:
+    post:
+      operationId: sendEmail
+      summary: Send an email
+      description: |
+        Send a transactional email to one or more recipients.
+        
+        Supports:
+        - Multiple recipients (to, cc, bcc)
+        - HTML and plain text content
+        - Attachments (up to 25MB total)
+        - Scheduled sending
+        - Custom headers
+        - Tags for analytics
+      tags:
+        - Emails
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendEmailRequest'
+            examples:
+              simple:
+                summary: Simple email
+                value:
+                  from: hello@example.com
+                  to: user@example.com
+                  subject: Welcome to ApexMail!
+                  html: <h1>Welcome!</h1><p>Thanks for signing up.</p>
+              full:
+                summary: Full email with all options
+                value:
+                  from:
+                    email: hello@example.com
+                    name: Hello from ApexMail
+                  to:
+                    - email: user@example.com
+                      name: John Doe
+                  cc:
+                    - cc@example.com
+                  bcc:
+                    - bcc@example.com
+                  replyTo: support@example.com
+                  subject: Your order confirmation
+                  html: <h1>Order Confirmed</h1>
+                  text: Order Confirmed
+                  headers:
+                    X-Order-ID: "12345"
+                  tags:
+                    - name: category
+                      value: transactional
+                  attachments:
+                    - filename: receipt.pdf
+                      content: base64-encoded-content
+                      contentType: application/pdf
+      responses:
+        '200':
+          description: Email queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendEmailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+    get:
+      operationId: listEmails
+      summary: List emails
+      description: Retrieve a paginated list of sent emails with optional filters.
+      tags:
+        - Emails
+      parameters:
+        - name: status
+          in: query
+          description: Filter by email status
+          schema:
+            type: string
+            enum: [queued, sent, delivered, bounced, complained, failed]
+        - name: from
+          in: query
+          description: Filter by sender email
+          schema:
+            type: string
+            format: email
+        - name: to
+          in: query
+          description: Filter by recipient email
+          schema:
+            type: string
+            format: email
+        - name: tag
+          in: query
+          description: Filter by tag name
+          schema:
+            type: string
+        - name: since
+          in: query
+          description: Return emails sent after this date
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          description: Return emails sent before this date
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: Number of results to return (1-100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: cursor
+          in: query
+          description: Pagination cursor from previous response
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of emails
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailListResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /emails/batch:
+    post:
+      operationId: sendBatchEmails
+      summary: Send batch emails
+      description: |
+        Send up to 1,000 emails in a single API call.
+        
+        Each email in the batch is processed independently. The response includes
+        IDs for successfully queued emails and details for any failures.
+      tags:
+        - Emails
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchEmailRequest'
+      responses:
+        '200':
+          description: Batch processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchEmailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /emails/{emailId}:
+    get:
+      operationId: getEmail
+      summary: Get email details
+      description: Retrieve details of a specific email including delivery status and events.
+      tags:
+        - Emails
+      parameters:
+        - $ref: '#/components/parameters/emailId'
+      responses:
+        '200':
+          description: Email details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Email'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /emails/{emailId}/cancel:
+    post:
+      operationId: cancelEmail
+      summary: Cancel scheduled email
+      description: Cancel a scheduled email that hasn't been sent yet.
+      tags:
+        - Emails
+      parameters:
+        - $ref: '#/components/parameters/emailId'
+      responses:
+        '200':
+          description: Email cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Email cancelled successfully
+        '400':
+          description: Email cannot be cancelled (already sent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /domains:
+    post:
+      operationId: createDomain
+      summary: Add a domain
+      description: |
+        Add a domain for sending emails. Returns DNS records that must be
+        configured for verification.
+      tags:
+        - Domains
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDomainRequest'
+      responses:
+        '201':
+          description: Domain created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '409':
+          description: Domain already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      operationId: listDomains
+      summary: List domains
+      description: Retrieve all configured sending domains.
+      tags:
+        - Domains
+      responses:
+        '200':
+          description: List of domains
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainListResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+  /domains/{domainId}:
+    get:
+      operationId: getDomain
+      summary: Get domain details
+      description: Retrieve details of a specific domain including DNS records.
+      tags:
+        - Domains
+      parameters:
+        - $ref: '#/components/parameters/domainId'
+      responses:
+        '200':
+          description: Domain details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+    delete:
+      operationId: deleteDomain
+      summary: Delete a domain
+      description: Remove a domain from your account.
+      tags:
+        - Domains
+      parameters:
+        - $ref: '#/components/parameters/domainId'
+      responses:
+        '204':
+          description: Domain deleted
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /domains/{domainId}/verify:
+    post:
+      operationId: verifyDomain
+      summary: Verify domain DNS
+      description: Trigger DNS verification for a domain.
+      tags:
+        - Domains
+      parameters:
+        - $ref: '#/components/parameters/domainId'
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Domain'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /webhooks:
+    post:
+      operationId: createWebhook
+      summary: Create a webhook
+      description: |
+        Register a webhook endpoint to receive real-time event notifications.
+        
+        Available events:
+        - `email.sent` - Email accepted for delivery
+        - `email.delivered` - Email delivered to recipient
+        - `email.bounced` - Email bounced
+        - `email.complained` - Recipient marked as spam
+        - `email.opened` - Email opened (if tracking enabled)
+        - `email.clicked` - Link clicked (if tracking enabled)
+      tags:
+        - Webhooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookRequest'
+      responses:
+        '201':
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+    get:
+      operationId: listWebhooks
+      summary: List webhooks
+      description: Retrieve all configured webhooks.
+      tags:
+        - Webhooks
+      responses:
+        '200':
+          description: List of webhooks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookListResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+  /webhooks/{webhookId}:
+    get:
+      operationId: getWebhook
+      summary: Get webhook details
+      description: Retrieve details of a specific webhook.
+      tags:
+        - Webhooks
+      parameters:
+        - $ref: '#/components/parameters/webhookId'
+      responses:
+        '200':
+          description: Webhook details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+    patch:
+      operationId: updateWebhook
+      summary: Update a webhook
+      description: Update webhook configuration.
+      tags:
+        - Webhooks
+      parameters:
+        - $ref: '#/components/parameters/webhookId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookRequest'
+      responses:
+        '200':
+          description: Webhook updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+    delete:
+      operationId: deleteWebhook
+      summary: Delete a webhook
+      description: Remove a webhook endpoint.
+      tags:
+        - Webhooks
+      parameters:
+        - $ref: '#/components/parameters/webhookId'
+      responses:
+        '204':
+          description: Webhook deleted
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /api-keys:
+    post:
+      operationId: createApiKey
+      summary: Create an API key
+      description: |
+        Create a new API key. The full key is only returned once at creation time.
+        Store it securely.
+      tags:
+        - API Keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+    get:
+      operationId: listApiKeys
+      summary: List API keys
+      description: Retrieve all API keys (masked).
+      tags:
+        - API Keys
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyListResponse'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+  /api-keys/{keyId}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke an API key
+      description: Permanently revoke an API key.
+      tags:
+        - API Keys
+      parameters:
+        - $ref: '#/components/parameters/keyId'
+      responses:
+        '204':
+          description: API key revoked
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /analytics:
+    get:
+      operationId: getAnalytics
+      summary: Get analytics
+      description: |
+        Retrieve email delivery and engagement analytics.
+        
+        Metrics include:
+        - Sent, delivered, bounced, complained counts
+        - Open and click rates (if tracking enabled)
+        - Delivery rate
+      tags:
+        - Analytics
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Start date (ISO 8601)
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          description: End date (ISO 8601)
+          schema:
+            type: string
+            format: date
+        - name: groupBy
+          in: query
+          description: Group results by time period
+          schema:
+            type: string
+            enum: [hour, day, week, month]
+            default: day
+        - name: domain
+          in: query
+          description: Filter by sending domain
+          schema:
+            type: string
+        - name: tag
+          in: query
+          description: Filter by tag
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Analytics'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        API key authentication. Include your API key in the Authorization header:
+        `Authorization: Bearer am_live_xxxxxxxxxxxxx`
+
+  parameters:
+    emailId:
+      name: emailId
+      in: path
+      required: true
+      description: Email ID
+      schema:
+        type: string
+        example: email_01HQMXJ5KXMW0NREP0YGCZKNVD
+
+    domainId:
+      name: domainId
+      in: path
+      required: true
+      description: Domain ID
+      schema:
+        type: string
+        example: domain_01HQMXJ5KXMW0NREP0YGCZKNVD
+
+    webhookId:
+      name: webhookId
+      in: path
+      required: true
+      description: Webhook ID
+      schema:
+        type: string
+        example: webhook_01HQMXJ5KXMW0NREP0YGCZKNVD
+
+    keyId:
+      name: keyId
+      in: path
+      required: true
+      description: API Key ID
+      schema:
+        type: string
+        example: key_01HQMXJ5KXMW0NREP0YGCZKNVD
+
+  schemas:
+    EmailAddress:
+      oneOf:
+        - type: string
+          format: email
+          example: user@example.com
+        - type: object
+          required:
+            - email
+          properties:
+            email:
+              type: string
+              format: email
+            name:
+              type: string
+          example:
+            email: user@example.com
+            name: John Doe
+
+    Attachment:
+      type: object
+      required:
+        - filename
+        - content
+      properties:
+        filename:
+          type: string
+          description: Attachment filename
+          example: report.pdf
+        content:
+          type: string
+          format: byte
+          description: Base64-encoded file content
+        contentType:
+          type: string
+          description: MIME type
+          example: application/pdf
+
+    Tag:
+      type: object
+      required:
+        - name
+        - value
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          example: category
+        value:
+          type: string
+          maxLength: 256
+          example: transactional
+
+    SendEmailRequest:
+      type: object
+      required:
+        - from
+        - to
+        - subject
+      properties:
+        from:
+          $ref: '#/components/schemas/EmailAddress'
+        to:
+          oneOf:
+            - $ref: '#/components/schemas/EmailAddress'
+            - type: array
+              items:
+                $ref: '#/components/schemas/EmailAddress'
+              maxItems: 50
+        cc:
+          oneOf:
+            - $ref: '#/components/schemas/EmailAddress'
+            - type: array
+              items:
+                $ref: '#/components/schemas/EmailAddress'
+              maxItems: 50
+        bcc:
+          oneOf:
+            - $ref: '#/components/schemas/EmailAddress'
+            - type: array
+              items:
+                $ref: '#/components/schemas/EmailAddress'
+              maxItems: 50
+        replyTo:
+          $ref: '#/components/schemas/EmailAddress'
+        subject:
+          type: string
+          maxLength: 998
+          example: Welcome to ApexMail!
+        html:
+          type: string
+          description: HTML content
+        text:
+          type: string
+          description: Plain text content
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+          maxItems: 10
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Custom email headers
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+          maxItems: 10
+        scheduledAt:
+          type: string
+          format: date-time
+          description: Schedule email for future delivery
+
+    SendEmailResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Email ID
+          example: email_01HQMXJ5KXMW0NREP0YGCZKNVD
+        status:
+          type: string
+          enum: [queued, scheduled]
+          example: queued
+
+    BatchEmailRequest:
+      type: object
+      required:
+        - emails
+      properties:
+        emails:
+          type: array
+          items:
+            $ref: '#/components/schemas/SendEmailRequest'
+          minItems: 1
+          maxItems: 1000
+
+    BatchEmailResponse:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+          description: IDs of successfully queued emails
+        successCount:
+          type: integer
+          description: Number of successfully queued emails
+        failureCount:
+          type: integer
+          description: Number of failed emails
+        failures:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: Index in the batch
+              error:
+                type: string
+                description: Error message
+
+    Email:
+      type: object
+      properties:
+        id:
+          type: string
+          example: email_01HQMXJ5KXMW0NREP0YGCZKNVD
+        status:
+          type: string
+          enum: [queued, sent, delivered, bounced, complained, failed]
+        from:
+          type: object
+          properties:
+            email:
+              type: string
+            name:
+              type: string
+        to:
+          type: array
+          items:
+            type: object
+            properties:
+              email:
+                type: string
+              name:
+                type: string
+        subject:
+          type: string
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+        createdAt:
+          type: string
+          format: date-time
+        sentAt:
+          type: string
+          format: date-time
+        deliveredAt:
+          type: string
+          format: date-time
+        openedAt:
+          type: string
+          format: date-time
+        clickedAt:
+          type: string
+          format: date-time
+
+    EmailListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Email'
+        hasMore:
+          type: boolean
+        cursor:
+          type: string
+          description: Cursor for next page
+
+    CreateDomainRequest:
+      type: object
+      required:
+        - domain
+      properties:
+        domain:
+          type: string
+          format: hostname
+          example: example.com
+
+    DnsRecord:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [TXT, CNAME, MX]
+        name:
+          type: string
+        value:
+          type: string
+        priority:
+          type: integer
+        status:
+          type: string
+          enum: [pending, verified, failed]
+
+    Domain:
+      type: object
+      properties:
+        id:
+          type: string
+          example: domain_01HQMXJ5KXMW0NREP0YGCZKNVD
+        domain:
+          type: string
+          example: example.com
+        status:
+          type: string
+          enum: [pending, verified, failed]
+        dnsRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsRecord'
+        createdAt:
+          type: string
+          format: date-time
+        verifiedAt:
+          type: string
+          format: date-time
+
+    DomainListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Domain'
+
+    CreateWebhookRequest:
+      type: object
+      required:
+        - url
+        - events
+      properties:
+        url:
+          type: string
+          format: uri
+          example: https://example.com/webhooks/apexmail
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - email.sent
+              - email.delivered
+              - email.bounced
+              - email.complained
+              - email.opened
+              - email.clicked
+          minItems: 1
+
+    UpdateWebhookRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - email.sent
+              - email.delivered
+              - email.bounced
+              - email.complained
+              - email.opened
+              - email.clicked
+        active:
+          type: boolean
+
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: string
+          example: webhook_01HQMXJ5KXMW0NREP0YGCZKNVD
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        secret:
+          type: string
+          description: Webhook signing secret (only returned on creation)
+        createdAt:
+          type: string
+          format: date-time
+
+    WebhookListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Webhook'
+
+    CreateApiKeyRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          example: Production API Key
+        scopes:
+          type: array
+          items:
+            type: string
+            enum:
+              - emails:send
+              - emails:read
+              - domains:manage
+              - webhooks:manage
+              - analytics:read
+              - api-keys:manage
+          description: Permission scopes (empty for full access)
+
+    ApiKeyCreated:
+      type: object
+      properties:
+        id:
+          type: string
+          example: key_01HQMXJ5KXMW0NREP0YGCZKNVD
+        key:
+          type: string
+          description: Full API key (only shown once)
+          example: am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+        keyPrefix:
+          type: string
+          description: First 8 characters of the key
+          example: am_live_
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        lastUsedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    ApiKeyListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKey'
+
+    Analytics:
+      type: object
+      properties:
+        sent:
+          type: integer
+          description: Total emails sent
+        delivered:
+          type: integer
+          description: Total emails delivered
+        opened:
+          type: integer
+          description: Total emails opened
+        clicked:
+          type: integer
+          description: Total links clicked
+        bounced:
+          type: integer
+          description: Total bounces
+        complained:
+          type: integer
+          description: Total spam complaints
+        deliveryRate:
+          type: number
+          format: float
+          description: Delivery rate (0-1)
+        openRate:
+          type: number
+          format: float
+          description: Open rate (0-1)
+        clickRate:
+          type: number
+          format: float
+          description: Click rate (0-1)
+        bounceRate:
+          type: number
+          format: float
+          description: Bounce rate (0-1)
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              sent:
+                type: integer
+              delivered:
+                type: integer
+              opened:
+                type: integer
+              clicked:
+                type: integer
+              bounced:
+                type: integer
+              complained:
+                type: integer
+
+    Error:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Human-readable error message
+        code:
+          type: string
+          description: Machine-readable error code
+        details:
+          type: object
+          additionalProperties: true
+          description: Additional error details
+
+  responses:
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Invalid email format
+            code: VALIDATION_ERROR
+            details:
+              field: to
+              value: invalid-email
+
+    AuthenticationError:
+      description: Authentication error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Invalid or missing API key
+            code: AUTHENTICATION_ERROR
+
+    NotFoundError:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Email not found
+            code: NOT_FOUND
+
+    RateLimitError:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: Rate limit exceeded
+            code: RATE_LIMIT_EXCEEDED
+
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            message: An unexpected error occurred
+            code: SERVER_ERROR

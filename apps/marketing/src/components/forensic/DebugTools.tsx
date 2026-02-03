@@ -115,41 +115,41 @@ export function DebugTools() {
  </div>
  <div className="p-8 font-mono text-sm leading-relaxed">
  <div className="text-surface-500 mb-2">$ apexmail inspect msg_7f3d8a2b</div>
- <div className="text-green-400 mb-6 font-bold">✓ Found 4 render snapshots</div>
+ <div className="text-emerald-400 mb-6 font-bold">✓ Found 4 render snapshots</div>
  
  <div className="space-y-3 text-surface-300">
  <div className="flex items-center gap-4">
  <span className="text-surface-600 w-4">1.</span>
  <span className="w-32 font-bold">Gmail Web</span>
  <span className="text-surface-500 text-xs">1440x900</span>
- <span className="text-green-400 font-bold ml-auto">OK</span>
+ <span className="text-emerald-400 font-bold ml-auto">OK</span>
  </div>
  <div className="flex items-center gap-4">
  <span className="text-surface-600 w-4">2.</span>
  <span className="w-32 font-bold">Outlook 365</span>
  <span className="text-surface-500 text-xs">1920x1080</span>
- <span className="text-yellow-400 font-bold ml-auto">⚠ Font fallback</span>
+ <span className="text-amber-400 font-bold ml-auto">⚠ Font fallback</span>
  </div>
  <div className="flex items-center gap-4">
  <span className="text-surface-600 w-4">3.</span>
  <span className="w-32 font-bold">Apple Mail</span>
  <span className="text-surface-500 text-xs">1280x800</span>
- <span className="text-green-400 font-bold ml-auto">OK</span>
+ <span className="text-emerald-400 font-bold ml-auto">OK</span>
  </div>
  <div className="flex items-center gap-4">
  <span className="text-surface-600 w-4">4.</span>
  <span className="w-32 font-bold">Gmail Android</span>
  <span className="text-surface-500 text-xs">412x915</span>
- <span className="text-green-400 font-bold ml-auto">OK</span>
+ <span className="text-emerald-400 font-bold ml-auto">OK</span>
  </div>
  </div>
 
  <div className="mt-8 pt-8 border-t border-surface-800">
  <div className="text-surface-500 mb-2">$ apexmail diff snap_001 snap_002</div>
  <div className="text-surface-300 bg-surface-800 p-4 rounded-md border border-surface-700">
- <span className="text-red-400 font-bold">- background-color: #6366f1;</span>
+ <span className="text-red-400 font-bold">- background-color: #3b82f6;</span>
  <br />
- <span className="text-green-400 font-bold">+ background-color: #4f46e5;</span>
+ <span className="text-emerald-400 font-bold">+ background-color: #4f46e5;</span>
  <br />
  <span className="text-surface-500 italic mt-2 block">// Outlook overrides primary color</span>
  </div>

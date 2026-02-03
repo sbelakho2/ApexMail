@@ -183,11 +183,11 @@
         @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
     }
 
-    .badge-primary { @apply badge bg-blue-100 text-blue-700; }
-    .badge-success { @apply badge bg-green-100 text-green-700; }
-    .badge-warning { @apply badge bg-amber-100 text-amber-700; }
-    .badge-danger { @apply badge bg-red-100 text-red-700; }
-    .badge-neutral { @apply badge bg-slate-100 text-slate-600; }
+    .badge-primary { @apply badge bg-blue-50 text-blue-700; }
+    .badge-success { @apply badge bg-emerald-50 text-emerald-700; }
+    .badge-warning { @apply badge bg-amber-50 text-amber-700; }
+    .badge-danger { @apply badge bg-red-50 text-red-700; }
+    .badge-neutral { @apply badge bg-slate-50 text-slate-600; }
 
     /* Data Table */
     .data-table {

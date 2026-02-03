@@ -169,7 +169,7 @@ Enterprise customers can request:
 - **Custom limits** for specific endpoints
 - **Dedicated rate limit pools** for different use cases
 
-Contact support@apexmail.io for enterprise rate limiting.
+Contact support@apexmail.ee for enterprise rate limiting.
 
 ## Monitoring Your Usage
 

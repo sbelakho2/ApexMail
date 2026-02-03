@@ -8,9 +8,13 @@
  */
 
 import type { Context, Next } from 'hono';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { createLogger } from '@apexmail/lib';
 
 const logger = createLogger({ name: 'control-plane-auth', level: 'info' });
+
+// Secret key for signing session tokens (MUST be set in production)
+const SESSION_SECRET = process.env.CONTROL_PLANE_SESSION_SECRET || 'dev-secret-change-in-production';
 
 // Internal API key for control plane access
 const CONTROL_PLANE_API_KEY = process.env.CONTROL_PLANE_API_KEY;
@@ -63,32 +67,110 @@ function validateApiKey(apiKey: string): boolean {
 }
 
 /**
- * Validates a control plane session token
+ * Validates a control plane session token with cryptographic signature verification
  */
 function validateSessionToken(token: string): boolean {
     try {
         const [payload, signature] = token.split('.');
-        if (!payload || !signature) return false;
+        if (!payload || !signature) {
+            logger.warn('Invalid token format: missing payload or signature');
+            return false;
+        }
         
-        const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
+        // Verify signature using HMAC-SHA256
+        const expectedSignature = createHmac('sha256', SESSION_SECRET)
+            .update(payload)
+            .digest('base64url');
+        
+        // Use timing-safe comparison to prevent timing attacks
+        const signatureBuffer = Buffer.from(signature, 'base64url');
+        const expectedBuffer = Buffer.from(expectedSignature, 'base64url');
+        
+        if (signatureBuffer.length !== expectedBuffer.length) {
+            logger.warn('Invalid token signature length');
+            return false;
+        }
+        
+        if (!timingSafeEqual(signatureBuffer, expectedBuffer)) {
+            logger.warn('Invalid token signature');
+            return false;
+        }
+        
+        // Decode and validate payload
+        const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
         
         // Must be a control plane session
         if (decoded.type !== 'control_plane') {
-            logger.warn('Attempted access with non-control-plane session');
+            logger.warn('Attempted access with non-control-plane session', { type: decoded.type });
             return false;
         }
         
         // Check expiration
         if (decoded.exp && Date.now() > decoded.exp) {
+            logger.warn('Token expired', { exp: new Date(decoded.exp).toISOString() });
             return false;
         }
         
-        // In production, verify signature
-        // TODO: Implement signature verification
+        // Check issued-at time (token should not be from the future)
+        if (decoded.iat && decoded.iat > Date.now() + 60000) { // Allow 1 min clock skew
+            logger.warn('Token issued in the future', { iat: new Date(decoded.iat).toISOString() });
+            return false;
+        }
+        
+        // Check not-before time if present
+        if (decoded.nbf && Date.now() < decoded.nbf) {
+            logger.warn('Token not yet valid', { nbf: new Date(decoded.nbf).toISOString() });
+            return false;
+        }
         
         return true;
-    } catch {
+    } catch (error) {
+        logger.error('Token validation error', { error: error instanceof Error ? error.message : 'Unknown' });
         return false;
+    }
+}
+
+/**
+ * Creates a signed session token for control plane access
+ */
+export function createSessionToken(payload: {
+    userId: string;
+    email?: string;
+    roles?: string[];
+    expiresInMs?: number;
+}): string {
+    const now = Date.now();
+    const expiresIn = payload.expiresInMs || 24 * 60 * 60 * 1000; // Default 24 hours
+    
+    const tokenPayload = {
+        type: 'control_plane',
+        sub: payload.userId,
+        email: payload.email,
+        roles: payload.roles || ['admin'],
+        iat: now,
+        nbf: now,
+        exp: now + expiresIn,
+        jti: `${now}-${Math.random().toString(36).slice(2, 11)}`, // Unique token ID
+    };
+    
+    const payloadBase64 = Buffer.from(JSON.stringify(tokenPayload)).toString('base64url');
+    const signature = createHmac('sha256', SESSION_SECRET)
+        .update(payloadBase64)
+        .digest('base64url');
+    
+    return `${payloadBase64}.${signature}`;
+}
+
+/**
+ * Decodes a session token without verification (for logging/debugging only)
+ */
+export function decodeSessionToken(token: string): Record<string, unknown> | null {
+    try {
+        const [payload] = token.split('.');
+        if (!payload) return null;
+        return JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
+    } catch {
+        return null;
     }
 }
 

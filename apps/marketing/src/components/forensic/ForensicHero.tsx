@@ -66,7 +66,7 @@ export function ForensicHero() {
  initial={{ opacity: 0, y: 20 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ delay: 0.4 }}
- className="grid grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200"
+ className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-12 pt-8 border-t border-surface-200"
  >
  {[
  { value: '90 days', label: 'Render History' },
@@ -119,7 +119,7 @@ export function ForensicHero() {
  transition={{ delay: 0.5 + index * 0.1 }}
  className="relative"
  >
- <div className="absolute -left-[25px] w-3 h-3 rounded-full bg-green-500 border-2 border-white z-10" />
+ <div className="absolute -left-[25px] w-3 h-3 rounded-full bg-emerald-500 border-2 border-white z-10" />
  <div className="bg-surface-50 border border-surface-100 rounded-xl p-4 transition-shadow">
  <div className="flex items-center justify-between mb-1">
  <span className="text-surface-900 font-bold text-sm">{event.client}</span>
@@ -148,7 +148,7 @@ export function ForensicHero() {
  <input
  type="text"
  placeholder="Search by message ID..."
- className="w-full pl-10 pr-4 py-2 bg-surface-50 border border-surface-200 rounded-lg text-sm text-surface-900 font-medium placeholder-surface-400 focus:outline-none focus:border-primary-500 transition-colors "
+ className="w-full pl-10 pr-4 py-2 bg-surface-50 border border-surface-200 rounded-lg text-sm text-surface-900 font-medium placeholder-surface-400 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
  />
  </div>
  </div>

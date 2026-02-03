@@ -90,7 +90,10 @@ export default function ControlPlaneDashboard() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="flex flex-col items-center gap-3">
+                    <div className="animate-spin rounded-full h-10 w-10 border-2 border-blue-600 border-t-transparent"></div>
+                    <span className="text-sm text-surface-500">Loading dashboard...</span>
+                </div>
             </div>
         );
     }
@@ -100,32 +103,32 @@ export default function ControlPlaneDashboard() {
     return (
         <div className="max-w-7xl mx-auto">
             <div className="mb-8">
-                <h1 className="text-2xl font-bold text-gray-900">Control Plane Dashboard</h1>
-                <p className="text-gray-600 mt-1">
+                <h1 className="text-2xl font-bold text-surface-900">Control Plane Dashboard</h1>
+                <p className="text-surface-500 mt-1">
                     Business operations overview • Last updated: {new Date().toLocaleTimeString()}
                 </p>
             </div>
 
             {/* Critical Alerts */}
             {(stats.compliance.riskAlerts > 0 || stats.compliance.criticalTenants > 0) && (
-                <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
-                    <div className="flex items-center gap-2 text-red-800 font-medium mb-2">
+                <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl">
+                    <div className="flex items-center gap-2 text-red-800 font-semibold mb-2">
                         ⚠️ Requires Attention
                     </div>
                     <div className="flex gap-4 text-sm text-red-700">
                         {stats.compliance.riskAlerts > 0 && (
-                            <Link href="/risk" className="hover:underline">
-                                {stats.compliance.riskAlerts} risk alert{stats.compliance.riskAlerts > 1 ? 's' : ''}
+                            <Link href="/risk" className="hover:underline flex items-center gap-1">
+                                <span className="font-medium">{stats.compliance.riskAlerts}</span> risk alert{stats.compliance.riskAlerts > 1 ? 's' : ''}
                             </Link>
                         )}
                         {stats.compliance.criticalTenants > 0 && (
-                            <Link href="/risk" className="hover:underline">
-                                {stats.compliance.criticalTenants} critical tenant{stats.compliance.criticalTenants > 1 ? 's' : ''}
+                            <Link href="/risk" className="hover:underline flex items-center gap-1">
+                                <span className="font-medium">{stats.compliance.criticalTenants}</span> critical tenant{stats.compliance.criticalTenants > 1 ? 's' : ''}
                             </Link>
                         )}
                         {stats.compliance.gdprPending > 0 && (
-                            <Link href="/gdpr" className="hover:underline">
-                                {stats.compliance.gdprPending} pending GDPR request{stats.compliance.gdprPending > 1 ? 's' : ''}
+                            <Link href="/gdpr" className="hover:underline flex items-center gap-1">
+                                <span className="font-medium">{stats.compliance.gdprPending}</span> pending GDPR request{stats.compliance.gdprPending > 1 ? 's' : ''}
                             </Link>
                         )}
                     </div>
@@ -167,33 +170,33 @@ export default function ControlPlaneDashboard() {
             {/* Main Content Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Sales Overview */}
-                <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 p-6">
+                <div className="lg:col-span-2 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-lg font-semibold">Sales Pipeline</h2>
-                        <Link href="/crm" className="text-sm text-indigo-600 hover:underline">
+                        <h2 className="text-lg font-semibold text-surface-900">Sales Pipeline</h2>
+                        <Link href="/crm" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
                             View CRM →
                         </Link>
                     </div>
-                    <div className="grid grid-cols-5 gap-4">
-                        <PipelineStage label="Prospects" count={89} color="bg-gray-100" />
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                        <PipelineStage label="Prospects" count={89} color="bg-surface-100" />
                         <PipelineStage label="Outreach" count={64} color="bg-blue-100" />
-                        <PipelineStage label="Engaged" count={47} color="bg-yellow-100" />
-                        <PipelineStage label="Demo" count={32} color="bg-purple-100" />
-                        <PipelineStage label="Closed" count={15} color="bg-green-100" />
+                        <PipelineStage label="Engaged" count={47} color="bg-amber-100" />
+                        <PipelineStage label="Demo" count={32} color="bg-violet-100" />
+                        <PipelineStage label="Closed" count={15} color="bg-emerald-100" />
                     </div>
-                    <div className="mt-6 pt-4 border-t border-gray-100">
+                    <div className="mt-6 pt-4 border-t border-surface-100">
                         <div className="flex items-center justify-between text-sm">
-                            <span className="text-gray-600">Conversion Rate</span>
-                            <span className="font-medium">{(stats.sales.conversionRate * 100).toFixed(1)}%</span>
+                            <span className="text-surface-600">Conversion Rate</span>
+                            <span className="font-semibold text-surface-900">{(stats.sales.conversionRate * 100).toFixed(1)}%</span>
                         </div>
                     </div>
                 </div>
 
                 {/* Compliance Status */}
-                <div className="bg-white rounded-xl border border-gray-200 p-6">
+                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-lg font-semibold">Compliance Status</h2>
-                        <Link href="/compliance" className="text-sm text-indigo-600 hover:underline">
+                        <h2 className="text-lg font-semibold text-surface-900">Compliance Status</h2>
+                        <Link href="/compliance" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
                             View All →
                         </Link>
                     </div>
@@ -223,11 +226,11 @@ export default function ControlPlaneDashboard() {
             </div>
 
             {/* Recent Activity */}
-            <div className="mt-6 bg-white rounded-xl border border-gray-200 p-6">
-                <h2 className="text-lg font-semibold mb-4">Recent Activity</h2>
+            <div className="mt-6 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-surface-900 mb-4">Recent Activity</h2>
                 <div className="space-y-3">
                     {stats.recentActivity.map((activity) => (
-                        <div key={activity.id} className="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0">
+                        <div key={activity.id} className="flex items-center gap-3 py-2.5 border-b border-surface-50 last:border-0">
                             <span className="text-lg">
                                 {activity.type === 'lead' && '🎯'}
                                 {activity.type === 'risk' && '⚠️'}
@@ -235,16 +238,16 @@ export default function ControlPlaneDashboard() {
                                 {activity.type === 'gdpr' && '🇪🇺'}
                                 {activity.type === 'revenue' && '💰'}
                             </span>
-                            <span className="flex-1 text-sm text-gray-700">{activity.message}</span>
-                            <span className="text-xs text-gray-500">{timeAgo(activity.timestamp)}</span>
+                            <span className="flex-1 text-sm text-surface-700">{activity.message}</span>
+                            <span className="text-xs text-surface-400 font-medium">{timeAgo(activity.timestamp)}</span>
                         </div>
                     ))}
                 </div>
             </div>
 
             {/* Process Isolation Status */}
-            <div className="mt-6 bg-indigo-50 rounded-xl border border-indigo-100 p-6">
-                <h2 className="text-lg font-semibold text-indigo-900 mb-4">🔒 Process Isolation Status</h2>
+            <div className="mt-6 bg-gradient-to-br from-surface-50 to-blue-50 rounded-xl border border-surface-200 p-6">
+                <h2 className="text-lg font-semibold text-surface-900 mb-4">🔒 Process Isolation Status</h2>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <ProcessCard name="Control Plane UI" port="3020" status="isolated" />
                     <ProcessCard name="Sales Autopilot" port="3010" status="isolated" />
@@ -272,22 +275,22 @@ function StatCard({
     variant?: 'default' | 'success' | 'warning';
 }) {
     const content = (
-        <div className={`rounded-xl border p-6 ${
-            variant === 'success' ? 'bg-green-50 border-green-200' :
-            variant === 'warning' ? 'bg-yellow-50 border-yellow-200' :
-            'bg-white border-gray-200'
+        <div className={`rounded-xl border p-6 shadow-sm transition-all hover:shadow-md ${
+            variant === 'success' ? 'bg-emerald-50 border-emerald-200' :
+            variant === 'warning' ? 'bg-amber-50 border-amber-200' :
+            'bg-surface-0 border-surface-200'
         }`}>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between mb-3">
                 <span className="text-2xl">{icon}</span>
             </div>
-            <div className="text-2xl font-bold text-gray-900">{value}</div>
-            <div className="text-sm text-gray-600">{title}</div>
-            <div className="text-xs text-gray-500 mt-1">{change}</div>
+            <div className="text-2xl font-bold text-surface-900">{value}</div>
+            <div className="text-sm font-medium text-surface-600 mt-1">{title}</div>
+            <div className="text-xs text-surface-400 mt-1">{change}</div>
         </div>
     );
 
     return href ? (
-        <Link href={href} className="block hover:shadow-md transition-shadow">
+        <Link href={href} className="block">
             {content}
         </Link>
     ) : content;
@@ -296,10 +299,10 @@ function StatCard({
 function PipelineStage({ label, count, color }: { label: string; count: number; color: string }) {
     return (
         <div className="text-center">
-            <div className={`${color} rounded-lg py-6 mb-2`}>
-                <div className="text-2xl font-bold text-gray-900">{count}</div>
+            <div className={`${color} rounded-xl py-6 mb-2 transition-transform hover:scale-105`}>
+                <div className="text-2xl font-bold text-surface-900">{count}</div>
             </div>
-            <div className="text-xs text-gray-600">{label}</div>
+            <div className="text-xs font-medium text-surface-500">{label}</div>
         </div>
     );
 }
@@ -314,16 +317,16 @@ function ComplianceItem({
     status: 'good' | 'warning' | 'critical' | 'info';
 }) {
     const statusColors = {
-        good: 'text-green-600 bg-green-50',
-        warning: 'text-yellow-600 bg-yellow-50',
-        critical: 'text-red-600 bg-red-50',
-        info: 'text-blue-600 bg-blue-50',
+        good: 'text-emerald-700 bg-emerald-50 border border-emerald-100',
+        warning: 'text-amber-700 bg-amber-50 border border-amber-100',
+        critical: 'text-red-700 bg-red-50 border border-red-100',
+        info: 'text-blue-700 bg-blue-50 border border-blue-100',
     };
 
     return (
-        <div className="flex items-center justify-between">
-            <span className="text-sm text-gray-600">{label}</span>
-            <span className={`px-2 py-0.5 rounded text-sm font-medium ${statusColors[status]}`}>
+        <div className="flex items-center justify-between py-1">
+            <span className="text-sm text-surface-600">{label}</span>
+            <span className={`px-2.5 py-0.5 rounded-full text-sm font-semibold ${statusColors[status]}`}>
                 {formatNumber(value)}
             </span>
         </div>
@@ -340,11 +343,12 @@ function ProcessCard({
     status: 'isolated' | 'disconnected';
 }) {
     return (
-        <div className="bg-white rounded-lg p-4 border border-indigo-100">
-            <div className="text-sm font-medium text-gray-700">{name}</div>
-            <div className="text-lg font-bold text-indigo-900">Port {port}</div>
-            <div className={`text-xs ${status === 'isolated' ? 'text-green-600' : 'text-blue-600'}`}>
-                {status === 'isolated' ? '✓ Isolated' : '⊘ Not Connected'}
+        <div className="bg-surface-0 rounded-xl p-4 border border-surface-200 shadow-sm">
+            <div className="text-sm font-medium text-surface-600">{name}</div>
+            <div className="text-lg font-bold text-surface-900">Port {port}</div>
+            <div className={`text-xs font-medium flex items-center gap-1 mt-1 ${status === 'isolated' ? 'text-emerald-600' : 'text-surface-400'}`}>
+                <span className={`w-2 h-2 rounded-full ${status === 'isolated' ? 'bg-emerald-500' : 'bg-surface-300'}`}></span>
+                {status === 'isolated' ? 'Isolated' : 'Not Connected'}
             </div>
         </div>
     );

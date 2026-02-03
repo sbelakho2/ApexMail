@@ -5,9 +5,6 @@
 :root {
   --brand-500: 37 99 235;
   --brand-700: 23 66 180;
-  --gray-50: 248 250 252;
-  --gray-900: 15 23 42;
-  --gray-600: 71 85 105;
   
   --success: 22 163 74;
   --warning: 217 119 6;
@@ -203,7 +200,7 @@
 }
 
 .code-keyword {
-  @apply text-purple-400;
+  @apply text-violet-400;
 }
 
 .code-comment {

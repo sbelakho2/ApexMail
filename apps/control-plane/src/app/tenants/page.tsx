@@ -50,16 +50,16 @@ const DEMO_TENANTS: Tenant[] = [
 ];
 
 const PLAN_COLORS: Record<string, string> = {
-    free: 'bg-gray-100 text-gray-700',
+    free: 'bg-surface-100 text-surface-700',
     starter: 'bg-blue-100 text-blue-700',
-    professional: 'bg-purple-100 text-purple-700',
+    professional: 'bg-violet-100 text-violet-700',
     enterprise: 'bg-amber-100 text-amber-700',
 };
 
 const STATUS_COLORS: Record<string, string> = {
-    active: 'bg-green-100 text-green-700',
+    active: 'bg-emerald-100 text-emerald-700',
     suspended: 'bg-red-100 text-red-700',
-    churned: 'bg-gray-100 text-gray-500',
+    churned: 'bg-surface-100 text-surface-500',
     trialing: 'bg-blue-100 text-blue-700',
 };
 
@@ -105,7 +105,7 @@ export default function TenantsPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
             </div>
         );
     }
@@ -114,15 +114,15 @@ export default function TenantsPage() {
         <div className="max-w-7xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Tenant Overview</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Tenant Overview</h1>
+                    <p className="text-surface-600 mt-1">
                         {activeTenants} active tenants • {formatCurrency(totalMRR)}/mo MRR
                     </p>
                 </div>
             </div>
 
             {/* Filters */}
-            <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 mb-6 shadow-sm">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div>
                         <input
@@ -130,14 +130,14 @@ export default function TenantsPage() {
                             placeholder="Search tenants..."
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                         />
                     </div>
                     <div>
                         <select
                             value={filterPlan}
                             onChange={(e) => setFilterPlan(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                         >
                             <option value="">All Plans</option>
                             <option value="free">Free</option>
@@ -150,7 +150,7 @@ export default function TenantsPage() {
                         <select
                             value={filterStatus}
                             onChange={(e) => setFilterStatus(e.target.value)}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                         >
                             <option value="">All Statuses</option>
                             <option value="active">Active</option>
@@ -162,7 +162,7 @@ export default function TenantsPage() {
                     <div>
                         <button
                             onClick={() => { setSearchQuery(''); setFilterPlan(''); setFilterStatus(''); }}
-                            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
+                            className="px-4 py-2 text-sm text-surface-600 hover:text-surface-900 font-medium"
                         >
                             Clear Filters
                         </button>
@@ -171,27 +171,27 @@ export default function TenantsPage() {
             </div>
 
             {/* Tenant List */}
-            <div className="bg-white rounded-xl border border-gray-200">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm">
                 <div className="overflow-x-auto">
                     <table className="w-full">
                         <thead>
-                            <tr className="border-b border-gray-200 text-left">
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Tenant</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Plan</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Status</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Risk</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Emails/Mo</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">MRR</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Last Active</th>
-                                <th className="px-4 py-3 text-xs font-medium text-gray-500 uppercase">Actions</th>
+                            <tr className="border-b border-surface-200 text-left bg-surface-50/50">
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Tenant</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Plan</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Status</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Risk</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Emails/Mo</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">MRR</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Last Active</th>
+                                <th className="px-4 py-3 text-xs font-semibold text-surface-500 uppercase">Actions</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-100">
+                        <tbody className="divide-y divide-surface-100">
                             {filteredTenants.map(tenant => (
-                                <tr key={tenant.id} className="hover:bg-gray-50">
+                                <tr key={tenant.id} className="hover:bg-surface-50 transition-colors">
                                     <td className="px-4 py-4">
-                                        <div className="font-medium text-gray-900">{tenant.name}</div>
-                                        <div className="text-sm text-gray-500">{tenant.domain}</div>
+                                        <div className="font-medium text-surface-900">{tenant.name}</div>
+                                        <div className="text-sm text-surface-500">{tenant.domain}</div>
                                     </td>
                                     <td className="px-4 py-4">
                                         <span className={cn('px-2 py-1 rounded text-xs font-medium', PLAN_COLORS[tenant.plan])}>
@@ -208,26 +208,26 @@ export default function TenantsPage() {
                                             {tenant.riskLevel}
                                         </span>
                                     </td>
-                                    <td className="px-4 py-4 font-medium">
+                                    <td className="px-4 py-4 font-medium text-surface-700">
                                         {formatNumber(tenant.metrics.emailsSentMonth)}
                                     </td>
-                                    <td className="px-4 py-4 font-medium">
+                                    <td className="px-4 py-4 font-medium text-surface-700">
                                         {tenant.billing.mrr > 0 ? formatCurrency(tenant.billing.mrr) : '—'}
                                     </td>
-                                    <td className="px-4 py-4 text-sm text-gray-500">
+                                    <td className="px-4 py-4 text-sm text-surface-500">
                                         {formatDate(tenant.lastActiveAt)}
                                     </td>
                                     <td className="px-4 py-4">
                                         <div className="flex items-center gap-2">
                                             <button
                                                 onClick={() => setSelectedTenant(tenant)}
-                                                className="text-indigo-600 hover:text-indigo-800 text-sm"
+                                                className="text-blue-600 hover:text-blue-800 text-sm font-medium"
                                             >
                                                 View
                                             </button>
                                             <Link
                                                 href={`/risk?tenant=${tenant.id}`}
-                                                className="text-gray-500 hover:text-gray-700 text-sm"
+                                                className="text-surface-500 hover:text-surface-700 text-sm font-medium"
                                             >
                                                 Risk
                                             </Link>
@@ -242,83 +242,91 @@ export default function TenantsPage() {
 
             {/* Tenant Detail Modal */}
             {selectedTenant && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedTenant(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/50 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setSelectedTenant(null)}>
+                    <div className="bg-surface-0 rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-6">
                             <div>
-                                <h2 className="text-xl font-bold text-gray-900">{selectedTenant.name}</h2>
-                                <div className="text-gray-500">{selectedTenant.domain}</div>
+                                <h2 className="text-xl font-bold text-surface-900">{selectedTenant.name}</h2>
+                                <div className="text-surface-500">{selectedTenant.domain}</div>
                             </div>
-                            <button onClick={() => setSelectedTenant(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedTenant(null)} 
+                                className="text-surface-400 hover:text-surface-600 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-4 mb-6">
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-xl font-bold text-gray-900">{formatNumber(selectedTenant.metrics.emailsSentMonth)}</div>
-                                <div className="text-xs text-gray-500">Emails This Month</div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                            <div className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
+                                <div className="text-xl font-bold text-surface-900">{formatNumber(selectedTenant.metrics.emailsSentMonth)}</div>
+                                <div className="text-xs text-surface-500 font-medium uppercase tracking-wide">Emails This Month</div>
                             </div>
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-xl font-bold text-gray-900">{selectedTenant.metrics.domainsVerified}</div>
-                                <div className="text-xs text-gray-500">Verified Domains</div>
+                            <div className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
+                                <div className="text-xl font-bold text-surface-900">{selectedTenant.metrics.domainsVerified}</div>
+                                <div className="text-xs text-surface-500 font-medium uppercase tracking-wide">Verified Domains</div>
                             </div>
-                            <div className="bg-gray-50 rounded-lg p-3 text-center">
-                                <div className="text-xl font-bold text-gray-900">{selectedTenant.metrics.teamMembers}</div>
-                                <div className="text-xs text-gray-500">Team Members</div>
-                            </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4 mb-6">
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Plan</label>
-                                <div className={cn('inline-block px-2 py-1 rounded text-sm font-medium', PLAN_COLORS[selectedTenant.plan])}>
-                                    {selectedTenant.plan}
-                                </div>
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Status</label>
-                                <div className={cn('inline-block px-2 py-1 rounded text-sm font-medium', STATUS_COLORS[selectedTenant.status])}>
-                                    {selectedTenant.status}
-                                </div>
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">MRR</label>
-                                <div className="font-medium">{selectedTenant.billing.mrr > 0 ? formatCurrency(selectedTenant.billing.mrr) : 'N/A'}</div>
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Payment Method</label>
-                                <div className="font-medium">{selectedTenant.billing.paymentMethod || 'None'}</div>
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Contact Email</label>
-                                <div className="font-medium">{selectedTenant.email}</div>
-                            </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Customer Since</label>
-                                <div className="font-medium">{formatDate(selectedTenant.createdAt)}</div>
+                            <div className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
+                                <div className="text-xl font-bold text-surface-900">{selectedTenant.metrics.teamMembers}</div>
+                                <div className="text-xs text-surface-500 font-medium uppercase tracking-wide">Team Members</div>
                             </div>
                         </div>
 
-                        <div className="flex gap-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
+                            <div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Plan</label>
+                                <div className="mt-1">
+                                    <div className={cn('inline-block px-2.5 py-0.5 rounded-full text-sm font-medium', PLAN_COLORS[selectedTenant.plan])}>
+                                        {selectedTenant.plan}
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Status</label>
+                                <div className="mt-1">
+                                    <div className={cn('inline-block px-2.5 py-0.5 rounded-full text-sm font-medium', STATUS_COLORS[selectedTenant.status])}>
+                                        {selectedTenant.status}
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">MRR</label>
+                                <div className="font-medium text-surface-900 mt-1">{selectedTenant.billing.mrr > 0 ? formatCurrency(selectedTenant.billing.mrr) : 'N/A'}</div>
+                            </div>
+                            <div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Payment Method</label>
+                                <div className="font-medium text-surface-900 mt-1">{selectedTenant.billing.paymentMethod || 'None'}</div>
+                            </div>
+                            <div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Contact Email</label>
+                                <div className="font-medium text-surface-900 mt-1">{selectedTenant.email}</div>
+                            </div>
+                            <div>
+                                <label className="text-xs text-surface-500 uppercase font-semibold">Customer Since</label>
+                                <div className="font-medium text-surface-900 mt-1">{formatDate(selectedTenant.createdAt)}</div>
+                            </div>
+                        </div>
+
+                        <div className="flex gap-3 pt-6 border-t border-surface-100">
                             <Link
                                 href={`/risk?tenant=${selectedTenant.id}`}
-                                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg text-center hover:bg-indigo-700"
+                                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-center hover:bg-blue-700 font-medium transition-colors"
                             >
                                 View Risk Profile
                             </Link>
                             <Link
                                 href={`/audit?tenant=${selectedTenant.id}`}
-                                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200"
+                                className="px-4 py-2 bg-surface-100 text-surface-700 rounded-lg hover:bg-surface-200 font-medium transition-colors"
                             >
                                 Audit Logs
                             </Link>
                             <button
                                 onClick={() => toggleSuspension(selectedTenant.id)}
                                 className={cn(
-                                    'px-4 py-2 rounded-lg',
+                                    'px-4 py-2 rounded-lg font-medium transition-colors',
                                     selectedTenant.status === 'suspended'
-                                        ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                                        ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
                                         : 'bg-red-100 text-red-700 hover:bg-red-200'
                                 )}
                             >

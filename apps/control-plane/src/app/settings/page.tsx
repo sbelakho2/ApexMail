@@ -55,7 +55,7 @@ export default function SettingsPage() {
         warmupEnabled: true,
         warmupDays: 14,
         defaultFromName: 'ApexMail',
-        replyToAddress: 'support@apexmail.io',
+        replyToAddress: 'support@apexmail.ee',
     });
 
     // Tenant Defaults State
@@ -108,8 +108,8 @@ export default function SettingsPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Platform Settings</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Platform Settings</h1>
+                    <p className="text-surface-600 mt-1">
                         Configure your SaaS platform settings
                     </p>
                 </div>
@@ -118,9 +118,9 @@ export default function SettingsPage() {
                     disabled={saveStatus !== 'idle'}
                     className={cn(
                         'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-                        saveStatus === 'idle' && 'bg-indigo-600 text-white hover:bg-indigo-700',
-                        saveStatus === 'saving' && 'bg-gray-400 text-white cursor-not-allowed',
-                        saveStatus === 'saved' && 'bg-green-600 text-white'
+                        saveStatus === 'idle' && 'bg-blue-600 text-white hover:bg-blue-700',
+                        saveStatus === 'saving' && 'bg-surface-400 text-white cursor-not-allowed',
+                        saveStatus === 'saved' && 'bg-emerald-600 text-white'
                     )}
                 >
                     {saveStatus === 'idle' && '💾 Save Changes'}
@@ -129,25 +129,25 @@ export default function SettingsPage() {
                 </button>
             </div>
 
-            <div className="flex gap-6">
-                {/* Sidebar Navigation */}
-                <div className="w-64 flex-shrink-0">
-                    <nav className="space-y-1">
+            <div className="flex flex-col lg:flex-row gap-6">
+                {/* Sidebar Navigation - Horizontal scroll on mobile, vertical on desktop */}
+                <div className="w-full lg:w-64 lg:flex-shrink-0">
+                    <nav className="flex lg:flex-col gap-2 lg:gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0 -mx-2 lg:mx-0 px-2 lg:px-0">
                         {SETTINGS_SECTIONS.map(section => (
                             <button
                                 key={section.id}
                                 onClick={() => setActiveSection(section.id)}
                                 className={cn(
-                                    'w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors',
+                                    'flex items-center gap-2 lg:gap-3 px-3 lg:px-4 py-2 lg:py-3 rounded-lg text-left transition-colors whitespace-nowrap lg:whitespace-normal flex-shrink-0 lg:flex-shrink lg:w-full',
                                     activeSection === section.id
-                                        ? 'bg-indigo-50 text-indigo-700'
-                                        : 'text-gray-600 hover:bg-gray-50'
+                                        ? 'bg-blue-50 text-blue-700 font-medium'
+                                        : 'text-surface-600 hover:bg-surface-50 hover:text-surface-900'
                                 )}
                             >
-                                <span className="text-xl">{section.icon}</span>
+                                <span className="text-lg lg:text-xl">{section.icon}</span>
                                 <div>
-                                    <div className="font-medium">{section.title}</div>
-                                    <div className="text-xs text-gray-500">{section.description}</div>
+                                    <div className={cn("text-sm lg:text-base font-medium", activeSection !== section.id && "text-surface-700")}>{section.title}</div>
+                                    <div className="hidden lg:block text-xs text-surface-500">{section.description}</div>
                                 </div>
                             </button>
                         ))}
@@ -155,29 +155,29 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Settings Content */}
-                <div className="flex-1 bg-white rounded-xl border border-gray-200 p-6">
+                <div className="flex-1 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
                     {/* Access Control */}
                     {activeSection === 'access' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-semibold text-gray-900">Access Control</h2>
+                            <h2 className="text-lg font-bold text-surface-900">Access Control</h2>
                             
                             {/* IP Whitelist */}
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                <label className="block text-sm font-medium text-surface-700 mb-2">
                                     IP Whitelist
                                 </label>
-                                <p className="text-sm text-gray-500 mb-3">
+                                <p className="text-sm text-surface-500 mb-3">
                                     Only allow access from these IP addresses or CIDR ranges
                                 </p>
                                 <div className="space-y-2 mb-3">
                                     {ipWhitelist.map(ip => (
                                         <div key={ip} className="flex items-center gap-2">
-                                            <code className="flex-1 px-3 py-2 bg-gray-50 rounded-lg text-sm font-mono">
+                                            <code className="flex-1 px-3 py-2 bg-surface-50 rounded-lg text-sm font-mono text-surface-600 border border-surface-100">
                                                 {ip}
                                             </code>
                                             <button
                                                 onClick={() => removeIp(ip)}
-                                                className="px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg"
+                                                className="px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg font-medium transition-colors"
                                             >
                                                 Remove
                                             </button>
@@ -190,11 +190,11 @@ export default function SettingsPage() {
                                         value={newIp}
                                         onChange={(e) => setNewIp(e.target.value)}
                                         placeholder="10.0.0.0/8 or 192.168.1.1"
-                                        className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="flex-1 px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                     <button
                                         onClick={addIp}
-                                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
+                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors"
                                     >
                                         Add IP
                                     </button>
@@ -202,10 +202,10 @@ export default function SettingsPage() {
                             </div>
 
                             {/* MFA */}
-                            <div className="flex items-center justify-between py-4 border-t border-gray-100">
+                            <div className="flex items-center justify-between py-4 border-t border-surface-100">
                                 <div>
-                                    <div className="font-medium text-gray-900">Require MFA</div>
-                                    <div className="text-sm text-gray-500">
+                                    <div className="font-medium text-surface-900">Require MFA</div>
+                                    <div className="text-sm text-surface-500">
                                         All control plane users must use two-factor authentication
                                     </div>
                                 </div>
@@ -213,19 +213,19 @@ export default function SettingsPage() {
                                     onClick={() => setMfaRequired(!mfaRequired)}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
-                                        mfaRequired ? 'bg-indigo-600' : 'bg-gray-300'
+                                        mfaRequired ? 'bg-blue-600' : 'bg-surface-300'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute top-1 w-5 h-5 bg-white rounded-full transition-transform',
+                                        'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
                                         mfaRequired ? 'left-8' : 'left-1'
                                     )} />
                                 </button>
                             </div>
 
                             {/* Session Timeout */}
-                            <div className="py-4 border-t border-gray-100">
-                                <label className="block font-medium text-gray-900 mb-2">
+                            <div className="py-4 border-t border-surface-100">
+                                <label className="block font-medium text-surface-900 mb-2">
                                     Session Timeout
                                 </label>
                                 <div className="flex items-center gap-2">
@@ -233,9 +233,9 @@ export default function SettingsPage() {
                                         type="number"
                                         value={sessionTimeout}
                                         onChange={(e) => setSessionTimeout(Number(e.target.value))}
-                                        className="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-24 px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
-                                    <span className="text-gray-500">minutes of inactivity</span>
+                                    <span className="text-surface-500">minutes of inactivity</span>
                                 </div>
                             </div>
                         </div>
@@ -244,27 +244,27 @@ export default function SettingsPage() {
                     {/* Integrations */}
                     {activeSection === 'integrations' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-semibold text-gray-900">Integrations</h2>
+                            <h2 className="text-lg font-bold text-surface-900">Integrations</h2>
                             <div className="space-y-4">
                                 {integrations.map(integration => (
-                                    <div key={integration.id} className="flex items-center justify-between py-4 border-b border-gray-100">
+                                    <div key={integration.id} className="flex items-center justify-between py-4 border-b border-surface-100 last:border-0">
                                         <div className="flex items-center gap-3">
                                             <span className="text-2xl">{integration.icon}</span>
                                             <div>
-                                                <div className="font-medium text-gray-900">{integration.name}</div>
+                                                <div className="font-medium text-surface-900">{integration.name}</div>
                                                 <div className={cn(
                                                     'text-sm',
-                                                    integration.status === 'connected' ? 'text-green-600' : 'text-gray-400'
+                                                    integration.status === 'connected' ? 'text-emerald-600' : 'text-surface-400'
                                                 )}>
                                                     {integration.status === 'connected' ? '✓ Connected' : 'Not connected'}
                                                 </div>
                                             </div>
                                         </div>
                                         <button className={cn(
-                                            'px-4 py-2 rounded-lg text-sm font-medium',
+                                            'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                                             integration.status === 'connected'
-                                                ? 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                                : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                                                ? 'bg-surface-100 text-surface-700 hover:bg-surface-200'
+                                                : 'bg-blue-600 text-white hover:bg-blue-700'
                                         )}>
                                             {integration.status === 'connected' ? 'Configure' : 'Connect'}
                                         </button>
@@ -277,59 +277,59 @@ export default function SettingsPage() {
                     {/* Email Configuration */}
                     {activeSection === 'email' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-semibold text-gray-900">Email Configuration</h2>
+                            <h2 className="text-lg font-bold text-surface-900">Email Configuration</h2>
                             
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Default Daily Send Limit
                                     </label>
                                     <input
                                         type="number"
                                         value={emailConfig.defaultDailyLimit}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, defaultDailyLimit: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Max Bounce Rate (%)
                                     </label>
                                     <input
                                         type="number"
                                         value={emailConfig.maxBounceRate}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, maxBounceRate: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Default From Name
                                     </label>
                                     <input
                                         type="text"
                                         value={emailConfig.defaultFromName}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, defaultFromName: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Reply-To Address
                                     </label>
                                     <input
                                         type="email"
                                         value={emailConfig.replyToAddress}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, replyToAddress: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
 
-                            <div className="flex items-center justify-between py-4 border-t border-gray-100">
+                            <div className="flex items-center justify-between py-4 border-t border-surface-100">
                                 <div>
-                                    <div className="font-medium text-gray-900">Domain Warmup</div>
-                                    <div className="text-sm text-gray-500">
+                                    <div className="font-medium text-surface-900">Domain Warmup</div>
+                                    <div className="text-sm text-surface-500">
                                         Gradually increase sending volume for new domains
                                     </div>
                                 </div>
@@ -337,11 +337,11 @@ export default function SettingsPage() {
                                     onClick={() => setEmailConfig({ ...emailConfig, warmupEnabled: !emailConfig.warmupEnabled })}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
-                                        emailConfig.warmupEnabled ? 'bg-indigo-600' : 'bg-gray-300'
+                                        emailConfig.warmupEnabled ? 'bg-blue-600' : 'bg-surface-300'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute top-1 w-5 h-5 bg-white rounded-full transition-transform',
+                                        'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
                                         emailConfig.warmupEnabled ? 'left-8' : 'left-1'
                                     )} />
                                 </button>
@@ -352,17 +352,17 @@ export default function SettingsPage() {
                     {/* Tenant Defaults */}
                     {activeSection === 'tenants' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-semibold text-gray-900">Tenant Defaults</h2>
+                            <h2 className="text-lg font-bold text-surface-900">Tenant Defaults</h2>
                             
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Default Plan
                                     </label>
                                     <select
                                         value={tenantDefaults.defaultPlan}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, defaultPlan: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     >
                                         <option value="free">Free</option>
                                         <option value="starter">Starter</option>
@@ -371,36 +371,36 @@ export default function SettingsPage() {
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Trial Days
                                     </label>
                                     <input
                                         type="number"
                                         value={tenantDefaults.trialDays}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, trialDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Default Max Users
                                     </label>
                                     <input
                                         type="number"
                                         value={tenantDefaults.maxUsersDefault}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, maxUsersDefault: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Default Max Emails/Month
                                     </label>
                                     <input
                                         type="number"
                                         value={tenantDefaults.maxEmailsDefault}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, maxEmailsDefault: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
@@ -410,34 +410,34 @@ export default function SettingsPage() {
                     {/* Compliance */}
                     {activeSection === 'compliance' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-semibold text-gray-900">Compliance Settings</h2>
+                            <h2 className="text-lg font-bold text-surface-900">Compliance Settings</h2>
                             
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Data Retention (days)
                                     </label>
                                     <input
                                         type="number"
                                         value={complianceConfig.dataRetentionDays}
                                         onChange={(e) => setComplianceConfig({ ...complianceConfig, dataRetentionDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Audit Log Retention (days)
                                     </label>
                                     <input
                                         type="number"
                                         value={complianceConfig.auditLogRetentionDays}
                                         onChange={(e) => setComplianceConfig({ ...complianceConfig, auditLogRetentionDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
 
-                            <div className="space-y-4 pt-4 border-t border-gray-100">
+                            <div className="space-y-4 pt-4 border-t border-surface-100">
                                 {[
                                     { key: 'gdprAutoDelete', label: 'GDPR Auto-Delete', desc: 'Automatically delete data upon GDPR request completion' },
                                     { key: 'hipaaMode', label: 'HIPAA Mode', desc: 'Enable HIPAA-compliant data handling' },
@@ -445,8 +445,8 @@ export default function SettingsPage() {
                                 ].map(item => (
                                     <div key={item.key} className="flex items-center justify-between py-2">
                                         <div>
-                                            <div className="font-medium text-gray-900">{item.label}</div>
-                                            <div className="text-sm text-gray-500">{item.desc}</div>
+                                            <div className="font-medium text-surface-900">{item.label}</div>
+                                            <div className="text-sm text-surface-500">{item.desc}</div>
                                         </div>
                                         <button
                                             onClick={() => setComplianceConfig({
@@ -455,11 +455,11 @@ export default function SettingsPage() {
                                             })}
                                             className={cn(
                                                 'relative w-14 h-7 rounded-full transition-colors',
-                                                complianceConfig[item.key as keyof typeof complianceConfig] ? 'bg-indigo-600' : 'bg-gray-300'
+                                                complianceConfig[item.key as keyof typeof complianceConfig] ? 'bg-blue-600' : 'bg-surface-300'
                                             )}
                                         >
                                             <div className={cn(
-                                                'absolute top-1 w-5 h-5 bg-white rounded-full transition-transform',
+                                                'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
                                                 complianceConfig[item.key as keyof typeof complianceConfig] ? 'left-8' : 'left-1'
                                             )} />
                                         </button>
@@ -472,24 +472,24 @@ export default function SettingsPage() {
                     {/* Backup & Recovery */}
                     {activeSection === 'backup' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-semibold text-gray-900">Backup & Recovery</h2>
+                            <h2 className="text-lg font-bold text-surface-900">Backup & Recovery</h2>
                             
-                            <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
-                                <div className="flex items-center gap-2 text-green-700">
+                            <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-6">
+                                <div className="flex items-center gap-2 text-emerald-700">
                                     <span>✓</span>
                                     <span className="font-medium">Last backup: {formatDate(backupConfig.lastBackup)}</span>
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Backup Frequency
                                     </label>
                                     <select
                                         value={backupConfig.backupFrequency}
                                         onChange={(e) => setBackupConfig({ ...backupConfig, backupFrequency: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     >
                                         <option value="hourly">Hourly</option>
                                         <option value="daily">Daily</option>
@@ -497,22 +497,22 @@ export default function SettingsPage() {
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         Retention (days)
                                     </label>
                                     <input
                                         type="number"
                                         value={backupConfig.backupRetentionDays}
                                         onChange={(e) => setBackupConfig({ ...backupConfig, backupRetentionDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
 
-                            <div className="flex items-center justify-between py-4 border-t border-gray-100">
+                            <div className="flex items-center justify-between py-4 border-t border-surface-100">
                                 <div>
-                                    <div className="font-medium text-gray-900">Disaster Recovery</div>
-                                    <div className="text-sm text-gray-500">
+                                    <div className="font-medium text-surface-900">Disaster Recovery</div>
+                                    <div className="text-sm text-surface-500">
                                         Enable cross-region replication for disaster recovery
                                     </div>
                                 </div>
@@ -520,11 +520,11 @@ export default function SettingsPage() {
                                     onClick={() => setBackupConfig({ ...backupConfig, drEnabled: !backupConfig.drEnabled })}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
-                                        backupConfig.drEnabled ? 'bg-indigo-600' : 'bg-gray-300'
+                                        backupConfig.drEnabled ? 'bg-blue-600' : 'bg-surface-300'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute top-1 w-5 h-5 bg-white rounded-full transition-transform',
+                                        'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
                                         backupConfig.drEnabled ? 'left-8' : 'left-1'
                                     )} />
                                 </button>
@@ -532,13 +532,13 @@ export default function SettingsPage() {
 
                             {backupConfig.drEnabled && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-surface-700 mb-2">
                                         DR Region
                                     </label>
                                     <select
                                         value={backupConfig.drRegion}
                                         onChange={(e) => setBackupConfig({ ...backupConfig, drRegion: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                                     >
                                         <option value="us-east-1">US East (N. Virginia)</option>
                                         <option value="us-west-2">US West (Oregon)</option>
@@ -548,14 +548,14 @@ export default function SettingsPage() {
                                 </div>
                             )}
 
-                            <div className="flex gap-2 pt-4 border-t border-gray-100">
-                                <button className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                            <div className="flex gap-2 pt-4 border-t border-surface-100">
+                                <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors">
                                     🔄 Run Backup Now
                                 </button>
-                                <button className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">
+                                <button className="px-4 py-2 bg-surface-100 text-surface-700 rounded-lg text-sm hover:bg-surface-200 font-medium transition-colors">
                                     📋 View Backup History
                                 </button>
-                                <button className="px-4 py-2 bg-orange-100 text-orange-700 rounded-lg text-sm hover:bg-orange-200">
+                                <button className="px-4 py-2 bg-amber-100 text-amber-700 rounded-lg text-sm hover:bg-amber-200 font-medium transition-colors">
                                     ⚠️ Test DR Failover
                                 </button>
                             </div>

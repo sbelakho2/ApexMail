@@ -59,7 +59,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     await domainsRepo.update(domainRecord.id, {
       dnsRecords: {
         spf: {
-          value: `v=spf1 include:_spf.apexmail.io ~all`,
+          value: `v=spf1 include:_spf.apexmail.ee ~all`,
           verified: false,
         },
         dkim: {
@@ -68,7 +68,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
           verified: false,
         },
         dmarc: {
-          value: `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io`,
+          value: `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee`,
           verified: false,
         },
         returnPath: {
@@ -371,11 +371,11 @@ function getVerificationInstructions(domain: DomainData): Record<string, unknown
       return {
         type: 'DNS CNAME Record',
         name: `_apexmail.${domain.domain}`,
-        value: `verify.apexmail.io`,
+        value: `verify.apexmail.ee`,
         instructions: [
           `Add a CNAME record to your DNS`,
           `Name/Host: _apexmail`,
-          `Target: verify.apexmail.io`,
+          `Target: verify.apexmail.ee`,
         ],
       };
     case 'meta_tag':
@@ -434,7 +434,7 @@ function generateDnsRecordInstructions(domain: DomainData): Array<{
     records.push({
       type: 'CNAME',
       name: `bounce.${domain.domain}`,
-      value: 'bounce.apexmail.io',
+      value: 'bounce.apexmail.ee',
       purpose: 'Return Path - Routes bounces to ApexMail for processing',
     });
   }
@@ -462,7 +462,7 @@ async function verifyDomain(domain: DomainData): Promise<{ verified: boolean; de
       
       case 'dns_cname': {
         const cnameRecords = await dns.resolveCname(`_apexmail.${domain.domain}`).catch(() => []);
-        const found = cnameRecords.some(record => record === 'verify.apexmail.io');
+        const found = cnameRecords.some(record => record === 'verify.apexmail.ee');
         return {
           verified: found,
           details: found ? undefined : 'CNAME record not found or incorrect',

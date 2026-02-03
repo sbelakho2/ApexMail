@@ -26,7 +26,7 @@ Private cloud deployment offers:
 ### Request Dedicated Tenant
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/request \
+curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/request \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -144,7 +144,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/request \
 ### Configure Dedicated IPs
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/dedicated-ips \
+curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/dedicated-ips \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
@@ -201,7 +201,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/dedicated-ips 
 Connect ApexMail private cloud to your AWS VPC:
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/vpc-peering \
+curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/vpc-peering \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
@@ -232,7 +232,7 @@ Response:
 ### Private Link / PrivateLink
 
 ```bash
-curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/private-link \
+curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/private-link \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
@@ -268,7 +268,7 @@ curl -X POST https://api.apexmail.io/enterprise/v1/private-deploy/private-link \
 ### Customer-Managed Keys
 
 ```bash
-curl -X PUT https://api.apexmail.io/enterprise/v1/private-deploy/encryption \
+curl -X PUT https://api.apexmail.ee/enterprise/v1/private-deploy/encryption \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
@@ -327,7 +327,7 @@ curl -X PUT https://api.apexmail.io/enterprise/v1/private-deploy/encryption \
 ### Custom Metrics Endpoint
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/private-deploy/metrics \
+curl https://api.apexmail.ee/enterprise/v1/private-deploy/metrics \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -G -d "deploymentId=deploy_abc123"
 ```
@@ -439,7 +439,7 @@ Forward infrastructure logs to your SIEM:
 ### Check Deployment Status
 
 ```bash
-curl https://api.apexmail.io/enterprise/v1/private-deploy/status/{deployment_id} \
+curl https://api.apexmail.ee/enterprise/v1/private-deploy/status/{deployment_id} \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
@@ -453,9 +453,9 @@ Response:
     "region": "us-east-1",
     "provisionedAt": "2024-01-10T10:00:00Z",
     "endpoints": {
-      "api": "https://api-abc123.private.apexmail.io",
-      "smtp": "smtp-abc123.private.apexmail.io:587",
-      "dashboard": "https://dashboard-abc123.private.apexmail.io"
+      "api": "https://api-abc123.private.apexmail.ee",
+      "smtp": "smtp-abc123.private.apexmail.ee:587",
+      "dashboard": "https://dashboard-abc123.private.apexmail.ee"
     },
     "health": {
       "status": "healthy",

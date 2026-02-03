@@ -1,0 +1,149 @@
+# ApexMail Mail Server - Docker Compose
+#
+# Self-hosted email infrastructure with NO third-party services.
+# All emails are sent directly via SMTP with DKIM signing.
+
+version: '3.8'
+
+services:
+  # Outbound Queue Service
+  # Handles email sending with retry logic
+  outbound-queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: outbound-queue
+    ports:
+      - "50052:50052"  # gRPC
+    environment:
+      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - RUST_LOG=info
+      - FROM_DOMAIN=apexmail.ee
+      - DKIM_SELECTOR=apexmail2026
+      - DKIM_KEY_PATH=/etc/apexmail/dkim/private.pem
+    volumes:
+      - ./config/dkim:/etc/apexmail/dkim:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50052"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # SMTP Edge Server (Inbound)
+  # Receives incoming emails on port 25
+  smtp-edge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: smtp-edge
+    ports:
+      - "25:25"     # SMTP
+    environment:
+      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - RUST_LOG=info
+      - HOSTNAME=mail.apexmail.ee
+      - MAILSTORE_URL=http://mailstore:50051
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailstore:
+        condition: service_started
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "25"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Submission Server (Authenticated SMTP)
+  # For clients to send mail via port 587
+  submission:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: submission
+    ports:
+      - "587:587"   # Submission
+      - "465:465"   # SMTPS (TLS)
+    environment:
+      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - RUST_LOG=info
+      - HOSTNAME=mail.apexmail.ee
+      - OUTBOUND_URL=http://outbound-queue:50052
+      - REQUIRE_AUTH=true
+      - ENABLE_STARTTLS=true
+    volumes:
+      - ./config/certs:/etc/apexmail/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      outbound-queue:
+        condition: service_started
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "587"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Mailstore Service
+  # Message storage and retrieval
+  mailstore:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mailstore
+    ports:
+      - "50051:50051"  # gRPC
+    environment:
+      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - RUST_LOG=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"  # Different port to avoid conflicts
+    environment:
+      - POSTGRES_USER=apexmail
+      - POSTGRES_PASSWORD=apexmail
+      - POSTGRES_DB=apexmail_mail
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apexmail -d apexmail_mail"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  apexmail:
+    driver: bridge
+
+volumes:
+  postgres_data:

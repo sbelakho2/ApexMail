@@ -369,6 +369,7 @@ export interface SentimentRequest {
     text: string;
     language?: string;
     granularity?: 'document' | 'sentence' | 'aspect';
+    aspects?: string[]; // For aspect-based sentiment analysis
 }
 
 export interface SentimentResult {

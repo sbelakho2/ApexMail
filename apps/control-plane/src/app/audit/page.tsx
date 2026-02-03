@@ -108,27 +108,27 @@ export default function AuditLogsPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
             </div>
         );
     }
 
     return (
         <div className="max-w-7xl mx-auto">
-            <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900">Audit Logs</h1>
-                    <p className="text-gray-600 mt-1">
+                    <h1 className="text-2xl font-bold text-surface-900">Audit Logs</h1>
+                    <p className="text-surface-500 mt-1">
                         Complete audit trail for compliance and security monitoring
                     </p>
                 </div>
-                <div className="flex gap-2">
-                    <button className="px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm hover:bg-gray-50">
+                <div className="flex gap-3">
+                    <button className="px-4 py-2 bg-surface-0 border border-surface-200 rounded-lg text-sm font-medium text-surface-700 hover:bg-surface-50 hover:border-surface-300 shadow-sm transition-all">
                         ⚙️ Configure Alerts
                     </button>
                     <button
                         onClick={exportLogs}
-                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm transition-all hover:shadow-md"
                     >
                         📥 Export Logs
                     </button>
@@ -136,24 +136,24 @@ export default function AuditLogsPage() {
             </div>
 
             {/* Filters */}
-            <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+            <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 mb-8 shadow-sm">
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                     <div>
-                        <label className="text-xs text-gray-500 mb-1 block">Search</label>
+                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Search</label>
                         <input
                             type="text"
                             placeholder="Search logs..."
                             value={filters.search}
                             onChange={(e) => setFilters(prev => ({ ...prev, search: e.target.value }))}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900 placeholder:text-surface-400"
                         />
                     </div>
                     <div>
-                        <label className="text-xs text-gray-500 mb-1 block">Action Category</label>
+                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Action Category</label>
                         <select
                             value={filters.action}
                             onChange={(e) => setFilters(prev => ({ ...prev, action: e.target.value }))}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900"
                         >
                             <option value="">All Actions</option>
                             <option value="auth">Authentication</option>
@@ -165,11 +165,11 @@ export default function AuditLogsPage() {
                         </select>
                     </div>
                     <div>
-                        <label className="text-xs text-gray-500 mb-1 block">Status</label>
+                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Status</label>
                         <select
                             value={filters.status}
                             onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900"
                         >
                             <option value="">All Statuses</option>
                             <option value="success">Success</option>
@@ -177,11 +177,11 @@ export default function AuditLogsPage() {
                         </select>
                     </div>
                     <div>
-                        <label className="text-xs text-gray-500 mb-1 block">Tenant</label>
+                        <label className="text-xs font-semibold text-surface-500 mb-1.5 block uppercase tracking-wider">Tenant</label>
                         <select
                             value={filters.tenantId}
                             onChange={(e) => setFilters(prev => ({ ...prev, tenantId: e.target.value }))}
-                            className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
+                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900"
                         >
                             <option value="">All Tenants</option>
                             {uniqueTenants.map(tenant => (
@@ -192,7 +192,7 @@ export default function AuditLogsPage() {
                     <div className="flex items-end">
                         <button
                             onClick={() => setFilters({ search: '', action: '', status: '', tenantId: '', dateFrom: '', dateTo: '' })}
-                            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
+                            className="px-4 py-2 text-sm font-medium text-surface-600 hover:text-surface-900 hover:bg-surface-100 rounded-lg transition-colors w-full"
                         >
                             Clear Filters
                         </button>
@@ -201,39 +201,45 @@ export default function AuditLogsPage() {
             </div>
 
             {/* Audit Log List */}
-            <div className="bg-white rounded-xl border border-gray-200">
-                <div className="p-4 border-b border-gray-200">
-                    <span className="text-sm text-gray-500">{filteredLogs.length} events</span>
+            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-surface-100 bg-surface-50/50">
+                    <span className="text-sm font-medium text-surface-500">{filteredLogs.length} events found</span>
                 </div>
-                <div className="divide-y divide-gray-100">
+                <div className="divide-y divide-surface-100">
                     {filteredLogs.map(log => (
                         <div
                             key={log.id}
-                            className="p-4 hover:bg-gray-50 cursor-pointer"
+                            className="p-4 hover:bg-surface-50/80 cursor-pointer transition-colors"
                             onClick={() => setSelectedLog(log)}
                         >
                             <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                    <span className="text-xl">{getActionIcon(log.action)}</span>
+                                <div className="flex items-center gap-4">
+                                    <span className="text-2xl bg-surface-100 rounded-lg p-2">{getActionIcon(log.action)}</span>
                                     <div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="font-medium text-gray-900">{log.action}</span>
+                                        <div className="flex items-center gap-2.5">
+                                            <span className="font-semibold text-surface-900">{log.action}</span>
                                             <span className={cn(
-                                                'px-2 py-0.5 rounded text-xs font-medium',
-                                                log.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                                                'px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border',
+                                                log.status === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'
                                             )}>
                                                 {log.status}
                                             </span>
                                         </div>
-                                        <div className="text-sm text-gray-500">
-                                            {log.resource}: {log.resourceId}
-                                            {log.tenantId && <span className="ml-2">• {log.tenantId}</span>}
+                                        <div className="text-sm text-surface-500 mt-0.5 flex items-center gap-2">
+                                            <span className="font-medium text-surface-700">{log.resource}:</span> 
+                                            <span className="font-mono text-xs bg-surface-100 px-1.5 py-0.5 rounded">{log.resourceId}</span>
+                                            {log.tenantId && (
+                                                <>
+                                                    <span className="text-surface-300">•</span>
+                                                    <span>{log.tenantId}</span>
+                                                </>
+                                            )}
                                         </div>
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <div className="text-sm text-gray-900">{formatDate(log.timestamp)}</div>
-                                    <div className="text-xs text-gray-500">{log.ipAddress}</div>
+                                    <div className="text-sm font-medium text-surface-900">{formatDate(log.timestamp)}</div>
+                                    <div className="text-xs font-mono text-surface-400 mt-1">{log.ipAddress}</div>
                                 </div>
                             </div>
                         </div>
@@ -243,71 +249,82 @@ export default function AuditLogsPage() {
 
             {/* Log Detail Modal */}
             {selectedLog && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setSelectedLog(null)}>
-                    <div className="bg-white rounded-xl p-6 w-full max-w-2xl shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-start justify-between mb-6">
-                            <div className="flex items-center gap-3">
-                                <span className="text-3xl">{getActionIcon(selectedLog.action)}</span>
+                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLog(null)}>
+                    <div className="bg-surface-0 rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-surface-200 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-start justify-between mb-8 border-b border-surface-100 pb-6">
+                            <div className="flex items-center gap-4">
+                                <span className="text-4xl bg-surface-50 p-3 rounded-xl">{getActionIcon(selectedLog.action)}</span>
                                 <div>
-                                    <h2 className="text-xl font-bold text-gray-900">{selectedLog.action}</h2>
-                                    <span className={cn(
-                                        'px-2 py-0.5 rounded text-xs font-medium',
-                                        selectedLog.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                                    )}>
-                                        {selectedLog.status}
-                                    </span>
+                                    <h2 className="text-xl font-bold text-surface-900">{selectedLog.action}</h2>
+                                    <div className="mt-1">
+                                        <span className={cn(
+                                            'px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border',
+                                            selectedLog.status === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'
+                                        )}>
+                                            {selectedLog.status}
+                                        </span>
+                                    </div>
                                 </div>
                             </div>
-                            <button onClick={() => setSelectedLog(null)} className="text-gray-400 hover:text-gray-600">
+                            <button 
+                                onClick={() => setSelectedLog(null)} 
+                                className="text-surface-400 hover:text-surface-600 p-2 rounded-lg hover:bg-surface-100 transition-colors"
+                                aria-label="Close modal"
+                            >
                                 ✕
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4 mb-6">
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Timestamp</label>
-                                <div className="font-medium">{formatDate(selectedLog.timestamp)}</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6 mb-8">
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Timestamp</label>
+                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{formatDate(selectedLog.timestamp)}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Event ID</label>
-                                <div className="font-medium font-mono text-sm">{selectedLog.id}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Event ID</label>
+                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.id}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Resource</label>
-                                <div className="font-medium">{selectedLog.resource}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Resource</label>
+                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors capitalize">{selectedLog.resource}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Resource ID</label>
-                                <div className="font-medium font-mono text-sm">{selectedLog.resourceId}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Resource ID</label>
+                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.resourceId}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Actor Type</label>
-                                <div className="font-medium">{selectedLog.actorType}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Actor Type</label>
+                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors capitalize">{selectedLog.actorType}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Actor ID</label>
-                                <div className="font-medium font-mono text-sm">{selectedLog.actorId}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Actor ID</label>
+                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.actorId}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">Tenant</label>
-                                <div className="font-medium">{selectedLog.tenantId || 'System'}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">Tenant</label>
+                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.tenantId || 'System'}</div>
                             </div>
-                            <div>
-                                <label className="text-xs text-gray-500 uppercase">IP Address</label>
-                                <div className="font-medium font-mono text-sm">{selectedLog.ipAddress}</div>
+                            <div className="group">
+                                <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1 block">IP Address</label>
+                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.ipAddress}</div>
                             </div>
                         </div>
 
-                        <div className="mb-6">
-                            <label className="text-xs text-gray-500 uppercase mb-2 block">User Agent</label>
-                            <div className="font-mono text-sm bg-gray-50 p-2 rounded">{selectedLog.userAgent}</div>
+                        <div className="mb-8">
+                            <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2 block">User Agent</label>
+                            <div className="font-mono text-sm text-surface-600 bg-surface-50 p-3 rounded-lg border border-surface-200 break-all">{selectedLog.userAgent}</div>
                         </div>
 
                         <div>
-                            <label className="text-xs text-gray-500 uppercase mb-2 block">Event Details</label>
-                            <pre className="font-mono text-sm bg-gray-900 text-green-400 p-4 rounded-lg overflow-x-auto">
-                                {JSON.stringify(selectedLog.details, null, 2)}
-                            </pre>
+                            <label className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2 block">Event Details</label>
+                            <div className="bg-surface-900 rounded-xl overflow-hidden shadow-inner">
+                                <div className="flex items-center justify-between px-4 py-2 bg-surface-800 border-b border-surface-700">
+                                    <span className="text-xs font-mono text-surface-400">JSON</span>
+                                </div>
+                                <pre className="font-mono text-sm text-blue-300 p-4 overflow-x-auto">
+                                    {JSON.stringify(selectedLog.details, null, 2)}
+                                </pre>
+                            </div>
                         </div>
                     </div>
                 </div>

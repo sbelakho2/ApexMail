@@ -297,4 +297,4 @@ Proprietary - Bel Consulting OÜ
 
 ## Support
 
-For support inquiries, contact: support@apexmail.io
+For support inquiries, contact: support@apexmail.ee

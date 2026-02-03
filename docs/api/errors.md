@@ -15,7 +15,7 @@ All API errors follow a consistent structure:
       "field": "Additional context"
     },
     "requestId": "req_abc123xyz",
-    "documentation": "https://docs.apexmail.io/errors/error_code"
+    "documentation": "https://docs.apexmail.ee/errors/error_code"
   }
 }
 ```
@@ -193,7 +193,7 @@ The sender domain hasn't been verified.
     "message": "Sender domain is not verified",
     "details": {
       "domain": "unverified.com",
-      "verificationUrl": "https://app.apexmail.io/domains"
+      "verificationUrl": "https://app.apexmail.ee/domains"
     }
   }
 }
@@ -572,7 +572,7 @@ Account doesn't have enough sending credits.
     "details": {
       "required": 5000,
       "available": 250,
-      "topUpUrl": "https://app.apexmail.io/billing"
+      "topUpUrl": "https://app.apexmail.ee/billing"
     }
   }
 }

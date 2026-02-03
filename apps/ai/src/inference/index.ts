@@ -16,3 +16,11 @@ export {
     type VectorEntry,
     type SearchResult,
 } from './embeddings.js';
+
+export {
+    ModelLifecycleManager,
+    InferenceCircuitBreaker,
+    InferenceQueue,
+    type ModelHealth,
+    type LifecycleConfig,
+} from './lifecycle.js';

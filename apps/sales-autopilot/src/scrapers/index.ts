@@ -21,4 +21,31 @@ export {
     scrapedToLeads,
     runDiscoveryJob,
     exportLeadsToCsv,
+    getLeadScoringModel,
+    setLeadScoringModel,
+    calculateLeadScore,
 } from './saas-hunter.js';
+
+// Hunter Training System
+export {
+    extractFeatures,
+    LeadScoringModel,
+    generateSyntheticTrainingData,
+    trainUntilQualityThreshold,
+    calculateQualityMetrics,
+    type LeadFeatures,
+    type TrainingSample,
+    type LeadLabel,
+    type QualityMetrics,
+} from './hunter-training.js';
+
+// Hunter Quality Testing
+export {
+    runQualityTests,
+    runOptimizationLoop,
+    runFullTrainingPipeline,
+    validateCompany,
+    scrapeCompanyWebsite,
+    calculateStringSimilarity,
+    GROUND_TRUTH_COMPANIES,
+} from './hunter-quality-test.js';

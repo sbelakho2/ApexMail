@@ -9,11 +9,11 @@
 // Chart color palette following design system
 export const CHART_COLORS = {
     primary: '#3b82f6',    // Blue
-    success: '#22c55e',    // Green
+    success: '#10b981',    // Emerald
     warning: '#f59e0b',    // Amber
     danger: '#ef4444',     // Red
-    info: '#6366f1',       // Indigo
-    purple: '#a855f7',     // Purple
+    info: '#0ea5e9',       // Sky
+    purple: '#8b5cf6',     // Violet
     pink: '#ec4899',       // Pink
     teal: '#14b8a6',       // Teal
     slate: '#64748b',      // Slate
@@ -61,20 +61,20 @@ interface StatCardProps {
 }
 
 export function StatCard({ label, value, change, changeLabel, icon, trend }: StatCardProps) {
-    const trendColor = trend === 'up' ? 'text-green-600' : trend === 'down' ? 'text-red-600' : 'text-slate-500';
+    const trendColor = trend === 'up' ? 'text-emerald-600' : trend === 'down' ? 'text-red-600' : 'text-surface-500';
     const trendIcon = trend === 'up' ? '↑' : trend === 'down' ? '↓' : '→';
 
     return (
         <div className="card p-5">
             <div className="flex items-start justify-between">
                 <div>
-                    <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{label}</p>
-                    <p className="text-2xl font-bold text-slate-900 mt-1">{value}</p>
+                    <p className="text-xs font-medium text-surface-500 uppercase tracking-wide">{label}</p>
+                    <p className="text-2xl font-bold text-surface-900 mt-1">{value}</p>
                     {change !== undefined && (
                         <p className={`text-xs font-medium mt-2 flex items-center gap-1 ${trendColor}`}>
                             <span>{trendIcon}</span>
                             <span>{change > 0 ? '+' : ''}{change}%</span>
-                            {changeLabel && <span className="text-slate-400 ml-1">{changeLabel}</span>}
+                            {changeLabel && <span className="text-surface-400 ml-1">{changeLabel}</span>}
                         </p>
                     )}
                 </div>
@@ -102,14 +102,14 @@ export function ProgressBar({ value, max = 100, color = CHART_COLORS.primary, sh
 
     return (
         <div className="w-full">
-            <div className={`w-full bg-slate-100 rounded-full overflow-hidden ${height}`}>
+            <div className={`w-full bg-surface-100 rounded-full overflow-hidden ${height}`}>
                 <div
                     className="h-full rounded-full transition-all duration-500 ease-out"
                     style={{ width: `${percent}%`, backgroundColor: color }}
                 />
             </div>
             {showLabel && (
-                <div className="flex justify-between mt-1 text-xs text-slate-500">
+                <div className="flex justify-between mt-1 text-xs text-surface-500">
                     <span>{value.toLocaleString()}</span>
                     <span>{max.toLocaleString()}</span>
                 </div>
@@ -183,8 +183,8 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
                 </svg>
                 {(centerLabel || centerValue) && (
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
-                        {centerValue && <span className="text-2xl font-bold text-slate-900">{centerValue}</span>}
-                        {centerLabel && <span className="text-xs text-slate-500">{centerLabel}</span>}
+                        {centerValue && <span className="text-2xl font-bold text-surface-900">{centerValue}</span>}
+                        {centerLabel && <span className="text-xs text-surface-500">{centerLabel}</span>}
                     </div>
                 )}
             </div>
@@ -193,8 +193,8 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
                     {segments.map((seg, i) => (
                         <div key={i} className="flex items-center gap-2 text-sm">
                             <div className="w-3 h-3 rounded-full" style={{ backgroundColor: seg.color }} />
-                            <span className="text-slate-600">{seg.label}</span>
-                            <span className="text-slate-900 font-medium ml-auto">{seg.percent}%</span>
+                            <span className="text-surface-600">{seg.label}</span>
+                            <span className="text-surface-900 font-medium ml-auto">{seg.percent}%</span>
                         </div>
                     ))}
                 </div>
@@ -226,10 +226,10 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                     return (
                         <div key={i}>
                             <div className="flex justify-between text-sm mb-1">
-                                <span className="text-slate-600">{d.label}</span>
-                                {showValues && <span className="text-slate-900 font-medium">{d.value.toLocaleString()}</span>}
+                                <span className="text-surface-600">{d.label}</span>
+                                {showValues && <span className="text-surface-900 font-medium">{d.value.toLocaleString()}</span>}
                             </div>
-                            <div className="h-6 bg-slate-100 rounded-lg overflow-hidden">
+                            <div className="h-6 bg-surface-100 rounded-lg overflow-hidden">
                                 <div
                                     className="h-full rounded-lg transition-all duration-500"
                                     style={{ width: `${percent}%`, backgroundColor: color }}
@@ -267,7 +267,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                                     x={`${x}%`}
                                     y={height - barHeight - 25}
                                     textAnchor="middle"
-                                    className="text-xs fill-slate-600 font-medium"
+                                    className="text-xs fill-surface-600 font-medium"
                                 >
                                     {d.value.toLocaleString()}
                                 </text>
@@ -276,7 +276,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                                 x={`${x}%`}
                                 y={height - 5}
                                 textAnchor="middle"
-                                className="text-xs fill-slate-500"
+                                className="text-xs fill-surface-500"
                             >
                                 {d.label}
                             </text>
@@ -342,7 +342,7 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
                         stroke="#e2e8f0"
                         strokeDasharray="4 4"
                     />
-                    <text x={padding.left - 8} y={tick.y + 4} textAnchor="end" className="text-xs fill-slate-400">
+                    <text x={padding.left - 8} y={tick.y + 4} textAnchor="end" className="text-xs fill-surface-400">
                         {tick.value.toLocaleString()}
                     </text>
                 </g>
@@ -363,7 +363,7 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
 
             {/* X-axis labels (show every few) */}
             {points.filter((_, i) => i % Math.ceil(data.length / 6) === 0 || i === data.length - 1).map((p, i) => (
-                <text key={i} x={p.x} y={height - 8} textAnchor="middle" className="text-xs fill-slate-400">
+                <text key={i} x={p.x} y={height - 8} textAnchor="middle" className="text-xs fill-surface-400">
                     {p.date}
                 </text>
             ))}
@@ -439,7 +439,7 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
                     {series.map(s => (
                         <div key={s.key} className="flex items-center gap-2 text-sm">
                             <div className="w-3 h-0.5 rounded" style={{ backgroundColor: s.color }} />
-                            <span className="text-slate-600">{s.label}</span>
+                            <span className="text-surface-600">{s.label}</span>
                         </div>
                     ))}
                 </div>
@@ -502,7 +502,7 @@ export function HeatMap({ data, width = 500, height = 150 }: HeatMapProps) {
         <svg width={width} height={height}>
             {/* Day labels */}
             {days.map((day, i) => (
-                <text key={day} x={0} y={25 + i * cellHeight + cellHeight / 2} className="text-xs fill-slate-400" alignmentBaseline="middle">
+                <text key={day} x={0} y={25 + i * cellHeight + cellHeight / 2} className="text-xs fill-surface-400" alignmentBaseline="middle">
                     {day}
                 </text>
             ))}
@@ -564,7 +564,7 @@ export function FunnelChart({ data, height = 200 }: FunnelChartProps) {
                             <span className="text-white/90 text-sm">{d.value.toLocaleString()}</span>
                         </div>
                         {conversionRate && (
-                            <div className="absolute -right-16 top-1/2 -translate-y-1/2 text-xs text-slate-500">
+                            <div className="absolute -right-16 top-1/2 -translate-y-1/2 text-xs text-surface-500">
                                 {conversionRate}%
                             </div>
                         )}

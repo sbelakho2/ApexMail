@@ -20,3 +20,7 @@ export * from './time/index.js';
 export * from './id/index.js';
 export * from './json/index.js';
 export * from './result.js';
+export * from './mail-server-client.js';
+export * from './templates/index.js';
+export * from './attachments/index.js';
+export * from './validation/index.js';

@@ -230,7 +230,7 @@ export function PricingCalculator() {
                       {(prices.apexmail / (volume / 1000)).toFixed(3)}/1K emails
                     </div>
                     {savings > 0 && (
-                      <div className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-green-50 text-green-700 text-[10px] font-bold uppercase tracking-tight border border-green-100">
+                      <div className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-bold uppercase tracking-tight border border-emerald-100">
                         Save {formatCurrency(savings)}/mo
                       </div>
                     )}
@@ -285,10 +285,10 @@ export function PricingCalculator() {
  className="mt-12 grid sm:grid-cols-2 lg:grid-cols-4 gap-6"
  >
  {[
- { name: 'Free', price: '$0', volume: '1,000 emails/mo', features: ['Shared IP', 'Basic analytics', 'Community support'] },
- { name: 'Starter', price: '$29', volume: '25,000 emails/mo', features: ['Remove branding', 'Webhooks', 'Email support'] },
- { name: 'Growth', price: '$99', volume: '100,000 emails/mo', features: ['Dedicated IP', 'Priority support', 'Custom domain'], popular: true },
- { name: 'Scale', price: '$299', volume: '500,000 emails/mo', features: ['Multiple IPs', 'SSO included', 'SLA guarantee'] },
+ { name: 'Free', price: '$0', volume: '1,000 emails/mo', features: ['Shared IP (High Reputation)', 'Full API Access', 'Forensic Logs (24h)'] },
+ { name: 'Starter', price: '$29', volume: '25,000 emails/mo', features: ['Remove Branding', 'Webhooks', '30-Day Forensic Logs'] },
+ { name: 'Growth', price: '$99', volume: '100,000 emails/mo', features: ['Dedicated IP', 'Priority Queue', 'HIPAA Add-on Available'], popular: true },
+ { name: 'Scale', price: '$299', volume: '500,000 emails/mo', features: ['Multiple IPs', 'SSO Included', '99.99% SLA Guarantee'] },
  ].map((tier) => (
  <div
  key={tier.name}

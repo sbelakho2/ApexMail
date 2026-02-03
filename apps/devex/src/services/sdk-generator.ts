@@ -1089,7 +1089,7 @@ setup(
     version="${sdkConfig.version}",
     description="ApexMail Python SDK",
     author="ApexMail",
-    author_email="support@apexmail.io",
+    author_email="support@apexmail.ee",
     url="https://github.com/apexmail/apexmail-python",
     packages=find_packages(),
     python_requires=">=3.8",
@@ -2227,7 +2227,7 @@ Full documentation: ${config.docsBaseUrl}/sdk/python
   spec.name          = "${gemName}"
   spec.version       = "${sdkConfig.version}"
   spec.authors       = ["ApexMail"]
-  spec.email         = ["support@apexmail.io"]
+  spec.email         = ["support@apexmail.ee"]
   spec.summary       = "ApexMail Ruby SDK"
   spec.description   = "Official Ruby SDK for the ApexMail API"
   spec.homepage      = "https://github.com/apexmail/apexmail-ruby"
