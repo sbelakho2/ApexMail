@@ -184,7 +184,7 @@ export function LiveAPIConsole() {
 
           {/* Email Input */}
           <div className="mb-6">
-            <label className="block text-[11px] font-bold text-surface-400 uppercase tracking-widest mb-2.5">Your email address</label>
+            <label className="block text-[11px] font-bold text-surface-600 uppercase tracking-widest mb-2.5">Your email address</label>
             <input
               type="email"
               value={email}
@@ -197,7 +197,7 @@ export function LiveAPIConsole() {
           {/* Curl Command Preview */}
           <div className="mb-8">
             <div className="flex items-center justify-between mb-3">
-              <span className="text-[11px] font-bold text-surface-400 uppercase tracking-widest">cURL command</span>
+              <span className="text-[11px] font-bold text-surface-600 uppercase tracking-widest">cURL command</span>
               <button
                 onClick={handleCopy}
                 className="flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700 transition-colors bg-white px-2.5 py-1 rounded-md border border-surface-200 shadow-sm"
@@ -286,7 +286,7 @@ export function LiveAPIConsole() {
           {/* Code Example Container */}
           <div className="flex-1 bg-surface-900 rounded-xl border border-surface-800 shadow-2xl overflow-hidden flex flex-col min-h-[300px]">
             <div className="px-5 py-3 border-b border-surface-800 bg-surface-900/50 flex items-center justify-between">
-              <span className="text-[11px] font-mono text-surface-500 uppercase tracking-widest">{selectedLanguage}.example</span>
+              <span className="text-[11px] font-mono text-surface-600 uppercase tracking-widest">{selectedLanguage}.example</span>
               <div className="w-2 h-2 rounded-full bg-primary-500 animate-pulse" />
             </div>
             <div className="flex-1 p-0 overflow-auto custom-scrollbar">
@@ -325,7 +325,7 @@ export function LiveAPIConsole() {
  ].map((item) => (
  <div key={item.label} className="text-center p-6 rounded-lg bg-surface-50 border border-surface-100">
  <div className="text-2xl font-bold text-primary-600 mb-1 tabular-nums">{item.value}</div>
- <div className="text-[10px] font-bold text-surface-500 uppercase tracking-widest">{item.label}</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{item.label}</div>
  </div>
  ))}
  </motion.div>

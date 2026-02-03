@@ -151,13 +151,13 @@ export function CompetitorBreakdown() {
  <table className="w-full">
  <thead>
  <tr className="border-b border-surface-200">
- <th className="text-left py-4 px-6 text-[10px] font-bold text-surface-500 uppercase tracking-widest">Feature</th>
+ <th className="text-left py-4 px-6 text-[10px] font-bold text-surface-600 uppercase tracking-widest">Feature</th>
  <th className="text-center py-4 px-4">
  <span className="text-[10px] font-bold text-primary-600 uppercase tracking-widest">ApexMail</span>
  </th>
- <th className="text-center py-4 px-4 text-[10px] font-bold text-surface-400 uppercase tracking-widest">SendGrid</th>
- <th className="text-center py-4 px-4 text-[10px] font-bold text-surface-400 uppercase tracking-widest">Mailchimp</th>
- <th className="text-center py-4 px-4 text-[10px] font-bold text-surface-400 uppercase tracking-widest">AWS SES</th>
+ <th className="text-center py-4 px-4 text-[10px] font-bold text-surface-600 uppercase tracking-widest">SendGrid</th>
+ <th className="text-center py-4 px-4 text-[10px] font-bold text-surface-600 uppercase tracking-widest">Mailchimp</th>
+ <th className="text-center py-4 px-4 text-[10px] font-bold text-surface-600 uppercase tracking-widest">AWS SES</th>
  </tr>
  </thead>
  <tbody className="divide-y divide-surface-100">

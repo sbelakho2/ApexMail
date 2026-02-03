@@ -77,7 +77,7 @@ export function PrivateCloudHero() {
  ].map((stat) => (
  <div key={stat.label}>
  <div className="text-2xl lg:text-3xl font-bold text-surface-900 tabular-nums">{stat.value}</div>
- <div className="text-[10px] font-bold text-surface-500 uppercase tracking-widest">{stat.label}</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
  </div>
  ))}
  </motion.div>

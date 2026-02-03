@@ -260,7 +260,7 @@ export function EndpointExplorer() {
  animate={{ opacity: 1, height: 'auto' }}
  className="mt-6 pt-6 border-t border-surface-100"
  >
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-3">Example Request/Response</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-3">Example Request/Response</div>
  <pre className="text-[13px] text-surface-300 font-mono bg-surface-900 p-4 rounded-lg overflow-auto shadow-inner">
  {endpoint.example}
  </pre>

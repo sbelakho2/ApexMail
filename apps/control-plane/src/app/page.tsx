@@ -302,7 +302,7 @@ function PipelineStage({ label, count, color }: { label: string; count: number; 
             <div className={`${color} rounded-xl py-6 mb-2 transition-transform hover:scale-105`}>
                 <div className="text-2xl font-bold text-surface-900">{count}</div>
             </div>
-            <div className="text-xs font-medium text-surface-500">{label}</div>
+            <div className="text-xs font-medium text-surface-600">{label}</div>
         </div>
     );
 }

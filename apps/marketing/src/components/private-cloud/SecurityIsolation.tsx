@@ -99,7 +99,7 @@ export function SecurityIsolation() {
  <p className="text-sm text-surface-500 font-medium mb-6 leading-relaxed">{feature.description}</p>
  <div className="space-y-2">
  {feature.details.map((detail) => (
- <div key={detail} className="flex items-center gap-2 text-[10px] font-bold text-surface-400 uppercase tracking-tight">
+ <div key={detail} className="flex items-center gap-2 text-[10px] font-bold text-surface-600 uppercase tracking-tight">
  <div className="w-1 h-1 rounded-full bg-emerald-500" />
  {detail}
  </div>
@@ -123,8 +123,8 @@ export function SecurityIsolation() {
  <table className="w-full text-sm">
  <thead>
  <tr className="border-b border-surface-100">
- <th className="text-left py-4 px-6 text-[10px] font-bold text-surface-400 uppercase tracking-widest">Security Aspect</th>
- <th className="text-center py-4 px-6 text-[10px] font-bold text-surface-400 uppercase tracking-widest">Shared Cloud</th>
+ <th className="text-left py-4 px-6 text-[10px] font-bold text-surface-600 uppercase tracking-widest">Security Aspect</th>
+ <th className="text-center py-4 px-6 text-[10px] font-bold text-surface-600 uppercase tracking-widest">Shared Cloud</th>
  <th className="text-center py-4 px-6 text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50/30">Private Cloud</th>
  </tr>
  </thead>

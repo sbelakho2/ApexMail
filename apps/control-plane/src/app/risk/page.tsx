@@ -248,11 +248,11 @@ export default function RiskMonitoringPage() {
                                 </div>
                                 <div className="flex items-center gap-8">
                                     <div className="text-right">
-                                        <div className="text-xs font-medium text-surface-400 uppercase tracking-wider mb-0.5">Daily Volume</div>
+                                        <div className="text-xs font-medium text-surface-600 uppercase tracking-wider mb-0.5">Daily Volume</div>
                                         <div className="font-semibold text-surface-900">{formatNumber(tenant.metrics.dailyVolume)}</div>
                                     </div>
                                     <div className="text-right">
-                                        <div className="text-xs font-medium text-surface-400 uppercase tracking-wider mb-0.5">Bounce Rate</div>
+                                        <div className="text-xs font-medium text-surface-600 uppercase tracking-wider mb-0.5">Bounce Rate</div>
                                         <div className={cn(
                                             'font-semibold px-1.5 rounded',
                                             tenant.metrics.bounceRate > 0.1 ? 'text-red-600 bg-red-50' :
@@ -263,7 +263,7 @@ export default function RiskMonitoringPage() {
                                         </div>
                                     </div>
                                     <div className="text-right">
-                                        <div className="text-xs font-medium text-surface-400 uppercase tracking-wider mb-0.5">Flags</div>
+                                        <div className="text-xs font-medium text-surface-600 uppercase tracking-wider mb-0.5">Flags</div>
                                         <div className={cn(
                                             'font-semibold',
                                             tenant.flags.filter(f => !f.resolved).length > 0 ? 'text-red-600' : 'text-surface-400'

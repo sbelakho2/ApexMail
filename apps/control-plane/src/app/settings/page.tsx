@@ -132,7 +132,7 @@ export default function SettingsPage() {
             <div className="flex flex-col lg:flex-row gap-6">
                 {/* Sidebar Navigation - Horizontal scroll on mobile, vertical on desktop */}
                 <div className="w-full lg:w-64 lg:flex-shrink-0">
-                    <nav className="flex lg:flex-col gap-2 lg:gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0 -mx-2 lg:mx-0 px-2 lg:px-0">
+                    <nav className="flex lg:flex-col gap-2 lg:gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0 -mx-2.5 lg:mx-0 px-2.5 lg:px-0">
                         {SETTINGS_SECTIONS.map(section => (
                             <button
                                 key={section.id}

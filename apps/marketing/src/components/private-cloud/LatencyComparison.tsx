@@ -102,7 +102,7 @@ export function LatencyComparison() {
  <div className="flex justify-between items-center text-sm">
  <div className="flex items-center gap-3">
  <span className="text-surface-900 font-bold">{data.provider}</span>
- <span className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">{data.scenario}</span>
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{data.scenario}</span>
  </div>
  <span className="text-primary-600 font-mono font-bold">
  {animatedValues[index].toFixed(1)}ms
@@ -124,15 +124,15 @@ export function LatencyComparison() {
  <div className="flex flex-wrap justify-center gap-8 mt-10 pt-10 border-t border-surface-200">
  <div className="flex items-center gap-2">
  <div className="w-3 h-3 rounded-full bg-emerald-500" />
- <span className="text-xs font-bold text-surface-500 uppercase tracking-widest">Private Cloud</span>
+ <span className="text-xs font-bold text-surface-600 uppercase tracking-widest">Private Cloud</span>
  </div>
  <div className="flex items-center gap-2">
  <div className="w-3 h-3 rounded-full bg-amber-500" />
- <span className="text-xs font-bold text-surface-500 uppercase tracking-widest">Same Region</span>
+ <span className="text-xs font-bold text-surface-600 uppercase tracking-widest">Same Region</span>
  </div>
  <div className="flex items-center gap-2">
  <div className="w-3 h-3 rounded-full bg-red-500" />
- <span className="text-xs font-bold text-surface-500 uppercase tracking-widest">External API</span>
+ <span className="text-xs font-bold text-surface-600 uppercase tracking-widest">External API</span>
  </div>
  </div>
  </motion.div>

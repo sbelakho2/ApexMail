@@ -115,7 +115,7 @@ export function InteractiveConsole() {
  <div className="w-3 h-3 rounded-full bg-surface-200" />
  <div className="w-3 h-3 rounded-full bg-surface-200" />
  </div>
- <span className="text-xs font-bold text-surface-500 uppercase tracking-widest font-mono">POST /v1/send</span>
+ <span className="text-xs font-bold text-surface-600 uppercase tracking-widest font-mono">POST /v1/send</span>
  </div>
  <div className="flex items-center gap-3">
  <button
@@ -169,7 +169,7 @@ export function InteractiveConsole() {
  {activeTab === 'request' && (
  <div className="space-y-4">
  <div>
- <label className="block text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-2">To</label>
+ <label className="block text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-2">To</label>>
  <input
  type="email"
                       value={requestBody.to}
@@ -178,7 +178,7 @@ export function InteractiveConsole() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-2">Subject</label>
+                    <label className="block text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-2">Subject</label>>
                     <input
                       type="text"
                       value={requestBody.subject}
@@ -187,7 +187,7 @@ export function InteractiveConsole() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-2">HTML Body</label>
+                    <label className="block text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-2">HTML Body</label>>
                     <textarea
                       value={requestBody.html}
                       onChange={(e) => setRequestBody({ ...requestBody, html: e.target.value })}
@@ -246,7 +246,7 @@ export function InteractiveConsole() {
  >
  <div className="flex items-center justify-between mb-2">
  <span className="text-primary-600 font-mono text-xs font-bold uppercase tracking-tight">{webhook.type}</span>
- <span className="text-[10px] font-bold text-surface-400 uppercase tracking-widest tabular-nums">
+ <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest tabular-nums">
  {new Date(webhook.timestamp).toLocaleTimeString()}
  </span>
  </div>
@@ -263,7 +263,7 @@ export function InteractiveConsole() {
 
  {/* Right Panel - Preview */}
  <div className="p-6 bg-surface-50 min-h-[400px]">
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-4">Email Live Preview</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-4">Email Live Preview</div>
  <div className="bg-white border border-surface-200 rounded-xl overflow-hidden ">
  <div className="bg-surface-50 px-4 py-3 border-b border-surface-200">
  <div className="text-xs text-surface-500 font-medium">

@@ -261,15 +261,15 @@ export default function TenantsPage() {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                             <div className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
                                 <div className="text-xl font-bold text-surface-900">{formatNumber(selectedTenant.metrics.emailsSentMonth)}</div>
-                                <div className="text-xs text-surface-500 font-medium uppercase tracking-wide">Emails This Month</div>
+                                <div className="text-xs text-surface-600 font-medium uppercase tracking-wide">Emails This Month</div>
                             </div>
                             <div className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
                                 <div className="text-xl font-bold text-surface-900">{selectedTenant.metrics.domainsVerified}</div>
-                                <div className="text-xs text-surface-500 font-medium uppercase tracking-wide">Verified Domains</div>
+                                <div className="text-xs text-surface-600 font-medium uppercase tracking-wide">Verified Domains</div>
                             </div>
                             <div className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
                                 <div className="text-xl font-bold text-surface-900">{selectedTenant.metrics.teamMembers}</div>
-                                <div className="text-xs text-surface-500 font-medium uppercase tracking-wide">Team Members</div>
+                                <div className="text-xs text-surface-600 font-medium uppercase tracking-wide">Team Members</div>
                             </div>
                         </div>
 

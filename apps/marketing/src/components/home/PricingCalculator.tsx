@@ -210,7 +210,7 @@ export function PricingCalculator() {
                     </div>
                     <div>
                       <div className="text-sm font-bold text-surface-900">{option.label}</div>
-                      <div className="text-[10px] text-surface-500 font-medium uppercase tracking-tight">{option.tip}</div>
+                      <div className="text-[10px] text-surface-600 font-medium uppercase tracking-tight">{option.tip}</div>
                     </div>
                   </label>
                 ))}
@@ -226,7 +226,7 @@ export function PricingCalculator() {
                       {formatCurrency(prices.apexmail)}
                       <span className="text-lg text-surface-400 font-medium">/mo</span>
                     </div>
-                    <div className="text-[10px] text-surface-500 font-bold uppercase tracking-tight mb-4 tabular-nums">
+                    <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight mb-4 tabular-nums">
                       {(prices.apexmail / (volume / 1000)).toFixed(3)}/1K emails
                     </div>
                     {savings > 0 && (
@@ -247,12 +247,12 @@ export function PricingCalculator() {
                     key={competitor.name}
                     className="premium-card p-6 bg-white"
                   >
-                    <div className="text-[10px] text-surface-500 font-bold uppercase tracking-widest mb-1">{competitor.name}</div>
+                    <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest mb-1">{competitor.name}</div>
                     <div className="text-3xl font-bold text-surface-700 mb-1 tabular-nums">
                       {formatCurrency(competitor.price)}
                       <span className="text-lg text-surface-400 font-medium">/mo</span>
                     </div>
-                    <div className="text-[10px] text-surface-500 font-bold uppercase tracking-tight tabular-nums">
+                    <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight tabular-nums">
                       {(competitor.price / (volume / 1000)).toFixed(3)}/1K emails
                     </div>
                     {options.privateCloud && competitor.name !== 'ApexMail' && (
@@ -304,7 +304,7 @@ export function PricingCalculator() {
  )}
  <div className="text-lg font-bold text-surface-900 mb-1">{tier.name}</div>
  <div className="text-3xl font-bold text-primary-600 mb-1 tabular-nums">{tier.price}</div>
- <div className="text-xs text-surface-500 font-bold uppercase tracking-tight mb-4">{tier.volume}</div>
+ <div className="text-xs text-surface-600 font-bold uppercase tracking-tight mb-4">{tier.volume}</div>
  <ul className="space-y-2">
  {tier.features.map((feature) => (
  <li key={feature} className="flex items-center gap-2 text-sm text-surface-600 font-medium">

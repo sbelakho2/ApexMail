@@ -48,7 +48,7 @@ export function APIConsoleCTA() {
 
           {/* SDK Options */}
           <div className="pt-10 border-t border-surface-100">
-            <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-6">Available SDKs</div>
+            <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-6">Available SDKs</div>
             <div className="flex flex-wrap justify-center gap-3">
               {['Node.js', 'Python', 'Ruby', 'Go', 'PHP', 'Java', '.NET', 'Rust'].map((sdk) => (
                 <span

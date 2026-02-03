@@ -549,7 +549,7 @@ export default function AnalyticsPage() {
                                             <span className="font-medium text-surface-800">{c.name}</span>
                                             <span className="text-sm text-emerald-600 font-medium">{c.conversion}% conv.</span>
                                         </div>
-                                        <div className="flex gap-4 text-xs text-surface-500">
+                                        <div className="flex gap-4 text-xs text-surface-600">
                                             <span>📧 {c.sent.toLocaleString()} sent</span>
                                             <span>💬 {c.replies} replies</span>
                                             <span>📅 {c.meetings} meetings</span>

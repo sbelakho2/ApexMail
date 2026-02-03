@@ -96,7 +96,7 @@ export default function ControlPlaneLogin() {
                                     A
                                 </div>
                                 <h1 className="text-xl font-bold text-white tracking-tight">Control Plane</h1>
-                                <p className="text-xs text-surface-400 mt-2 font-medium uppercase tracking-wider">
+                                <p className="text-xs text-surface-600 mt-2 font-medium uppercase tracking-wider">
                                     Platform Administration
                                 </p>
                             </div>
@@ -182,7 +182,7 @@ export default function ControlPlaneLogin() {
                             </form>
 
                             <div className="mt-6 pt-6 border-t border-surface-100 text-center">
-                                <div className="flex items-center justify-center gap-3 text-[10px] text-surface-400 font-medium uppercase tracking-wider">
+                                <div className="flex items-center justify-center gap-3 text-[10px] text-surface-600 font-medium uppercase tracking-wider">
                                     <span className="flex items-center gap-1">🔒 TLS 1.3</span>
                                     <span className="w-1 h-1 rounded-full bg-surface-300"></span>
                                     <span className="flex items-center gap-1">Audit Logged</span>

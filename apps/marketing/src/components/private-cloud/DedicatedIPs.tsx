@@ -67,7 +67,7 @@ export function DedicatedIPs() {
  >
  <div className="premium-card p-8 bg-surface-50">
  <div className="flex items-center justify-between mb-8">
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest">IP Pool Dashboard</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">IP Pool Dashboard</div>
  <div className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-tight rounded-md">
  All Healthy
  </div>
@@ -100,7 +100,7 @@ export function DedicatedIPs() {
  </div>
  <div className="flex items-center gap-8">
  <div className="text-right hidden sm:block">
- <div className="text-[9px] font-bold text-surface-400 uppercase tracking-tight">Reputation</div>
+ <div className="text-[9px] font-bold text-surface-600 uppercase tracking-tight">Reputation</div>
  <div
  className={`text-sm font-bold ${
  ipData.reputation >= 90
@@ -131,7 +131,7 @@ export function DedicatedIPs() {
 
  {/* Features */}
  <div className="mt-8 pt-8 border-t border-surface-200">
- <div className="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-4">Included Protection</div>
+ <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-4">Included Protection</div>
  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
  {[
  'Automatic failover',

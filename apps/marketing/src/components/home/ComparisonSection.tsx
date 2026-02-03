@@ -92,22 +92,22 @@ export function ComparisonSection() {
  {/* Table Header */}
  <div className="min-w-[900px]">
  <div className="grid grid-cols-5 gap-4 p-4 lg:p-6 border-b border-surface-200 bg-surface-50">
-   <div className="font-bold text-surface-400 uppercase tracking-widest text-[11px] flex items-center">Feature</div>
+   <div className="font-bold text-surface-600 uppercase tracking-widest text-[11px] flex items-center">Feature</div>
    <div className="text-center">
      <div className="font-bold text-primary-600">ApexMail</div>
      <div className="text-[10px] text-primary-500 uppercase font-bold tracking-tight">Recommended</div>
    </div>
    <div className="text-center text-surface-900">
      <div className="font-medium">SendGrid</div>
-     <div className="text-[10px] text-surface-400 font-bold uppercase tracking-widest">Twilio</div>
+     <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest">Twilio</div>
    </div>
    <div className="text-center text-surface-900">
      <div className="font-medium">Mailchimp</div>
-     <div className="text-[10px] text-surface-400 font-bold uppercase tracking-widest">Intuit</div>
+     <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest">Intuit</div>
    </div>
    <div className="text-center text-surface-900">
      <div className="font-medium">AWS SES</div>
-     <div className="text-[10px] text-surface-400 font-bold uppercase tracking-widest">Amazon</div>
+     <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest">Amazon</div>
    </div>
  </div>
 
@@ -116,7 +116,7 @@ export function ComparisonSection() {
  <div key={category.name}>
  {/* Category Header */}
  <div className="px-4 lg:px-6 py-3 bg-surface-50 border-b border-surface-100">
- <span className="text-[11px] font-bold text-surface-400 uppercase tracking-widest">
+ <span className="text-[11px] font-bold text-surface-600 uppercase tracking-widest">
  {category.name}
  </span>
  </div>

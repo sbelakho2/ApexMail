@@ -173,7 +173,7 @@
 
     /* Status badge - restrained semantic usage */
     .status-badge {
-        @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium border;
+        @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border;
     }
 
     .status-badge-success {

@@ -42,15 +42,15 @@ export function APIConsoleHero() {
  transition={{ delay: 0.3 }}
  className="flex flex-wrap justify-center gap-8"
  >
- <div className="flex items-center gap-2 text-surface-500 font-bold text-[10px] uppercase tracking-widest">
+ <div className="flex items-center gap-2 text-surface-600 font-bold text-[10px] uppercase tracking-widest">
               <Zap className="w-5 h-5 text-primary-600" />
               <span>Real API responses</span>
             </div>
-            <div className="flex items-center gap-2 text-surface-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2 text-surface-600 font-bold text-[10px] uppercase tracking-widest">
               <Lock className="w-5 h-5 text-primary-600" />
               <span>Sandboxed environment</span>
             </div>
-            <div className="flex items-center gap-2 text-surface-500 font-bold text-[10px] uppercase tracking-widest">
+            <div className="flex items-center gap-2 text-surface-600 font-bold text-[10px] uppercase tracking-widest">
               <Terminal className="w-5 h-5 text-primary-600" />
               <span>Copy code snippets</span>
             </div>

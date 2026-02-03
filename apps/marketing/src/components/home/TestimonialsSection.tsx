@@ -129,19 +129,19 @@ export function TestimonialsSection() {
  {/* Stats Card */}
  <div className="lg:w-64 flex-shrink-0">
  <div className="bg-surface-50 rounded-lg p-6 border border-surface-200">
- <div className="text-xs font-bold text-surface-400 mb-4 uppercase tracking-widest">{activeTestimonial.stats.metric}</div>
+ <div className="text-xs font-bold text-surface-600 mb-4 uppercase tracking-widest">{activeTestimonial.stats.metric}</div>
  <div className="space-y-3">
  <div>
- <div className="text-[10px] text-surface-400 mb-1 uppercase font-bold">Before</div>
+ <div className="text-[10px] text-surface-600 mb-1 uppercase font-bold">Before</div>
  <div className="text-lg font-mono text-red-600 font-bold tabular-nums">{activeTestimonial.stats.before}</div>
  </div>
  <div className="w-full h-px bg-surface-200" />
  <div>
- <div className="text-[10px] text-surface-400 mb-1 uppercase font-bold">After</div>
+ <div className="text-[10px] text-surface-600 mb-1 uppercase font-bold">After</div>
  <div className="text-2xl font-mono text-primary-600 font-bold tabular-nums">{activeTestimonial.stats.after}</div>
  </div>
  </div>
- <div className="mt-4 text-[10px] text-surface-500 font-bold uppercase tracking-tight">
+ <div className="mt-4 text-[10px] text-surface-600 font-bold uppercase tracking-tight">
  Industry: {activeTestimonial.industry}
  </div>
  </div>
@@ -196,7 +196,7 @@ export function TestimonialsSection() {
  transition={{ delay: 0.4 }}
  className="mt-16 pt-12 border-t border-surface-200"
  >
- <p className="text-center text-xs font-bold text-surface-400 uppercase tracking-widest mb-8">
+ <p className="text-center text-xs font-bold text-surface-600 uppercase tracking-widest mb-8">
  Powering email for innovative companies worldwide
  </p>
  <div className="flex items-center justify-center gap-12 flex-wrap opacity-40 grayscale">

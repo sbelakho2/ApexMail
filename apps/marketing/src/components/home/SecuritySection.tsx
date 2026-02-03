@@ -114,7 +114,7 @@ export function SecuritySection() {
                   <div className="w-20 h-20 rounded-xl bg-white border border-surface-200 flex items-center justify-center mb-3 shadow-sm group-hover:shadow-md group-hover:-translate-y-1 transition-all duration-300">
                     <span className="text-xl font-bold text-primary-600 tracking-tighter">{logo.name}</span>
                   </div>
-                  <div className="text-[10px] text-surface-400 font-bold uppercase tracking-widest whitespace-nowrap">{logo.description}</div>
+                  <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest whitespace-nowrap">{logo.description}</div>
                 </div>
               ))}
             </div>

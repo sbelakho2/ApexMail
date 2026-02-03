@@ -165,14 +165,14 @@ export function DeploymentOptions() {
  </div>
  <p className="text-surface-600 font-medium mb-8 leading-relaxed">{selected.description}</p>
  <div className="bg-white border border-surface-200 rounded-md p-6 ">
- <div className="text-[10px] font-bold text-surface-400 mb-2 uppercase tracking-widest">Best For</div>
+ <div className="text-[10px] font-bold text-surface-600 mb-2 uppercase tracking-widest">Best For</div>
  <div className="text-surface-900 font-bold">{selected.bestFor}</div>
  </div>
  </div>
 
  {/* Right - Features */}
  <div>
- <div className="text-[10px] font-bold text-surface-400 mb-6 uppercase tracking-widest">Included Components</div>
+ <div className="text-[10px] font-bold text-surface-600 mb-6 uppercase tracking-widest">Included Components</div>
  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
  {selected.features.map((feature) => (
  <div key={feature} className="flex items-center gap-3 text-surface-700 font-bold text-sm">
@@ -186,7 +186,7 @@ export function DeploymentOptions() {
 
  {/* Architecture Preview */}
  <div className="mt-12 pt-12 border-t border-surface-200">
- <div className="text-[10px] font-bold text-surface-400 mb-4 uppercase tracking-widest text-center">Reference Architecture</div>
+ <div className="text-[10px] font-bold text-surface-600 mb-4 uppercase tracking-widest text-center">Reference Architecture</div>
  <div className="bg-surface-900 rounded-lg p-8 font-mono text-[13px] text-surface-300 shadow-inner overflow-x-auto">
  <pre className="whitespace-pre">
 {`┌─────────────────────────────────────────────────────────────┐

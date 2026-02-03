@@ -737,7 +737,7 @@ export default function IPWarmerPage() {
                                 />
                             </div>
                             <div className="bg-surface-50 rounded-lg p-3 mb-4">
-                                <div className="text-xs text-surface-500 mb-1">New Daily Limit</div>
+                                <div className="text-xs text-surface-600 mb-1">New Daily Limit</div>
                                 <div className="text-lg font-bold text-surface-900">
                                     {formatNumber(schedules.default?.schedule[Math.min(newWarmupDay, schedules.default.schedule.length - 1)] || 100)} emails/day
                                 </div>
