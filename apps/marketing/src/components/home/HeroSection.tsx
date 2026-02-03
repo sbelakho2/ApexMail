@@ -34,50 +34,43 @@ const benefits = [
 
 export function HeroSection() {
  return (
- <section className="relative min-h-screen flex items-center pt-20 lg:pt-0 overflow-hidden bg-surface-50">
- {/* Background Effects - Removed for Rams-grade minimalism */}
- <div className="absolute inset-0 overflow-hidden pointer-events-none">
- <div className="absolute top-0 right-0 w-1/2 h-full bg-surface-100 [clip-path:polygon(100%_0,0%_0,100%_100%)]" />
- </div>
-
- <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-20">
- <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+ <section className="relative min-h-[90vh] flex items-center pt-24 pb-16 lg:pt-0 overflow-hidden bg-white">
+ 
+ <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+ <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
  {/* Left Column - Copy */}
  <motion.div
- initial={{ opacity: 0, y: 20 }}
+ initial={{ opacity: 0, y: 12 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ duration: 0.5 }}
  >
  {/* Badge */}
  <div
-   className="inline-flex items-center gap-2 px-4 py-1.5 rounded-xl bg-white border border-surface-200 text-sm text-primary-700 mb-6"
+   className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-50 border border-surface-200 text-xs font-medium text-surface-600 mb-8"
  >
-   <span className="w-2 h-2 rounded-full bg-primary-500" />
+   <span className="w-1.5 h-1.5 rounded-full bg-primary-500" />
    Now with Private Cloud deployments
  </div>
 
  {/* Headline */}
- <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
- <span className="text-surface-900">The Email API That</span>
- <br />
- <span className="text-primary-500">Keeps You Out of Court</span>
- </h1>
+ <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 text-surface-900 leading-tight">
+                The Email API That <br />
+                <span className="text-surface-500">Value Your Sleep.</span>
+              </h1>
 
  {/* subheadline */}
- <p className="text-[17px] lg:text-xl text-surface-600 mb-8 max-w-xl leading-relaxed">
-                Ship <strong className="text-surface-900 font-semibold">HIPAA & GDPR-ready</strong> transactional emails with 99.99% deliverability.
-                The only infrastructure designed for developers who value sleep over debugging spam filters.
+ <p className="text-lg text-surface-600 mb-8 max-w-xl leading-relaxed">
+                Send <strong className="text-surface-900 font-semibold">HIPAA & GDPR-ready</strong> transactional emails with clear tracking.
+                Infrastructure designed for developers who prefer stability over buzzwords.
               </p>
  {/* Benefits List */}
- <ul className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+ <ul className="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-8 mb-10">
    {benefits.map((benefit) => (
      <li
        key={benefit}
-       className="flex items-center gap-3 text-surface-600 text-[14px] font-medium"
+       className="flex items-center gap-2.5 text-surface-600 text-sm"
      >
-       <span className="w-5 h-5 rounded-md bg-primary-50 flex items-center justify-center flex-shrink-0 border border-primary-100">
-         <Check className="w-3 h-3 text-primary-600" />
-       </span>
+       <Check className="w-4 h-4 text-primary-600" />
        {benefit}
      </li>
    ))}
@@ -87,16 +80,16 @@ export function HeroSection() {
         <div className="flex flex-wrap gap-4">
           <Link 
             href="https://app.apexmail.ee/signup" 
-            className="btn-primary flex items-center gap-2 group shadow-lg shadow-primary-500/20 active:scale-[0.98] transition-all"
+            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
           >
             Get API Keys
-            <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+            <ArrowRight className="w-4 h-4 ml-2" />
           </Link>
           <Link 
             href="#demo" 
-            className="btn-secondary flex items-center gap-2 hover:bg-surface-50 active:scale-[0.98] transition-all"
+            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
           >
-            <Play className="w-4 h-4 fill-current" />
+            <Play className="w-4 h-4 mr-2" />
             Watch Demo
           </Link>
         </div>
@@ -113,13 +106,11 @@ export function HeroSection() {
  </motion.div>
 
  {/* Right Column - Code Block */}
- <div
- className="relative"
- >
+ <div className="relative hidden lg:block">
  {/* Code block */}
- <div className="relative premium-card p-1 bg-surface-900 overflow-hidden border-surface-700">
+ <div className="relative bg-surface-900 rounded-xl overflow-hidden border border-surface-800 shadow-2xl">
  {/* Window header */}
- <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800">
+ <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-900">
  <div className="flex gap-1.5">
  <span className="w-3 h-3 rounded-full bg-surface-700" />
  <span className="w-3 h-3 rounded-full bg-surface-700" />
@@ -133,15 +124,15 @@ export function HeroSection() {
 
  {/* Floating stat card */}
  <div
- className="absolute -bottom-8 -left-8 premium-card px-4 py-3 bg-white"
+ className="absolute -bottom-8 -left-8 bg-white border border-surface-200 rounded-xl px-5 py-4 shadow-xl"
  >
- <div className="flex items-center gap-3">
- <div className="w-10 h-10 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100">
- <span className="text-primary-600 text-lg font-bold">✓</span>
+ <div className="flex items-center gap-4">
+ <div className="w-12 h-12 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100">
+ <span className="text-primary-600 text-xl font-bold">✓</span>
  </div>
  <div>
- <div className="text-xs font-semibold uppercase tracking-wider text-surface-500">Average delivery</div>
- <div className="text-xl font-bold text-surface-900 tabular-nums">1.2s</div>
+ <div className="text-xs font-bold uppercase tracking-wider text-surface-500 mb-0.5">Average delivery</div>
+ <div className="text-2xl font-bold text-surface-900 tabular-nums">1.2s</div>
  </div>
  </div>
  </div>

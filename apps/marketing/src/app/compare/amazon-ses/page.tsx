@@ -92,7 +92,7 @@ const comparisonData = {
       'Predictable pricing without hidden AWS charges',
     ],
   },
-};
+} as const;
 
 export default function CompareAmazonSESPage() {
   return (

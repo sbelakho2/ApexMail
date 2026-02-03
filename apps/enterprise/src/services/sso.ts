@@ -257,7 +257,8 @@ export class SSOService {
         SELECT * FROM ent_sso_configurations
         WHERE organization_id = $1 AND enabled = true
       `;
-      const params: any[] = [organizationId];
+      // Use proper typing for SQL parameters
+      const params: (string | SSOProvider)[] = [organizationId];
 
       if (provider) {
         query += ' AND provider = $2';

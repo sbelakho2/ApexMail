@@ -37,7 +37,7 @@ export function CTASection() {
  </p>
 
  {/* Features List */}
- <div className="grid sm:grid-cols-2 gap-4 max-w-2xl mx-auto mb-12 p-6 rounded-2xl bg-surface-50 border border-surface-100/60">
+ <div className="grid sm:grid-cols-2 gap-x-8 gap-y-4 max-w-2xl mx-auto mb-12">
    {ctaFeatures.map((feature, index) => (
      <motion.div
        key={feature.text}
@@ -46,10 +46,10 @@ export function CTASection() {
        transition={{ delay: 0.2 + index * 0.1 }}
        className="flex items-center gap-3 text-left"
      >
-       <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center flex-shrink-0 border border-surface-200 shadow-sm">
-         <feature.icon className="w-4 h-4 text-primary-600" />
+       <div className="w-6 h-6 rounded bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
+         <feature.icon className="w-3.5 h-3.5" />
        </div>
-       <span className="text-surface-700 text-[15px] font-medium">{feature.text}</span>
+       <span className="text-surface-600 text-sm font-medium">{feature.text}</span>
      </motion.div>
    ))}
  </div>
@@ -63,14 +63,14 @@ export function CTASection() {
  >
    <Link
      href="https://app.apexmail.ee/signup"
-     className="btn-primary text-[17px] font-bold px-8 py-4 flex items-center gap-2 group w-full sm:w-auto justify-center rounded-xl shadow-xl shadow-primary-500/20 hover:shadow-2xl hover:shadow-primary-500/30 active:scale-[0.98] transition-all"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors w-full sm:w-auto"
    >
      Deploy to Production
-     <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+     <ArrowRight className="w-4 h-4 ml-2" />
    </Link>
    <Link
      href="/contact"
-     className="btn-secondary text-[17px] font-bold px-8 py-4 w-full sm:w-auto justify-center bg-white hover:bg-surface-50 rounded-xl border-surface-200 active:scale-[0.98] transition-all"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors w-full sm:w-auto"
    >
      Book Architecture Review
    </Link>
@@ -84,19 +84,19 @@ export function CTASection() {
  className="flex flex-wrap items-center justify-center gap-6 text-surface-500 text-sm font-medium"
  >
  <span className="flex items-center gap-2">
- <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
  99.99% Uptime SLA
  </span>
  <span className="flex items-center gap-2">
- <span className="w-2 h-2 rounded-full bg-primary-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-primary-500"></span>
  SOC 2 Certified
  </span>
  <span className="flex items-center gap-2">
- <span className="w-2 h-2 rounded-full bg-primary-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-primary-500"></span>
  GDPR Compliant
  </span>
  <span className="flex items-center gap-2">
- <span className="w-2 h-2 rounded-full bg-orange-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-surface-400"></span>
  24/7 Support
  </span>
  </motion.div>

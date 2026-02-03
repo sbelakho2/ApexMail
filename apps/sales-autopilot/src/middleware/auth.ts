@@ -14,7 +14,19 @@ import { createLogger } from '@apexmail/lib';
 const logger = createLogger({ name: 'control-plane-auth', level: 'info' });
 
 // Secret key for signing session tokens (MUST be set in production)
-const SESSION_SECRET = process.env.CONTROL_PLANE_SESSION_SECRET || 'dev-secret-change-in-production';
+function getSessionSecret(): string {
+    const secret = process.env.CONTROL_PLANE_SESSION_SECRET;
+    if (!secret) {
+        if (process.env.NODE_ENV === 'production') {
+            throw new Error('CONTROL_PLANE_SESSION_SECRET must be set in production');
+        }
+        logger.warn('Using dev session secret - set CONTROL_PLANE_SESSION_SECRET in production');
+        return 'dev-secret-DO-NOT-USE-IN-PRODUCTION';
+    }
+    return secret;
+}
+
+const SESSION_SECRET = getSessionSecret();
 
 // Internal API key for control plane access
 const CONTROL_PLANE_API_KEY = process.env.CONTROL_PLANE_API_KEY;

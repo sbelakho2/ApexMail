@@ -666,9 +666,13 @@ export class BackupService {
   }
 
   private async backupTable(schema: string, table: string, outputPath: string): Promise<number> {
-    // In production, would use pg_dump for proper backup
+    // SECURITY: Validate and quote identifiers to prevent SQL injection
+    // Even though input comes from system catalogs, defense in depth is important
+    const safeSchema = this.quoteIdentifier(schema);
+    const safeTable = this.quoteIdentifier(table);
+    
     const result = await this.db.query(`
-      SELECT * FROM ${schema}.${table}
+      SELECT * FROM ${safeSchema}.${safeTable}
     `);
 
     const data = JSON.stringify(result.rows);
@@ -676,6 +680,19 @@ export class BackupService {
     
     await fs.writeFile(outputPath, compressed);
     return data.length;
+  }
+
+  /**
+   * Quote SQL identifier to prevent injection
+   * Uses PostgreSQL's standard identifier quoting
+   */
+  private quoteIdentifier(identifier: string): string {
+    // Validate: only allow alphanumeric, underscore
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier)) {
+      throw new Error(`Invalid SQL identifier: ${identifier}`);
+    }
+    // Double any embedded quotes and wrap in quotes
+    return `"${identifier.replace(/"/g, '""')}"`;
   }
 
   private async backupRoles(outputPath: string): Promise<void> {
@@ -697,9 +714,13 @@ export class BackupService {
     _since: Date,
     outputPath: string
   ): Promise<number> {
+    // SECURITY: Use quoted identifiers
+    const safeSchema = this.quoteIdentifier(schema);
+    const safeTable = this.quoteIdentifier(table);
+    
     // In production, would track changes via triggers or logical decoding
     const result = await this.db.query(`
-      SELECT * FROM ${schema}.${table}
+      SELECT * FROM ${safeSchema}.${safeTable}
     `);
 
     const data = JSON.stringify(result.rows);

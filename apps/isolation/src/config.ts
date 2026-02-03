@@ -109,7 +109,13 @@ export const config: Config = {
   },
 
   security: {
-    encryptionKey: getEnv('TENANT_ENCRYPTION_KEY', 'dev-encryption-key-32chars!!'),
+    encryptionKey: (() => {
+      const key = getEnv('TENANT_ENCRYPTION_KEY', 'dev-encryption-key-32chars!!');
+      if (key === 'dev-encryption-key-32chars!!' && process.env.NODE_ENV === 'production') {
+        throw new Error('TENANT_ENCRYPTION_KEY must be set in production');
+      }
+      return key;
+    })(),
     dataKeyRotationDays: parseInt(getEnv('DATA_KEY_ROTATION_DAYS', '90')),
     auditRetentionDays: parseInt(getEnv('AUDIT_RETENTION_DAYS', '365')),
     sessionTimeoutMinutes: parseInt(getEnv('SESSION_TIMEOUT_MINUTES', '60')),

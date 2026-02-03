@@ -218,7 +218,8 @@ export class TemplateApprovalService {
   ): Promise<Result<{ submissions: TemplateSubmission[]; total: number }>> {
     try {
       const conditions: string[] = [];
-      const params: any[] = [];
+      // Use union type for SQL parameter values
+      const params: (string | Date | number)[] = [];
       let paramIndex = 1;
 
       if (filters.accountId) {
@@ -555,7 +556,8 @@ export class TemplateApprovalService {
   ): Promise<Result<ApprovalStats>> {
     try {
       const conditions: string[] = [];
-      const params: any[] = [];
+      // Use union type for SQL parameter values
+      const params: (string | Date)[] = [];
       let paramIndex = 1;
 
       if (accountId) {

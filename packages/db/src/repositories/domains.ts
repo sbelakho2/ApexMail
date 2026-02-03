@@ -101,7 +101,12 @@ export class DomainsRepository {
     return Result.ok(this.mapRow(row));
   }
 
-  async findById(id: string): Promise<Result<Domain | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<Domain | null, Error>> {
+    const query = tenantId
+      ? 'SELECT * FROM domains WHERE id = $1 AND tenant_id = $2'
+      : 'SELECT * FROM domains WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
+    
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -115,10 +120,7 @@ export class DomainsRepository {
       health_status: string;
       created_at: Date;
       updated_at: Date;
-    }>(
-      'SELECT * FROM domains WHERE id = $1',
-      [id]
-    );
+    }>(query, params);
 
     if (!result.ok) return result;
 
@@ -151,7 +153,7 @@ export class DomainsRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async update(id: string, input: UpdateDomainInput): Promise<Result<Domain, Error>> {
+  async update(id: string, input: UpdateDomainInput, tenantId?: string): Promise<Result<Domain, Error>> {
     const updates: string[] = [];
     const values: unknown[] = [];
     let paramIndex = 1;
@@ -177,6 +179,12 @@ export class DomainsRepository {
     values.push(new Date());
 
     values.push(id);
+    
+    let whereClause = `WHERE id = $${paramIndex}`;
+    if (tenantId) {
+      values.push(tenantId);
+      whereClause += ` AND tenant_id = $${paramIndex + 1}`;
+    }
 
     const result = await this.db.query<{
       id: string;
@@ -192,7 +200,7 @@ export class DomainsRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE domains SET ${updates.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      `UPDATE domains SET ${updates.join(', ')} ${whereClause} RETURNING *`,
       values
     );
 

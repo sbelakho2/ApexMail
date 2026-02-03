@@ -81,15 +81,6 @@
     @apply bg-white border border-surface-200;
   }
 
-  .premium-card {
-    @apply bg-white border border-surface-200 rounded-md transition-all duration-300;
-    box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06);
-  }
-  .premium-card:hover {
-    @apply border-primary-500/30 bg-surface-50/50;
-    box-shadow: 0 14px 40px rgba(15,23,42,0.08);
-  }
-
   .btn-primary {
     @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-medium rounded-md transition-all duration-200;
   }
@@ -112,10 +103,6 @@
 
   .code-block {
     @apply font-mono text-[13px] bg-surface-900 text-white rounded-sm border border-surface-700 overflow-x-auto p-4;
-  }
-
-  .feature-card {
-    @apply premium-card p-6;
   }
 
   .nav-link {

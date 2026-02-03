@@ -237,17 +237,17 @@ export default function CRMPipelinePage() {
                                 <div className="text-surface-900 font-medium">{selectedLead.source}</div>
                             </div>
                             <div>
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Contact</label>>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Contact</label>
                                 <div className="text-surface-900 font-medium">{selectedLead.contactName || 'Unknown'}</div>
                             </div>
                             <div>
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Email</label>>
+                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Email</label>
                                 <div className="text-surface-900 font-medium">{selectedLead.contactEmail || 'Not found'}</div>
                             </div>
                         </div>
 
                         <div className="mb-8">
-                            <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2 block">Tags</label>>
+                            <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2 block">Tags</label>
                             <div className="flex flex-wrap gap-2">
                                 {selectedLead.tags.map(tag => (
                                     <span key={tag} className="px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-100 rounded-md text-sm font-medium">

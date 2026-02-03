@@ -133,7 +133,6 @@ const REAL_COMPANIES: RealCompany[] = [
     { name: 'Checkout.com', domain: 'checkout.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Go', 'React'], isQualifiedLead: true },
     { name: 'Adyen', domain: 'adyen.com', industry: 'Fintech', employees: '1001-5000', hasFunding: true, techStack: ['Java', 'React'], isQualifiedLead: true },
     { name: 'Chargebee', domain: 'chargebee.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },
-    { name: 'Paddle', domain: 'paddle.com', industry: 'Fintech', employees: '201-500', hasFunding: true, techStack: ['Go', 'React'], isQualifiedLead: true },
     { name: 'Bill.com', domain: 'bill.com', industry: 'Fintech', employees: '1001-5000', hasFunding: true, techStack: ['Java', 'React'], isQualifiedLead: true },
     { name: 'Marqeta', domain: 'marqeta.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Java', 'React'], isQualifiedLead: true },
     // Marketing/Sales (50)

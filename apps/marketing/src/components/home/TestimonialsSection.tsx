@@ -91,7 +91,7 @@ export function TestimonialsSection() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
- className="premium-card p-8 lg:p-12 mb-8 bg-white"
+ className="p-8 lg:p-12 mb-10 bg-white rounded-xl border border-surface-200"
  >
  <AnimatePresence mode="wait">
  <motion.div
@@ -101,27 +101,22 @@ export function TestimonialsSection() {
  exit={{ opacity: 0, x: -20 }}
  transition={{ duration: 0.3 }}
  >
- <div className="flex flex-col lg:flex-row gap-8 lg:gap-12">
+ <div className="flex flex-col lg:flex-row gap-8 lg:gap-16">
  {/* Quote */}
  <div className="flex-1">
- <Quote className="w-10 h-10 text-primary-200 mb-4" />
- <blockquote className="text-xl lg:text-2xl text-surface-900 font-medium leading-relaxed mb-6">
+ <Quote className="w-8 h-8 text-surface-200 mb-6" fill="currentColor" />
+ <blockquote className="text-xl lg:text-2xl text-surface-900 font-medium leading-relaxed mb-8">
  &ldquo;{activeTestimonial.quote}&rdquo;
  </blockquote>
  <div className="flex items-center gap-4">
- <div className="w-14 h-14 rounded-full bg-primary-50 flex items-center justify-center text-primary-600 font-bold text-lg border border-primary-100">
+ <div className="w-12 h-12 rounded-full bg-surface-50 flex items-center justify-center text-surface-900 font-semibold text-sm border border-surface-200">
  {activeTestimonial.author.split(' ').map(n => n[0]).join('')}
  </div>
  <div>
- <div className="font-bold text-surface-900">{activeTestimonial.author}</div>
- <div className="text-sm text-surface-500 font-medium">
- {activeTestimonial.role} at {activeTestimonial.company}
+ <div className="font-semibold text-surface-900">{activeTestimonial.author}</div>
+ <div className="text-sm text-surface-500">
+ {activeTestimonial.role}, {activeTestimonial.company}
  </div>
- </div>
- <div className="ml-auto hidden sm:flex items-center gap-0.5">
- {[...Array(5)].map((_, i) => (
- <Star key={i} className="w-4 h-4 fill-amber-400 text-amber-400" />
- ))}
  </div>
  </div>
  </div>
@@ -129,19 +124,18 @@ export function TestimonialsSection() {
  {/* Stats Card */}
  <div className="lg:w-64 flex-shrink-0">
  <div className="bg-surface-50 rounded-lg p-6 border border-surface-200">
- <div className="text-xs font-bold text-surface-600 mb-4 uppercase tracking-widest">{activeTestimonial.stats.metric}</div>
- <div className="space-y-3">
+ <div className="text-xs font-semibold text-surface-500 mb-4 uppercase tracking-wide">{activeTestimonial.stats.metric}</div>
+ <div className="space-y-4">
  <div>
- <div className="text-[10px] text-surface-600 mb-1 uppercase font-bold">Before</div>
- <div className="text-lg font-mono text-red-600 font-bold tabular-nums">{activeTestimonial.stats.before}</div>
+ <div className="text-[10px] text-surface-400 mb-1 uppercase font-medium">Before</div>
+ <div className="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">{activeTestimonial.stats.before}</div>
  </div>
- <div className="w-full h-px bg-surface-200" />
  <div>
- <div className="text-[10px] text-surface-600 mb-1 uppercase font-bold">After</div>
+ <div className="text-[10px] text-surface-400 mb-1 uppercase font-medium">After</div>
  <div className="text-2xl font-mono text-primary-600 font-bold tabular-nums">{activeTestimonial.stats.after}</div>
  </div>
  </div>
- <div className="mt-4 text-[10px] text-surface-600 font-bold uppercase tracking-tight">
+ <div className="mt-6 pt-4 border-t border-surface-200 text-xs text-surface-500 font-medium">
  Industry: {activeTestimonial.industry}
  </div>
  </div>
@@ -160,10 +154,10 @@ export function TestimonialsSection() {
  key={index}
  onClick={() => setActiveIndex(index)}
  className={cn(
- 'w-2 h-2 rounded-full transition-all',
+ 'h-1.5 rounded-full transition-all duration-300',
  index === activeIndex
- ? 'w-8 bg-primary-600'
- : 'bg-surface-300 hover:bg-surface-400'
+ ? 'w-6 bg-surface-900'
+ : 'w-1.5 bg-surface-200 hover:bg-surface-300'
  )}
  aria-label={`Go to testimonial ${index + 1}`}
  />
@@ -174,14 +168,14 @@ export function TestimonialsSection() {
  <div className="flex items-center gap-2">
  <button
  onClick={prevTestimonial}
- className="w-10 h-10 rounded-md border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-primary-600 hover:border-primary-200 transition-colors "
+ className="w-9 h-9 rounded-lg border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
  aria-label="Previous testimonial"
  >
  <ChevronLeft className="w-5 h-5" />
  </button>
  <button
  onClick={nextTestimonial}
- className="w-10 h-10 rounded-md border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-primary-600 hover:border-primary-200 transition-colors "
+ className="w-9 h-9 rounded-lg border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
  aria-label="Next testimonial"
  >
  <ChevronRight className="w-5 h-5" />

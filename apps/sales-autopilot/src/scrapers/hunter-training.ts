@@ -287,7 +287,7 @@ function hasAnalytics(technologies: string[]): boolean {
  * Checks for payment integrations
  */
 function hasPaymentIntegration(technologies: string[]): boolean {
-    const payments = ['stripe', 'paypal', 'braintree', 'square', 'paddle', 'chargebee'];
+    const payments = ['stripe', 'paypal', 'braintree', 'square', 'chargebee'];
     const techLower = technologies.map(t => t.toLowerCase());
     return payments.some(p => techLower.some(t => t.includes(p)));
 }

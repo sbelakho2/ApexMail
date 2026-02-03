@@ -17,6 +17,8 @@ const configSchema = z.object({
   supportedApiVersions: z.array(z.string()).default(['2024-01', '2023-10', '2023-06']),
   deprecatedApiVersions: z.array(z.string()).default(['2023-01', '2022-10']),
   sandboxEnabled: z.boolean().default(true),
+  // Webhook limits (configurable per deployment)
+  maxWebhookEndpointsPerTenant: z.number().default(10),
   // Database config
   dbHost: z.string().default('localhost'),
   dbPort: z.number().default(5432),

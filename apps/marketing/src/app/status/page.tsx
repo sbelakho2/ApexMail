@@ -1,8 +1,8 @@
 import type { Metadata } from 'next';
 import { StatusHero } from '@/components/status/StatusHero';
-import { StatusOverview } from '@/components/status/StatusOverview';
-import { StatusHistory } from '@/components/status/StatusHistory';
-import { StatusSubscribe } from '@/components/status/StatusSubscribe';
+// import { StatusOverview } from '@/components/status/StatusOverview';
+// import { StatusHistory } from '@/components/status/StatusHistory';
+// import { StatusSubscribe } from '@/components/status/StatusSubscribe';
 
 export const metadata: Metadata = {
   title: 'System Status | ApexMail',
@@ -19,9 +19,11 @@ export default function StatusPage() {
   return (
     <main className="overflow-hidden">
       <StatusHero />
+      {/* 
       <StatusOverview />
       <StatusHistory />
-      <StatusSubscribe />
+      <StatusSubscribe /> 
+      */}
     </main>
   );
 }

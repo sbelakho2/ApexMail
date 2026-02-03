@@ -83,7 +83,7 @@ const comparisonData = {
       'More generous free tier (1,000 vs 100 emails/month)',
     ],
   },
-};
+} as const;
 
 export default function ComparePostmarkPage() {
   return (

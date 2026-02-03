@@ -8,7 +8,7 @@ export function DedicatedIPs() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+ <section ref={ref} className="py-24 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
@@ -16,14 +16,14 @@ export function DedicatedIPs() {
  initial={{ opacity: 0, x: -20 }}
  animate={inView ? { opacity: 1, x: 0 } : {}}
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-4">
-            <Globe className="w-4 h-4" />
+ <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
+            <Globe className="w-3.5 h-3.5" />
             Dedicated IPs
           </div>
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
+ <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Your Reputation. Your IPs.
  </h2>
- <p className="text-lg text-surface-600 mb-8 leading-relaxed font-medium">
+ <p className="text-lg text-surface-600 mb-8 leading-relaxed">
  With private cloud, you get dedicated IP addresses that no one else shares. 
  Build your sender reputation from scratch, and keep it pristine.
  </p>
@@ -47,12 +47,12 @@ export function DedicatedIPs() {
  },
  ].map((item) => (
  <div key={item.title} className="flex items-start gap-4">
- <div className="w-12 h-12 rounded-md bg-primary-50 flex items-center justify-center flex-shrink-0 border border-primary-100">
- <item.icon className="w-6 h-6 text-primary-600" />
+ <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center flex-shrink-0 border border-surface-200">
+ <item.icon className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
  </div>
  <div>
- <div className="text-surface-900 font-bold">{item.title}</div>
- <div className="text-sm text-surface-500 font-medium">{item.description}</div>
+ <div className="text-surface-900 font-semibold mb-1">{item.title}</div>
+ <div className="text-sm text-surface-600 leading-relaxed">{item.description}</div>
  </div>
  </div>
  ))}
@@ -65,10 +65,10 @@ export function DedicatedIPs() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  transition={{ delay: 0.2 }}
  >
- <div className="premium-card p-8 bg-surface-50">
+ <div className="bg-white rounded-xl border border-surface-200 p-8 shadow-sm">
  <div className="flex items-center justify-between mb-8">
- <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">IP Pool Dashboard</div>
- <div className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-tight rounded-md">
+ <div className="text-xs font-semibold text-surface-500">IP Pool Dashboard</div>
+ <div className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100/50 text-[10px] font-medium rounded">
  All Healthy
  </div>
  </div>
@@ -84,7 +84,7 @@ export function DedicatedIPs() {
  ].map((ipData) => (
  <div
  key={ipData.ip}
- className="flex items-center justify-between p-4 bg-white border border-surface-100 rounded-lg "
+ className="flex items-center justify-between p-4 bg-surface-50/50 border border-surface-100/50 rounded-lg hover:border-surface-200 transition-colors"
  >
  <div className="flex items-center gap-3">
  <div
@@ -96,13 +96,13 @@ export function DedicatedIPs() {
  : 'bg-surface-300'
  }`}
  />
- <span className="text-surface-900 font-mono text-sm font-bold">{ipData.ip}</span>
+ <span className="text-surface-900 font-mono text-xs font-medium">{ipData.ip}</span>
  </div>
  <div className="flex items-center gap-8">
  <div className="text-right hidden sm:block">
- <div className="text-[9px] font-bold text-surface-600 uppercase tracking-tight">Reputation</div>
+ <div className="text-[10px] font-medium text-surface-500 mb-0.5">Reputation</div>
  <div
- className={`text-sm font-bold ${
+ className={`text-sm font-semibold ${
  ipData.reputation >= 90
  ? 'text-emerald-600'
  : ipData.reputation >= 70
@@ -114,11 +114,11 @@ export function DedicatedIPs() {
  </div>
  </div>
  <div
- className={`px-2.5 py-0.5 text-[9px] font-bold uppercase tracking-tight rounded-md ${
+ className={`px-2 py-0.5 text-xs font-medium rounded ${
  ipData.status === 'active'
- ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+ ? 'bg-emerald-50 text-emerald-700 border border-emerald-100/50'
  : ipData.status === 'warming'
- ? 'bg-amber-50 text-amber-700 border border-amber-100'
+ ? 'bg-amber-50 text-amber-700 border border-amber-100/50'
  : 'bg-surface-100 text-surface-500 border border-surface-200'
  }`}
  >
@@ -130,8 +130,8 @@ export function DedicatedIPs() {
  </div>
 
  {/* Features */}
- <div className="mt-8 pt-8 border-t border-surface-200">
- <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-4">Included Protection</div>
+ <div className="mt-8 pt-6 border-t border-surface-200">
+ <div className="text-xs font-semibold text-surface-900 mb-4">Included Protection</div>
  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
  {[
  'Automatic failover',
@@ -141,8 +141,8 @@ export function DedicatedIPs() {
  'Blacklist alerts',
  'SPF/DKIM/DMARC setup',
  ].map((feature) => (
- <div key={feature} className="flex items-center gap-2 text-xs font-bold text-surface-700">
- <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0" strokeWidth={3} />
+ <div key={feature} className="flex items-center gap-2 text-xs text-surface-600">
+ <CheckCircle className="w-4 h-4 text-emerald-600 flex-shrink-0" strokeWidth={1.5} />
  {feature}
  </div>
  ))}

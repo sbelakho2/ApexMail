@@ -76,12 +76,19 @@ export class SLOManager extends EventEmitter {
         if (this.refreshInterval) return;
 
         this.refreshInterval = setInterval(
-            () => this.refreshAllSLOs(),
+            () => {
+                // Properly handle the async promise to prevent unhandled rejections
+                this.refreshAllSLOs().catch((error) => {
+                    this.emit('manager:refresh:error', { error });
+                });
+            },
             this.config.refreshIntervalMs
         );
 
-        // Initial refresh
-        this.refreshAllSLOs();
+        // Initial refresh (also handle the promise)
+        this.refreshAllSLOs().catch((error) => {
+            this.emit('manager:refresh:error', { error });
+        });
         this.emit('manager:started');
     }
 

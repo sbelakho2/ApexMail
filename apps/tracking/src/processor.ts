@@ -37,10 +37,14 @@ export class EventProcessor {
   private readonly logger: Logger;
   private readonly flushIntervalMs: number;
   private readonly maxBufferSize: number;
+  // SECURITY: Hard cap to prevent unbounded memory growth during flush
+  private readonly absoluteMaxBufferSize: number;
   
   private buffer: TrackingEvent[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
+  // Track dropped events for monitoring
+  private droppedEventCount = 0;
 
   constructor(options: EventProcessorConfig) {
     this.db = options.db;
@@ -48,6 +52,8 @@ export class EventProcessor {
     this.logger = options.logger;
     this.flushIntervalMs = options.flushIntervalMs ?? 1000;
     this.maxBufferSize = options.maxBufferSize ?? 100;
+    // Hard cap at 10x normal buffer size to prevent OOM
+    this.absoluteMaxBufferSize = this.maxBufferSize * 10;
   }
 
   start(): void {
@@ -190,6 +196,22 @@ export class EventProcessor {
   }
 
   private addToBuffer(event: TrackingEvent): void {
+    // SECURITY: Enforce hard cap to prevent unbounded memory growth
+    // This can happen when flush is slow or failing and events keep arriving
+    if (this.buffer.length >= this.absoluteMaxBufferSize) {
+      this.droppedEventCount++;
+      // Log every 100 dropped events to avoid log spam
+      if (this.droppedEventCount % 100 === 1) {
+        this.logger.error('Buffer overflow - dropping events', {
+          droppedTotal: this.droppedEventCount,
+          bufferSize: this.buffer.length,
+          maxSize: this.absoluteMaxBufferSize,
+          flushing: this.flushing,
+        });
+      }
+      return; // Drop the event to prevent OOM
+    }
+
     this.buffer.push(event);
     
     // Flush if buffer is full

@@ -407,7 +407,8 @@ export class ComplianceService {
   ): Promise<Result<{ logs: AuditLogEntry[]; total: number }>> {
     try {
       const conditions: string[] = ['account_id = $1'];
-      const params: any[] = [accountId];
+      // Use union type for SQL parameter values (includes number for pagination)
+      const params: (string | Date | ComplianceFramework | number)[] = [accountId];
       let paramIndex = 2;
 
       if (filters.userId) {
@@ -693,7 +694,19 @@ export class ComplianceService {
       let progress = 0;
       const progressIncrement = 100 / tables.length;
 
+      // SECURITY: Allowlist of valid table names to prevent SQL injection
+      const VALID_TABLES = new Set([
+        'emails', 'email_events', 'email_attachments',
+        'contacts', 'contact_lists', 'contact_segments',
+        'campaigns', 'campaign_emails', 'campaign_stats'
+      ]);
+
       for (const table of tables) {
+        // SECURITY: Validate table name against allowlist
+        if (!VALID_TABLES.has(table)) {
+          throw new Error(`Invalid table name: ${table}`);
+        }
+        
         if (request.scope === 'all') {
           await this.pool.query(`DELETE FROM ${table} WHERE account_id = $1`, [request.account_id]);
         } else if (request.identifiers) {

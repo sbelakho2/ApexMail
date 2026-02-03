@@ -14,9 +14,9 @@ export function PrivateCloudHero() {
  <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-6"
+          className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6"
         >
-          <Cloud className="w-4 h-4" />
+          <Cloud className="w-3.5 h-3.5" />
           Private Cloud
         </motion.div>
 
@@ -30,7 +30,7 @@ export function PrivateCloudHero() {
  <br />
  Your IP.
  <br />
- <span className="text-primary-600">Our Code.</span>
+ <span className="text-surface-500">Our Code.</span>
  </motion.h1>
 
  <motion.p
@@ -51,13 +51,13 @@ export function PrivateCloudHero() {
  >
  <Link
  href="/contact/enterprise"
- className="btn-primary text-lg px-8 py-4"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
  >
  Request Demo
  </Link>
  <Link
  href="/docs/private-cloud"
- className="btn-secondary text-lg px-8 py-4 bg-white"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
  >
  View Architecture
  </Link>
@@ -76,8 +76,8 @@ export function PrivateCloudHero() {
  { value: '0', label: 'Shared Resources' },
  ].map((stat) => (
  <div key={stat.label}>
- <div className="text-2xl lg:text-3xl font-bold text-surface-900 tabular-nums">{stat.value}</div>
- <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
+ <div className="text-2xl lg:text-3xl font-bold text-surface-900 tabular-nums mb-1">{stat.value}</div>
+ <div className="text-xs font-medium text-surface-600 text-surface-500">{stat.label}</div>
  </div>
  ))}
  </motion.div>
@@ -90,45 +90,45 @@ export function PrivateCloudHero() {
  transition={{ delay: 0.2 }}
  className="relative"
  >
- <div className="premium-card p-8 bg-white">
+ <div className="bg-white rounded-xl border border-surface-200 p-8 shadow-sm">
  {/* VPC Diagram */}
- <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-4 text-center">Cloud VPC Architecture</div>
+ <div className="text-xs font-semibold text-surface-500 mb-6 text-center">Cloud VPC Architecture</div>
  
- <div className="relative bg-surface-50 rounded-xl p-6 border border-surface-200">
+ <div className="relative bg-surface-50/50 rounded-lg p-6 border border-surface-200">
  {/* VPC Label */}
- <div className="absolute -top-3 left-4 px-2.5 bg-white border border-surface-200 rounded text-[10px] font-bold text-primary-600 uppercase tracking-tight">
+ <div className="absolute -top-3 left-4 px-2 bg-white border border-surface-200 rounded text-[10px] font-medium text-surface-600">
  vpc-production
  </div>
 
  {/* Private Subnet */}
- <div className="bg-white rounded-lg p-4 border border-dashed border-surface-300 mb-4 ">
- <div className="text-[10px] font-bold text-surface-600 mb-3 uppercase tracking-tight text-center">Private Subnet (10.0.1.0/24)</div>
+ <div className="bg-white rounded p-4 border border-dashed border-surface-300 mb-4 ">
+ <div className="text-[10px] font-medium text-surface-500 mb-3 text-center">Private Subnet (10.0.1.0/24)</div>
  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
  {[
  { icon: Server, label: 'API Cluster', count: '3x' },
  { icon: Server, label: 'Workers', count: '5x' },
  { icon: Server, label: 'Database', count: '2x' },
  ].map((item) => (
- <div key={item.label} className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
- <item.icon className="w-6 h-6 text-primary-600 mx-auto mb-1" />
- <div className="text-[10px] font-bold text-surface-900 uppercase tracking-tighter">{item.label}</div>
- <div className="text-[10px] font-bold text-primary-500">{item.count}</div>
+ <div key={item.label} className="bg-surface-50 rounded p-3 text-center border border-surface-100">
+ <item.icon className="w-5 h-5 text-surface-900 mx-auto mb-1.5" strokeWidth={1.5} />
+ <div className="text-[10px] font-medium text-surface-900">{item.label}</div>
+ <div className="text-[10px] text-surface-500">{item.count}</div>
  </div>
  ))}
  </div>
  </div>
 
  {/* Public Subnet */}
- <div className="bg-white rounded-lg p-4 border border-dashed border-surface-300 ">
- <div className="text-[10px] font-bold text-surface-600 mb-3 uppercase tracking-tight text-center">Public Subnet (10.0.0.0/24)</div>
+ <div className="bg-white rounded p-4 border border-dashed border-surface-300 ">
+ <div className="text-[10px] font-medium text-surface-500 mb-3 text-center">Public Subnet (10.0.0.0/24)</div>
  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
  {[
  { icon: Shield, label: 'Load Balancer' },
  { icon: Zap, label: 'NAT Gateway' },
  ].map((item) => (
- <div key={item.label} className="bg-surface-50 rounded-lg p-3 text-center border border-surface-100">
- <item.icon className="w-6 h-6 text-primary-600 mx-auto mb-1" />
- <div className="text-[10px] font-bold text-surface-900 uppercase tracking-tighter">{item.label}</div>
+ <div key={item.label} className="bg-surface-50 rounded p-3 text-center border border-surface-100">
+ <item.icon className="w-5 h-5 text-surface-900 mx-auto mb-1.5" strokeWidth={1.5} />
+ <div className="text-[10px] font-medium text-surface-900">{item.label}</div>
  </div>
  ))}
  </div>
@@ -138,7 +138,7 @@ export function PrivateCloudHero() {
  {/* Cloud Providers */}
  <div className="flex justify-center gap-8 mt-6 pt-6 border-t border-surface-100">
  {['AWS', 'GCP', 'Azure'].map((provider) => (
- <div key={provider} className="text-surface-600 text-xs font-bold uppercase tracking-widest">
+ <div key={provider} className="text-surface-400 text-xs font-semibold">
  {provider}
  </div>
  ))}

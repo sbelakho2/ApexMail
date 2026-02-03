@@ -543,7 +543,8 @@ export class WhiteLabelService {
   async listEmailTemplates(accountId: string, type?: string): Promise<Result<EmailTemplate[]>> {
     try {
       let query = `SELECT * FROM ent_email_templates WHERE account_id = $1`;
-      const params: any[] = [accountId];
+      // Use proper typing for SQL parameters
+      const params: string[] = [accountId];
 
       if (type) {
         query += ` AND type = $2`;

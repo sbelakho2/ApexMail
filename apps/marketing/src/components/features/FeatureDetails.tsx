@@ -5,12 +5,13 @@ import { useInView } from 'react-intersection-observer';
 import { Check, ArrowRight } from 'lucide-react';
 import Link from 'next/link';
 import { CodeBlock } from '@/components/ui/CodeBlock';
+import { cn } from '@/lib/utils';
 
 const detailedFeatures = [
   {
     id: 'api',
     title: 'Developer-First API',
-    subtitle: 'Build in Minutes, Not Days',
+    subtitle: 'Build in Minutes',
     description:
       'Our RESTful API is designed for developers who value simplicity and power. TypeScript types, comprehensive SDKs, and instant feedback.',
     benefits: [
@@ -42,7 +43,7 @@ console.log(email.status); // 'delivered'`,
   {
     id: 'compliance',
     title: 'Built-In Compliance',
-    subtitle: 'GDPR & HIPAA Without the Headache',
+    subtitle: 'GDPR & HIPAA',
     description:
       'Compliance is baked into every layer. Automated data subject requests, encrypted storage, and complete audit trails.',
     benefits: [
@@ -74,7 +75,7 @@ await apexmail.compliance.consent.record({
   {
     id: 'ai',
     title: 'Local AI Intelligence',
-    subtitle: 'Smart Features, Zero External APIs',
+    subtitle: 'Smart Features',
     description:
       'Our AI runs entirely on local ONNX models. No data leaves your infrastructure, no per-request API costs, sub-50ms latency.',
     benefits: [
@@ -139,10 +140,10 @@ export function FeatureDetails() {
             >
               {/* Content */}
               <div className={index % 2 === 1 ? 'lg:order-2' : ''}>
-                <span className="text-sm font-bold text-primary-600 uppercase tracking-wider">
+                <span className="text-sm font-bold text-primary-600 mb-2 block">
                   {feature.subtitle}
                 </span>
-                <h3 className="text-2xl lg:text-3xl font-bold text-surface-900 mt-2 mb-4">
+                <h3 className="text-2xl lg:text-3xl font-bold text-surface-900 mb-4">
                   {feature.title}
                 </h3>
                 <p className="text-lg text-surface-600 mb-6">{feature.description}</p>
@@ -169,14 +170,14 @@ export function FeatureDetails() {
 
               {/* Code Block */}
               <div className={index % 2 === 1 ? 'lg:order-1' : ''}>
-                <div className="premium-card p-1 bg-surface-900 overflow-hidden">
-                  <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800">
+                <div className="rounded-xl border border-surface-200 bg-surface-900 overflow-hidden shadow-sm">
+                  <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
                     <div className="flex gap-1.5">
-                      <span className="w-3 h-3 rounded-full bg-surface-700" />
-                      <span className="w-3 h-3 rounded-full bg-surface-700" />
-                      <span className="w-3 h-3 rounded-full bg-surface-700" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-surface-700" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-surface-700" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-surface-700" />
                     </div>
-                    <span className="text-sm text-surface-500 ml-2 font-mono">example.ts</span>
+                    <span className="text-xs text-surface-500 ml-2 font-mono font-medium">example.ts</span>
                   </div>
                   <CodeBlock code={feature.code} language="typescript" />
                 </div>

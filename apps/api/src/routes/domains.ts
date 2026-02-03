@@ -114,13 +114,14 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
-    const result = await domainsRepo.findById(domainId);
+    // Use tenant-scoped query for database-level isolation
+    const result = await domainsRepo.findById(domainId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch domain');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Domain');
     }
 
@@ -186,13 +187,14 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domainId = c.req.param('id');
     const logger = c.get('logger');
 
-    const result = await domainsRepo.findById(domainId);
+    // Use tenant-scoped query for database-level isolation
+    const result = await domainsRepo.findById(domainId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch domain');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Domain');
     }
 
@@ -246,13 +248,14 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
-    const result = await domainsRepo.findById(domainId);
+    // Use tenant-scoped query for database-level isolation
+    const result = await domainsRepo.findById(domainId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch domain');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Domain');
     }
 
@@ -261,10 +264,10 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     // Perform health check
     const healthCheck = await checkDnsHealth(domain);
 
-    // Update health status in database
+    // Update health status in database (with tenant scope)
     await domainsRepo.update(domainId, {
       healthStatus: healthCheck,
-    });
+    }, tenantId);
 
     return c.json({
       domain: domain.domain,
@@ -280,13 +283,14 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domainId = c.req.param('id');
     const logger = c.get('logger');
 
-    const result = await domainsRepo.findById(domainId);
+    // Use tenant-scoped query for database-level isolation
+    const result = await domainsRepo.findById(domainId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch domain');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Domain');
     }
 
@@ -319,13 +323,14 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
-    const result = await domainsRepo.findById(domainId);
+    // Use tenant-scoped query for database-level isolation
+    const result = await domainsRepo.findById(domainId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch domain');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Domain');
     }
 

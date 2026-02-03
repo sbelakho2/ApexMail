@@ -354,8 +354,8 @@ export class EmailProcessor {
       // Token bucket rate limit (per-second smoothing)
       await this.rateLimiter.acquire();
 
-      // Get domain for DKIM signing
-      const domainResult = await this.domainsRepo.findById(job.domainId);
+      // Get domain for DKIM signing (with tenant isolation)
+      const domainResult = await this.domainsRepo.findById(job.domainId, job.tenantId);
       if (!domainResult.ok || !domainResult.value) {
         await this.handleError(job, new Error('Domain not found'));
         return;

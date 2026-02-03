@@ -253,17 +253,13 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     const apiKeyId = c.req.param('id');
     const logger = c.get('logger');
 
-    // Verify ownership
-    const existing = await apiKeysRepo.findById(apiKeyId);
+    // Verify ownership with tenant isolation
+    const existing = await apiKeysRepo.findById(apiKeyId, tenantId);
     if (!existing.ok || !existing.value) {
       throw ApiError.notFound('API key');
     }
 
-    if (existing.value.tenantId !== tenantId) {
-      throw ApiError.forbidden();
-    }
-
-    const result = await apiKeysRepo.rotate(apiKeyId);
+    const result = await apiKeysRepo.rotate(apiKeyId, tenantId);
     if (!result.ok) {
       throw ApiError.internal('Failed to rotate API key');
     }
@@ -301,14 +297,10 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     const apiKeyId = c.req.param('id');
     const logger = c.get('logger');
 
-    // Verify ownership
-    const existing = await apiKeysRepo.findById(apiKeyId);
+    // Verify ownership with tenant isolation
+    const existing = await apiKeysRepo.findById(apiKeyId, tenantId);
     if (!existing.ok || !existing.value) {
       throw ApiError.notFound('API key');
-    }
-
-    if (existing.value.tenantId !== tenantId) {
-      throw ApiError.forbidden();
     }
 
     const result = await apiKeysRepo.revoke(apiKeyId);

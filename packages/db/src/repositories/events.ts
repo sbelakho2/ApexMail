@@ -259,7 +259,12 @@ export class EventsRepository {
     });
   }
 
-  async findById(id: string): Promise<Result<Event | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<Event | null, Error>> {
+    const query = tenantId
+      ? 'SELECT * FROM events WHERE id = $1 AND tenant_id = $2'
+      : 'SELECT * FROM events WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
+    
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -283,10 +288,7 @@ export class EventsRepository {
       deduplication_key: string;
       processed_at: Date;
       metadata: string;
-    }>(
-      'SELECT * FROM events WHERE id = $1',
-      [id]
-    );
+    }>(query, params);
 
     if (!result.ok) return result;
 
@@ -294,7 +296,12 @@ export class EventsRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async findByMessageId(messageId: string): Promise<Result<Event[], Error>> {
+  async findByMessageId(messageId: string, tenantId?: string): Promise<Result<Event[], Error>> {
+    const query = tenantId
+      ? 'SELECT * FROM events WHERE message_id = $1 AND tenant_id = $2 ORDER BY timestamp'
+      : 'SELECT * FROM events WHERE message_id = $1 ORDER BY timestamp';
+    const params = tenantId ? [messageId, tenantId] : [messageId];
+    
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -318,10 +325,7 @@ export class EventsRepository {
       deduplication_key: string;
       processed_at: Date;
       metadata: string;
-    }>(
-      'SELECT * FROM events WHERE message_id = $1 ORDER BY timestamp',
-      [messageId]
-    );
+    }>(query, params);
 
     if (!result.ok) return result;
 

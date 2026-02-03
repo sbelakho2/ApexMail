@@ -14,11 +14,11 @@ interface Feature {
 
 interface Category {
   name: string;
-  features: Feature[];
+  features: readonly Feature[];
 }
 
 interface CompareTableProps {
-  categories: Category[];
+  categories: readonly Category[];
   competitorName: string;
 }
 
@@ -87,11 +87,11 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.2 }}
-          className="premium-card overflow-hidden bg-white"
+          className="bg-white rounded-xl border border-surface-200 shadow-sm overflow-hidden"
         >
           {/* Table Header */}
           <div className="grid grid-cols-4 gap-4 p-6 border-b border-surface-200 bg-surface-50">
-            <div className="font-bold text-surface-600 uppercase tracking-widest text-xs">
+            <div className="font-bold text-surface-600 uppercase tracking-widest text-xs self-center">
               Feature
             </div>
             <div className="text-center">
@@ -100,8 +100,8 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
                 ApexMail
               </div>
             </div>
-            <div className="text-center font-medium text-surface-900">{competitorName}</div>
-            <div className="text-center font-bold text-surface-600 uppercase tracking-widest text-xs">
+            <div className="text-center font-medium text-surface-900 self-center">{competitorName}</div>
+            <div className="text-center font-bold text-surface-600 uppercase tracking-widest text-xs self-center">
               Winner
             </div>
           </div>
@@ -110,7 +110,7 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
           {categories.map((category, categoryIndex) => (
             <div key={category.name}>
               {/* Category Header */}
-              <div className="px-6 py-3 bg-surface-50 border-b border-surface-100">
+              <div className="px-6 py-3 bg-surface-50/50 border-b border-surface-100">
                 <span className="text-xs font-bold text-surface-600 uppercase tracking-widest">
                   {category.name}
                 </span>
@@ -137,12 +137,12 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
                   </div>
                   <div className="flex justify-center">
                     {feature.winner === 'apexmail' && (
-                      <span className="px-2 py-1 text-xs font-bold bg-primary-100 text-primary-700 rounded">
+                      <span className="px-2 py-1 text-xs font-bold bg-primary-100 text-primary-700 rounded-md">
                         ApexMail
                       </span>
                     )}
                     {feature.winner === 'competitor' && (
-                      <span className="px-2 py-1 text-xs font-medium bg-surface-100 text-surface-600 rounded">
+                      <span className="px-2 py-1 text-xs font-medium bg-surface-100 text-surface-600 rounded-md">
                         {competitorName}
                       </span>
                     )}

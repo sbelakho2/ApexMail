@@ -76,7 +76,13 @@ export const config = {
   backupBucket: process.env.BACKUP_BUCKET ?? 'apexmail-backups',
   backupRegion: process.env.BACKUP_REGION ?? 'us-east-1',
   backupRetentionDays: parseInt(process.env.BACKUP_RETENTION_DAYS ?? '90', 10),
-  backupEncryptionKey: process.env.BACKUP_ENCRYPTION_KEY,
+  backupEncryptionKey: (() => {
+    const key = process.env.BACKUP_ENCRYPTION_KEY;
+    if (!key && process.env.NODE_ENV === 'production' && process.env.BACKUP_ENABLED !== 'false') {
+      throw new Error('BACKUP_ENCRYPTION_KEY must be set in production when backups are enabled');
+    }
+    return key;
+  })(),
 
   // Backup Schedules
   fullBackupSchedule: process.env.FULL_BACKUP_SCHEDULE ?? '0 2 * * 0', // Weekly Sunday 2 AM

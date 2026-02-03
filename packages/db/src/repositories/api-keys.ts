@@ -299,7 +299,7 @@ export class ApiKeysRepository {
     return num >>> 0; // Convert to unsigned
   }
 
-  async findById(id: string): Promise<Result<ApiKey | null, Error>> {
+  async findById(id: string, tenantId: string): Promise<Result<ApiKey | null, Error>> {
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -320,8 +320,8 @@ export class ApiKeysRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      'SELECT * FROM api_keys WHERE id = $1',
-      [id]
+      'SELECT * FROM api_keys WHERE id = $1 AND tenant_id = $2',
+      [id, tenantId]
     );
 
     if (!result.ok) return result;
@@ -330,7 +330,7 @@ export class ApiKeysRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async update(id: string, input: UpdateApiKeyInput): Promise<Result<ApiKey, Error>> {
+  async update(id: string, input: UpdateApiKeyInput, tenantId: string): Promise<Result<ApiKey, Error>> {
     const updates: string[] = [];
     const values: unknown[] = [];
     let paramIndex = 1;
@@ -393,8 +393,8 @@ export class ApiKeysRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE api_keys SET ${updates.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
-      values
+      `UPDATE api_keys SET ${updates.join(', ')} WHERE id = $${paramIndex} AND tenant_id = $${paramIndex + 1} RETURNING *`,
+      [...values, tenantId]
     );
 
     if (!result.ok) return result;
@@ -407,7 +407,7 @@ export class ApiKeysRepository {
     return Result.ok(this.mapRow(row));
   }
 
-  async rotate(id: string): Promise<Result<ApiKeyWithSecret, Error>> {
+  async rotate(id: string, tenantId: string): Promise<Result<ApiKeyWithSecret, Error>> {
     // Generate new key
     const { key: newSecretKey, prefix: newPrefix } = generateApiKey();
     
@@ -435,9 +435,9 @@ export class ApiKeysRepository {
     }>(
       `UPDATE api_keys 
        SET prefix = $1, key_hash = $2, updated_at = NOW()
-       WHERE id = $3
+       WHERE id = $3 AND tenant_id = $4
        RETURNING *`,
-      [newPrefix, keyHash, id]
+      [newPrefix, keyHash, id, tenantId]
     );
 
     if (!result.ok) return result;

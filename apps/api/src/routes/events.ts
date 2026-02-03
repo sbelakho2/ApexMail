@@ -127,13 +127,14 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const eventId = c.req.param('id');
 
-    const result = await eventsRepo.findById(eventId);
+    // Use tenant-scoped query for database-level isolation
+    const result = await eventsRepo.findById(eventId, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch event');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Event');
     }
 

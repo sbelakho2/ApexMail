@@ -9,7 +9,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { AuditLogsRepository, WebhooksRepository, type Webhook, type WebhookInsert, type WebhookUpdate } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
-import { hmacSign, randomToken } from '@apexmail/lib/crypto';
+import { hmacSign, randomToken, timingSafeCompareBuffers } from '@apexmail/lib/crypto';
 import { generateId } from '@apexmail/lib';
 
 const eventTypes = [
@@ -541,8 +541,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const expectedSignature = signPayload(secret, timestamp, payload);
     
-    // Use timing-safe comparison
-    const valid = signature === expectedSignature && signature.length === expectedSignature.length;
+    // Use timing-safe comparison to prevent timing attacks
+    const valid = signature.length === expectedSignature.length && 
+      timingSafeCompareBuffers(Buffer.from(signature), Buffer.from(expectedSignature));
 
     return c.json({
       valid,

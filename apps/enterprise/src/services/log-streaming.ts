@@ -266,7 +266,8 @@ export class LogStreamingService {
   ): Promise<Result<LogStream>> {
     try {
       const setClause: string[] = ['updated_at = NOW()'];
-      const params: any[] = [id];
+      // Use union type for SQL parameter values
+      const params: (string | string[] | Record<string, unknown>)[] = [id];
       let paramIndex = 2;
 
       if (updates.name) {

@@ -43,10 +43,39 @@ export interface PolicyCondition {
   value: unknown;
 }
 
+/**
+ * Wrapper for isolated connections with automatic cleanup and tracking
+ * SECURITY: Ensures connections are properly released to prevent leaks
+ */
+export interface IsolatedConnection {
+  /** Execute a query within this isolated connection */
+  query<T = unknown>(text: string, values?: unknown[]): Promise<Result<T[]>>;
+  /** Release the connection back to the pool - MUST be called */
+  release(): void;
+  /** Whether this connection has been released */
+  readonly released: boolean;
+  /** Context this connection was created for */
+  readonly context: IsolationContext;
+}
+
+/**
+ * Internal tracking for connection ownership
+ */
+interface TrackedConnection {
+  client: PoolClient;
+  context: IsolationContext;
+  acquiredAt: Date;
+  stackTrace: string;
+  released: boolean;
+}
+
 export class DataIsolationService {
   private db: Pool;
   private redis: Redis;
   private policies: Map<string, DataAccessPolicy[]> = new Map();
+  // Connection tracking to detect leaks
+  private activeConnections: Map<string, TrackedConnection> = new Map();
+  private connectionIdCounter = 0;
   // @ts-expect-error - reserved for future schema isolation
   private _schemaConnections: Map<string, Pool> = new Map();
 
@@ -54,6 +83,58 @@ export class DataIsolationService {
     this.db = db;
     this.redis = redis;
     this.loadPolicies();
+    
+    // Periodically check for leaked connections (every 60 seconds)
+    this.leakCheckInterval = setInterval(() => {
+      this.checkForLeakedConnections();
+    }, 60000);
+  }
+
+  private leakCheckInterval: NodeJS.Timeout | null = null;
+  private readonly CONNECTION_LEAK_THRESHOLD_MS = 300000; // 5 minutes
+
+  /**
+   * Shutdown the service and clean up resources
+   */
+  async shutdown(): Promise<void> {
+    if (this.leakCheckInterval) {
+      clearInterval(this.leakCheckInterval);
+      this.leakCheckInterval = null;
+    }
+    
+    // Force release any leaked connections
+    for (const [connId, tracked] of this.activeConnections) {
+      if (!tracked.released) {
+        console.warn(`[DataIsolation] Force releasing leaked connection ${connId}`);
+        tracked.client.release();
+        tracked.released = true;
+      }
+    }
+    this.activeConnections.clear();
+  }
+
+  /**
+   * Check for connections that have been held too long (potential leaks)
+   */
+  private checkForLeakedConnections(): void {
+    const now = Date.now();
+    for (const [connId, tracked] of this.activeConnections) {
+      if (!tracked.released) {
+        const heldMs = now - tracked.acquiredAt.getTime();
+        if (heldMs > this.CONNECTION_LEAK_THRESHOLD_MS) {
+          console.error(`[DataIsolation] POTENTIAL CONNECTION LEAK detected!`, {
+            connectionId: connId,
+            heldForMs: heldMs,
+            context: {
+              organizationId: tracked.context.organizationId,
+              workspaceId: tracked.context.workspaceId,
+            },
+            acquiredAt: tracked.acquiredAt.toISOString(),
+            stackTrace: tracked.stackTrace,
+          });
+        }
+      }
+    }
   }
 
   /**
@@ -65,9 +146,26 @@ export class DataIsolationService {
   }
 
   /**
-   * Create an isolated database connection for a workspace
+   * Sanitize identifier (schema/table name) for safe use in SQL
+   * SECURITY: Removes any characters that could enable SQL injection
    */
-  async getIsolatedConnection(context: IsolationContext): Promise<Result<PoolClient>> {
+  private sanitizeIdentifier(id: string): string {
+    // Remove all non-alphanumeric/underscore characters
+    const sanitized = id.replace(/[^a-zA-Z0-9_]/g, '_');
+    // Ensure it starts with a letter or underscore
+    if (!/^[a-zA-Z_]/.test(sanitized)) {
+      return `_${sanitized}`;
+    }
+    return sanitized;
+  }
+
+  /**
+   * Create an isolated database connection for a workspace with ownership tracking
+   * SECURITY: Wraps connection in tracking wrapper to detect leaks
+   * 
+   * @returns IsolatedConnection wrapper that MUST be released after use
+   */
+  async getIsolatedConnection(context: IsolationContext): Promise<Result<IsolatedConnection>> {
     try {
       const client = await this.db.connect();
 
@@ -86,7 +184,46 @@ export class DataIsolationService {
         await client.query(`SET search_path TO "${context.schemaName}", public`);
       }
 
-      return { ok: true, value: client };
+      // Track this connection for leak detection
+      const connectionId = `conn_${++this.connectionIdCounter}_${Date.now()}`;
+      const trackedConn: TrackedConnection = {
+        client,
+        context,
+        acquiredAt: new Date(),
+        stackTrace: new Error().stack ?? 'unknown',
+        released: false,
+      };
+      this.activeConnections.set(connectionId, trackedConn);
+
+      // Create wrapper with automatic cleanup
+      const wrapper: IsolatedConnection = {
+        query: async <T>(text: string, values?: unknown[]): Promise<Result<T[]>> => {
+          if (trackedConn.released) {
+            return { ok: false, error: new Error('Connection already released') };
+          }
+          try {
+            const result = await client.query(text, values);
+            return { ok: true, value: result.rows as T[] };
+          } catch (error) {
+            return { ok: false, error: error as Error };
+          }
+        },
+        release: () => {
+          if (!trackedConn.released) {
+            trackedConn.released = true;
+            this.activeConnections.delete(connectionId);
+            client.release();
+          }
+        },
+        get released() {
+          return trackedConn.released;
+        },
+        get context() {
+          return context;
+        },
+      };
+
+      return { ok: true, value: wrapper };
     } catch (error) {
       return { ok: false, error: error as Error };
     }
@@ -103,19 +240,17 @@ export class DataIsolationService {
     const connectionResult = await this.getIsolatedConnection(context);
     if (!connectionResult.ok) return connectionResult;
 
-    const client = connectionResult.value;
+    const conn = connectionResult.value;
 
     try {
       // Transform query to add tenant filters
       const isolatedQuery = this.addTenantFilters(query, context);
       
-      const result = await client.query(isolatedQuery.text, [...isolatedQuery.values, ...values]);
+      const result = await conn.query<T>(isolatedQuery.text, [...isolatedQuery.values, ...values]);
       
-      return { ok: true, value: result.rows as T[] };
-    } catch (error) {
-      return { ok: false, error: error as Error };
+      return result;
     } finally {
-      client.release();
+      conn.release();
     }
   }
 
@@ -524,15 +659,21 @@ export class DataIsolationService {
   }
 
   private async migrateToSchema(workspaceId: string): Promise<void> {
-    const schemaName = `ws_${workspaceId.replace(/-/g, '_')}`;
+    // SECURITY: Sanitize workspace ID for use in schema name
+    const schemaName = `ws_${this.sanitizeIdentifier(workspaceId)}`;
+    
+    // Validate the final schema name
+    if (!this.validateSchemaName(schemaName)) {
+      throw new Error(`Invalid schema name generated from workspace ID: ${workspaceId}`);
+    }
 
     // Create schema
     await this.db.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
 
-    // Create tables in new schema
-    const tables = ['emails', 'contacts', 'templates', 'campaigns', 'webhooks'];
+    // Create tables in new schema - using allowlist of known table names
+    const ALLOWED_TABLES = ['emails', 'contacts', 'templates', 'campaigns', 'webhooks'] as const;
     
-    for (const table of tables) {
+    for (const table of ALLOWED_TABLES) {
       // Copy structure
       await this.db.query(`
         CREATE TABLE IF NOT EXISTS "${schemaName}"."${table}" 
@@ -565,10 +706,16 @@ export class DataIsolationService {
     
     const schemaName = result.rows[0]?.schema_name;
     if (!schemaName) return;
+    
+    // SECURITY: Validate schema name from database before using in SQL
+    if (!this.validateSchemaName(schemaName)) {
+      throw new Error(`Invalid schema name in database: ${schemaName}`);
+    }
 
-    const tables = ['emails', 'contacts', 'templates', 'campaigns', 'webhooks'];
+    // Using allowlist of known table names
+    const ALLOWED_TABLES = ['emails', 'contacts', 'templates', 'campaigns', 'webhooks'] as const;
 
-    for (const table of tables) {
+    for (const table of ALLOWED_TABLES) {
       // Copy data back to shared table
       await this.db.query(`
         INSERT INTO public."${table}"

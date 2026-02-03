@@ -215,7 +215,6 @@ const FINTECH: RealCompany[] = [
     { name: 'GoCardless', domain: 'gocardless.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },
     { name: 'Chargebee', domain: 'chargebee.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },
     { name: 'Recurly', domain: 'recurly.com', industry: 'Fintech', employees: '201-500', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },
-    { name: 'Paddle', domain: 'paddle.com', industry: 'Fintech', employees: '201-500', hasFunding: true, techStack: ['Go', 'React'], isQualifiedLead: true },
     { name: 'FastSpring', domain: 'fastspring.com', industry: 'Fintech', employees: '201-500', hasFunding: true, techStack: ['Java', 'React'], isQualifiedLead: true },
     { name: 'Lemon Squeezy', domain: 'lemonsqueezy.com', industry: 'Fintech', employees: '11-50', hasFunding: true, techStack: ['Laravel', 'React'], isQualifiedLead: true },
     { name: 'Gumroad', domain: 'gumroad.com', industry: 'Fintech', employees: '11-50', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },

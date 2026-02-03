@@ -9,22 +9,22 @@ export function PrivateCloudCTA() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-white">
- <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+ <section ref={ref} className="py-24 relative bg-white">
+ <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 relative">
  <motion.div
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
- className="premium-card p-8 lg:p-12 text-center bg-surface-50"
+ className="bg-surface-50/50 rounded-2xl border border-surface-200 p-8 md:p-12 text-center"
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-6">
-            <Cloud className="w-4 h-4" />
+ <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-surface-200 text-xs font-medium text-surface-900 mb-6 shadow-sm">
+            <Cloud className="w-3.5 h-3.5" />
             Enterprise Ready
           </div>
 
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
+ <h2 className="text-3xl md:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Deploy in Your Cloud This Week
  </h2>
- <p className="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed font-medium">
+ <p className="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
  Our solutions architects will work with your team to design and deploy 
  a private ApexMail instance tailored to your security requirements.
  </p>
@@ -32,16 +32,16 @@ export function PrivateCloudCTA() {
  <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
  <Link
  href="/contact/enterprise"
- className="btn-primary text-lg px-8 py-4"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
  >
  Talk to Sales
- <ArrowRight className="w-5 h-5 ml-2" />
+ <ArrowRight className="w-4 h-4 ml-2" />
  </Link>
  <Link
  href="/docs/private-cloud/architecture"
- className="btn-secondary text-lg px-8 py-4 bg-white"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
  >
- <Calendar className="w-5 h-5 mr-2" />
+ <Calendar className="w-4 h-4 mr-2" />
  Architecture Review
  </Link>
  </div>
@@ -55,9 +55,9 @@ export function PrivateCloudCTA() {
  { day: 'Day 5', title: 'Go Live', description: 'Production ready' },
  ].map((step) => (
  <div key={step.day} className="text-center relative">
- <div className="text-primary-600 font-bold text-[10px] uppercase tracking-widest mb-1">{step.day}</div>
- <div className="text-surface-900 font-bold text-sm mb-1">{step.title}</div>
- <div className="text-[10px] text-surface-600 font-bold uppercase tracking-tight">{step.description}</div>
+ <div className="text-surface-500 font-medium text-xs mb-1">{step.day}</div>
+ <div className="text-surface-900 font-semibold text-sm mb-1">{step.title}</div>
+ <div className="text-xs text-surface-500">{step.description}</div>
  </div>
  ))}
  </div>
@@ -70,18 +70,18 @@ export function PrivateCloudCTA() {
  transition={{ delay: 0.2 }}
  className="grid md:grid-cols-2 gap-6 mt-8"
  >
- <div className="premium-card p-6 flex items-center gap-4 bg-white">
- <div className="w-12 h-12 rounded-md bg-primary-50 flex items-center justify-center flex-shrink-0 border border-primary-100">
- <Phone className="w-6 h-6 text-primary-600" />
+ <div className="bg-white rounded-xl border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
+ <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center flex-shrink-0 border border-surface-200">
+ <Phone className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
  </div>
  <div>
- <div className="text-surface-900 font-bold">Talk to an Engineer</div>
- <div className="text-xs text-surface-500 font-medium">
+ <div className="text-surface-900 font-semibold text-sm">Talk to an Engineer</div>
+ <div className="text-xs text-surface-500 mt-0.5">
  Get a technical deep-dive with our solutions team
  </div>
  </div>
  </div>
- <div className="premium-card p-6 flex items-center gap-4 bg-white">
+ <div className="bg-white rounded-xl border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
  <div className="w-12 h-12 rounded-md bg-primary-50 flex items-center justify-center flex-shrink-0 border border-primary-100">
  <Calendar className="w-6 h-6 text-primary-600" />
  </div>

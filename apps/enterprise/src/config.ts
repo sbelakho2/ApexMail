@@ -2,6 +2,22 @@
  * Enterprise Configuration
  */
 
+/**
+ * Helper function to require environment variables in production
+ * Returns devDefault in non-production environments if env var is not set
+ */
+function getRequiredEnvInProd(envVar: string, devDefault: string): string {
+  const value = process.env[envVar];
+  if (!value) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(`${envVar} must be set in production`);
+    }
+    console.warn(`[SECURITY] ${envVar} not set - using dev default. Set in production!`);
+    return devDefault;
+  }
+  return value;
+}
+
 export interface SSOConfig {
   saml: {
     enabled: boolean;
@@ -148,14 +164,14 @@ export const config: EnterpriseConfig = {
     flushInterval: parseInt(process.env.LOG_STREAM_FLUSH_INTERVAL || '60000', 10),
     compressionEnabled: process.env.LOG_STREAM_COMPRESSION !== 'false',
     maxRetries: parseInt(process.env.LOG_STREAM_MAX_RETRIES || '3', 10),
-    encryptionKey: process.env.LOG_STREAM_ENCRYPTION_KEY || 'default-encryption-key-change-in-production',
+    encryptionKey: getRequiredEnvInProd('LOG_STREAM_ENCRYPTION_KEY', 'dev-encryption-key'),
   },
   logStreaming: {
     bufferSize: parseInt(process.env.LOG_STREAM_BUFFER_SIZE || '1000', 10),
     flushInterval: parseInt(process.env.LOG_STREAM_FLUSH_INTERVAL || '60000', 10),
     compressionEnabled: process.env.LOG_STREAM_COMPRESSION !== 'false',
     maxRetries: parseInt(process.env.LOG_STREAM_MAX_RETRIES || '3', 10),
-    encryptionKey: process.env.LOG_STREAM_ENCRYPTION_KEY || 'default-encryption-key-change-in-production',
+    encryptionKey: getRequiredEnvInProd('LOG_STREAM_ENCRYPTION_KEY', 'dev-encryption-key'),
   },
   templateApproval: {
     maxSpamScore: parseInt(process.env.TEMPLATE_MAX_SPAM_SCORE || '50', 10),

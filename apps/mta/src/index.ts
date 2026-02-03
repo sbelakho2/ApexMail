@@ -74,6 +74,13 @@ async function main(): Promise<void> {
       redis: redisClient,
       config: config.inbound,
       rateLimit: config.rateLimit,
+      emailAuth: {
+        requireSPF: config.emailAuth?.requireSPF ?? true,
+        requireDKIM: config.emailAuth?.requireDKIM ?? true,
+        enforceDMARC: config.emailAuth?.enforceDMARC ?? true,
+        allowSoftFail: config.emailAuth?.allowSoftFail ?? true,
+        trustedRelays: config.emailAuth?.trustedRelays ?? [],
+      },
       logger: logger.child({ server: 'inbound' }),
     });
 

@@ -13,6 +13,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
+import bcrypt from 'bcrypt';
 
 // Rate limiting store (in production, use Redis)
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
@@ -79,10 +80,10 @@ function recordAttempt(ip: string, success: boolean): void {
 }
 
 /**
- * Verifies owner credentials
+ * Verifies owner credentials using bcrypt for secure password comparison
  * In production, this would check against a secure database with hashed passwords
  */
-function verifyCredentials(email: string, password: string): { valid: boolean; userId?: string } {
+async function verifyCredentials(email: string, password: string): Promise<{ valid: boolean; userId?: string }> {
     // SECURITY: In production, these would be stored securely in the database
     // with properly hashed passwords (bcrypt/argon2)
     const OWNER_EMAIL = process.env.CONTROL_PLANE_OWNER_EMAIL || 'admin@apexmail.ee';
@@ -94,25 +95,18 @@ function verifyCredentials(email: string, password: string): { valid: boolean; u
     }
     
     if (email.toLowerCase() !== OWNER_EMAIL.toLowerCase()) {
+        // Perform a dummy bcrypt compare to prevent timing attacks on email check
+        await bcrypt.compare(password, '$2b$10$dummyhashtopreventtimingattacks');
         return { valid: false };
     }
     
-    // Hash the provided password and compare
-    const providedHash = crypto.createHash('sha256').update(password).digest('hex');
-    
-    // Constant-time comparison
-    if (providedHash.length !== OWNER_PASSWORD_HASH.length) {
-        return { valid: false };
-    }
-    
-    let result = 0;
-    for (let i = 0; i < providedHash.length; i++) {
-        result |= providedHash.charCodeAt(i) ^ OWNER_PASSWORD_HASH.charCodeAt(i);
-    }
+    // Use bcrypt.compare for secure password verification
+    // bcrypt.compare is timing-safe internally
+    const isValid = await bcrypt.compare(password, OWNER_PASSWORD_HASH);
     
     return { 
-        valid: result === 0,
-        userId: 'owner_001' // In production, this would be the actual user ID
+        valid: isValid,
+        userId: isValid ? 'owner_001' : undefined // In production, this would be the actual user ID
     };
 }
 
@@ -238,10 +232,18 @@ function createSessionToken(userId: string): string {
     
     const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64');
     
-    // Sign the payload
-    const secret = process.env.CONTROL_PLANE_JWT_SECRET || 'dev-secret-change-in-production';
+    // Sign the payload - MUST have JWT secret in production
+    const secret = process.env.CONTROL_PLANE_JWT_SECRET;
+    if (!secret) {
+        if (process.env.NODE_ENV === 'production') {
+            throw new Error('CONTROL_PLANE_JWT_SECRET must be set in production');
+        }
+        // Only allow dev fallback in non-production environments
+        console.warn('[SECURITY] Using dev JWT secret - set CONTROL_PLANE_JWT_SECRET in production');
+    }
+    const effectiveSecret = secret || 'dev-secret-DO-NOT-USE-IN-PRODUCTION';
     const signature = crypto
-        .createHmac('sha256', secret)
+        .createHmac('sha256', effectiveSecret)
         .update(payloadB64)
         .digest('base64');
     
@@ -277,7 +279,7 @@ export async function POST(request: NextRequest) {
         }
         
         // Verify credentials
-        const credentialCheck = verifyCredentials(email, password);
+        const credentialCheck = await verifyCredentials(email, password);
         
         if (!credentialCheck.valid) {
             recordAttempt(clientIp, false);

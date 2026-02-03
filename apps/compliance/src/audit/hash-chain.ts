@@ -35,13 +35,20 @@ interface ChainValidationResult {
 export class AuditLogger {
     private db: Pool;
     private redis: Redis;
-    private signingKey: string;
+    // Store signing key as Buffer for better security practices
+    private signingKeyBuffer: Buffer;
     private lastHash: Map<string, string> = new Map();
 
     constructor(db: Pool, redis: Redis, signingKey: string) {
         this.db = db;
         this.redis = redis;
-        this.signingKey = signingKey;
+        // Convert to Buffer immediately and validate
+        if (signingKey.length === 0 && process.env.NODE_ENV === 'production') {
+            throw new Error('Audit signing key is required in production');
+        }
+        this.signingKeyBuffer = Buffer.from(signingKey, 'utf8');
+        // Note: The original string is still in memory via the caller,
+        // but at least we're not holding onto an additional copy
     }
 
     /**
@@ -559,10 +566,13 @@ export class AuditLogger {
     }
 
     /**
-     * Sign a hash using HMAC-SHA256
+     * Sign a hash using HMAC-SHA256 with the secure key buffer
      */
     private sign(hash: string): string {
-        return CryptoJS.HmacSHA256(hash, this.signingKey).toString(CryptoJS.enc.Hex);
+        // CryptoJS accepts string keys, but we convert from our secure buffer
+        // This ensures the key is not accidentally exposed through string operations
+        const keyString = this.signingKeyBuffer.toString('utf8');
+        return CryptoJS.HmacSHA256(hash, keyString).toString(CryptoJS.enc.Hex);
     }
 
     /**

@@ -458,33 +458,6 @@ CREATE INDEX idx_billing_audit_tenant ON billing_audit_log(tenant_id);
 CREATE INDEX idx_billing_audit_action ON billing_audit_log(action);
 CREATE INDEX idx_billing_audit_created ON billing_audit_log(created_at);
 
--- Paddle subscriptions (alternative payment processor)
-CREATE TABLE IF NOT EXISTS paddle_subscriptions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    paddle_subscription_id VARCHAR(255) UNIQUE NOT NULL,
-    paddle_customer_id VARCHAR(255) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'active',
-    current_period_start TIMESTAMPTZ,
-    current_period_end TIMESTAMPTZ,
-    price_id VARCHAR(255),
-    canceled_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id)
-);
-
--- Paddle transactions
-CREATE TABLE IF NOT EXISTS paddle_transactions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    paddle_transaction_id VARCHAR(255) UNIQUE NOT NULL,
-    amount INTEGER NOT NULL,
-    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
-    status VARCHAR(50) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 -- Insert default plans
 INSERT INTO plans (name, display_name, description, price_monthly, price_yearly, features, limits, sort_order) VALUES
 ('free', 'Free', 'Get started with email delivery', 0, 0,
@@ -523,7 +496,7 @@ DO $$
 DECLARE
     t text;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['plans', 'stripe_customers', 'stripe_subscriptions', 'invoices', 'metering_aggregates', 'usage_alert_configs', 'dunning_states', 'wallets', 'enterprise_contracts', 'paddle_subscriptions']
+    FOREACH t IN ARRAY ARRAY['plans', 'stripe_customers', 'stripe_subscriptions', 'invoices', 'metering_aggregates', 'usage_alert_configs', 'dunning_states', 'wallets', 'enterprise_contracts']
     LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS update_%I_updated_at ON %I', t, t);
         EXECUTE format('CREATE TRIGGER update_%I_updated_at BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()', t, t);

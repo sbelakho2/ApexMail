@@ -81,7 +81,7 @@ const comparisonData = {
       'SSO included in all plans, not a $500/mo add-on',
     ],
   },
-};
+} as const;
 
 export default function CompareSendGridPage() {
   return (

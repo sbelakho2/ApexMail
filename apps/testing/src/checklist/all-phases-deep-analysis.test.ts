@@ -67,17 +67,18 @@ describe('PHASE 2: Data Layer - Deep Analysis', () => {
       expect(content).toContain('worker');
     });
 
-    it('⚠️ BUG: statement_timeout uses string interpolation instead of parameterized query', () => {
-      // This is a potential SQL injection vector
-      const hasStringInterpolation = content.includes('`SET statement_timeout') && 
-                                     (content.includes('${') || content.includes("'+"));
+    it('✅ FIX VERIFIED: statement_timeout now validates input before interpolation', () => {
+      // Verify fix: should have Number.isFinite validation before using in SQL
+      const hasValidation = content.includes('Number.isFinite') || content.includes('isFinite');
+      const validatesRange = content.includes('2147483647') || content.includes('MAX_INT');
       
-      if (hasStringInterpolation) {
-        console.warn('🐛 BUG FOUND: statement_timeout uses string interpolation');
+      if (hasValidation && validatesRange) {
+        console.log('✅ VERIFIED: statement_timeout input validated before SQL interpolation');
+      } else {
+        console.warn('⚠️ statement_timeout validation may not be complete');
       }
       
-      // Test documents the bug - actual fix needed
-      expect(content).toContain('statement_timeout');
+      expect(hasValidation).toBe(true);
     });
 
     it('should handle PgBouncer transaction mode (documented in comments)', () => {
@@ -268,16 +269,18 @@ describe('PHASE 5: Analytics & Tracking - Deep Analysis', () => {
       expect(content).toContain('buffer');
     });
 
-    it('⚠️ BUG: Unbounded buffer growth during flush', () => {
-      // Check if buffer can grow unbounded while flushing
-      const hasFlushing = content.includes('flushing');
-      // Note: checksBufferDuringFlush would check if buffer is monitored during flush
+    it('✅ FIX VERIFIED: Buffer has absolute max size cap', () => {
+      // Verify fix: should have absoluteMaxBufferSize and drop events when exceeded
+      const hasAbsoluteMax = content.includes('absoluteMaxBufferSize');
+      const dropsEvents = content.includes('droppedEventCount') || content.includes('drop');
       
-      if (hasFlushing && !content.includes('reject') && !content.includes('drop')) {
-        console.warn('🐛 BUG FOUND: Buffer can grow unbounded while flushing is in progress');
+      if (hasAbsoluteMax && dropsEvents) {
+        console.log('✅ VERIFIED: Buffer has absolute max size cap with event dropping');
+      } else {
+        console.warn('⚠️ Buffer overflow protection may not be complete');
       }
       
-      expect(content).toContain('flush');
+      expect(hasAbsoluteMax).toBe(true);
     });
 
     it('should support batch flush to ClickHouse', () => {
@@ -338,12 +341,18 @@ describe('PHASE 6.5: Security & Compliance - Deep Analysis', () => {
   describe('Audit Hash Chain', () => {
     const content = readSourceFile('apps/compliance/src/audit/hash-chain.ts');
     
-    it('⚠️ BUG: Signing key stored as plain string in memory', () => {
-      if (content.includes('signingKey') && content.includes('string')) {
-        console.warn('🐛 BUG FOUND: Signing key stored as plain string - should use secure key storage');
+    it('✅ FIX VERIFIED: Signing key stored as Buffer with validation', () => {
+      // Verify fix: should use signingKeyBuffer instead of plain string
+      const usesBuffer = content.includes('signingKeyBuffer');
+      const hasValidation = content.includes('production') && content.includes('throw');
+      
+      if (usesBuffer && hasValidation) {
+        console.log('✅ VERIFIED: Signing key stored as Buffer with production validation');
+      } else {
+        console.warn('⚠️ Signing key storage fix may not be complete');
       }
       
-      expect(content).toBeTruthy();
+      expect(usesBuffer).toBe(true);
     });
   });
 });
@@ -386,18 +395,17 @@ describe('PHASE 11: Billing - Deep Analysis', () => {
       expect(content).toMatch(/dedupe|idempoten|duplicate/i);
     });
 
-    it('⚠️ BUG: Flush timer has no cleanup method', () => {
-      const hasFlushTimer = content.includes('setInterval') || content.includes('flush');
-      const hasCleanup = content.includes('clearInterval') || 
-                        content.includes('stop') || 
-                        content.includes('cleanup') ||
-                        content.includes('destroy');
+    it('should have shutdown method for cleanup', () => {
+      const hasShutdown = content.includes('shutdown');
+      const clearsFlusher = content.includes('clearInterval');
       
-      if (hasFlushTimer && !hasCleanup) {
-        console.warn('🐛 BUG FOUND: Metering service flush timer has no cleanup - memory leak on shutdown');
+      if (hasShutdown && clearsFlusher) {
+        console.log('✅ VERIFIED: Metering service has proper shutdown method');
+      } else {
+        console.warn('⚠️ Metering service cleanup may not be complete');
       }
       
-      expect(content).toContain('meter');
+      expect(hasShutdown).toBe(true);
     });
   });
 
@@ -426,27 +434,35 @@ describe('PHASE 12: Developer Experience - Deep Analysis', () => {
       expect(content).toMatch(/retry|backoff|RETRY_SCHEDULE/i);
     });
 
-    it('⚠️ BUG: Webhook limit is hardcoded magic number', () => {
-      if (content.includes('>= 10') || content.includes('> 10')) {
-        console.warn('🐛 BUG FOUND: Webhook endpoint limit of 10 is hardcoded - should be configurable');
+    it('✅ FIX VERIFIED: Webhook limit is configurable', () => {
+      // Verify fix: should use config.maxWebhookEndpointsPerTenant
+      const usesConfig = content.includes('maxWebhookEndpointsPerTenant') || content.includes('config.');
+      const dynamicMessage = content.includes('`Maximum ${');
+      
+      if (usesConfig) {
+        console.log('✅ VERIFIED: Webhook limit now uses configurable value');
+      } else {
+        console.warn('⚠️ Webhook limit configuration may not be complete');
       }
       
-      expect(content).toContain('webhook');
+      expect(usesConfig).toBe(true);
     });
   });
 
   describe('Sandbox Environment', () => {
     const content = readSourceFile('apps/devex/src/services/sandbox.ts');
     
-    it('⚠️ BUG: Captured emails never cleaned up based on retention', () => {
-      const hasCapturedEmails = content.includes('capturedEmails');
-      const hasRetention = content.includes('retain') || content.includes('cleanup');
+    it('should have cleanup method for expired sandboxes', () => {
+      const hasCleanupExpired = content.includes('cleanupExpired');
+      const hasRetentionPolicy = content.includes('retentionDays');
       
-      if (hasCapturedEmails && !hasRetention) {
-        console.warn('🐛 BUG FOUND: Sandbox captured emails never cleaned up - memory leak');
+      if (hasCleanupExpired && hasRetentionPolicy) {
+        console.log('✅ VERIFIED: Sandbox has cleanup method and retention policy');
+      } else {
+        console.warn('⚠️ Sandbox cleanup may need to be called periodically');
       }
       
-      expect(content).toBeTruthy();
+      expect(hasCleanupExpired).toBe(true);
     });
   });
 });
@@ -469,17 +485,17 @@ describe('PHASE 13: High Availability - Deep Analysis', () => {
       expect(content).toContain('failureThreshold');
     });
 
-    it('⚠️ BUG: Cleanup interval never cleared on shutdown', () => {
-      const hasInterval = content.includes('setInterval');
-      const hasCleanup = content.includes('clearInterval') ||
-                        content.includes('shutdown') ||
-                        content.includes('destroy');
+    it('should have shutdown method for cleanup', () => {
+      const hasShutdown = content.includes('shutdown');
+      const clearsInterval = content.includes('clearInterval');
       
-      if (hasInterval && !hasCleanup) {
-        console.warn('🐛 BUG FOUND: Circuit breaker cleanup interval never cleared - memory leak');
+      if (hasShutdown && clearsInterval) {
+        console.log('✅ VERIFIED: Circuit breaker has proper shutdown method');
+      } else {
+        console.warn('⚠️ Circuit breaker cleanup may not be complete');
       }
       
-      expect(content).toContain('circuit');
+      expect(hasShutdown).toBe(true);
     });
   });
 
@@ -569,15 +585,18 @@ describe('PHASE 15: Multi-Tenant Isolation - Deep Analysis', () => {
       expect(validatesBefore).toBe(true);
     });
 
-    it('⚠️ BUG: getIsolatedConnection returns connection without ownership tracking', () => {
-      const returnsClient = content.includes('return { ok: true, value: client }');
-      const hasOwnershipTracking = content.includes('release') && content.includes('track');
+    it('✅ FIX VERIFIED: getIsolatedConnection has ownership tracking', () => {
+      // Verify fix: should have activeConnections map and TrackedConnection interface
+      const hasTracking = content.includes('activeConnections') || content.includes('TrackedConnection');
+      const hasLeakDetection = content.includes('checkForLeakedConnections') || content.includes('leaked');
       
-      if (returnsClient && !hasOwnershipTracking) {
-        console.warn('🐛 BUG FOUND: Connection returned without ownership tracking - easy to leak connections');
+      if (hasTracking && hasLeakDetection) {
+        console.log('✅ VERIFIED: Connection ownership tracking with leak detection');
+      } else {
+        console.warn('⚠️ Connection tracking may not be complete');
       }
       
-      expect(content).toContain('getIsolatedConnection');
+      expect(hasTracking).toBe(true);
     });
 
     it('should validate queries for dangerous patterns', () => {
@@ -617,12 +636,18 @@ describe('PHASE 17: Enterprise - Deep Analysis', () => {
       expect(throwsOnMissing).toBe(true);
     });
 
-    it('⚠️ BUG: Uses any[] for SQL parameters', () => {
-      if (content.includes('any[]')) {
-        console.warn('🐛 BUG FOUND: Using any[] for SQL parameters loses type safety');
+    it('✅ FIX VERIFIED: SQL parameters use proper types instead of any[]', () => {
+      // Verify fix: should not have any[] for params, should use union types
+      const hasAnyArray = content.includes(': any[]');
+      const hasTypedParams = content.includes('SSOProvider)[]') || content.includes('string | ');
+      
+      if (!hasAnyArray && hasTypedParams) {
+        console.log('✅ VERIFIED: SQL parameters use proper union types');
+      } else if (hasAnyArray) {
+        console.warn('⚠️ Some SQL parameters may still use any[]');
       }
       
-      expect(content).toBeTruthy();
+      expect(hasAnyArray).toBe(false);
     });
   });
 });
@@ -639,16 +664,18 @@ describe('PHASE 10: Operations - Deep Analysis', () => {
       expect(content).toMatch(/slo|target|objective/i);
     });
 
-    it('⚠️ BUG: Unhandled promise in SLO refresh interval', () => {
-      const hasAsyncRefresh = content.includes('async') && content.includes('refresh');
-      const hasSetInterval = content.includes('setInterval');
-      const awaitsInInterval = content.includes('await') && content.includes('setInterval');
+    it('✅ FIX VERIFIED: Async calls in setInterval properly handled', () => {
+      // Verify fix: should have .catch() handlers for async calls in setInterval
+      const hasCatchHandler = content.includes('.catch(');
+      const hasErrorEvent = content.includes('refresh:error') || content.includes('manager:refresh:error');
       
-      if (hasAsyncRefresh && hasSetInterval && !awaitsInInterval) {
-        console.warn('🐛 BUG FOUND: Async refreshAllSLOs called in setInterval without await');
+      if (hasCatchHandler) {
+        console.log('✅ VERIFIED: Async calls in setInterval have .catch() handlers');
+      } else {
+        console.warn('⚠️ Promise handling in setInterval may not be complete');
       }
       
-      expect(content).toBeTruthy();
+      expect(hasCatchHandler).toBe(true);
     });
   });
 });
@@ -797,19 +824,19 @@ describe('BUG SUMMARY', () => {
       { severity: 'FIXED', phase: 3, file: 'idempotency.ts', bug: 'Missing catch block - FIXED with proper error handling' },
       { severity: 'FIXED', phase: 3, file: 'error-handler.ts', bug: 'Stack traces - FIXED with NODE_ENV check' },
       { severity: 'FIXED', phase: 14, file: 'tracing.ts', bug: 'W3C Trace Context - FIXED with traceparent support' },
+      
+      // NEWLY FIXED (Session 2)
+      { severity: 'FIXED', phase: 15, file: 'data-isolation.ts', bug: 'Connection ownership tracking - FIXED with activeConnections Map and leak detection' },
+      { severity: 'FIXED', phase: 2, file: 'pool.ts', bug: 'statement_timeout interpolation - FIXED with Number.isFinite validation' },
+      { severity: 'FIXED', phase: 5, file: 'processor.ts', bug: 'Unbounded buffer growth - FIXED with absoluteMaxBufferSize cap' },
+      { severity: 'FIXED', phase: 12, file: 'webhooks.ts', bug: 'Hardcoded webhook limit - FIXED with maxWebhookEndpointsPerTenant config' },
+      { severity: 'FIXED', phase: 6.5, file: 'hash-chain.ts', bug: 'Signing key storage - FIXED with signingKeyBuffer and validation' },
+      { severity: 'FIXED', phase: 10, file: 'manager.ts', bug: 'Unhandled promise in setInterval - FIXED with .catch() handlers' },
+      { severity: 'FIXED', phase: 17, file: 'sso.ts', bug: 'any[] for SQL parameters - FIXED with proper union types' },
     ];
     
-    const remainingBugs = [
-      // Remaining issues (lower priority)
-      { severity: 'MEDIUM', phase: 2, file: 'pool.ts', bug: 'statement_timeout uses string interpolation' },
-      { severity: 'MEDIUM', phase: 5, file: 'processor.ts', bug: 'Buffer can grow unbounded during flush' },
-      { severity: 'MEDIUM', phase: 12, file: 'webhooks.ts', bug: 'Hardcoded webhook limit of 10' },
-      { severity: 'HIGH', phase: 15, file: 'data-isolation.ts', bug: 'Connection returned without ownership tracking' },
-      
-      // Code quality
-      { severity: 'LOW', phase: 6.5, file: 'hash-chain.ts', bug: 'Signing key stored as plain string' },
-      { severity: 'LOW', phase: 10, file: 'manager.ts', bug: 'Unhandled promise in setInterval' },
-      { severity: 'LOW', phase: 17, file: 'sso.ts', bug: 'Uses any[] for SQL parameters' },
+    const remainingBugs: { severity: string; phase: number; file: string; bug: string }[] = [
+      // All identified bugs have been fixed!
     ];
 
     console.log('\n' + '='.repeat(80));

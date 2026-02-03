@@ -84,7 +84,7 @@ const comparisonData = {
       'Higher batch limits (1,000 vs 100 per request)',
     ],
   },
-};
+} as const;
 
 export default function CompareResendPage() {
   return (

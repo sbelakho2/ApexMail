@@ -26,7 +26,7 @@ export function ConsentLedger() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
+ <section ref={ref} className="py-24 relative bg-surface-50">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Visual */}
@@ -35,13 +35,13 @@ export function ConsentLedger() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  className="order-2 lg:order-1"
  >
- <div className="premium-card overflow-hidden bg-white ">
+ <div className="bg-white rounded-xl border border-surface-200 overflow-hidden shadow-sm">
  {/* Header */}
- <div className="flex items-center gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50">
- <Database className="w-4 h-4 text-primary-600" />
- <span className="text-[10px] font-bold text-surface-600 uppercase tracking-widest font-mono">Consent Ledger Entry</span>
+ <div className="flex items-center gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50/50">
+ <Database className="w-4 h-4 text-surface-500" />
+ <span className="text-xs font-medium text-surface-600 font-mono">Consent Ledger Entry</span>
  </div>
- <div className="bg-surface-900 overflow-hidden shadow-inner">
+ <div className="bg-surface-950 overflow-hidden">
  <CodeBlock code={ledgerCode} language="json" />
  </div>
 
@@ -50,15 +50,15 @@ export function ConsentLedger() {
  <div className="flex items-center justify-between gap-4">
  {[1, 2, 3, 4, 5].map((block, i) => (
  <div key={i} className="flex items-center gap-2">
- <div className="w-10 h-10 rounded-lg bg-primary-50 border border-primary-100 flex items-center justify-center ">
- <Hash className="w-4 h-4 text-primary-600" />
+ <div className="w-10 h-10 rounded-lg bg-surface-50 border border-surface-200 flex items-center justify-center ">
+ <Hash className="w-4 h-4 text-surface-900" />
  </div>
  {i < 4 && <LinkIcon className="w-3 h-3 text-surface-300" />}
  </div>
  ))}
  </div>
- <div className="mt-4 p-3 bg-primary-50 border border-primary-100 rounded-lg">
- <p className="text-[10px] text-primary-700 font-bold uppercase tracking-tight text-center">
+ <div className="mt-6 p-4 bg-surface-50 border border-surface-200 rounded-lg">
+ <p className="text-xs text-surface-600 font-medium text-center">
  Immutable hash chain - tampering is mathematically detectable
  </p>
  </div>
@@ -73,14 +73,14 @@ export function ConsentLedger() {
  transition={{ delay: 0.2 }}
  className="order-1 lg:order-2"
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-4">
-          <Database className="w-4 h-4" />
+ <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
+          <Database className="w-3.5 h-3.5" />
           Consent Ledger
         </div>
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
+ <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Immutable Consent Records
  </h2>
- <p className="text-lg text-surface-600 mb-8 leading-relaxed font-medium">
+ <p className="text-lg text-surface-600 mb-8 leading-relaxed">
  Every consent event is recorded in a cryptographically-linked chain. 
  Each entry references the hash of the previous one, making any tampering 
  mathematically detectable.
@@ -94,16 +94,16 @@ export function ConsentLedger() {
  'Export-ready for GDPR Article 30 compliance',
  'Real-time verification API for auditors',
  ].map((item) => (
- <li key={item} className="flex items-start gap-3 text-surface-700 font-bold text-sm">
- <Shield className="w-5 h-5 text-primary-600 flex-shrink-0 mt-0.5" strokeWidth={3} />
+ <li key={item} className="flex items-start gap-3 text-surface-700 text-sm leading-relaxed">
+ <Shield className="w-5 h-5 text-surface-900 flex-shrink-0 mt-0.5" strokeWidth={1.5} />
  {item}
  </li>
  ))}
  </ul>
 
- <div className="p-6 rounded-xl bg-white border border-surface-200 ">
- <p className="text-sm text-surface-600 leading-relaxed font-medium">
- <strong className="text-surface-900 font-bold uppercase text-[10px] tracking-widest block mb-2">Auditor-Ready</strong>
+ <div className="p-6 rounded-xl bg-white border border-surface-200 shadow-sm">
+ <p className="text-sm text-surface-600 leading-relaxed">
+ <strong className="text-surface-900 font-semibold block mb-1">Auditor-Ready</strong>
  Our consent ledger has been reviewed and approved by DPOs at 
  Fortune 500 companies for GDPR Article 7 compliance.
  </p>

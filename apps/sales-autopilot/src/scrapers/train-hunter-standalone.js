@@ -123,7 +123,6 @@ const REAL_COMPANIES = [
     { name: 'Render', domain: 'render.com', industry: 'Cloud Platform', employees: '51-200', hasFunding: true, techStack: ['Go', 'React', 'Kubernetes'], isQualifiedLead: true },
     // More Fintech
     { name: 'Chargebee', domain: 'chargebee.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },
-    { name: 'Paddle', domain: 'paddle.com', industry: 'Fintech', employees: '201-500', hasFunding: true, techStack: ['Go', 'React'], isQualifiedLead: true },
     { name: 'Modern Treasury', domain: 'moderntreasury.com', industry: 'Fintech', employees: '51-200', hasFunding: true, techStack: ['Ruby', 'React'], isQualifiedLead: true },
     { name: 'Marqeta', domain: 'marqeta.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Java', 'React'], isQualifiedLead: true },
     { name: 'Checkout.com', domain: 'checkout.com', industry: 'Fintech', employees: '501-1000', hasFunding: true, techStack: ['Go', 'React'], isQualifiedLead: true },

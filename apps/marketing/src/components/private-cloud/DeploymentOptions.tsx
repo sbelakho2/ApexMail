@@ -90,22 +90,22 @@ export function DeploymentOptions() {
  const selected = deploymentOptions.find((o) => o.id === selectedOption) || deploymentOptions[0];
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+ <section ref={ref} className="py-24 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
- <div className="text-center mb-12">
+ <div className="text-center mb-16">
  <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={inView ? { opacity: 1, y: 0 } : {}}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-primary-50 text-primary-700 border border-primary-100 text-[10px] font-bold uppercase tracking-widest mb-4"
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6"
           >
-            <Server className="w-4 h-4" />
+            <Server className="w-3.5 h-3.5" />
             Deployment Options
           </motion.div>
  <motion.h2
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.1 }}
- className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight"
+ className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight"
  >
  Deploy Anywhere
  </motion.h2>
@@ -125,17 +125,17 @@ export function DeploymentOptions() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.3 }}
- className="flex flex-wrap justify-center gap-2 mb-8"
+ className="flex flex-wrap justify-center gap-2 mb-10"
  >
  {deploymentOptions.map((option) => (
  <button
  key={option.id}
  onClick={() => setSelectedOption(option.id)}
  className={cn(
- 'flex items-center gap-2 px-4 py-2 rounded-md font-bold text-[10px] uppercase tracking-widest transition-all',
+ 'flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold transition-all',
  selectedOption === option.id
- ? 'bg-primary-600 text-white '
- : 'bg-surface-50 text-surface-500 hover:text-surface-900 hover:bg-surface-100'
+ ? 'bg-surface-900 text-white shadow-sm'
+ : 'bg-surface-50 text-surface-600 hover:text-surface-900 hover:bg-surface-100 border border-transparent hover:border-surface-200'
  )}
  >
  <option.icon className="w-4 h-4" />
@@ -149,34 +149,34 @@ export function DeploymentOptions() {
  key={selected.id}
  initial={{ opacity: 0, y: 20 }}
  animate={{ opacity: 1, y: 0 }}
- className="premium-card p-8 bg-surface-50"
+ className="bg-white rounded-2xl border border-surface-200 p-8 shadow-sm"
  >
  <div className="grid lg:grid-cols-2 gap-12">
  {/* Left - Info */}
  <div>
- <div className="flex items-center gap-4 mb-6">
- <div className="w-14 h-14 rounded-md bg-primary-50 flex items-center justify-center border border-primary-100">
- <selected.icon className="w-7 h-7 text-primary-600" />
+ <div className="flex items-center gap-5 mb-6">
+ <div className="w-12 h-12 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200">
+ <selected.icon className="w-6 h-6 text-surface-900" strokeWidth={1.5} />
  </div>
  <div>
- <h3 className="text-2xl font-bold text-surface-900">{selected.name}</h3>
- <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{selected.availability}</span>
+ <h3 className="text-xl font-bold text-surface-900">{selected.name}</h3>
+ <span className="text-xs font-medium text-emerald-600">{selected.availability}</span>
  </div>
  </div>
- <p className="text-surface-600 font-medium mb-8 leading-relaxed">{selected.description}</p>
- <div className="bg-white border border-surface-200 rounded-md p-6 ">
- <div className="text-[10px] font-bold text-surface-600 mb-2 uppercase tracking-widest">Best For</div>
- <div className="text-surface-900 font-bold">{selected.bestFor}</div>
+ <p className="text-surface-600 mb-8 leading-relaxed">{selected.description}</p>
+ <div className="bg-surface-50 border border-surface-200 rounded-lg p-5 ">
+ <div className="text-xs font-medium text-surface-500 mb-1.5">Best For</div>
+ <div className="text-surface-900 font-semibold text-sm">{selected.bestFor}</div>
  </div>
  </div>
 
  {/* Right - Features */}
  <div>
- <div className="text-[10px] font-bold text-surface-600 mb-6 uppercase tracking-widest">Included Components</div>
+ <div className="text-xs font-semibold text-surface-900 mb-6">Included Components</div>
  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
  {selected.features.map((feature) => (
- <div key={feature} className="flex items-center gap-3 text-surface-700 font-bold text-sm">
- <CheckCircle className="w-5 h-5 text-primary-600 flex-shrink-0" strokeWidth={3} />
+ <div key={feature} className="flex items-center gap-3 text-surface-700 text-sm">
+ <CheckCircle className="w-5 h-5 text-surface-900 flex-shrink-0" strokeWidth={1.5} />
  <span>{feature}</span>
  </div>
  ))}
@@ -186,8 +186,8 @@ export function DeploymentOptions() {
 
  {/* Architecture Preview */}
  <div className="mt-12 pt-12 border-t border-surface-200">
- <div className="text-[10px] font-bold text-surface-600 mb-4 uppercase tracking-widest text-center">Reference Architecture</div>
- <div className="bg-surface-900 rounded-lg p-8 font-mono text-[13px] text-surface-300 shadow-inner overflow-x-auto">
+ <div className="text-xs font-semibold text-surface-500 mb-6 text-center">Reference Architecture</div>
+ <div className="bg-surface-950 rounded-xl p-8 font-mono text-[13px] text-surface-300 shadow-sm overflow-x-auto border border-surface-900">
  <pre className="whitespace-pre">
 {`┌─────────────────────────────────────────────────────────────┐
 │ Your ${selected.name} Environment │

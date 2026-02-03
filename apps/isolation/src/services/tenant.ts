@@ -736,13 +736,44 @@ export class TenantService {
 
   // ==================== Private Methods ====================
 
+  /**
+   * Validate identifier (schema/table name) to prevent SQL injection
+   * SECURITY: Only allow alphanumeric and underscores
+   */
+  private validateIdentifier(name: string): boolean {
+    return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
+  }
+
+  /**
+   * Sanitize an ID for safe use in SQL identifiers
+   * SECURITY: Removes any characters that could enable SQL injection
+   */
+  private sanitizeIdentifier(id: string): string {
+    const sanitized = id.replace(/[^a-zA-Z0-9_]/g, '_');
+    if (!/^[a-zA-Z_]/.test(sanitized)) {
+      return `_${sanitized}`;
+    }
+    return sanitized;
+  }
+
   private async createDedicatedSchema(orgId: string): Promise<void> {
-    const schemaName = `org_${orgId.replace(/-/g, '_')}`;
+    // SECURITY: Sanitize org ID for use in schema name
+    const schemaName = `org_${this.sanitizeIdentifier(orgId)}`;
+    
+    if (!this.validateIdentifier(schemaName)) {
+      throw new Error(`Invalid schema name generated from org ID: ${orgId}`);
+    }
+    
     await this.db.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
     // Would create org-level tables in this schema
   }
 
   private async createWorkspaceSchema(schemaName: string): Promise<void> {
+    // SECURITY: Validate schema name before using in SQL
+    if (!this.validateIdentifier(schemaName)) {
+      throw new Error(`Invalid schema name: ${schemaName}`);
+    }
+    
     await this.db.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
     
     // Create workspace-specific tables

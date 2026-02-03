@@ -142,23 +142,23 @@ export function FeaturesSection() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: categoryIndex * 0.1 + index * 0.1 }}
-              className="premium-card p-6 bg-surface-50 group hover:bg-white transition-all duration-300"
+              className="p-6 bg-white rounded-xl border border-surface-200 hover:border-surface-300 transition-colors"
             >
               {/* Icon & Badge */}
-              <div className="flex items-start justify-between mb-4">
-                <div className="w-12 h-12 rounded-lg bg-primary-50 flex items-center justify-center border border-primary-100 group-hover:bg-primary-100 transition-colors">
-                  <feature.icon className="w-6 h-6 text-primary-600" />
+              <div className="flex items-start justify-between mb-5">
+                <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
+                  <feature.icon className="w-5 h-5" strokeWidth={1.5} />
                 </div>
-                <span className="inline-flex items-center px-2.5 py-1 rounded-md bg-white text-surface-600 border border-surface-200 text-[10px] font-bold uppercase tracking-widest">
+                <span className="inline-flex items-center px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 text-[10px] font-medium uppercase tracking-wide">
                   {feature.badge}
                 </span>
               </div>
 
               {/* Content */}
-              <h4 className="text-lg font-bold text-surface-900 mb-2 group-hover:text-primary-600 transition-colors">
+              <h4 className="text-base font-semibold text-surface-900 mb-2">
                 {feature.title}
               </h4>
-              <p className="text-surface-600 text-[14px] leading-relaxed font-medium">
+              <p className="text-surface-600 text-sm leading-relaxed">
                 {feature.description}
               </p>
             </motion.div>
@@ -173,7 +173,7 @@ export function FeaturesSection() {
     initial={{ opacity: 0, y: 20 }}
     animate={inView ? { opacity: 1, y: 0 } : {}}
     transition={{ delay: 0.6 }}
-    className="mt-20 grid grid-cols-2 md:grid-cols-4 gap-6"
+    className="mt-20 grid grid-cols-2 md:grid-cols-4 gap-px bg-surface-200 border border-surface-200 rounded-lg overflow-hidden"
   >
     {[
       { value: '99.9%', label: 'Delivery Rate' },
@@ -181,9 +181,9 @@ export function FeaturesSection() {
       { value: '50M+', label: 'Emails/Month' },
       { value: '24/7', label: 'Support Response' },
     ].map((stat) => (
-      <div key={stat.label} className="text-center premium-card py-6 bg-surface-50">
-        <div className="text-3xl lg:text-4xl font-bold text-primary-600 mb-1 tabular-nums">{stat.value}</div>
-        <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
+      <div key={stat.label} className="text-center py-8 bg-white">
+        <div className="text-3xl font-semibold text-surface-900 mb-1 tabular-nums tracking-tight">{stat.value}</div>
+        <div className="text-xs font-medium text-surface-500 uppercase tracking-wide">{stat.label}</div>
       </div>
     ))}
   </motion.div>

@@ -6,8 +6,9 @@ import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { config } from './config.js';
-import { readdir } from 'fs/promises';
+import { readdir, mkdir } from 'fs/promises';
 import { join } from 'path';
+import * as duckdb from 'duckdb';
 
 interface QueryEngineConfig {
   db: Pool;
@@ -40,6 +41,8 @@ export class QueryEngine {
   private readonly db: Pool;
   private readonly redis: Redis;
   private readonly logger: Logger;
+  private duckDb: duckdb.Database | null = null;
+  private duckConn: duckdb.Connection | null = null;
 
   constructor(options: QueryEngineConfig) {
     this.db = options.db;
@@ -50,14 +53,74 @@ export class QueryEngine {
   async initialize(): Promise<void> {
     this.logger.info('Initializing query engine');
     
-    // In production, initialize DuckDB here
-    // For now, we'll use PostgreSQL for queries
+    // Initialize DuckDB for cold storage queries
+    try {
+      const dbPath = config.duckdb.dbPath;
+      
+      // Ensure directory exists for DuckDB file
+      const dbDir = dbPath.substring(0, dbPath.lastIndexOf('/'));
+      await mkdir(dbDir, { recursive: true });
+      
+      // Initialize DuckDB with memory limits from config
+      this.duckDb = new duckdb.Database(dbPath);
+      this.duckConn = this.duckDb.connect();
+      
+      // Configure DuckDB settings
+      await this.runDuckDbQuery(`SET memory_limit='${config.duckdb.memoryLimit}'`);
+      await this.runDuckDbQuery(`SET threads=${config.duckdb.threads}`);
+      
+      // Install and load parquet extension
+      await this.runDuckDbQuery(`INSTALL parquet`);
+      await this.runDuckDbQuery(`LOAD parquet`);
+      
+      this.logger.info('DuckDB initialized', { 
+        path: dbPath,
+        memoryLimit: config.duckdb.memoryLimit,
+        threads: config.duckdb.threads,
+      });
+    } catch (error) {
+      this.logger.error('Failed to initialize DuckDB, falling back to PostgreSQL only', { error });
+      // Continue without DuckDB - fall back to PostgreSQL for all queries
+    }
     
     this.logger.info('Query engine initialized');
   }
 
+  private runDuckDbQuery(sql: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (!this.duckConn) {
+        reject(new Error('DuckDB connection not initialized'));
+        return;
+      }
+      this.duckConn.run(sql, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  private queryDuckDb<T>(sql: string): Promise<T[]> {
+    return new Promise((resolve, reject) => {
+      if (!this.duckConn) {
+        reject(new Error('DuckDB connection not initialized'));
+        return;
+      }
+      this.duckConn.all(sql, (err, result) => {
+        if (err) reject(err);
+        else resolve(result as T[]);
+      });
+    });
+  }
+
   async close(): Promise<void> {
-    // Close DuckDB connection if open
+    if (this.duckConn) {
+      this.duckConn.close();
+      this.duckConn = null;
+    }
+    if (this.duckDb) {
+      this.duckDb.close();
+      this.duckDb = null;
+    }
     this.logger.info('Query engine closed');
   }
 
@@ -313,19 +376,62 @@ export class QueryEngine {
       return { eventCount: 0, sampleEvents: [] };
     }
 
-    // In production, use DuckDB to query Parquet files
-    // For now, return placeholder
-    this.logger.info('Would query cold storage', {
-      tenantId,
-      fileCount: files.length,
-      startDate: startDate.toISOString(),
-      endDate: endDate.toISOString(),
-    });
+    // Use DuckDB to query Parquet/JSONL files for cold storage analytics
+    if (!this.duckConn) {
+      this.logger.warn('DuckDB not initialized, skipping cold storage query');
+      return { eventCount: 0, sampleEvents: [] };
+    }
 
-    return {
-      eventCount: 0,
-      sampleEvents: [],
-    };
+    try {
+      // Query all files using DuckDB's glob pattern for JSONL files
+      const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+      
+      if (jsonlFiles.length === 0) {
+        return { eventCount: 0, sampleEvents: [] };
+      }
+
+      // Create a view over the JSONL files
+      const fileList = jsonlFiles.map(f => `'${f}'`).join(', ');
+      
+      // Get event count
+      const countResult = await this.queryDuckDb<{ cnt: number }>(
+        `SELECT COUNT(*) as cnt FROM read_json_auto([${fileList}])`
+      );
+      const eventCount = countResult[0]?.cnt || 0;
+
+      // Get sample events
+      const sampleResult = await this.queryDuckDb<{
+        id: string;
+        event_type: string;
+        recipient: string;
+        timestamp: string;
+      }>(
+        `SELECT id, event_type, recipient, timestamp 
+         FROM read_json_auto([${fileList}]) 
+         LIMIT 10`
+      );
+
+      this.logger.info('Queried cold storage', {
+        tenantId,
+        fileCount: jsonlFiles.length,
+        eventCount,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+      });
+
+      return {
+        eventCount,
+        sampleEvents: sampleResult.map(row => ({
+          id: row.id,
+          eventType: row.event_type,
+          recipient: row.recipient,
+          timestamp: row.timestamp,
+        })),
+      };
+    } catch (error) {
+      this.logger.error('Cold storage query failed', { error, tenantId });
+      return { eventCount: 0, sampleEvents: [] };
+    }
   }
 
   /**

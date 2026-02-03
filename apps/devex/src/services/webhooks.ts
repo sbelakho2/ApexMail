@@ -15,6 +15,7 @@ import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { hmacSign, randomToken, timingSafeCompare } from '@apexmail/lib/crypto';
 import { lookup } from 'dns/promises';
+import { config } from '../config.js';
 
 /**
  * SSRF Protection: Check if an IP address is private/internal
@@ -247,14 +248,15 @@ export class WebhookService {
         return { ok: false, error: new Error(`Invalid events: ${invalidEvents.join(', ')}`) };
       }
 
-      // Check endpoint limit (max 10 per tenant)
+      // Check endpoint limit (configurable per deployment)
+      const maxEndpoints = config.maxWebhookEndpointsPerTenant;
       const countResult = await this.db.query(
         `SELECT COUNT(*) as count FROM webhook_endpoints WHERE tenant_id = $1`,
         [tenantId]
       );
 
-      if (parseInt(countResult.rows[0].count, 10) >= 10) {
-        return { ok: false, error: new Error('Maximum 10 webhook endpoints allowed') };
+      if (parseInt(countResult.rows[0].count, 10) >= maxEndpoints) {
+        return { ok: false, error: new Error(`Maximum ${maxEndpoints} webhook endpoints allowed`) };
       }
 
       // Generate signing secret

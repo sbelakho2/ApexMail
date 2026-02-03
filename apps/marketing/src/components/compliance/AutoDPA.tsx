@@ -8,7 +8,7 @@ export function AutoDPA() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative bg-white">
+ <section ref={ref} className="py-24 relative bg-white">
  <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
@@ -16,14 +16,14 @@ export function AutoDPA() {
  initial={{ opacity: 0, x: -20 }}
  animate={inView ? { opacity: 1, x: 0 } : {}}
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold uppercase tracking-widest mb-4">
-            <FileText className="w-4 h-4" />
+ <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-100/50 text-xs font-medium text-emerald-700 mb-6">
+            <FileText className="w-3.5 h-3.5" />
             Auto-DPA
           </div>
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-4 tracking-tight">
+ <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
  Data Processing Agreements on Autopilot
  </h2>
- <p className="text-lg text-surface-600 mb-8 font-medium leading-relaxed">
+ <p className="text-lg text-surface-600 mb-8 leading-relaxed">
  No more back-and-forth with legal teams. Generate compliant DPAs instantly, 
  customized to your jurisdiction and processing activities.
  </p>
@@ -36,8 +36,8 @@ export function AutoDPA() {
  'Versioned and timestamped for audit trails',
  'Digital signatures with legal validity',
  ].map((item) => (
- <li key={item} className="flex items-start gap-3 text-surface-700 font-bold text-sm">
- <CheckCircle className="w-5 h-5 text-primary-600 flex-shrink-0 mt-0.5" strokeWidth={3} />
+ <li key={item} className="flex items-start gap-3 text-surface-700 text-sm leading-relaxed">
+ <CheckCircle className="w-5 h-5 text-surface-900 flex-shrink-0 mt-0.5" strokeWidth={1.5} />
  {item}
  </li>
  ))}
@@ -50,28 +50,28 @@ export function AutoDPA() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  transition={{ delay: 0.2 }}
  >
- <div className="premium-card p-8 bg-surface-50">
+ <div className="bg-white rounded-xl border border-surface-200 p-8 shadow-sm">
  {/* Document Preview */}
- <div className="bg-white rounded-xl p-8 mb-6 border border-surface-200 ">
+ <div className="bg-surface-50/50 rounded-lg p-6 mb-6 border border-surface-200">
  <div className="flex items-center gap-4 mb-6">
- <div className="w-12 h-12 rounded-lg bg-primary-50 flex items-center justify-center border border-primary-100">
- <FileText className="w-7 h-7 text-primary-600" />
+ <div className="w-10 h-10 rounded-lg bg-white flex items-center justify-center border border-surface-200 shadow-sm">
+ <FileText className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
  </div>
  <div>
- <div className="font-bold text-surface-900">Data Processing Agreement</div>
- <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">Generated: Feb 15, 2024</div>
+ <div className="font-semibold text-surface-900 text-sm mb-0.5">Data Processing Agreement</div>
+ <div className="text-xs text-surface-500">Generated: Feb 15, 2024</div>
  </div>
  </div>
- <div className="space-y-3 mb-6">
- <div className="h-2 bg-surface-50 rounded-full w-full" />
- <div className="h-2 bg-surface-50 rounded-full w-5/6" />
- <div className="h-2 bg-surface-50 rounded-full w-4/5" />
+ <div className="space-y-3 mb-6 opacity-60">
+ <div className="h-1.5 bg-surface-200 rounded-full w-full" />
+ <div className="h-1.5 bg-surface-200 rounded-full w-5/6" />
+ <div className="h-1.5 bg-surface-200 rounded-full w-4/5" />
  </div>
- <div className="mt-6 pt-6 border-t border-surface-100">
- <div className="text-[10px] font-bold text-surface-600 mb-3 uppercase tracking-widest">Included Clauses:</div>
+ <div className="mt-6 pt-6 border-t border-surface-200">
+ <div className="text-xs font-semibold text-surface-900 mb-3">Included Clauses:</div>
  <div className="flex flex-wrap gap-2">
  {['GDPR Art. 28', 'SCCs', 'Sub-processors', 'Security Measures'].map((item) => (
- <span key={item} className="px-2.5 py-1 bg-surface-100 text-surface-600 text-[10px] font-bold uppercase tracking-tight rounded-md border border-surface-200">
+ <span key={item} className="px-2 py-1 bg-white text-surface-600 text-[10px] font-medium rounded border border-surface-200">
  {item}
  </span>
  ))}
@@ -81,11 +81,11 @@ export function AutoDPA() {
 
  {/* Actions */}
  <div className="flex gap-4">
- <button className="btn-primary flex-1 py-3 text-xs font-bold uppercase tracking-widest">
+ <button className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors flex items-center justify-center">
  <Download className="w-4 h-4 mr-2" />
  Download PDF
  </button>
- <button className="btn-secondary flex-1 py-3 bg-white text-xs font-bold uppercase tracking-widest">
+ <button className="flex-1 py-2.5 px-4 text-sm font-semibold text-surface-700 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors">
  Send for Signature
  </button>
  </div>

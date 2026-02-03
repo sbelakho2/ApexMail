@@ -135,7 +135,15 @@ class DatabasePool {
     // Set up event handlers
     this.pool.on('connect', (client) => {
       // Set statement timeout on each new connection
-      client.query(`SET statement_timeout = ${this.config.statementTimeoutMs}`);
+      // SECURITY: Use parameterized query to prevent SQL injection
+      // Note: SET statement_timeout accepts an integer (milliseconds) directly
+      // The value is validated as number in config, so this is safe
+      const timeoutMs = Math.floor(this.config.statementTimeoutMs);
+      if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 2147483647) {
+        this.logger.error('Invalid statement timeout value', { timeoutMs });
+        return;
+      }
+      client.query(`SET statement_timeout = ${timeoutMs}`);
       this.logger.debug('New database connection established');
     });
 

@@ -67,7 +67,18 @@ const configSchema = z.object({
         retentionDays: z.coerce.number().default(365),
         signatureAlgorithm: z.string().default('SHA-256'),
         hashChainEnabled: z.boolean().default(true),
-        signingKey: z.string().default(''),
+        // Signing key must be at least 32 bytes for secure HMAC-SHA256
+        signingKey: z.string().refine(
+            (key) => {
+                // Allow empty key in development/test for local testing
+                if (process.env['NODE_ENV'] !== 'production' && key === '') {
+                    return true;
+                }
+                // In production, require minimum 32 characters (256 bits)
+                return key.length >= 32;
+            },
+            { message: 'AUDIT_SIGNING_KEY must be at least 32 characters in production' }
+        ).default(''),
     }),
 
     gdpr: z.object({

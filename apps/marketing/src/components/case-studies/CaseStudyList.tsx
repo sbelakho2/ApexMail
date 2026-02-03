@@ -2,8 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import Link from 'next/link';
-import { ArrowRight, Building2, Users, Mail, TrendingUp, Shield, Clock } from 'lucide-react';
+import { Mail, TrendingUp, Shield, Clock, Building2, Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const caseStudies = [
@@ -36,7 +35,9 @@ const caseStudies = [
       author: 'Sarah Chen',
       role: 'CTO, FinanceFlow',
     },
-    color: 'bg-blue-500',
+    color: 'bg-blue-600',
+    iconColor: 'text-blue-600',
+    bgLight: 'bg-blue-50',
   },
   {
     slug: 'healthcare-saas',
@@ -67,7 +68,9 @@ const caseStudies = [
       author: 'Dr. Michael Torres',
       role: 'VP of Engineering, MedConnect',
     },
-    color: 'bg-green-500',
+    color: 'bg-emerald-600',
+    iconColor: 'text-emerald-600',
+    bgLight: 'bg-emerald-50',
   },
   {
     slug: 'ecommerce-platform',
@@ -98,7 +101,9 @@ const caseStudies = [
       author: 'Jessica Park',
       role: 'Head of Growth, ShopScale',
     },
-    color: 'bg-purple-500',
+    color: 'bg-purple-600',
+    iconColor: 'text-purple-600',
+    bgLight: 'bg-purple-50',
   },
   {
     slug: 'developer-tools',
@@ -129,7 +134,9 @@ const caseStudies = [
       author: 'Alex Rivera',
       role: 'Founder & CEO, DevPipeline',
     },
-    color: 'bg-orange-500',
+    color: 'bg-orange-600',
+    iconColor: 'text-orange-600',
+    bgLight: 'bg-orange-50',
   },
 ];
 
@@ -137,84 +144,93 @@ export function CaseStudyList() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
 
   return (
-    <section ref={ref} className="py-20 lg:py-32 bg-white">
+    <section ref={ref} className="py-20 bg-surface-50">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="space-y-24">
+        <div className="space-y-16">
           {caseStudies.map((study, index) => (
             <motion.article
               key={study.slug}
-              initial={{ opacity: 0, y: 40 }}
+              initial={{ opacity: 0, y: 20 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: index * 0.1 }}
-              className="premium-card overflow-hidden bg-white"
+              className="bg-white rounded-xl border border-surface-200 shadow-sm overflow-hidden"
             >
               {/* Header */}
-              <div className={cn('px-8 py-4', study.color)}>
-                <div className="flex items-center justify-between">
-                  <span className="text-white/80 text-sm font-medium">{study.industry}</span>
-                  <span className="text-white font-bold text-lg">{study.company}</span>
+              <div className="border-b border-surface-100 flex flex-col md:flex-row md:items-center justify-between p-6 bg-white">
+                <div className="flex items-center gap-3 mb-4 md:mb-0">
+                  <div className={cn("w-10 h-10 rounded-lg flex items-center justify-center", study.bgLight)}>
+                     <Building2 className={cn("w-5 h-5", study.iconColor)} />
+                  </div>
+                   <div>
+                    <h3 className="font-bold text-lg text-surface-900 leading-tight">{study.company}</h3>
+                    <div className="text-sm text-surface-500">{study.industry}</div>
+                   </div>
                 </div>
               </div>
 
-              <div className="p-8 lg:p-10">
+              <div className="p-6 lg:p-10">
                 {/* Title */}
-                <h2 className="text-2xl lg:text-3xl font-bold text-surface-900 mb-4">
+                <h2 className="text-2xl font-bold text-surface-900 mb-4 leading-tight">
                   {study.title}
                 </h2>
-                <p className="text-lg text-surface-600 mb-8">{study.summary}</p>
+                <p className="text-lg text-surface-600 mb-10 max-w-4xl">{study.summary}</p>
 
                 {/* Stats Grid */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
                   {study.stats.map((stat) => (
-                    <div key={stat.label} className="text-center p-4 rounded-xl bg-surface-50">
-                      <stat.icon className="w-6 h-6 mx-auto mb-2 text-primary-600" />
-                      <div className="text-2xl font-bold text-surface-900">{stat.value}</div>
-                      <div className="text-sm text-surface-600">{stat.label}</div>
+                    <div key={stat.label} className="p-4 rounded-lg bg-surface-50 border border-surface-100">
+                      <stat.icon className="w-5 h-5 mb-2 text-primary-600" />
+                      <div className="text-xl font-bold text-surface-900">{stat.value}</div>
+                      <div className="text-xs font-medium text-surface-500">{stat.label}</div>
                     </div>
                   ))}
                 </div>
 
                 {/* Challenge & Solution */}
-                <div className="grid lg:grid-cols-2 gap-8 mb-10">
+                <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 mb-10">
                   <div>
-                    <h3 className="text-sm font-bold text-surface-500 uppercase tracking-wider mb-3">
+                    <h3 className="text-sm font-bold text-surface-900 flex items-center gap-2 mb-3">
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
                       The Challenge
                     </h3>
-                    <p className="text-surface-700">{study.challenge}</p>
+                    <p className="text-surface-600 leading-relaxed">{study.challenge}</p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-bold text-surface-500 uppercase tracking-wider mb-3">
+                    <h3 className="text-sm font-bold text-surface-900 flex items-center gap-2 mb-3">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                       The Solution
                     </h3>
-                    <p className="text-surface-700">{study.solution}</p>
+                    <p className="text-surface-600 leading-relaxed">{study.solution}</p>
                   </div>
                 </div>
 
-                {/* Results */}
-                <div className="mb-10">
-                  <h3 className="text-sm font-bold text-surface-500 uppercase tracking-wider mb-4">
-                    Key Results
-                  </h3>
-                  <ul className="grid sm:grid-cols-2 gap-3">
-                    {study.results.map((result) => (
-                      <li key={result} className="flex items-start gap-2">
-                        <span className="w-5 h-5 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                          <TrendingUp className="w-3 h-3 text-primary-600" />
-                        </span>
-                        <span className="text-surface-700">{result}</span>
-                      </li>
-                    ))}
-                  </ul>
+                <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 pt-10 border-t border-surface-100">
+                   {/* Results */}
+                  <div>
+                    <h3 className="text-sm font-bold text-surface-900 mb-4">
+                      Key Results
+                    </h3>
+                    <ul className="space-y-3">
+                      {study.results.map((result) => (
+                        <li key={result} className="flex items-start gap-3">
+                          <TrendingUp className="w-4 h-4 text-emerald-600 mt-1 flex-shrink-0" />
+                          <span className="text-surface-700 text-sm">{result}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {/* Quote */}
+                  <div className={cn("p-6 rounded-xl border border-surface-100", study.bgLight)}>
+                     <p className="text-lg text-surface-800 italic mb-4 leading-relaxed">&ldquo;{study.quote.text}&rdquo;</p>
+                      <footer className="text-sm flex items-center gap-2">
+                        <span className="font-semibold text-surface-900">{study.quote.author}</span>
+                        <span className="w-1 h-1 rounded-full bg-surface-300" />
+                        <span className="text-surface-600">{study.quote.role}</span>
+                      </footer>
+                  </div>
                 </div>
 
-                {/* Quote */}
-                <blockquote className="border-l-4 border-primary-500 pl-6 py-2">
-                  <p className="text-lg text-surface-700 italic mb-4">&ldquo;{study.quote.text}&rdquo;</p>
-                  <footer className="text-sm">
-                    <span className="font-semibold text-surface-900">{study.quote.author}</span>
-                    <span className="text-surface-500"> — {study.quote.role}</span>
-                  </footer>
-                </blockquote>
               </div>
             </motion.article>
           ))}

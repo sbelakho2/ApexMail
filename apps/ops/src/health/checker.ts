@@ -221,12 +221,19 @@ export class HealthChecker extends EventEmitter {
         const check = this.checks.get(checkId);
         if (!check) return;
 
-        // Run immediately
-        this.runCheck(checkId);
+        // Run immediately (handle the promise)
+        this.runCheck(checkId).catch((error) => {
+            this.emit('check:error', { checkId, error });
+        });
 
         // Schedule interval
         const interval = setInterval(
-            () => this.runCheck(checkId),
+            () => {
+                // Properly handle the async promise to prevent unhandled rejections
+                this.runCheck(checkId).catch((error) => {
+                    this.emit('check:error', { checkId, error });
+                });
+            },
             check.interval
         );
         this.intervals.set(checkId, interval);

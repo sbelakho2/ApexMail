@@ -68,6 +68,14 @@ export interface MTAConfig {
     maxRecipientsPerMessage: number;
   };
   
+  emailAuth: {
+    requireSPF: boolean;
+    requireDKIM: boolean;
+    enforceDMARC: boolean;
+    allowSoftFail: boolean;
+    trustedRelays: string[];
+  };
+  
   metrics: {
     enabled: boolean;
     port: number;
@@ -165,6 +173,14 @@ export function loadConfig(): MTAConfig {
       maxConnectionsPerIP: parseNumber(process.env.RATE_LIMIT_MAX_CONNECTIONS_PER_IP, 10),
       maxMessagesPerConnection: parseNumber(process.env.RATE_LIMIT_MAX_MESSAGES_PER_CONNECTION, 100),
       maxRecipientsPerMessage: parseNumber(process.env.RATE_LIMIT_MAX_RECIPIENTS_PER_MESSAGE, 100),
+    },
+    
+    emailAuth: {
+      requireSPF: parseBoolean(process.env.EMAIL_AUTH_REQUIRE_SPF, true),
+      requireDKIM: parseBoolean(process.env.EMAIL_AUTH_REQUIRE_DKIM, true),
+      enforceDMARC: parseBoolean(process.env.EMAIL_AUTH_ENFORCE_DMARC, true),
+      allowSoftFail: parseBoolean(process.env.EMAIL_AUTH_ALLOW_SOFTFAIL, true),
+      trustedRelays: (process.env.EMAIL_AUTH_TRUSTED_RELAYS ?? '').split(',').filter(Boolean),
     },
     
     metrics: {

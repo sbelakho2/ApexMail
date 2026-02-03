@@ -57,15 +57,15 @@ export function SecuritySection() {
  animate={inView ? { opacity: 1, y: 0 } : {}}
  className="text-center mb-16"
  >
- <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-md bg-primary-50 border border-primary-100 text-sm text-primary-700 mb-6 font-medium">
-          <Shield className="w-4 h-4" />
+ <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-50 border border-surface-200 text-xs font-medium text-surface-600 mb-6">
+          <Shield className="w-3.5 h-3.5" />
           Enterprise-Grade Security
         </div>
  <h2 className="section-title mb-4">
  <span className="text-surface-900">Security That</span>{' '}
- <span className="text-primary-500">Actually Works</span>
+ <span className="text-primary-600">Actually Works</span>
  </h2>
- <p className="text-surface-600 text-[17px] max-w-2xl mx-auto leading-relaxed">
+ <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
  We don&apos;t just check compliance boxes. We built security into the foundation, 
  not as an afterthought.
  </p>
@@ -79,15 +79,15 @@ export function SecuritySection() {
               initial={{ opacity: 0, y: 20 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: index * 0.1 }}
-              className="premium-card p-6 group bg-white hover:bg-surface-50"
+              className="p-6 bg-white rounded-lg border border-surface-200 hover:border-surface-300 transition-colors"
             >
-              <div className="w-12 h-12 rounded-lg bg-primary-50 flex items-center justify-center border border-primary-100 mb-6 group-hover:scale-110 transition-transform duration-300">
-                <feature.icon className="w-6 h-6 text-primary-600" />
+              <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900 mb-5">
+                <feature.icon className="w-5 h-5" strokeWidth={1.5} />
               </div>
-              <h3 className="text-lg font-bold text-surface-900 mb-3 group-hover:text-primary-600 transition-colors">
+              <h3 className="text-base font-semibold text-surface-900 mb-2">
                 {feature.title}
               </h3>
-              <p className="text-surface-600 text-[14px] leading-relaxed">
+              <p className="text-surface-600 text-sm leading-relaxed">
                 {feature.description}
               </p>
             </motion.div>
@@ -99,22 +99,22 @@ export function SecuritySection() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.6 }}
-          className="premium-card p-10 bg-surface-50 border-surface-200/50"
+          className="p-8 lg:p-10 bg-surface-50 rounded-xl border border-surface-200"
         >
           <div className="flex flex-col lg:flex-row items-center justify-between gap-10">
-            <div className="text-center lg:text-left">
-              <h3 className="text-xl font-bold text-surface-900 mb-2">Compliance Certifications</h3>
-              <p className="text-surface-600 leading-relaxed max-w-md">
+            <div className="text-center lg:text-left max-w-md">
+              <h3 className="text-lg font-semibold text-surface-900 mb-2">Compliance Certifications</h3>
+              <p className="text-surface-600 text-sm leading-relaxed">
                 Verified by independent auditors and regularly renewed to ensure your data remains protected.
               </p>
             </div>
-            <div className="flex flex-wrap items-center justify-center gap-8">
+            <div className="flex flex-wrap items-center justify-center gap-6">
               {complianceLogos.map((logo) => (
-                <div key={logo.name} className="flex flex-col items-center group">
-                  <div className="w-20 h-20 rounded-xl bg-white border border-surface-200 flex items-center justify-center mb-3 shadow-sm group-hover:shadow-md group-hover:-translate-y-1 transition-all duration-300">
-                    <span className="text-xl font-bold text-primary-600 tracking-tighter">{logo.name}</span>
+                <div key={logo.name} className="flex flex-col items-center">
+                  <div className="w-16 h-16 rounded-lg bg-white border border-surface-200 flex items-center justify-center mb-2 shadow-sm">
+                    <span className="text-sm font-semibold text-surface-900 tracking-tight">{logo.name}</span>
                   </div>
-                  <div className="text-[10px] text-surface-600 font-bold uppercase tracking-widest whitespace-nowrap">{logo.description}</div>
+                  <div className="text-[10px] text-surface-500 font-medium uppercase tracking-wide whitespace-nowrap">{logo.description}</div>
                 </div>
               ))}
             </div>
@@ -128,11 +128,11 @@ export function SecuritySection() {
  transition={{ delay: 0.8 }}
  className="mt-12 text-center"
  >
- <div className="inline-flex items-center gap-3 premium-card px-6 py-4 bg-white">
- <FileCheck className="w-6 h-6 text-primary-600" />
+ <div className="inline-flex items-center gap-3 px-6 py-4 bg-white border border-surface-200 rounded-lg">
+ <FileCheck className="w-5 h-5 text-primary-600" />
  <div className="text-left">
- <div className="text-sm font-bold text-surface-900">Security Audit Reports Available</div>
- <div className="text-xs text-surface-500 font-medium">Enterprise customers receive full penetration test results</div>
+ <div className="text-sm font-semibold text-surface-900">Security Audit Reports Available</div>
+ <div className="text-xs text-surface-500">Enterprise customers receive full penetration test results</div>
  </div>
  </div>
  </motion.div>

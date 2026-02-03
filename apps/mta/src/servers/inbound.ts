@@ -9,6 +9,7 @@ import { generateId } from '@apexmail/lib';
 import { sha256 } from '@apexmail/lib/crypto';
 import { SMTPServer, type SMTPServerSession, type SMTPServerAddress, type SMTPServerDataStream } from 'smtp-server';
 import { simpleParser, type ParsedMail, type AddressObject, type Headers } from 'mailparser';
+import { EmailAuthenticator, type AuthenticationResults } from '../auth/email-authentication.js';
 import { readFileSync } from 'fs';
 
 interface InboundServerConfig {
@@ -34,6 +35,13 @@ interface InboundServerConfig {
     maxMessagesPerConnection: number;
     maxRecipientsPerMessage: number;
   };
+  emailAuth: {
+    requireSPF: boolean;
+    requireDKIM: boolean;
+    enforceDMARC: boolean;
+    allowSoftFail: boolean;
+    trustedRelays: string[];
+  };
   logger: Logger;
 }
 
@@ -44,13 +52,17 @@ interface SessionContext {
   tenantId?: string;
   messageCount: number;
   startTime: Date;
+  heloHostname: string;
+  mailFrom?: string;
 }
 
 export class InboundServer {
   private readonly db: Pool;
   private readonly config: InboundServerConfig['config'];
   private readonly rateLimit: InboundServerConfig['rateLimit'];
+  private readonly emailAuth: InboundServerConfig['emailAuth'];
   private readonly logger: Logger;
+  private readonly authenticator: EmailAuthenticator;
   
   private smtpServer: SMTPServer | null = null;
   private secureSmtpServer: SMTPServer | null = null;
@@ -61,7 +73,18 @@ export class InboundServer {
     this.db = options.db;
     this.config = options.config;
     this.rateLimit = options.rateLimit;
+    this.emailAuth = options.emailAuth;
     this.logger = options.logger;
+    
+    // Initialize email authenticator
+    this.authenticator = new EmailAuthenticator({
+      requireSPF: this.emailAuth.requireSPF,
+      requireDKIM: this.emailAuth.requireDKIM,
+      enforceDMARC: this.emailAuth.enforceDMARC,
+      allowSoftFail: this.emailAuth.allowSoftFail,
+      trustedRelays: this.emailAuth.trustedRelays,
+      logger: this.logger,
+    });
   }
 
   async start(): Promise<void> {
@@ -218,6 +241,7 @@ export class InboundServer {
       authenticated: false,
       messageCount: 0,
       startTime: new Date(),
+      heloHostname: session.hostNameAppearsAs ?? '',
     });
 
     callback();
@@ -294,6 +318,9 @@ export class InboundServer {
     }
 
     this.logger.debug('MAIL FROM', { sessionId: ctx.id, from: address.address });
+
+    // Store MAIL FROM for authentication
+    ctx.mailFrom = address.address;
 
     // Check message count rate limit
     if (this.rateLimit.enabled && ctx.messageCount >= this.rateLimit.maxMessagesPerConnection) {
@@ -452,6 +479,50 @@ export class InboundServer {
       size: rawMessage.length,
     });
 
+    // Perform email authentication (SPF, DKIM, DMARC)
+    let authResults: AuthenticationResults | null = null;
+    let authAction: 'accept' | 'quarantine' | 'reject' = 'accept';
+    
+    try {
+      authResults = await this.authenticator.authenticate(
+        parsed,
+        rawMessage,
+        ctx.clientIP,
+        ctx.heloHostname,
+        ctx.mailFrom ?? (envelope.mailFrom ? (typeof envelope.mailFrom === 'string' ? envelope.mailFrom : envelope.mailFrom.address ?? '') : '')
+      );
+
+      const authDecision = this.authenticator.shouldAccept(authResults);
+      authAction = authDecision.action;
+
+      this.logger.info('Email authentication results', {
+        sessionId: ctx.id,
+        messageId,
+        spf: authResults.spf.result,
+        dkim: authResults.dkim.result,
+        dmarc: authResults.dmarc.result,
+        dmarcPolicy: authResults.dmarc.policy,
+        action: authAction,
+        reason: authDecision.reason,
+      });
+
+      // Reject if authentication fails and policy says reject
+      if (!authDecision.accept) {
+        throw new Error(`550 Email rejected: ${authDecision.reason}`);
+      }
+    } catch (error) {
+      // If it's a rejection error, rethrow
+      if (error instanceof Error && error.message.startsWith('550')) {
+        throw error;
+      }
+      // Log other auth errors but continue processing
+      this.logger.warn('Email authentication error', {
+        sessionId: ctx.id,
+        messageId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+
     // Check for VERP-style reply addresses to link replies to original messages
     // Format: reply+{original_message_id}@inbound.domain.com
     const replyTracking = await this.checkVerpReplyAddress(envelope.rcptTo);
@@ -488,8 +559,9 @@ export class InboundServer {
         INSERT INTO inbound_messages (
           id, tenant_id, domain_id, message_id_header, from_address, to_address,
           subject, text_body, html_body, raw_message, headers, attachments,
-          received_at, client_ip, session_id, in_reply_to_message_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15)
+          received_at, client_ip, session_id, in_reply_to_message_id,
+          spf_result, dkim_result, dmarc_result, dmarc_policy, auth_action
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15, $16, $17, $18, $19, $20)
       `, [
         messageId,
         domain.tenant_id,
@@ -506,6 +578,11 @@ export class InboundServer {
         ctx.clientIP,
         ctx.id,
         linkedMessageId ?? parsed.inReplyTo ?? null,
+        authResults?.spf.result ?? 'none',
+        authResults?.dkim.result ?? 'none',
+        authResults?.dmarc.result ?? 'none',
+        authResults?.dmarc.policy ?? 'none',
+        authAction,
       ]);
 
       // If this is a reply, update the original message's reply count
@@ -523,6 +600,13 @@ export class InboundServer {
         headers: this.headersToObject(parsed.headers),
         inReplyTo: linkedMessageId ?? parsed.inReplyTo ?? undefined,
         isReply: !!linkedMessageId,
+        authentication: authResults ? {
+          spf: authResults.spf.result,
+          dkim: authResults.dkim.result,
+          dmarc: authResults.dmarc.result,
+          dmarcPolicy: authResults.dmarc.policy,
+          action: authAction,
+        } : undefined,
       });
     }
   }
