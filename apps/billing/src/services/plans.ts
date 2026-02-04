@@ -285,8 +285,8 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'pro',
     displayName: 'Pro',
     description: 'For scaling teams with custom tracking needs',
-    priceMonthly: 4900, // $49
-    priceYearly: 49000, // $490 (~17% discount)
+    priceMonthly: 5900, // $59
+    priceYearly: 59000, // $590 (~17% discount)
     emailLimit: 50000,
     apiCallLimit: 500000,
     features: {
@@ -327,8 +327,8 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'growth',
     displayName: 'Growth',
     description: 'For teams that need advanced deliverability features',
-    priceMonthly: 9900, // $99
-    priceYearly: 99000, // $990 (~17% discount)
+    priceMonthly: 12900, // $129
+    priceYearly: 129000, // $1290 (~17% discount)
     emailLimit: 100000,
     apiCallLimit: 1000000,
     features: {
@@ -369,8 +369,8 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'scale',
     displayName: 'Scale',
     description: 'For high-volume senders needing isolation',
-    priceMonthly: 29900, // $299
-    priceYearly: 299000, // $2990 (~17% discount)
+    priceMonthly: 39900, // $399
+    priceYearly: 399000, // $3990 (~17% discount)
     emailLimit: 500000,
     apiCallLimit: 5000000,
     features: {
@@ -411,8 +411,8 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'enterprise',
     displayName: 'Enterprise',
     description: 'Custom solutions for large organizations',
-    priceMonthly: 99900, // $999 (base)
-    priceYearly: 999000, // $9990
+    priceMonthly: 129900, // $1299 (base)
+    priceYearly: 1299000, // $12990
     emailLimit: 2000000,
     apiCallLimit: 20000000,
     features: {

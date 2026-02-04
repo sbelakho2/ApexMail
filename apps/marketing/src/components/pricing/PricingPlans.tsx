@@ -51,7 +51,7 @@ const plans: Plan[] = [
  },
  {
  name: 'Pro',
- price: '$49',
+ price: '$59',
  period: '/month',
  description: 'For scaling teams needing custom tracking.',
  features: [
@@ -67,7 +67,7 @@ const plans: Plan[] = [
  },
  {
  name: 'Growth',
- price: '$99',
+ price: '$129',
  period: '/month',
  description: 'For teams serious about deliverability.',
  features: [
@@ -85,7 +85,7 @@ const plans: Plan[] = [
  },
  {
  name: 'Scale',
- price: '$299',
+ price: '$399',
  period: '/month',
  description: 'For high-volume enterprise senders.',
  features: [

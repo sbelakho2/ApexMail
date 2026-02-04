@@ -19,9 +19,9 @@ const pricingTiers = {
   apexmail: [
     { max: 1000, price: 0 },
     { max: 25000, price: 29 },
-    { max: 50000, price: 49 },
-    { max: 100000, price: 99 },
-    { max: 500000, price: 299 },
+    { max: 50000, price: 59 },
+    { max: 100000, price: 129 },
+    { max: 500000, price: 399 },
     { max: Infinity, pricePerK: 0.45 },
   ],
   sendgrid: [
@@ -72,8 +72,8 @@ function calculateApexMailCost(volume: number, options: PricingOption) {
   
   if (plan && plan.price !== undefined) {
     planCost = plan.price;
-    const isGrowthOrHigher = plan.price >= 99;
-    const isScaleOrHigher = plan.price >= 299;
+    const isGrowthOrHigher = plan.price >= 129;
+    const isScaleOrHigher = plan.price >= 399;
 
     if (options.dedicatedIP && !isGrowthOrHigher) planCost += 50;
     if (options.sso && !isScaleOrHigher) planCost += 100;

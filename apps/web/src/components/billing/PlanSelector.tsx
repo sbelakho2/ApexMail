@@ -58,8 +58,8 @@ const PLANS: Plan[] = [
     id: 'pro',
     name: 'pro',
     displayName: 'Pro',
-    priceMonthly: 4900,
-    priceYearly: 49000,
+    priceMonthly: 5900,
+    priceYearly: 59000,
     emailLimit: 50000,
     features: [
       '50,000 emails/month',
@@ -72,8 +72,8 @@ const PLANS: Plan[] = [
     id: 'growth',
     name: 'growth',
     displayName: 'Growth',
-    priceMonthly: 9900,
-    priceYearly: 99000,
+    priceMonthly: 12900,
+    priceYearly: 129000,
     emailLimit: 100000,
     features: [
       '100,000 emails/month',
@@ -87,8 +87,8 @@ const PLANS: Plan[] = [
     id: 'scale',
     name: 'scale',
     displayName: 'Scale',
-    priceMonthly: 29900,
-    priceYearly: 299000,
+    priceMonthly: 39900,
+    priceYearly: 399000,
     emailLimit: 500000,
     features: [
       '500,000 emails/month',

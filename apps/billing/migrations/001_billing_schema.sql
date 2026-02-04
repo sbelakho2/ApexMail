@@ -468,18 +468,22 @@ INSERT INTO plans (name, display_name, description, price_monthly, price_yearly,
  '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true}',
  '{"emails_per_month": 50000, "contacts_limit": 5000, "api_calls_per_minute": 300, "webhooks_per_day": 1000, "team_members_limit": 3, "storage_gb": 10, "dedicated_ips": 1, "custom_domains_limit": 5}',
  2),
-('growth', 'Growth', 'Scale your email operations', 9900, 99000,
+('pro', 'Pro', 'For scaling teams with custom tracking needs', 5900, 59000,
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true}',
+ '{"emails_per_month": 100000, "contacts_limit": 10000, "api_calls_per_minute": 450, "webhooks_per_day": 2500, "team_members_limit": 5, "storage_gb": 25, "dedicated_ips": 2, "custom_domains_limit": 10}',
+ 3),
+('growth', 'Growth', 'Scale your email operations', 12900, 129000,
  '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true}',
  '{"emails_per_month": 250000, "contacts_limit": 25000, "api_calls_per_minute": 600, "webhooks_per_day": 5000, "team_members_limit": 10, "storage_gb": 50, "dedicated_ips": 3, "custom_domains_limit": 20}',
- 3),
-('scale', 'Scale', 'Enterprise-grade email at scale', 29900, 299000,
+ 4),
+('scale', 'Scale', 'Enterprise-grade email at scale', 39900, 399000,
  '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "custom_tracking_domain": true, "sso": true, "audit_logs": true}',
  '{"emails_per_month": 1000000, "contacts_limit": 100000, "api_calls_per_minute": 1200, "webhooks_per_day": 25000, "team_members_limit": 25, "storage_gb": 200, "dedicated_ips": 10, "custom_domains_limit": 50}',
- 4),
-('enterprise', 'Enterprise', 'Custom solutions for large organizations', 99900, 999000,
+ 5),
+('enterprise', 'Enterprise', 'Custom solutions for large organizations', 129900, 1299000,
  '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "custom_tracking_domain": true, "sso": true, "audit_logs": true, "dedicated_account_manager": true, "custom_sla": true, "on_premise_available": true, "hipaa_compliant": true}',
  '{"emails_per_month": -1, "contacts_limit": -1, "api_calls_per_minute": -1, "webhooks_per_day": -1, "team_members_limit": -1, "storage_gb": -1, "dedicated_ips": -1, "custom_domains_limit": -1}',
- 5)
+ 6)
 ON CONFLICT (name) DO NOTHING;
 
 -- Trigger to update updated_at timestamps

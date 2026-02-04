@@ -590,9 +590,9 @@ export default function SettingsPage() {
                                     <h3 className="font-medium">Billing History</h3>
                                     <div className="space-y-2">
                                         {[
-                                            { date: 'Dec 15, 2024', amount: '$49.00' },
-                                            { date: 'Nov 15, 2024', amount: '$49.00' },
-                                            { date: 'Oct 15, 2024', amount: '$49.00' },
+                                            { date: 'Dec 15, 2024', amount: '$59.00' },
+                                            { date: 'Nov 15, 2024', amount: '$59.00' },
+                                            { date: 'Oct 15, 2024', amount: '$59.00' },
                                         ].map((invoice, i) => (
                                             <div
                                                 key={i}

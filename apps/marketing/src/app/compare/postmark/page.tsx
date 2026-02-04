@@ -66,7 +66,7 @@ const comparisonData = {
       name: 'Pricing',
       features: [
         { name: 'Free Tier', apexmail: '1,000/mo', competitor: '100/mo', winner: 'apexmail' },
-        { name: '100K emails/mo', apexmail: '$99', competitor: '$115', winner: 'apexmail' },
+        { name: '100K emails/mo', apexmail: '$129', competitor: '$115', winner: 'apexmail' },
         { name: 'Unlimited team members', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'Zero per-email cost option', apexmail: 'Yes (self-hosted)', competitor: 'No', winner: 'apexmail' },
       ],
