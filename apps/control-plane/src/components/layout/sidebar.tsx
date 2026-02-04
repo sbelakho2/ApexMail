@@ -77,7 +77,7 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
     };
 
     return (
-        <aside className={cn("w-64 border-r border-surface-200 bg-surface-0 min-h-screen overflow-y-auto print:hidden", className)}>
+        <aside className={cn("w-64 border-r border-surface-200 bg-white min-h-screen overflow-y-auto print:hidden", className)}>
             {/* Control Plane Header */}
             <div className="bg-gradient-to-r from-amber-500 to-orange-500 text-white text-xs font-medium py-1.5 px-4 text-center">
                 🔐 Control Plane

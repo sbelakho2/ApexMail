@@ -10,16 +10,16 @@ import { ApiError } from '../middleware/error-handler.js';
 import { createJwt } from '../middleware/auth.js';
 
 const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+  email: z.string().email().max(254), // RFC 5321 max email length
+  password: z.string().min(1).max(1000), // Reasonable max password length
   tenantId: z.string().uuid().optional(),
 });
 
 const createApiKeySchema = z.object({
   name: z.string().min(1).max(100),
-  scopes: z.array(z.string()).min(1),
+  scopes: z.array(z.string().max(100)).min(1).max(50), // Limit scope count and length
   rateLimit: z.number().int().positive().optional(),
-  allowedIps: z.array(z.string()).optional(),
+  allowedIps: z.array(z.string().max(45)).max(100).optional(), // IPv6 max is 45 chars, limit count
   expiresAt: z.string().datetime().optional(),
 });
 

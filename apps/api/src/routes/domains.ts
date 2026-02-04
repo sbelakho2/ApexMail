@@ -1,5 +1,11 @@
 /**
  * Domains Routes - Domain management and verification
+ * 
+ * Includes advanced authentication verification:
+ * - SPF, DKIM, DMARC (basic)
+ * - MTA-STS (RFC 8461) - Strict TLS enforcement
+ * - BIMI (Brand Indicators) - Logo in inbox
+ * - TLSRPT - TLS reporting
  */
 
 import { Hono } from 'hono';
@@ -8,6 +14,8 @@ import type { AppEnv, AppContext } from '../app.js';
 import { DomainsRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { generateDKIMKeyPair } from '@apexmail/lib/crypto';
+import { verifyMTASTS, generateMTASTSPolicy, generateMTASTSDNSRecord, verifyTLSRPT, generateTLSRPTRecord } from '../../mta/src/auth/mta-sts.js';
+import { verifyBIMI, getBIMISetupInstructions, validateBIMILogo } from '../../mta/src/auth/bimi.js';
 
 const addDomainSchema = z.object({
   domain: z.string()
@@ -340,6 +348,273 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     return c.json({
       domain: domain.domain,
       records,
+    });
+  });
+
+  // ============================================================================
+  // ADVANCED AUTHENTICATION ENDPOINTS
+  // ============================================================================
+
+  /**
+   * Check MTA-STS configuration for a domain
+   * MTA-STS ensures TLS is enforced (not opportunistic) for email delivery
+   * @see RFC 8461
+   */
+  router.get('/:id/mta-sts', async (c) => {
+    const tenantId = c.get('tenantId');
+    const domainId = c.req.param('id');
+
+    const result = await domainsRepo.findById(domainId, tenantId);
+    if (!result.ok || !result.value) {
+      throw ApiError.notFound('Domain');
+    }
+
+    const domain = result.value;
+    const mtaStsResult = await verifyMTASTS(domain.domain);
+
+    return c.json({
+      domain: domain.domain,
+      mtaSts: {
+        supported: mtaStsResult.supported,
+        mode: mtaStsResult.mode,
+        policy: mtaStsResult.policy,
+        dnsRecord: mtaStsResult.dnsRecord,
+        errors: mtaStsResult.errors,
+        warnings: mtaStsResult.warnings,
+        recommendations: mtaStsResult.recommendations,
+      },
+      setupInstructions: !mtaStsResult.supported ? {
+        dnsRecord: {
+          type: 'TXT',
+          name: `_mta-sts.${domain.domain}`,
+          value: generateMTASTSDNSRecord(),
+        },
+        policyFile: {
+          url: `https://mta-sts.${domain.domain}/.well-known/mta-sts.txt`,
+          content: generateMTASTSPolicy(['*.apexmail.ee'], 'testing', 604800),
+        },
+        tlsrptRecord: {
+          type: 'TXT',
+          name: `_smtp._tls.${domain.domain}`,
+          value: generateTLSRPTRecord([`tlsrpt@${domain.domain}`]),
+        },
+      } : undefined,
+    });
+  });
+
+  /**
+   * Check BIMI configuration for a domain
+   * BIMI displays sender brand logo in supporting email clients
+   * @see https://bimigroup.org
+   */
+  router.get('/:id/bimi', async (c) => {
+    const tenantId = c.get('tenantId');
+    const domainId = c.req.param('id');
+
+    const result = await domainsRepo.findById(domainId, tenantId);
+    if (!result.ok || !result.value) {
+      throw ApiError.notFound('Domain');
+    }
+
+    const domain = result.value;
+    const bimiResult = await verifyBIMI(domain.domain);
+
+    return c.json({
+      domain: domain.domain,
+      bimi: {
+        supported: bimiResult.supported,
+        record: bimiResult.record,
+        logoValid: bimiResult.logoValid,
+        dmarcValid: bimiResult.dmarcValid,
+        certificateValid: bimiResult.certificateValid,
+        errors: bimiResult.errors,
+        warnings: bimiResult.warnings,
+        recommendations: bimiResult.recommendations,
+      },
+      setupInstructions: getBIMISetupInstructions(
+        domain.domain,
+        `https://assets.${domain.domain}/logo.svg`
+      ),
+    });
+  });
+
+  /**
+   * Validate a BIMI logo SVG file
+   * Checks compliance with SVG Tiny PS requirements
+   */
+  router.post('/:id/bimi/validate-logo', async (c) => {
+    const tenantId = c.get('tenantId');
+    const domainId = c.req.param('id');
+
+    const result = await domainsRepo.findById(domainId, tenantId);
+    if (!result.ok || !result.value) {
+      throw ApiError.notFound('Domain');
+    }
+
+    const body = await c.req.json();
+    const logoUrl = z.string().url().parse(body.logoUrl);
+
+    const validation = await validateBIMILogo(logoUrl);
+
+    return c.json({
+      valid: validation.valid,
+      errors: validation.errors,
+      warnings: validation.warnings,
+      requirements: [
+        'Format: SVG Tiny Portable/Secure (baseProfile="tiny-ps")',
+        'Size: Maximum 32KB',
+        'Aspect ratio: Must be square (1:1)',
+        'No scripts, animations, or external references',
+        'Must include <title> element for accessibility',
+      ],
+    });
+  });
+
+  /**
+   * Check TLS reporting (TLSRPT) configuration
+   * Companion to MTA-STS for receiving TLS connection reports
+   * @see RFC 8460
+   */
+  router.get('/:id/tlsrpt', async (c) => {
+    const tenantId = c.get('tenantId');
+    const domainId = c.req.param('id');
+
+    const result = await domainsRepo.findById(domainId, tenantId);
+    if (!result.ok || !result.value) {
+      throw ApiError.notFound('Domain');
+    }
+
+    const domain = result.value;
+    const tlsrptResult = await verifyTLSRPT(domain.domain);
+
+    return c.json({
+      domain: domain.domain,
+      tlsrpt: {
+        supported: tlsrptResult.supported,
+        record: tlsrptResult.record,
+        error: tlsrptResult.error,
+      },
+      setupInstructions: !tlsrptResult.supported ? {
+        dnsRecord: {
+          type: 'TXT',
+          name: `_smtp._tls.${domain.domain}`,
+          value: generateTLSRPTRecord([`tlsrpt@${domain.domain}`]),
+        },
+        description: 'TLSRPT enables receiving reports about TLS connection issues from sending servers.',
+      } : undefined,
+    });
+  });
+
+  /**
+   * Get comprehensive authentication status for a domain
+   * Checks SPF, DKIM, DMARC, MTA-STS, BIMI, and TLSRPT
+   */
+  router.get('/:id/auth-status', async (c) => {
+    const tenantId = c.get('tenantId');
+    const domainId = c.req.param('id');
+
+    const result = await domainsRepo.findById(domainId, tenantId);
+    if (!result.ok || !result.value) {
+      throw ApiError.notFound('Domain');
+    }
+
+    const domain = result.value;
+    
+    // Run all checks in parallel
+    const [healthResult, mtaStsResult, bimiResult, tlsrptResult] = await Promise.all([
+      checkDnsHealth(domain),
+      verifyMTASTS(domain.domain),
+      verifyBIMI(domain.domain),
+      verifyTLSRPT(domain.domain),
+    ]);
+
+    // Calculate overall score (0-100)
+    let score = 0;
+    const breakdown: Record<string, { status: 'pass' | 'fail' | 'warning'; points: number; maxPoints: number }> = {};
+
+    // Basic auth (SPF, DKIM, DMARC) - 60 points
+    const basicIssues = healthResult.issues.length;
+    const basicPoints = Math.max(0, 60 - (basicIssues * 15));
+    breakdown['basic'] = { 
+      status: basicIssues === 0 ? 'pass' : basicIssues <= 2 ? 'warning' : 'fail',
+      points: basicPoints,
+      maxPoints: 60,
+    };
+    score += basicPoints;
+
+    // MTA-STS - 20 points
+    const mtaStsPoints = mtaStsResult.supported 
+      ? (mtaStsResult.mode === 'enforce' ? 20 : 15)
+      : 0;
+    breakdown['mtaSts'] = {
+      status: mtaStsResult.supported ? (mtaStsResult.mode === 'enforce' ? 'pass' : 'warning') : 'fail',
+      points: mtaStsPoints,
+      maxPoints: 20,
+    };
+    score += mtaStsPoints;
+
+    // BIMI - 15 points
+    const bimiPoints = bimiResult.supported
+      ? (bimiResult.certificateValid ? 15 : 10)
+      : 0;
+    breakdown['bimi'] = {
+      status: bimiResult.supported ? (bimiResult.certificateValid ? 'pass' : 'warning') : 'fail',
+      points: bimiPoints,
+      maxPoints: 15,
+    };
+    score += bimiPoints;
+
+    // TLSRPT - 5 points
+    const tlsrptPoints = tlsrptResult.supported ? 5 : 0;
+    breakdown['tlsrpt'] = {
+      status: tlsrptResult.supported ? 'pass' : 'fail',
+      points: tlsrptPoints,
+      maxPoints: 5,
+    };
+    score += tlsrptPoints;
+
+    // Generate grade
+    let grade: string;
+    if (score >= 95) grade = 'A+';
+    else if (score >= 90) grade = 'A';
+    else if (score >= 85) grade = 'A-';
+    else if (score >= 80) grade = 'B+';
+    else if (score >= 75) grade = 'B';
+    else if (score >= 70) grade = 'B-';
+    else if (score >= 65) grade = 'C+';
+    else if (score >= 60) grade = 'C';
+    else if (score >= 50) grade = 'D';
+    else grade = 'F';
+
+    return c.json({
+      domain: domain.domain,
+      score,
+      grade,
+      breakdown,
+      checks: {
+        spfDkimDmarc: {
+          status: healthResult.overall,
+          issues: healthResult.issues,
+        },
+        mtaSts: {
+          supported: mtaStsResult.supported,
+          mode: mtaStsResult.mode,
+          errors: mtaStsResult.errors,
+        },
+        bimi: {
+          supported: bimiResult.supported,
+          logoValid: bimiResult.logoValid,
+          certificateValid: bimiResult.certificateValid,
+        },
+        tlsrpt: {
+          supported: tlsrptResult.supported,
+        },
+      },
+      recommendations: [
+        ...mtaStsResult.recommendations,
+        ...bimiResult.recommendations,
+        ...(healthResult.issues.length > 0 ? ['Fix basic authentication issues first'] : []),
+      ],
     });
   });
 

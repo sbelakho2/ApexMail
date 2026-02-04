@@ -13,6 +13,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
+// @ts-expect-error - bcrypt has types but they're not always resolved correctly in Next.js
 import bcrypt from 'bcrypt';
 
 // Rate limiting store (in production, use Redis)

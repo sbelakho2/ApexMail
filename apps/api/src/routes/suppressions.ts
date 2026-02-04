@@ -10,7 +10,7 @@ import { ApiError } from '../middleware/error-handler.js';
 import { sha256 } from '@apexmail/lib/crypto';
 
 const addSuppressionSchema = z.object({
-  email: z.string().email(),
+  email: z.string().email().max(254), // RFC 5321 max email length
   reason: z.enum(['bounce', 'complaint', 'unsubscribe', 'manual']),
   bounceType: z.enum(['hard', 'soft', 'undetermined']).optional(),
   bounceSubtype: z.string().max(50).optional(),
@@ -27,11 +27,11 @@ const bulkAddSuppressionSchema = z.object({
 });
 
 const bulkRemoveSuppressionSchema = z.object({
-  emails: z.array(z.string().email()).min(1).max(10000),
+  emails: z.array(z.string().email().max(254)).min(1).max(10000), // RFC 5321 max email length
 });
 
 const bulkCheckSuppressionSchema = z.object({
-  emails: z.array(z.string().email()).min(1).max(10000),
+  emails: z.array(z.string().email().max(254)).min(1).max(10000), // RFC 5321 max email length
 });
 
 export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
@@ -175,8 +175,8 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const email = decodeURIComponent(c.req.param('email'));
 
-    // Validate email format
-    const emailSchema = z.string().email();
+    // Validate email format with RFC 5321 max length
+    const emailSchema = z.string().email().max(254);
     const parsed = emailSchema.safeParse(email);
     if (!parsed.success) {
       throw ApiError.badRequest('Invalid email format');
@@ -385,8 +385,8 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const email = decodeURIComponent(c.req.param('email'));
     const logger = c.get('logger');
 
-    // Validate email format
-    const emailSchema = z.string().email();
+    // Validate email format with RFC 5321 max length
+    const emailSchema = z.string().email().max(254);
     const parsed = emailSchema.safeParse(email);
     if (!parsed.success) {
       throw ApiError.badRequest('Invalid email format');
@@ -533,7 +533,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       const body = await c.req.json();
       const schema = z.object({
         suppressions: z.array(z.object({
-          email: z.string().email(),
+          email: z.string().email().max(254), // RFC 5321 max email length
           reason: z.enum(['bounce', 'complaint', 'unsubscribe', 'manual']).default('manual'),
         })).min(1).max(100000),
       });
@@ -550,7 +550,8 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         const line = lines[i];
         if (!line) continue;
         const parts = line.split(',').map(p => p.trim().replace(/^["']|["']$/g, ''));
-        if (parts[0] && z.string().email().safeParse(parts[0]).success) {
+        // Validate email with RFC 5321 max length
+        if (parts[0] && parts[0].length <= 254 && z.string().email().safeParse(parts[0]).success) {
           const reason = (['bounce', 'complaint', 'unsubscribe', 'manual'].includes(parts[1] ?? ''))
             ? parts[1] as 'bounce' | 'complaint' | 'unsubscribe' | 'manual'
             : 'manual';

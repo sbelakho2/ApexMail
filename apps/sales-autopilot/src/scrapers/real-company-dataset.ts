@@ -560,17 +560,22 @@ function generateSyntheticCompanies(count: number, qualified: boolean): RealComp
     for (let i = 0; i < count; i++) {
         let name: string;
         do {
-            const prefix = PREFIXES[Math.floor(random() * PREFIXES.length)]!;
-            const suffix = SUFFIXES[Math.floor(random() * SUFFIXES.length)]!;
+            const prefixIdx = Math.floor(random() * PREFIXES.length);
+            const suffixIdx = Math.floor(random() * SUFFIXES.length);
+            const prefix = PREFIXES[prefixIdx] ?? 'Tech';
+            const suffix = SUFFIXES[suffixIdx] ?? 'Corp';
             name = `${prefix}${suffix}`;
         } while (usedNames.has(name));
         usedNames.add(name);
         
         if (qualified) {
             const domain = `${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.${DOMAINS[Math.floor(random() * DOMAINS.length)]}`;
-            const industry = INDUSTRIES[Math.floor(random() * INDUSTRIES.length)]!;
-            const techStack = TECH_STACKS[Math.floor(random() * TECH_STACKS.length)]!;
-            const employees = EMPLOYEE_RANGES[Math.floor(random() * EMPLOYEE_RANGES.length)]!;
+            const industryIdx = Math.floor(random() * INDUSTRIES.length);
+            const techIdx = Math.floor(random() * TECH_STACKS.length);
+            const empIdx = Math.floor(random() * EMPLOYEE_RANGES.length);
+            const industry = INDUSTRIES[industryIdx] ?? 'SaaS';
+            const techStack = TECH_STACKS[techIdx] ?? ['React'];
+            const employees = EMPLOYEE_RANGES[empIdx] ?? '11-50';
             const hasFunding = random() > 0.2;
             
             companies.push({
@@ -584,7 +589,8 @@ function generateSyntheticCompanies(count: number, qualified: boolean): RealComp
             });
         } else {
             const domain = `${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.${['com', 'net', 'biz', 'info'][Math.floor(random() * 4)]}`;
-            const industry = ['Unknown', 'Personal', 'Hobby', 'Services'][Math.floor(random() * 4)]!;
+            const industryArr = ['Unknown', 'Personal', 'Hobby', 'Services'];
+            const industry = industryArr[Math.floor(random() * 4)] ?? 'Unknown';
             
             companies.push({
                 name,

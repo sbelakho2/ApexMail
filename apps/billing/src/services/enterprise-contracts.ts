@@ -703,10 +703,11 @@ export class EnterpriseContractService {
       (now.getTime() - contractStart.getTime()) / (1000 * 60 * 60 * 24 * 30)
     );
     
-    const periodStart = new Date(contractStart);
-    periodStart.setMonth(periodStart.getMonth() + monthsSinceStart);
-    const periodEnd = new Date(periodStart);
-    periodEnd.setMonth(periodEnd.getMonth() + 1);
+    // SECURITY: Use UTC-based date manipulation for billing consistency
+    const periodStart = new Date(contractStart.getTime());
+    periodStart.setUTCMonth(periodStart.getUTCMonth() + monthsSinceStart);
+    const periodEnd = new Date(periodStart.getTime());
+    periodEnd.setUTCMonth(periodEnd.getUTCMonth() + 1);
     
     // Query actual usage from usage_events table
     const usageResult = await this.db.query<{ total: string }>(

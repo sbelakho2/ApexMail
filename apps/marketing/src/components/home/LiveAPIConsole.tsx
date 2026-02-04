@@ -184,14 +184,17 @@ export function LiveAPIConsole() {
 
             {/* Email Input */}
             <div className="mb-6">
-              <label className="block text-xs font-semibold text-surface-700 mb-2">Your email address</label>
+              <label htmlFor="api-console-email" className="block text-xs font-semibold text-surface-700 mb-2">Your email address</label>
               <input
+                id="api-console-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
+                aria-describedby="email-hint"
                 className="w-full px-4 py-3 bg-white border border-surface-200 rounded-lg text-surface-900 placeholder-surface-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/10 transition-colors"
               />
+              <span id="email-hint" className="sr-only">Enter your email to receive a test email from the API</span>
             </div>
 
             {/* Curl Command Preview */}

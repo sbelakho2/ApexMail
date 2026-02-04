@@ -396,8 +396,8 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const limit = parseInt(c.req.query('limit') ?? '50', 10);
     const offset = parseInt(c.req.query('offset') ?? '0', 10);
 
-    // Validate email format
-    const emailSchema = z.string().email();
+    // Validate email format with RFC 5321 max length
+    const emailSchema = z.string().email().max(254);
     const parsed = emailSchema.safeParse(email);
     if (!parsed.success) {
       throw ApiError.badRequest('Invalid email format');

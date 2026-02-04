@@ -89,7 +89,7 @@ export function Header() {
                             className="flex items-start gap-3 p-3 rounded-lg hover:bg-surface-50 transition-colors group"
                           >
                             <div className="w-9 h-9 rounded-lg bg-surface-50 flex items-center justify-center text-surface-500 group-hover:text-primary-600 transition-colors">
-                              <subItem.icon className="w-4.5 h-4.5" />
+                              <subItem.icon className="w-[18px] h-[18px]" />
                             </div>
                             <div>
                               <div className="font-semibold text-surface-900 text-sm mb-0.5">{subItem.name}</div>

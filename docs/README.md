@@ -4,7 +4,7 @@ Enterprise-grade transactional email platform with zero paid SaaS dependencies.
 
 ## Documentation Structure
 
-```
+```text
 docs/
 ├── adr/                    # Architecture Decision Records
 │   ├── 0001-database-choice.md     ✅
@@ -16,7 +16,8 @@ docs/
 │   ├── authentication.md           ✅
 │   ├── endpoints/
 │   │   ├── messages.md             ✅
-│   │   └── campaigns.md            ✅
+│   │   ├── campaigns.md            ✅
+│   │   └── domains.md              ✅ (NEW)
 │   ├── errors.md                   ✅
 │   ├── rate-limits.md              ✅
 │   └── webhooks.md                 ✅
@@ -50,19 +51,24 @@ docs/
 │   │   └── incident-response.md    ✅
 │   └── slo-management.md           ✅
 ├── security/               # Security Documentation
-│   └── compliance.md               ✅
+│   ├── compliance.md               ✅
+│   ├── email-authentication.md     ✅ (NEW)
+│   └── advanced-analytics.md       ✅ (NEW)
 └── user-guide/            # User Documentation
-    └── getting-started.md          ✅
+    ├── getting-started.md          ✅
+    └── inbox-placement-testing.md  ✅ (NEW)
 ```
 
 ## Quick Links
 
 ### Getting Started
+
 - [Quick Start Guide](deployment/quickstart.md)
 - [API Reference](api/endpoints/messages.md)
 - [Architecture Overview](architecture/overview.md)
 
 ### Analytics & Data Science
+
 - [Analytics Module Overview](architecture/analytics-data-science.md)
 - Send Time Optimizer (Bayesian STO)
 - Churn Prediction Engine
@@ -71,6 +77,7 @@ docs/
 - AI Reply Classification
 
 ### Enterprise Features
+
 - [Enterprise Overview](enterprise/README.md)
 - [Single Sign-On (SSO)](enterprise/sso.md)
 - [Sub-Account Management](enterprise/sub-accounts.md)
@@ -82,17 +89,34 @@ docs/
 - [Premium Support](enterprise/support.md)
 - [Quarterly Business Reviews](enterprise/qbr.md)
 
+### Email Authentication & Deliverability
+
+- [Email Authentication Guide](security/email-authentication.md) (NEW)
+  - ARC (Authenticated Received Chain) - RFC 8617
+  - MTA-STS (Strict Transport Security) - RFC 8461
+  - BIMI (Brand Indicators for Message Identification)
+  - TLSRPT (TLS Reporting) - RFC 8460
+- [Advanced Analytics Features](security/advanced-analytics.md) (NEW)
+  - Bot Click Detection
+  - Reply Rate Tracking
+  - Engagement Trust Scoring
+  - Gmail Annotations
+- [Inbox Placement Testing](user-guide/inbox-placement-testing.md) (NEW)
+- [Domain API Reference](api/endpoints/domains.md) (NEW)
+
 ### Operations
+
 - [Security & Compliance](security/compliance.md)
 - [Operations Runbooks](operations/runbooks/incident-response.md)
 - [SLO Management](operations/slo-management.md)
 
 ### Development
+
 - [Marketing Website](marketing/README.md)
 - [Contributing Guide](development/contributing.md)
 
 ## Version
 
-- Documentation Version: 2.0.0
-- ApexMail Version: 2.0.0
-- Last Updated: 2025-01-15
+- Documentation Version: 2.1.0
+- ApexMail Version: 2.1.0
+- Last Updated: 2025-02-02

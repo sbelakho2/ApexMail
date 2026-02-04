@@ -200,7 +200,7 @@ export default function ControlPlaneDashboard() {
             {/* Main Content Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Sales Overview */}
-                <div className="lg:col-span-2 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                <div className="lg:col-span-2 bg-white rounded-xl border border-surface-200 p-6 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-lg font-semibold text-surface-900">Sales Pipeline</h2>
                         <Link href="/crm" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
@@ -223,7 +223,7 @@ export default function ControlPlaneDashboard() {
                 </div>
 
                 {/* Compliance Status */}
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                <div className="bg-white rounded-xl border border-surface-200 p-6 shadow-sm">
                     <div className="flex items-center justify-between mb-4">
                         <h2 className="text-lg font-semibold text-surface-900">Compliance Status</h2>
                         <Link href="/compliance" className="text-sm text-blue-600 hover:text-blue-700 font-medium">
@@ -256,7 +256,7 @@ export default function ControlPlaneDashboard() {
             </div>
 
             {/* Recent Activity */}
-            <div className="mt-6 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+            <div className="mt-6 bg-white rounded-xl border border-surface-200 p-6 shadow-sm">
                 <h2 className="text-lg font-semibold text-surface-900 mb-4">Recent Activity</h2>
                 <div className="space-y-3">
                     {stats.recentActivity.map((activity) => (
@@ -308,7 +308,7 @@ function StatCard({
         <div className={`rounded-xl border p-6 shadow-sm transition-all hover:shadow-md ${
             variant === 'success' ? 'bg-emerald-50 border-emerald-200' :
             variant === 'warning' ? 'bg-amber-50 border-amber-200' :
-            'bg-surface-0 border-surface-200'
+            'bg-white border-surface-200'
         }`}>
             <div className="flex items-center justify-between mb-3">
                 <span className="text-2xl">{icon}</span>
@@ -320,7 +320,7 @@ function StatCard({
     );
 
     return href ? (
-        <Link href={href} className="block">
+        <Link href={href} className="block" aria-label={`View ${title} details`}>
             {content}
         </Link>
     ) : content;
@@ -373,7 +373,7 @@ function ProcessCard({
     status: 'isolated' | 'disconnected';
 }) {
     return (
-        <div className="bg-surface-0 rounded-xl p-4 border border-surface-200 shadow-sm">
+        <div className="bg-white rounded-xl p-4 border border-surface-200 shadow-sm">
             <div className="text-sm font-medium text-surface-600">{name}</div>
             <div className="text-lg font-bold text-surface-900">Port {port}</div>
             <div className={`text-xs font-medium flex items-center gap-1 mt-1 ${status === 'isolated' ? 'text-emerald-600' : 'text-surface-400'}`}>

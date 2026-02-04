@@ -4,7 +4,7 @@
 
 ApexMail is built as a modular monorepo with clear service boundaries:
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                              Load Balancer                              │
 │                         (nginx/HAProxy/Cloudflare)                      │
@@ -41,7 +41,7 @@ ApexMail is built as a modular monorepo with clear service boundaries:
 ### Frontend Services
 
 | Service | Port | Technology | Purpose |
-|---------|------|------------|---------|
+| ------- | ---- | ---------- | ------- |
 | Web | 3000 | Next.js 14 | Dashboard, UI |
 | API | 3001 | Hono | REST API |
 | Tracking | 3002 | Hono | Open/click tracking |
@@ -49,7 +49,7 @@ ApexMail is built as a modular monorepo with clear service boundaries:
 ### Backend Services
 
 | Service | Port | Technology | Purpose |
-|---------|------|------------|---------|
+| ------- | ---- | ---------- | ------- |
 | Worker | - | BullMQ | Background jobs |
 | Analytics | 3010 | ClickHouse | OLAP queries |
 | AI | 3012 | ONNX Runtime | ML inference |
@@ -168,6 +168,22 @@ packages/lib/
 - Audit logging with cryptographic signing
 - Secret rotation with encryption at rest
 
+### Email Authentication Stack
+
+ApexMail implements comprehensive email authentication beyond basic SPF/DKIM/DMARC:
+
+| Protocol | RFC | Purpose |
+|----------|-----|---------|
+| SPF | RFC 7208 | Authorize sending IPs |
+| DKIM | RFC 6376 | Cryptographic message signing |
+| DMARC | RFC 7489 | Policy enforcement & reporting |
+| ARC | RFC 8617 | Preserve auth across forwarding |
+| MTA-STS | RFC 8461 | Enforce TLS (not opportunistic) |
+| TLSRPT | RFC 8460 | TLS connection reporting |
+| BIMI | Draft | Brand logo display in inbox |
+
+See [Email Authentication Guide](../security/email-authentication.md) for implementation details.
+
 ## Scalability
 
 - Horizontal scaling via stateless services
@@ -181,3 +197,5 @@ packages/lib/
 - [Control Plane Isolation](./control-plane-isolation.md) - Security boundaries
 - [Analytics & Data Science](./analytics-data-science.md) - ML modules (STO, Churn, NLP)
 - [Data Flow](./data-flow.md) - Message lifecycle
+- [Email Authentication](../security/email-authentication.md) - ARC, MTA-STS, BIMI, TLSRPT
+- [Inbox Placement Testing](../user-guide/inbox-placement-testing.md) - Deliverability monitoring

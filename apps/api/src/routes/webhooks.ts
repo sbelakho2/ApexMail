@@ -38,7 +38,7 @@ const createWebhookSchema = z.object({
   events: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length),
   description: z.string().max(500).optional(),
   secret: z.string().min(16).max(256).optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string().max(1000), z.string().max(4000)).optional(), // Limit header key/value sizes
   enabled: z.boolean().default(true),
   retryPolicy: z.object({
     maxRetries: z.number().int().min(0).max(10).default(3),
@@ -523,9 +523,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const schema = z.object({
       payload: z.unknown(),
-      signature: z.string(),
+      signature: z.string().max(512), // HMAC-SHA256 hex is 64 chars, allow margin
       timestamp: z.number(),
-      secret: z.string(),
+      secret: z.string().min(1).max(256), // Match createWebhookSchema secret limit
     });
     
     const { payload, signature, timestamp, secret } = schema.parse(body);

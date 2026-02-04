@@ -187,6 +187,10 @@ export function PricingCalculator() {
               step="1000"
               value={volume}
               onChange={(e) => setVolume(Number(e.target.value))}
+              aria-label="Email volume slider"
+              aria-valuemin={1000}
+              aria-valuemax={1000000}
+              aria-valuenow={volume}
               className="w-full h-2 bg-surface-100 rounded-full appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary-500/20 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-primary-600 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-sm [&::-webkit-slider-thumb]:active:scale-95 [&::-webkit-slider-thumb]:transition-transform"
             />
             <div className="flex justify-between mt-3">

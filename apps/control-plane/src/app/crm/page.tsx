@@ -126,7 +126,7 @@ export default function CRMPipelinePage() {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button className="px-4 py-2 bg-surface-0 border border-surface-200 text-surface-700 font-medium rounded-lg text-sm hover:bg-surface-50 shadow-sm transition-colors">
+                    <button className="px-4 py-2 bg-white border border-surface-200 text-surface-700 font-medium rounded-lg text-sm hover:bg-surface-50 shadow-sm transition-colors">
                         Export CSV
                     </button>
                     <button className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg text-sm hover:bg-blue-700 shadow-sm transition-colors">
@@ -152,7 +152,7 @@ export default function CRMPipelinePage() {
                             >
                                 <div className="flex items-center justify-between mb-4 px-1">
                                     <h3 className="font-semibold text-surface-700">{stage.label}</h3>
-                                    <span className="px-2.5 py-0.5 bg-surface-0/60 rounded-full text-xs font-bold text-surface-600 shadow-sm border border-black/5">
+                                    <span className="px-2.5 py-0.5 bg-white/60 rounded-full text-xs font-bold text-surface-600 shadow-sm border border-black/5">
                                         {stageLeads.length}
                                     </span>
                                 </div>
@@ -163,8 +163,11 @@ export default function CRMPipelinePage() {
                                             draggable
                                             onDragStart={(e) => handleDragStart(e, lead)}
                                             onClick={() => setSelectedLead(lead)}
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-label={`Lead: ${lead.companyName}, Score: ${lead.score}`}
                                             className={cn(
-                                                'bg-surface-0 rounded-xl p-4 shadow-sm border border-surface-100 cursor-pointer',
+                                                'bg-white rounded-xl p-4 shadow-sm border border-surface-100 cursor-pointer',
                                                 'hover:shadow-md transition-all duration-200 group',
                                                 draggedLead?.id === lead.id && 'opacity-50'
                                             )}
@@ -207,11 +210,11 @@ export default function CRMPipelinePage() {
 
             {/* Lead Detail Modal */}
             {selectedLead && (
-                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLead(null)}>
-                    <div className="bg-surface-0 rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
+                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLead(null)} role="dialog" aria-modal="true" aria-labelledby="lead-modal-title">
+                    <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-surface-200" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-6 border-b border-surface-100 pb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-surface-900">{selectedLead.companyName}</h2>
+                                <h2 id="lead-modal-title" className="text-xl font-bold text-surface-900">{selectedLead.companyName}</h2>
                                 <a href={`https://${selectedLead.domain}`} target="_blank" rel="noopener noreferrer" className="text-blue-600 text-sm hover:underline font-medium inline-flex items-center gap-1">
                                     {selectedLead.domain} <span>↗</span>
                                 </a>
@@ -261,10 +264,10 @@ export default function CRMPipelinePage() {
                             <button className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl font-semibold hover:bg-blue-700 shadow-md transition-all hover:shadow-lg">
                                 Add to Campaign
                             </button>
-                            <button className="px-4 py-2.5 bg-surface-0 border border-surface-200 text-surface-700 rounded-xl font-medium hover:bg-surface-50 shadow-sm">
+                            <button className="px-4 py-2.5 bg-white border border-surface-200 text-surface-700 rounded-xl font-medium hover:bg-surface-50 shadow-sm">
                                 Edit
                             </button>
-                            <button className="px-4 py-2.5 bg-surface-0 border border-red-200 text-red-600 rounded-xl font-medium hover:bg-red-50 shadow-sm">
+                            <button className="px-4 py-2.5 bg-white border border-red-200 text-red-600 rounded-xl font-medium hover:bg-red-50 shadow-sm">
                                 Delete
                             </button>
                         </div>

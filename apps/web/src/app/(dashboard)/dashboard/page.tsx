@@ -291,18 +291,18 @@ export default function DashboardPage() {
                                         </TableCell>
                                         <TableCell className="text-right">
                                             {campaign.openRate > 0
-                                                ? formatPercent(campaign.openRate / 100)
+                                                ? `${campaign.openRate.toFixed(1)}%`
                                                 : '-'}
                                         </TableCell>
                                         <TableCell className="text-right">
                                             {campaign.clickRate > 0
-                                                ? formatPercent(campaign.clickRate / 100)
+                                                ? `${campaign.clickRate.toFixed(1)}%`
                                                 : '-'}
                                         </TableCell>
                                         <TableCell>
                                             <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
-                                                    <Button variant="ghost" size="icon">
+                                                    <Button variant="ghost" size="icon" aria-label="Campaign actions">
                                                         <MoreHorizontal className="h-4 w-4" />
                                                     </Button>
                                                 </DropdownMenuTrigger>
@@ -359,7 +359,7 @@ export default function DashboardPage() {
                                     <div className="flex justify-between text-sm">
                                         <span className="text-muted-foreground">Open Rate</span>
                                         <span className="font-medium">
-                                            {formatPercent(list.openRate / 100)}
+                                            {`${list.openRate.toFixed(1)}%`}
                                         </span>
                                     </div>
                                     <Progress value={list.openRate} className="h-2" />
@@ -391,7 +391,7 @@ export default function DashboardPage() {
                             <span>Design Template</span>
                         </Button>
                         <Button variant="outline" className="h-auto flex-col gap-2 p-6">
-                            <Zap className="h-6 w-6 text-error" />
+                            <Zap className="h-6 w-6 text-info" />
                             <span>Setup Automation</span>
                         </Button>
                     </div>

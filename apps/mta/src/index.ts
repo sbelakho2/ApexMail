@@ -238,6 +238,10 @@ process.on('unhandledRejection', (reason) => {
   shutdown('unhandledRejection').catch(() => process.exit(1));
 });
 
+// Re-export authentication and enhancement modules
+export * from './auth/index.js';
+export { GmailAnnotationsService, createGmailAnnotationsService } from './gmail-annotations.js';
+
 // Start the MTA
 main().catch((error) => {
   logger.fatal('Failed to start MTA', { error });

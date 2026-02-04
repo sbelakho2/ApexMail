@@ -188,7 +188,8 @@ export class CostCircuitService {
     actions: string[];
   }, Error>> {
     const now = new Date();
-    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    // SECURITY: Use UTC for billing calculations to avoid timezone-related inconsistencies
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
     const costsResult = await this.calculateCosts(tenantId, periodStart, now);
     if (!costsResult.ok) return Result.err(costsResult.error);
@@ -247,7 +248,8 @@ export class CostCircuitService {
    */
   async checkCostSpike(tenantId: string): Promise<Result<boolean, Error>> {
     const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // SECURITY: Use UTC for billing calculations to avoid timezone/DST issues
+    const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const yesterdayStart = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
 
     const todayCosts = await this.calculateCosts(tenantId, todayStart, now);

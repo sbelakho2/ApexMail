@@ -81,15 +81,17 @@ export function HeroSection() {
           <Link 
             href="https://app.apexmail.ee/signup" 
             className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
+            aria-label="Get API Keys - Sign up for free"
           >
             Get API Keys
-            <ArrowRight className="w-4 h-4 ml-2" />
+            <ArrowRight className="w-4 h-4 ml-2" aria-hidden="true" />
           </Link>
           <Link 
             href="#demo" 
             className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+            aria-label="Watch product demo video"
           >
-            <Play className="w-4 h-4 mr-2" />
+            <Play className="w-4 h-4 mr-2" aria-hidden="true" />
             Watch Demo
           </Link>
         </div>

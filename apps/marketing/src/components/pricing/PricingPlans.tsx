@@ -150,6 +150,7 @@ export function PricingPlans() {
 
               <Link
                 href={plan.ctaLink}
+                aria-label={`${plan.cta} - ${plan.name} plan at ${plan.price}${plan.period}`}
                 className={cn(
                   'block w-full py-2.5 rounded-lg text-sm font-medium text-center transition-colors',
                   plan.popular

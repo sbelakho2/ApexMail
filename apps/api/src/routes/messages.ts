@@ -15,28 +15,35 @@ import {
 } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 
+/**
+ * SECURITY: Strip CRLF and other control characters to prevent header injection
+ * RFC 5322 headers must not contain CR, LF, or NUL characters
+ */
+const stripHeaderChars = (str: string): string => 
+  str.replace(/[\r\n\x00]/g, '').trim();
+
 const recipientSchema = z.object({
-  email: z.string().email(),
-  name: z.string().optional(),
+  email: z.string().email().max(254), // RFC 5321 max email length
+  name: z.string().max(200).transform(stripHeaderChars).optional(), // Sanitize to prevent header injection
   type: z.enum(['to', 'cc', 'bcc']).default('to'),
 });
 
 const sendMessageSchema = z.object({
   from: z.object({
-    email: z.string().email(),
-    name: z.string().optional(),
+    email: z.string().email().max(254), // RFC 5321 max email length
+    name: z.string().max(200).transform(stripHeaderChars).optional(), // Sanitize to prevent header injection
   }),
-  replyTo: z.string().email().optional(),
+  replyTo: z.string().email().max(254).optional(),
   to: z.array(recipientSchema).min(1).max(50),
   cc: z.array(recipientSchema).max(50).optional(),
   bcc: z.array(recipientSchema).max(50).optional(),
-  subject: z.string().min(1).max(998), // RFC 5322 limit
+  subject: z.string().min(1).max(998).transform(stripHeaderChars), // RFC 5322 limit + sanitize for header injection
   html: z.string().max(10_000_000).optional(), // 10MB limit
   text: z.string().max(1_000_000).optional(), // 1MB limit
   templateId: z.string().uuid().optional(),
   templateData: z.record(z.unknown()).optional(),
   campaignId: z.string().uuid().optional(),
-  tags: z.array(z.string()).max(10).optional(),
+  tags: z.array(z.string().max(100)).max(10).optional(), // Add per-tag length limit
   priority: z.enum(['high', 'normal', 'low']).default('normal'),
   scheduledAt: z.string().datetime().optional(),
   metadata: z.record(z.unknown()).optional(),

@@ -66,6 +66,9 @@ export function TestimonialsSection() {
  setActiveIndex((prev) => (prev - 1 + testimonials.length) % testimonials.length);
  };
 
+ // Guard against empty testimonials array
+ if (!testimonials.length) return null;
+
  const activeTestimonial = testimonials[activeIndex];
 
  return (
@@ -109,8 +112,8 @@ export function TestimonialsSection() {
  &ldquo;{activeTestimonial.quote}&rdquo;
  </blockquote>
  <div className="flex items-center gap-4">
- <div className="w-12 h-12 rounded-full bg-surface-50 flex items-center justify-center text-surface-900 font-semibold text-sm border border-surface-200">
- {activeTestimonial.author.split(' ').map(n => n[0]).join('')}
+ <div className="w-12 h-12 rounded-full bg-surface-50 flex items-center justify-center text-surface-900 font-semibold text-sm border border-surface-200" aria-hidden="true">
+ {activeTestimonial.author?.split(' ').map(n => n?.[0] ?? '').join('') ?? 'U'}
  </div>
  <div>
  <div className="font-semibold text-surface-900">{activeTestimonial.author}</div>
