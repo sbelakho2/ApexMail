@@ -1,12 +1,14 @@
 /**
  * Inbound SMTP Server - Receives and processes incoming email
+ * 
+ * SECURITY: Uses timing-safe comparisons for password verification
  */
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
-import { sha256 } from '@apexmail/lib/crypto';
+import { sha256, timingSafeCompare } from '@apexmail/lib/crypto';
 import { SMTPServer, type SMTPServerSession, type SMTPServerAddress, type SMTPServerDataStream } from 'smtp-server';
 import { simpleParser, type ParsedMail, type AddressObject, type Headers } from 'mailparser';
 import { EmailAuthenticator, type AuthenticationResults } from '../auth/email-authentication.js';
@@ -63,14 +65,22 @@ export class InboundServer {
   private readonly emailAuth: InboundServerConfig['emailAuth'];
   private readonly logger: Logger;
   private readonly authenticator: EmailAuthenticator;
+  private readonly redis: Redis;
   
   private smtpServer: SMTPServer | null = null;
   private secureSmtpServer: SMTPServer | null = null;
   private readonly sessions = new Map<string, SessionContext>();
   private readonly connectionCounts = new Map<string, number>();
+  // SECURITY FIX: Track auth attempts for rate limiting
+  private readonly authAttemptCounts = new Map<string, { count: number; firstAttempt: number }>();
+  private readonly AUTH_RATE_LIMIT = 5; // Max auth attempts
+  private readonly AUTH_RATE_WINDOW = 60 * 1000; // 1 minute window
+  // Memory management: Periodic cleanup timer
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(options: InboundServerConfig) {
     this.db = options.db;
+    this.redis = options.redis;
     this.config = options.config;
     this.rateLimit = options.rateLimit;
     this.emailAuth = options.emailAuth;
@@ -85,6 +95,35 @@ export class InboundServer {
       trustedRelays: this.emailAuth.trustedRelays,
       logger: this.logger,
     });
+    
+    // Start periodic cleanup of stale auth attempts to prevent memory leak
+    this.cleanupTimer = setInterval(() => this.cleanupStaleEntries(), 60000);
+    if (this.cleanupTimer.unref) {
+      this.cleanupTimer.unref();
+    }
+  }
+
+  /**
+   * Clean up stale entries from tracking maps to prevent memory leaks
+   */
+  private cleanupStaleEntries(): void {
+    const now = Date.now();
+    let cleanedAuthAttempts = 0;
+    
+    // Clean up expired auth attempt records
+    for (const [ip, attempts] of this.authAttemptCounts) {
+      if (now - attempts.firstAttempt > this.AUTH_RATE_WINDOW) {
+        this.authAttemptCounts.delete(ip);
+        cleanedAuthAttempts++;
+      }
+    }
+    
+    if (cleanedAuthAttempts > 0) {
+      this.logger.debug('Cleaned up stale auth attempt records', {
+        cleaned: cleanedAuthAttempts,
+        remaining: this.authAttemptCounts.size,
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -200,6 +239,15 @@ export class InboundServer {
   async stop(): Promise<void> {
     this.logger.info('Stopping inbound SMTP server');
 
+    // Clear cleanup timer
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+
+    // Shutdown email authenticator
+    this.authenticator.shutdown();
+
     const promises: Promise<void>[] = [];
 
     if (this.smtpServer) {
@@ -215,6 +263,12 @@ export class InboundServer {
     }
 
     await Promise.all(promises);
+    
+    // Clear all tracking maps
+    this.sessions.clear();
+    this.connectionCounts.clear();
+    this.authAttemptCounts.clear();
+    
     this.logger.info('Inbound SMTP server stopped');
   }
 
@@ -257,27 +311,81 @@ export class InboundServer {
       return callback(new Error('Session not found'));
     }
 
-    this.logger.debug('SMTP auth attempt', { 
-      sessionId: ctx.id, 
-      username: auth.username,
-      method: auth.method,
-    });
+    // SECURITY FIX: Rate limit authentication attempts to prevent brute force attacks
+    const clientIP = ctx.clientIP;
+    const now = Date.now();
+    let attempts = this.authAttemptCounts.get(clientIP);
+    
+    // Clean up expired attempt records
+    if (attempts && (now - attempts.firstAttempt) > this.AUTH_RATE_WINDOW) {
+      this.authAttemptCounts.delete(clientIP);
+      attempts = undefined;
+    }
+    
+    if (attempts) {
+      if (attempts.count >= this.AUTH_RATE_LIMIT) {
+        this.logger.warn('Auth rate limit exceeded', { 
+          clientIP, 
+          attempts: attempts.count,
+          username: auth.username,
+        });
+        // Use Redis to track persistent blocks
+        this.redis.setex(`smtp:auth_blocked:${clientIP}`, 300, '1').catch(() => {});
+        return callback(new Error('421 Too many authentication attempts. Try again later.'));
+      }
+      attempts.count++;
+    } else {
+      this.authAttemptCounts.set(clientIP, { count: 1, firstAttempt: now });
+    }
 
-    // Validate credentials against database
-    this.validateCredentials(auth.username ?? '', auth.password ?? '')
-      .then((result) => {
-        if (result.valid) {
-          ctx.authenticated = true;
-          ctx.tenantId = result.tenantId;
-          callback(null, { user: auth.username ?? '' });
-        } else {
-          callback(new Error('535 Authentication failed'));
-        }
-      })
-      .catch((error) => {
-        this.logger.error('Auth error', { error });
-        callback(new Error('451 Temporary authentication failure'));
+    // Check if IP is persistently blocked
+    this.redis.get(`smtp:auth_blocked:${clientIP}`).then((blocked) => {
+      if (blocked) {
+        this.logger.warn('Auth attempt from blocked IP', { clientIP, username: auth.username });
+        return callback(new Error('421 Your IP is temporarily blocked. Try again later.'));
+      }
+      
+      this.logger.debug('SMTP auth attempt', { 
+        sessionId: ctx.id, 
+        username: auth.username,
+        method: auth.method,
       });
+
+      // Validate credentials against database
+      this.validateCredentials(auth.username ?? '', auth.password ?? '')
+        .then((result) => {
+          if (result.valid) {
+            // Clear auth attempts on successful login
+            this.authAttemptCounts.delete(clientIP);
+            ctx.authenticated = true;
+            ctx.tenantId = result.tenantId;
+            callback(null, { user: auth.username ?? '' });
+          } else {
+            callback(new Error('535 Authentication failed'));
+          }
+        })
+        .catch((error) => {
+          this.logger.error('Auth error', { error });
+          callback(new Error('451 Temporary authentication failure'));
+        });
+    }).catch((error) => {
+      this.logger.error('Redis error checking auth block', { error });
+      // Fall through to attempt auth if Redis fails
+      this.validateCredentials(auth.username ?? '', auth.password ?? '')
+        .then((result) => {
+          if (result.valid) {
+            ctx.authenticated = true;
+            ctx.tenantId = result.tenantId;
+            callback(null, { user: auth.username ?? '' });
+          } else {
+            callback(new Error('535 Authentication failed'));
+          }
+        })
+        .catch((err) => {
+          this.logger.error('Auth error', { error: err });
+          callback(new Error('451 Temporary authentication failure'));
+        });
+    });
   }
 
   private async validateCredentials(
@@ -298,9 +406,9 @@ export class InboundServer {
 
     const { tenant_id, password_hash } = row;
 
-    // Verify password (using sha256 hash comparison)
+    // SECURITY: Use timing-safe comparison to prevent timing attacks
     const hash = sha256(password);
-    if (hash !== password_hash) {
+    if (!timingSafeCompare(hash, password_hash)) {
       return { valid: false };
     }
 

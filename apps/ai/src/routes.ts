@@ -34,6 +34,31 @@ const analytics = new PredictiveAnalytics();
 const app = new Hono();
 
 // ========================================
+// RATE LIMITING (AI-007: Per-tenant rate limiting)
+// ========================================
+
+// Simple in-memory rate limiter for AI endpoints
+// In production, use Redis-backed rate limiting
+interface RateLimitEntry {
+    count: number;
+    resetAt: number;
+}
+
+const rateLimitStore: Map<string, RateLimitEntry> = new Map();
+const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
+const RATE_LIMIT_MAX_REQUESTS = 60; // 60 requests per minute per tenant
+
+// Periodically clean up expired rate limit entries to prevent memory leak
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of rateLimitStore) {
+        if (entry.resetAt < now) {
+            rateLimitStore.delete(key);
+        }
+    }
+}, RATE_LIMIT_WINDOW_MS);
+
+// ========================================
 // MIDDLEWARE
 // ========================================
 
@@ -45,13 +70,80 @@ app.use('*', cors({
 app.use('*', secureHeaders());
 app.use('*', prettyJSON());
 
+// AI-008/009: Request ID propagation middleware
+// Generates or propagates request IDs for distributed tracing
+app.use('*', async (c, next) => {
+    // Get existing request ID from header or generate a new one
+    const incomingRequestId = c.req.header('X-Request-ID');
+    const requestId = incomingRequestId ?? `ai-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    
+    // Store in header for downstream use (Hono's preferred pattern)
+    c.req.raw.headers.set('X-Request-ID', requestId);
+    
+    // Always set the response header for tracing
+    c.header('X-Request-ID', requestId);
+    
+    return next();
+});
+
+// AI-007: Rate limiting middleware for AI endpoints
+app.use('/api/*', async (c, next) => {
+    // Extract tenant ID from header or request body
+    const tenantId = c.req.header('X-Tenant-ID') ?? 'default';
+    const now = Date.now();
+    const key = `ai:ratelimit:${tenantId}`;
+    
+    let entry = rateLimitStore.get(key);
+    
+    if (!entry || entry.resetAt < now) {
+        // Create new entry
+        entry = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
+        rateLimitStore.set(key, entry);
+    } else {
+        entry.count++;
+    }
+    
+    // Set rate limit headers
+    const remaining = Math.max(0, RATE_LIMIT_MAX_REQUESTS - entry.count);
+    c.header('X-RateLimit-Limit', String(RATE_LIMIT_MAX_REQUESTS));
+    c.header('X-RateLimit-Remaining', String(remaining));
+    c.header('X-RateLimit-Reset', String(Math.floor(entry.resetAt / 1000)));
+    
+    // Check if over limit
+    if (entry.count > RATE_LIMIT_MAX_REQUESTS) {
+        const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+        c.header('Retry-After', String(retryAfter));
+        return c.json({
+            success: false,
+            error: `Rate limit exceeded. Retry after ${retryAfter} seconds.`,
+            code: 'RATE_LIMIT_EXCEEDED',
+        }, 429);
+    }
+    
+    return next();
+});
+
 // Error handling
+// AI-009: Include request ID in error responses for tracing
 app.onError((err, c) => {
-    console.error('API Error:', err);
+    const requestId = c.req.header('X-Request-ID') ?? 'unknown';
+    console.error(`API Error [${requestId}]:`, err);
+    
+    // Return appropriate error code based on error type
+    const status = err.message.includes('not found') ? 404 
+        : err.message.includes('validation') ? 400
+        : err.message.includes('unauthorized') ? 401
+        : 500;
+    
     return c.json({
         success: false,
         error: err.message || 'Internal server error',
-    }, 500);
+        code: status === 400 ? 'VALIDATION_ERROR' 
+            : status === 401 ? 'UNAUTHORIZED'
+            : status === 404 ? 'NOT_FOUND'
+            : 'INTERNAL_ERROR',
+        requestId, // AI-009: Include request ID for debugging
+    }, status);
 });
 
 // ========================================

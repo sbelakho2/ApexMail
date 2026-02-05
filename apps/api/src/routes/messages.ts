@@ -14,6 +14,7 @@ import {
   type EmailRecipient 
 } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 
 /**
  * SECURITY: Strip CRLF and other control characters to prevent header injection
@@ -64,8 +65,9 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
   const eventsRepo = new EventsRepository(ctx.db);
   const auditRepo = new AuditLogsRepository(ctx.db);
 
-  // Send a single message
-  router.post('/', async (c) => {
+  // Apply scope enforcement to message routes
+  // Send a single message - requires 'messages:write' scope
+  router.post('/', requireScopes('messages:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -194,8 +196,8 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     }, 202);
   });
 
-  // Send batch messages
-  router.post('/batch', async (c) => {
+  // Send batch messages - requires 'messages:write' scope
+  router.post('/batch', requireScopes('messages:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -324,8 +326,8 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     }, 202);
   });
 
-  // Get message by ID
-  router.get('/:id', async (c) => {
+  // Get message by ID - requires 'messages:read' scope
+  router.get('/:id', requireScopes('messages:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('id');
 
@@ -341,8 +343,8 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const message = result.value;
 
-    // Get events for this message
-    const eventsResult = await eventsRepo.findByMessageId(messageId);
+    // Get events for this message (tenant-scoped for isolation)
+    const eventsResult = await eventsRepo.findByMessageId(messageId, tenantId);
     const events = eventsResult.ok ? eventsResult.value : [];
 
     return c.json({
@@ -385,8 +387,8 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     });
   });
 
-  // List messages
-  router.get('/', async (c) => {
+  // List messages - requires 'messages:read' scope
+  router.get('/', requireScopes('messages:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const status = c.req.query('status') as 'pending' | 'queued' | 'sending' | 'sent' | 'delivered' | 'bounced' | 'deferred' | 'failed' | undefined;
     const campaignId = c.req.query('campaignId');
@@ -430,8 +432,8 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     });
   });
 
-  // Get message counts by status
-  router.get('/stats/status', async (c) => {
+  // Get message counts by status - requires 'messages:read' scope
+  router.get('/stats/status', requireScopes('messages:read'), async (c) => {
     const tenantId = c.get('tenantId');
 
     const result = await messagesRepo.countByStatus(tenantId);
@@ -443,8 +445,8 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     return c.json({ counts: result.value });
   });
 
-  // Cancel scheduled message
-  router.post('/:id/cancel', async (c) => {
+  // Cancel scheduled message - requires 'messages:write' scope
+  router.post('/:id/cancel', requireScopes('messages:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const messageId = c.req.param('id');
@@ -477,14 +479,14 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to cancel message');
     }
 
-    // Audit log
+    // Audit log - AUDIT-003 FIX: Use message.sent for cancellation tracking
     await auditRepo.create({
       tenantId,
       userId: userId ?? undefined,
-      action: 'message.sent',
+      action: 'message.sent', // Use message.sent with metadata indicating cancellation
       resourceType: 'message',
       resourceId: messageId,
-      metadata: { cancelled: true },
+      metadata: { cancelled: true, previousStatus: message.status },
     });
 
     logger.info('Message cancelled', { messageId });

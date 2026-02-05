@@ -372,7 +372,11 @@ export class IncidentManager extends EventEmitter {
             this.incidentHistory = this.incidentHistory.slice(-IncidentManager.MAX_INCIDENT_HISTORY_SIZE);
         }
         
+        // MEM-009 FIX: Clean up all related maps to prevent memory leaks
         this.incidents.delete(incident.id);
+        this.timelines.delete(incident.id);
+        this.roles.delete(incident.id);
+        this.relatedAlerts.delete(incident.id);
     }
 
     /**

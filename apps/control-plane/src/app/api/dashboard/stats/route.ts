@@ -7,6 +7,8 @@
 
 import { NextResponse } from 'next/server';
 
+export const dynamic = 'force-dynamic';
+
 // Use dynamic import for pg to avoid build issues
 type Pool = import('pg').Pool;
 type PoolClient = import('pg').PoolClient;

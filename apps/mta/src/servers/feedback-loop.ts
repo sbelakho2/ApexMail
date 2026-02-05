@@ -1,5 +1,7 @@
 /**
  * Feedback Loop Server - Processes ARF complaint reports
+ * 
+ * SECURITY: Validates FBL source IPs against trusted ISP list to prevent spoofed complaints
  */
 
 import { Pool } from 'pg';
@@ -8,6 +10,7 @@ import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
 import { SMTPServer, type SMTPServerSession, type SMTPServerAddress, type SMTPServerDataStream } from 'smtp-server';
 import { simpleParser, type ParsedMail, type Attachment } from 'mailparser';
+import dns from 'dns/promises';
 
 interface FeedbackLoopServerConfig {
   db: Pool;
@@ -17,6 +20,8 @@ interface FeedbackLoopServerConfig {
     port: number;
     hostname: string;
     maxMessageSize: number;
+    // SECURITY FIX: Allow configuring trusted FBL sender domains
+    trustedFblSenders?: string[];
   };
   logger: Logger;
 }
@@ -35,19 +40,74 @@ interface ComplaintInfo {
   authenticationResults: string | null;
 }
 
+// SECURITY: Known legitimate FBL sender domains (major ISPs)
+// These can be customized via config
+const DEFAULT_TRUSTED_FBL_SENDERS = [
+  'feedback.microsoft.com',
+  'fbl.mail.yahoo.com',
+  'abuse-reports.mail.yahoo.com',
+  'postmaster.google.com',
+  'postmaster.aol.com',
+  'feedback-id.comcast.net',
+  'returnpath.com',
+  'validity.com',
+  'proofpoint.com',
+];
+
 export class FeedbackLoopServer {
   private readonly db: Pool;
   private readonly redis: Redis;
   private readonly config: FeedbackLoopServerConfig['config'];
   private readonly logger: Logger;
+  private readonly trustedFblSenders: Set<string>;
   
   private smtpServer: SMTPServer | null = null;
+  // Cache for reverse DNS lookups with LRU eviction
+  private readonly rdnsCache = new Map<string, { hostname: string | null; timestamp: number }>();
+  private readonly RDNS_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+  private readonly RDNS_CACHE_MAX_SIZE = 5000; // Maximum cache entries
+  private cacheCleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(options: FeedbackLoopServerConfig) {
     this.db = options.db;
     this.redis = options.redis;
     this.config = options.config;
     this.logger = options.logger;
+    this.trustedFblSenders = new Set([
+      ...DEFAULT_TRUSTED_FBL_SENDERS,
+      ...(options.config.trustedFblSenders || []),
+    ].map(s => s.toLowerCase()));
+    
+    // Start periodic cache cleanup to prevent memory leak
+    this.cacheCleanupTimer = setInterval(() => this.cleanupExpiredRdnsCache(), 300000); // 5 minutes
+    if (this.cacheCleanupTimer.unref) {
+      this.cacheCleanupTimer.unref();
+    }
+  }
+
+  /**
+   * Clean up expired rDNS cache entries and enforce max size
+   */
+  private cleanupExpiredRdnsCache(): void {
+    const now = Date.now();
+    
+    // Remove expired entries
+    for (const [key, entry] of this.rdnsCache) {
+      if (now - entry.timestamp > this.RDNS_CACHE_TTL) {
+        this.rdnsCache.delete(key);
+      }
+    }
+    
+    // If still over max size, remove oldest entries (LRU eviction)
+    if (this.rdnsCache.size > this.RDNS_CACHE_MAX_SIZE) {
+      const entries = Array.from(this.rdnsCache.entries())
+        .sort((a, b) => a[1].timestamp - b[1].timestamp);
+      
+      const toRemove = entries.slice(0, this.rdnsCache.size - this.RDNS_CACHE_MAX_SIZE);
+      for (const [key] of toRemove) {
+        this.rdnsCache.delete(key);
+      }
+    }
   }
 
   async start(): Promise<void> {
@@ -80,11 +140,20 @@ export class FeedbackLoopServer {
   async stop(): Promise<void> {
     this.logger.info('Stopping feedback loop SMTP server');
     
+    // Clear cache cleanup timer
+    if (this.cacheCleanupTimer) {
+      clearInterval(this.cacheCleanupTimer);
+      this.cacheCleanupTimer = null;
+    }
+    
     if (this.smtpServer) {
       await new Promise<void>((resolve) => {
         this.smtpServer!.close(() => resolve());
       });
     }
+    
+    // Clear cache
+    this.rdnsCache.clear();
     
     this.logger.info('Feedback loop SMTP server stopped');
   }
@@ -94,7 +163,92 @@ export class FeedbackLoopServer {
       clientIP: session.remoteAddress,
       hostname: session.clientHostname,
     });
-    callback();
+    
+    // SECURITY FIX: Verify connecting IP via reverse DNS matches trusted FBL senders
+    // This prevents spoofed complaints from malicious actors
+    this.verifyFblSource(session.remoteAddress)
+      .then((trusted) => {
+        if (trusted) {
+          callback();
+        } else {
+          this.logger.warn('FBL connection rejected - untrusted source', {
+            clientIP: session.remoteAddress,
+            hostname: session.clientHostname,
+          });
+          callback(new Error('550 Untrusted FBL source - only accepted from registered ISPs'));
+        }
+      })
+      .catch((error) => {
+        this.logger.error('FBL source verification failed', { error });
+        // Allow through on error to avoid losing legitimate FBL reports
+        // but log for monitoring
+        callback();
+      });
+  }
+
+  /**
+   * Verify FBL source via reverse DNS lookup
+   * SECURITY: Prevents spoofed complaints by validating sender identity
+   */
+  private async verifyFblSource(ip: string): Promise<boolean> {
+    // Check cache first
+    const cached = this.rdnsCache.get(ip);
+    if (cached && (Date.now() - cached.timestamp) < this.RDNS_CACHE_TTL) {
+      return cached.hostname ? this.isTrustedFblSender(cached.hostname) : false;
+    }
+
+    try {
+      // Reverse DNS lookup
+      const hostnames = await dns.reverse(ip);
+      const hostname = hostnames[0]?.toLowerCase() || null;
+      
+      // Cache the result
+      this.rdnsCache.set(ip, { hostname, timestamp: Date.now() });
+      
+      if (!hostname) {
+        this.logger.debug('No reverse DNS for FBL source', { ip });
+        return false;
+      }
+
+      // Verify forward DNS matches (prevents DNS spoofing)
+      try {
+        const addresses = await dns.resolve4(hostname);
+        if (!addresses.includes(ip)) {
+          this.logger.warn('Forward/reverse DNS mismatch for FBL source', {
+            ip,
+            hostname,
+            resolvedIPs: addresses,
+          });
+          return false;
+        }
+      } catch {
+        // No forward DNS or mismatch
+        this.logger.warn('Forward DNS verification failed for FBL source', { ip, hostname });
+        return false;
+      }
+
+      return this.isTrustedFblSender(hostname);
+    } catch (error) {
+      this.logger.debug('Reverse DNS lookup failed for FBL source', { ip, error });
+      this.rdnsCache.set(ip, { hostname: null, timestamp: Date.now() });
+      return false;
+    }
+  }
+
+  /**
+   * Check if hostname matches a trusted FBL sender domain
+   */
+  private isTrustedFblSender(hostname: string): boolean {
+    const lowerHostname = hostname.toLowerCase();
+    
+    for (const trusted of this.trustedFblSenders) {
+      // Match exact domain or subdomain
+      if (lowerHostname === trusted || lowerHostname.endsWith('.' + trusted)) {
+        return true;
+      }
+    }
+    
+    return false;
   }
 
   private onMailFrom(

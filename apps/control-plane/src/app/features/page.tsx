@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import { cn, timeAgo } from '../../lib/utils';
 import { useSearchParams } from 'next/navigation';
+
+export const dynamic = 'force-dynamic';
 
 /**
  * Feature Flags Management - Control feature rollout
@@ -65,7 +67,7 @@ const CATEGORY_CONFIG: Record<string, { label: string; bg: string; text: string;
     killswitch: { label: 'Killswitch', bg: 'bg-red-100', text: 'text-red-700', icon: '🔴' },
 };
 
-export default function FeatureFlagsPage() {
+function FeatureFlagsPageContent() {
     const searchParams = useSearchParams();
     const [flags, setFlags] = useState<FeatureFlag[]>([]);
     const [overrides, setOverrides] = useState<TenantOverride[]>([]);
@@ -593,5 +595,13 @@ export default function FeatureFlagsPage() {
                 </div>
             )}
         </div>
+    );
+}
+
+export default function FeatureFlagsPage() {
+    return (
+        <Suspense fallback={<div>Loading...</div>}>
+            <FeatureFlagsPageContent />
+        </Suspense>
     );
 }

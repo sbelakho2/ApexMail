@@ -100,9 +100,14 @@ export class IPRateLimiter {
   private readonly warmupCache = new Map<string, { status: IPWarmupStatus; expiresAt: number }>();
   private readonly cacheTtlMs = 60000; // 1 minute cache
   
-  // MX lookup cache to avoid repeated DNS queries
+  // MEM-005 FIX: MX lookup cache with LRU eviction to prevent unbounded growth
   private readonly mxCache = new Map<string, { isp: string; expiresAt: number }>();
   private readonly mxCacheTtlMs = 3600000; // 1 hour cache
+  private static readonly MAX_MX_CACHE_SIZE = 10000;
+  private static readonly MAX_WARMUP_CACHE_SIZE = 1000;
+  
+  // Cleanup interval handle
+  private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: IPRateLimiterConfig) {
     this.redis = config.redis;
@@ -112,6 +117,89 @@ export class IPRateLimiter {
     this.ispSchedules = { ...DEFAULT_ISP_WARMUP_SCHEDULES, ...config.ispSchedules };
     this.globalHourlyLimit = config.globalHourlyLimit ?? 2500;
     this.ispAwareLimiting = config.ispAwareLimiting ?? true;
+    
+    // MEM-005 FIX: Start periodic cache cleanup to prevent memory leaks
+    this.startCacheCleanup();
+  }
+
+  /**
+   * MEM-005 FIX: Clean up expired entries from caches and enforce size limits
+   */
+  private startCacheCleanup(): void {
+    // Run cleanup every 5 minutes
+    this.cleanupIntervalId = setInterval(() => {
+      this.cleanupExpiredCacheEntries();
+    }, 5 * 60 * 1000);
+    
+    // Don't prevent process exit
+    this.cleanupIntervalId.unref();
+  }
+
+  /**
+   * Clean up expired cache entries and enforce size limits
+   */
+  private cleanupExpiredCacheEntries(): void {
+    const now = Date.now();
+    let expiredMxCount = 0;
+    let expiredWarmupCount = 0;
+
+    // Clean up expired MX cache entries
+    for (const [key, value] of this.mxCache.entries()) {
+      if (value.expiresAt < now) {
+        this.mxCache.delete(key);
+        expiredMxCount++;
+      }
+    }
+
+    // Clean up expired warmup cache entries
+    for (const [key, value] of this.warmupCache.entries()) {
+      if (value.expiresAt < now) {
+        this.warmupCache.delete(key);
+        expiredWarmupCount++;
+      }
+    }
+
+    // Enforce size limits with LRU-like eviction (remove oldest entries first)
+    if (this.mxCache.size > IPRateLimiter.MAX_MX_CACHE_SIZE) {
+      const entriesToRemove = this.mxCache.size - IPRateLimiter.MAX_MX_CACHE_SIZE;
+      const entries = Array.from(this.mxCache.entries())
+        .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      for (let i = 0; i < entriesToRemove; i++) {
+        const entry = entries[i];
+        if (entry) this.mxCache.delete(entry[0]);
+      }
+    }
+
+    if (this.warmupCache.size > IPRateLimiter.MAX_WARMUP_CACHE_SIZE) {
+      const entriesToRemove = this.warmupCache.size - IPRateLimiter.MAX_WARMUP_CACHE_SIZE;
+      const entries = Array.from(this.warmupCache.entries())
+        .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      for (let i = 0; i < entriesToRemove; i++) {
+        const entry = entries[i];
+        if (entry) this.warmupCache.delete(entry[0]);
+      }
+    }
+
+    if (expiredMxCount > 0 || expiredWarmupCount > 0) {
+      this.logger.debug('Cache cleanup completed', {
+        expiredMxEntries: expiredMxCount,
+        expiredWarmupEntries: expiredWarmupCount,
+        mxCacheSize: this.mxCache.size,
+        warmupCacheSize: this.warmupCache.size,
+      });
+    }
+  }
+
+  /**
+   * Stop the cache cleanup interval (call on shutdown)
+   */
+  shutdown(): void {
+    if (this.cleanupIntervalId) {
+      clearInterval(this.cleanupIntervalId);
+      this.cleanupIntervalId = null;
+    }
+    this.mxCache.clear();
+    this.warmupCache.clear();
   }
 
   /**

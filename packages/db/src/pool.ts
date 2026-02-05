@@ -143,7 +143,8 @@ class DatabasePool {
         this.logger.error('Invalid statement timeout value', { timeoutMs });
         return;
       }
-      client.query(`SET statement_timeout = ${timeoutMs}`);
+      // SECURITY FIX: Use parameterized query for statement_timeout
+      client.query('SET statement_timeout = $1', [timeoutMs]);
       this.logger.debug('New database connection established');
     });
 

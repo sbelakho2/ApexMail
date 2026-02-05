@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { EventsRepository, type Event } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 
 const eventTypeSchema = z.enum([
   'queued',
@@ -38,7 +39,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   const eventsRepo = new EventsRepository(ctx.db);
 
   // List events
-  router.get('/', async (c) => {
+  router.get('/', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const messageId = c.req.query('messageId');
     const eventType = c.req.query('type');
@@ -96,12 +97,23 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
 
   // Get events for a specific message
   router.get('/message/:messageId', async (c) => {
+    const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
 
-    const result = await eventsRepo.findByMessageId(messageId);
+    // SECURITY: Use tenant-scoped query for cross-tenant isolation
+    const result = await eventsRepo.findByMessageId(messageId, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch events');
+    }
+
+    // If no events found for this tenant, return empty (don't leak that messageId exists)
+    if (result.value.length === 0) {
+      return c.json({
+        messageId,
+        events: [],
+        timeline: [],
+      });
     }
 
     return c.json({
@@ -123,7 +135,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get event by ID
-  router.get('/:id', async (c) => {
+  router.get('/:id', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const eventId = c.req.param('id');
 
@@ -449,9 +461,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
 
   // Get click tracking details by message ID
   router.get('/clicks/:messageId', async (c) => {
+    const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
 
-    const result = await eventsRepo.getLinkStats(messageId);
+    // SECURITY: Use tenant-scoped query to prevent cross-tenant data leak
+    const result = await eventsRepo.getLinkStats(messageId, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch click stats');

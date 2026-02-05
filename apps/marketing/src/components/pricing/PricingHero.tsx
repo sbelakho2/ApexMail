@@ -1,8 +1,6 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { DollarSign } from 'lucide-react';
-import Link from 'next/link';
 
 export function PricingHero() {
  return (

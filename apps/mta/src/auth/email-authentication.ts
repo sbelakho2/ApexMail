@@ -59,16 +59,78 @@ const DEFAULT_CONFIG: EmailAuthConfig = {
 
 /**
  * Email Authentication class for validating SPF, DKIM, and DMARC
+ * SECURITY FIX (MEM-008): Added LRU eviction to prevent unbounded DNS cache growth
  */
 export class EmailAuthenticator {
   private readonly config: EmailAuthConfig;
   private readonly logger: Logger;
   private readonly dnsCache: Map<string, { value: string[]; expires: number }> = new Map();
   private readonly DNS_CACHE_TTL = 300000; // 5 minutes
+  private readonly DNS_CACHE_MAX_SIZE = 10000; // Maximum cache entries
+  private cacheCleanupTimer: NodeJS.Timeout | null = null;
+  
+  /**
+   * RFC 7208 Section 4.6.4: SPF implementations MUST limit DNS lookups to 10
+   * This counter tracks TOTAL lookups across the entire SPF evaluation, not just depth
+   */
+  private spfDnsLookupCount = 0;
+  private readonly SPF_MAX_DNS_LOOKUPS = 10; // RFC 7208 mandated limit
 
   constructor(config: Partial<EmailAuthConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.logger = this.config.logger;
+    
+    // Start periodic cache cleanup to remove expired entries
+    this.cacheCleanupTimer = setInterval(() => this.cleanupExpiredCache(), 60000);
+    if (this.cacheCleanupTimer.unref) {
+      this.cacheCleanupTimer.unref();
+    }
+  }
+
+  /**
+   * Clean up expired cache entries and enforce max size
+   */
+  private cleanupExpiredCache(): void {
+    const now = Date.now();
+    let deletedCount = 0;
+    
+    // Remove expired entries
+    for (const [key, entry] of this.dnsCache) {
+      if (entry.expires < now) {
+        this.dnsCache.delete(key);
+        deletedCount++;
+      }
+    }
+    
+    // If still over max size, remove oldest entries (LRU eviction)
+    if (this.dnsCache.size > this.DNS_CACHE_MAX_SIZE) {
+      const entries = Array.from(this.dnsCache.entries())
+        .sort((a, b) => a[1].expires - b[1].expires);
+      
+      const toRemove = entries.slice(0, this.dnsCache.size - this.DNS_CACHE_MAX_SIZE);
+      for (const [key] of toRemove) {
+        this.dnsCache.delete(key);
+        deletedCount++;
+      }
+    }
+    
+    if (deletedCount > 0) {
+      this.logger.debug('DNS cache cleanup completed', { 
+        deleted: deletedCount, 
+        remaining: this.dnsCache.size 
+      });
+    }
+  }
+
+  /**
+   * Shutdown cleanup
+   */
+  shutdown(): void {
+    if (this.cacheCleanupTimer) {
+      clearInterval(this.cacheCleanupTimer);
+      this.cacheCleanupTimer = null;
+    }
+    this.dnsCache.clear();
   }
 
   /**
@@ -158,6 +220,9 @@ export class EmailAuthenticator {
     domain: string
   ): Promise<SPFResult> {
     try {
+      // Reset DNS lookup counter for this SPF evaluation (RFC 7208 Section 4.6.4)
+      this.spfDnsLookupCount = 0;
+      
       if (!domain) {
         return { result: 'none', domain: '', explanation: 'No domain in MAIL FROM' };
       }
@@ -167,7 +232,8 @@ export class EmailAuthenticator {
         return { result: 'pass', domain, explanation: 'Trusted relay' };
       }
 
-      // Look up SPF record
+      // Look up SPF record (counts as 1 lookup)
+      this.spfDnsLookupCount++;
       const spfRecords = await this.lookupTXT(domain);
       const spfRecord = spfRecords.find(r => r.startsWith('v=spf1 '));
 
@@ -193,16 +259,22 @@ export class EmailAuthenticator {
 
   /**
    * Evaluate SPF record mechanisms
+   * RFC 7208 Section 4.6.4: SPF implementations MUST limit "ichanism" DNS lookups to 10
+   * This includes: a, mx, ptr, include, exists, and redirect
+   * Note: ip4, ip6, and all mechanisms don't require DNS lookups
    */
   private async evaluateSPF(
     record: string,
     clientIP: string,
     domain: string,
-    depth: number
+    _depth: number // Kept for API compatibility but we use total counter now
   ): Promise<Omit<SPFResult, 'domain'>> {
-    // Prevent infinite loops with include/redirect
-    if (depth > 10) {
-      return { result: 'permerror', explanation: 'Too many DNS lookups' };
+    // RFC 7208 Section 4.6.4: Check total DNS lookup limit (prevents infinite loops)
+    if (this.spfDnsLookupCount > this.SPF_MAX_DNS_LOOKUPS) {
+      return { 
+        result: 'permerror', 
+        explanation: `SPF evaluation exceeded RFC 7208 limit of ${this.SPF_MAX_DNS_LOOKUPS} DNS lookups (count: ${this.spfDnsLookupCount})` 
+      };
     }
 
     const mechanisms = record.replace('v=spf1 ', '').trim().split(/\s+/);
@@ -221,7 +293,7 @@ export class EmailAuthenticator {
       }
 
       // Evaluate mechanism
-      const match = await this.matchesMechanism(mech, clientIP, domain, isIPv6, depth);
+      const match = await this.matchesMechanism(mech, clientIP, domain, isIPv6, _depth);
       
       if (match) {
         switch (qualifier) {
@@ -239,6 +311,7 @@ export class EmailAuthenticator {
 
   /**
    * Check if an SPF mechanism matches
+   * RFC 7208 Section 4.6.4: Count DNS lookups for mechanisms that require them
    */
   private async matchesMechanism(
     mech: string,
@@ -247,12 +320,25 @@ export class EmailAuthenticator {
     isIPv6: boolean,
     depth: number
   ): Promise<boolean> {
-    // Handle 'all' mechanism
+    // Check DNS lookup limit before any DNS-requiring mechanism
+    const checkDnsLimit = (): boolean => {
+      if (this.spfDnsLookupCount >= this.SPF_MAX_DNS_LOOKUPS) {
+        this.logger.warn('SPF DNS lookup limit reached', { 
+          count: this.spfDnsLookupCount, 
+          limit: this.SPF_MAX_DNS_LOOKUPS,
+          mechanism: mech 
+        });
+        return false; // Will trigger permerror on next evaluateSPF call
+      }
+      return true;
+    };
+    
+    // Handle 'all' mechanism (no DNS lookup needed)
     if (mech === 'all') {
       return true;
     }
 
-    // Handle IP mechanisms
+    // Handle IP mechanisms (no DNS lookup needed per RFC 7208)
     if (mech.startsWith('ip4:') && !isIPv6) {
       return this.ipMatchesCIDR(clientIP, mech.slice(4));
     }
@@ -260,26 +346,39 @@ export class EmailAuthenticator {
       return this.ipMatchesCIDR(clientIP, mech.slice(4));
     }
 
-    // Handle 'a' mechanism
+    // Handle 'a' mechanism (requires DNS lookup - RFC 7208 Section 5.3)
     if (mech === 'a' || mech.startsWith('a:') || mech.startsWith('a/')) {
+      if (!checkDnsLimit()) return false;
+      this.spfDnsLookupCount++;
       const targetDomain = mech.includes(':') ? mech.split(':')[1]?.split('/')[0] ?? domain : domain;
       const ips = isIPv6 ? await this.lookupAAAA(targetDomain) : await this.lookupA(targetDomain);
       return ips.includes(clientIP);
     }
 
-    // Handle 'mx' mechanism
+    // Handle 'mx' mechanism (requires DNS lookup - RFC 7208 Section 5.4)
+    // Note: RFC 7208 also limits MX record lookups to 10 (implicit in total limit)
     if (mech === 'mx' || mech.startsWith('mx:') || mech.startsWith('mx/')) {
+      if (!checkDnsLimit()) return false;
+      this.spfDnsLookupCount++;
       const targetDomain = mech.includes(':') ? mech.split(':')[1]?.split('/')[0] ?? domain : domain;
       const mxRecords = await this.lookupMX(targetDomain);
-      for (const mx of mxRecords) {
+      
+      // RFC 7208 Section 4.6.4: MX mechanism should also limit A/AAAA lookups
+      // We limit to first 10 MX records to prevent abuse
+      const limitedMxRecords = mxRecords.slice(0, 10);
+      for (const mx of limitedMxRecords) {
+        if (!checkDnsLimit()) return false;
+        this.spfDnsLookupCount++;
         const ips = isIPv6 ? await this.lookupAAAA(mx) : await this.lookupA(mx);
         if (ips.includes(clientIP)) return true;
       }
       return false;
     }
 
-    // Handle 'include' mechanism
+    // Handle 'include' mechanism (requires DNS lookup - RFC 7208 Section 5.2)
     if (mech.startsWith('include:')) {
+      if (!checkDnsLimit()) return false;
+      this.spfDnsLookupCount++;
       const includeDomain = mech.slice(8);
       const records = await this.lookupTXT(includeDomain);
       const spfRecord = records.find(r => r.startsWith('v=spf1 '));
@@ -290,8 +389,10 @@ export class EmailAuthenticator {
       return false;
     }
 
-    // Handle 'redirect' modifier
+    // Handle 'redirect' modifier (requires DNS lookup - RFC 7208 Section 6.1)
     if (mech.startsWith('redirect=')) {
+      if (!checkDnsLimit()) return false;
+      this.spfDnsLookupCount++;
       const redirectDomain = mech.slice(9);
       const records = await this.lookupTXT(redirectDomain);
       const spfRecord = records.find(r => r.startsWith('v=spf1 '));
@@ -299,6 +400,25 @@ export class EmailAuthenticator {
         const result = await this.evaluateSPF(spfRecord, clientIP, redirectDomain, depth + 1);
         return result.result === 'pass';
       }
+      return false;
+    }
+    
+    // Handle 'exists' mechanism (requires DNS lookup - RFC 7208 Section 5.7)
+    if (mech.startsWith('exists:')) {
+      if (!checkDnsLimit()) return false;
+      this.spfDnsLookupCount++;
+      const existsDomain = mech.slice(7);
+      const ips = await this.lookupA(existsDomain);
+      return ips.length > 0;
+    }
+    
+    // Handle 'ptr' mechanism (deprecated but must be supported - RFC 7208 Section 5.5)
+    // Note: PTR is expensive and discouraged, but we must handle it
+    if (mech === 'ptr' || mech.startsWith('ptr:')) {
+      if (!checkDnsLimit()) return false;
+      this.spfDnsLookupCount++;
+      this.logger.warn('SPF ptr mechanism used - this is deprecated per RFC 7208');
+      // PTR lookup is expensive; skip actual implementation but count the lookup
       return false;
     }
 
@@ -350,14 +470,14 @@ export class EmailAuthenticator {
         };
       }
 
-      // Parse public key
+      // Parse and validate public key
       const keyParams = this.parseDKIMKey(dkimRecord);
-      if (!keyParams.p) {
+      if (!keyParams.valid) {
         return {
           result: 'permerror',
           domain,
           selector,
-          explanation: 'Invalid DKIM public key',
+          explanation: keyParams.error ?? 'Invalid DKIM public key',
         };
       }
 
@@ -373,7 +493,7 @@ export class EmailAuthenticator {
       }
 
       // Verify signature
-      const signatureValid = await this.verifyDKIMSignature(rawMessage, params, keyParams.p);
+      const signatureValid = await this.verifyDKIMSignature(rawMessage, params, keyParams.p!);
       
       return {
         result: signatureValid ? 'pass' : 'fail',
@@ -406,16 +526,108 @@ export class EmailAuthenticator {
   }
 
   /**
-   * Parse DKIM DNS record
+   * Parse and validate DKIM DNS record
+   * RFC 6376 Section 3.6.1 - Key Record Format
    */
-  private parseDKIMKey(record: string): Record<string, string> {
-    const params: Record<string, string> = {};
+  private parseDKIMKey(record: string): any {
+    const params: any = { valid: true };
     const parts = record.split(/;\s*/);
     
     for (const part of parts) {
       const [key, ...valueParts] = part.split('=');
       if (key && valueParts.length > 0) {
         params[key.trim()] = valueParts.join('=').trim().replace(/\s+/g, '');
+      }
+    }
+    
+    // Validate required public key (p=)
+    if (!params.p) {
+      params.valid = false;
+      params.error = 'Missing public key (p= tag)';
+      return params;
+    }
+    
+    // Check for revoked key (empty p= tag means key is revoked per RFC 6376)
+    if (params.p === '') {
+      params.valid = false;
+      params.error = 'DKIM key has been revoked (empty p= tag)';
+      return params;
+    }
+    
+    // Validate key type (k= tag, default is rsa)
+    const keyType = params.k ?? 'rsa';
+    const supportedKeyTypes = ['rsa', 'ed25519'];
+    if (!supportedKeyTypes.includes(keyType)) {
+      params.valid = false;
+      params.error = `Unsupported key type: ${keyType}. Supported: ${supportedKeyTypes.join(', ')}`;
+      return params;
+    }
+    
+    // Validate public key format (must be valid base64)
+    const base64Regex = /^[A-Za-z0-9+/]+=*$/;
+    if (!base64Regex.test(params.p)) {
+      params.valid = false;
+      params.error = 'Invalid public key format: not valid base64';
+      return params;
+    }
+    
+    // Validate minimum key length for RSA (RFC 8301 requires >= 1024 bits, recommends >= 2048)
+    if (keyType === 'rsa') {
+      try {
+        const keyBuffer = Buffer.from(params.p, 'base64');
+        // RSA public key in DER format: rough estimate is key size ~= buffer length * 8 / 1.2
+        // More accurate: the modulus is roughly the key size
+        // A 1024-bit key has ~128 bytes, 2048-bit has ~256 bytes in DER
+        const estimatedBits = keyBuffer.length * 8 * 0.85; // Approximate for DER overhead
+        if (estimatedBits < 1024) {
+          this.logger.warn('DKIM key may be too short', { 
+            estimatedBits, 
+            recommendation: 'Use at least 2048-bit RSA keys per RFC 8301'
+          });
+        }
+      } catch {
+        params.valid = false;
+        params.error = 'Failed to decode public key';
+        return params;
+      }
+    }
+    
+    // Validate hash algorithms if specified (h= tag)
+    if (params.h) {
+      const hashAlgos = params.h.split(':');
+      const supportedHashes = ['sha1', 'sha256'];
+      for (const algo of hashAlgos) {
+        if (!supportedHashes.includes(algo)) {
+          params.valid = false;
+          params.error = `Unsupported hash algorithm: ${algo}`;
+          return params;
+        }
+      }
+      // SHA-1 is deprecated per RFC 8301
+      if (hashAlgos.includes('sha1') && !hashAlgos.includes('sha256')) {
+        this.logger.warn('DKIM key only allows SHA-1 which is deprecated per RFC 8301');
+      }
+    }
+    
+    // Validate service type if specified (s= tag)
+    if (params.s && params.s !== '*') {
+      const serviceTypes = params.s.split(':');
+      if (!serviceTypes.includes('email') && !serviceTypes.includes('*')) {
+        params.valid = false;
+        params.error = `DKIM key not valid for email service (s=${params.s})`;
+        return params;
+      }
+    }
+    
+    // Check flags (t= tag) for testing mode
+    if (params.t) {
+      const flags = params.t.split(':');
+      if (flags.includes('y')) {
+        this.logger.info('DKIM key is in testing mode (t=y)');
+      }
+      if (flags.includes('s')) {
+        // Strict mode: domain must match exactly (no subdomains)
+        params._strictMode = 'true';
       }
     }
     
@@ -704,21 +916,139 @@ export class EmailAuthenticator {
   }
 
   /**
+   * Public Suffix List for organizational domain extraction
+   * Source: https://publicsuffix.org/list/
+   * This is a curated subset - in production, consider using the 'psl' npm package
+   * or fetching the full list from https://publicsuffix.org/list/public_suffix_list.dat
+   * 
+   * Format: Map of suffix -> true for exact match, or nested suffixes
+   * LIMITATION: This is not the complete PSL. For full RFC 7489 compliance,
+   * use the 'psl' npm package or implement full PSL fetching.
+   */
+  private static readonly PUBLIC_SUFFIX_LIST: Set<string> = new Set([
+    // Generic TLDs that act as public suffixes
+    'com', 'net', 'org', 'edu', 'gov', 'mil', 'int',
+    'info', 'biz', 'name', 'pro', 'aero', 'coop', 'museum',
+    
+    // Country-code second-level domains (cc-SLDs)
+    // United Kingdom
+    'co.uk', 'org.uk', 'me.uk', 'ac.uk', 'gov.uk', 'ltd.uk', 'plc.uk', 'net.uk', 'sch.uk',
+    // Australia  
+    'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
+    // New Zealand
+    'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz', 'school.nz', 'geek.nz', 'gen.nz',
+    // Japan
+    'co.jp', 'or.jp', 'ne.jp', 'ac.jp', 'ad.jp', 'ed.jp', 'go.jp', 'gr.jp', 'lg.jp',
+    // Brazil
+    'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br', 'mil.br', 'art.br',
+    // China
+    'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'mil.cn', 'ac.cn',
+    // India
+    'co.in', 'net.in', 'org.in', 'gov.in', 'ac.in', 'edu.in', 'res.in', 'gen.in', 'firm.in', 'ind.in',
+    // South Africa
+    'co.za', 'net.za', 'org.za', 'gov.za', 'edu.za', 'ac.za',
+    // Germany (most are single-level but some special)
+    'com.de', 'net.de', 'org.de',
+    // France
+    'com.fr', 'asso.fr', 'nom.fr', 'prd.fr', 'tm.fr',
+    // Spain
+    'com.es', 'nom.es', 'org.es', 'gob.es', 'edu.es',
+    // Italy
+    'com.it', 'org.it', 'edu.it', 'gov.it',
+    // Netherlands
+    'co.nl',
+    // Belgium
+    'ac.be',
+    // Russia
+    'com.ru', 'net.ru', 'org.ru', 'pp.ru',
+    // South Korea
+    'co.kr', 'ne.kr', 'or.kr', 're.kr', 'pe.kr', 'go.kr', 'mil.kr', 'ac.kr', 'hs.kr', 'ms.kr', 'es.kr', 'sc.kr', 'kg.kr',
+    // Taiwan
+    'com.tw', 'net.tw', 'org.tw', 'edu.tw', 'gov.tw', 'idv.tw', 'game.tw', 'ebiz.tw', 'club.tw',
+    // Hong Kong
+    'com.hk', 'edu.hk', 'gov.hk', 'idv.hk', 'net.hk', 'org.hk',
+    // Singapore
+    'com.sg', 'net.sg', 'org.sg', 'gov.sg', 'edu.sg', 'per.sg',
+    // Malaysia
+    'com.my', 'net.my', 'org.my', 'gov.my', 'edu.my', 'mil.my', 'name.my',
+    // Indonesia
+    'co.id', 'ac.id', 'go.id', 'mil.id', 'net.id', 'or.id', 'sch.id', 'web.id',
+    // Thailand
+    'co.th', 'in.th', 'go.th', 'mi.th', 'or.th', 'net.th', 'ac.th',
+    // Vietnam
+    'com.vn', 'net.vn', 'org.vn', 'edu.vn', 'gov.vn', 'int.vn', 'ac.vn', 'biz.vn', 'info.vn', 'name.vn', 'pro.vn', 'health.vn',
+    // Philippines
+    'com.ph', 'net.ph', 'org.ph', 'gov.ph', 'edu.ph', 'ngo.ph', 'mil.ph',
+    // Pakistan
+    'com.pk', 'net.pk', 'edu.pk', 'org.pk', 'fam.pk', 'biz.pk', 'web.pk', 'gov.pk', 'gob.pk', 'gok.pk', 'gon.pk', 'gop.pk', 'gos.pk',
+    // Turkey
+    'com.tr', 'net.tr', 'org.tr', 'biz.tr', 'info.tr', 'tv.tr', 'gen.tr', 'web.tr', 'tel.tr', 'av.tr', 'dr.tr', 'bbs.tr', 'name.tr', 'gov.tr', 'pol.tr', 'mil.tr', 'k12.tr', 'edu.tr',
+    // Israel
+    'co.il', 'org.il', 'net.il', 'ac.il', 'gov.il', 'muni.il', 'idf.il',
+    // United Arab Emirates
+    'co.ae', 'net.ae', 'org.ae', 'sch.ae', 'ac.ae', 'gov.ae', 'mil.ae',
+    // Mexico
+    'com.mx', 'org.mx', 'gob.mx', 'edu.mx', 'net.mx',
+    // Argentina
+    'com.ar', 'edu.ar', 'gob.ar', 'gov.ar', 'int.ar', 'mil.ar', 'net.ar', 'org.ar', 'tur.ar',
+    // Chile
+    'co.cl', 'gob.cl', 'gov.cl', 'mil.cl',
+    // Colombia
+    'com.co', 'edu.co', 'gov.co', 'mil.co', 'net.co', 'nom.co', 'org.co',
+    // Peru
+    'com.pe', 'edu.pe', 'gob.pe', 'mil.pe', 'net.pe', 'nom.pe', 'org.pe',
+    // Venezuela
+    'com.ve', 'net.ve', 'org.ve', 'info.ve', 'co.ve', 'web.ve', 'edu.ve', 'gob.ve', 'gov.ve', 'mil.ve',
+  ]);
+
+  /**
    * Extract organizational domain (e.g., mail.example.com -> example.com)
+   * Uses Public Suffix List for accurate extraction per RFC 7489
+   * 
+   * LIMITATION NOTICE: This implementation uses a static subset of the Public Suffix List.
+   * For complete RFC 7489 compliance in production, consider:
+   * 1. Using the 'psl' npm package (npm install psl @types/psl)
+   * 2. Fetching and caching the full list from https://publicsuffix.org/list/public_suffix_list.dat
+   * 
+   * @see https://publicsuffix.org/
+   * @see RFC 7489 Section 3.2 - Organizational Domain
    */
   private getOrganizationalDomain(domain: string): string {
-    // Simple implementation - in production, use Public Suffix List
-    const parts = domain.toLowerCase().split('.');
-    if (parts.length <= 2) return domain.toLowerCase();
+    const normalizedDomain = domain.toLowerCase().trim();
+    const parts = normalizedDomain.split('.');
     
-    // Handle common multi-part TLDs
-    const commonMultiPartTLDs = ['co.uk', 'com.au', 'co.nz', 'co.jp', 'com.br', 'com.cn'];
-    const lastTwo = parts.slice(-2).join('.');
+    if (parts.length <= 1) return normalizedDomain;
+    if (parts.length === 2) return normalizedDomain;
     
-    if (commonMultiPartTLDs.includes(lastTwo)) {
-      return parts.slice(-3).join('.');
+    // Try to find the longest matching public suffix
+    // Start from the rightmost parts and work left
+    for (let i = 1; i < parts.length; i++) {
+      const potentialSuffix = parts.slice(i).join('.');
+      
+      if (EmailAuthenticator.PUBLIC_SUFFIX_LIST.has(potentialSuffix)) {
+        // Found a public suffix - organizational domain is one level above
+        if (i > 0) {
+          return parts.slice(i - 1).join('.');
+        }
+        // The entire domain is a public suffix (shouldn't happen for valid email domains)
+        return normalizedDomain;
+      }
     }
     
+    // No multi-part suffix found, check if TLD itself is in the list
+    const tld = parts[parts.length - 1]!;
+    if (EmailAuthenticator.PUBLIC_SUFFIX_LIST.has(tld)) {
+      // Standard TLD - organizational domain is last two parts
+      return parts.slice(-2).join('.');
+    }
+    
+    // Unknown TLD - log warning and default to last two parts
+    // This handles new gTLDs and ccTLDs not in our list
+    this.logger.debug('Unknown TLD encountered, using default organizational domain extraction', { 
+      domain: normalizedDomain, 
+      tld,
+      note: 'Consider updating PUBLIC_SUFFIX_LIST or using psl package'
+    });
     return parts.slice(-2).join('.');
   }
 

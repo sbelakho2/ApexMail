@@ -2,6 +2,8 @@
  * SSO (Single Sign-On) Service
  * 
  * Handles SAML and OIDC authentication for enterprise tenants
+ * 
+ * SECURITY: SOC2 compliant session timeout of 30 minutes (1800 seconds)
  */
 
 import { Pool } from 'pg';
@@ -9,6 +11,11 @@ import type { Redis } from 'ioredis';
 // import * as jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { config, SSOProvider } from '../config.js';
+
+// SOC2 COMPLIANCE FIX: Session timeout should be 30 minutes or less
+// Previous value was 24 hours which violated SOC2 requirements
+const SESSION_TIMEOUT_SECONDS = 30 * 60; // 30 minutes
+const SESSION_TIMEOUT_MS = SESSION_TIMEOUT_SECONDS * 1000;
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -467,13 +474,14 @@ export class SSOService {
         attributes: parsedResponse.value.attributes,
         sessionIndex: parsedResponse.value.sessionIndex,
         createdAt: new Date(),
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+        // SOC2 COMPLIANCE: 30-minute session timeout
+        expiresAt: new Date(Date.now() + SESSION_TIMEOUT_MS),
       };
 
       // Store session
       await this.redis.setex(
         `sso:session:${session.id}`,
-        86400,
+        SESSION_TIMEOUT_SECONDS,
         JSON.stringify(session)
       );
 
@@ -626,6 +634,8 @@ export class SSOService {
       if (userResult.ok === false) return { ok: false, error: userResult.error };
 
       // Create session
+      // SOC2 COMPLIANCE: Use shorter of token expiry or 30 minutes
+      const sessionDuration = Math.min(tokenResponse.value.expiresIn, SESSION_TIMEOUT_SECONDS);
       const session: SSOSession = {
         id: uuidv4(),
         userId: userResult.value.userId,
@@ -635,13 +645,13 @@ export class SSOService {
         email,
         attributes: userInfo,
         createdAt: new Date(),
-        expiresAt: new Date(Date.now() + tokenResponse.value.expiresIn * 1000),
+        expiresAt: new Date(Date.now() + sessionDuration * 1000),
       };
 
       // Store session
       await this.redis.setex(
         `sso:session:${session.id}`,
-        tokenResponse.value.expiresIn,
+        sessionDuration,
         JSON.stringify(session)
       );
 

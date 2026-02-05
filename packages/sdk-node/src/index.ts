@@ -257,26 +257,56 @@ export class RateLimitError extends ApexMailError {
 }
 
 // ============================================================================
-// HTTP Client
+// HTTP Client with Retry Logic
 // ============================================================================
+
+interface RetryConfig {
+    maxRetries: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+    retryableStatuses: Set<number>;
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+    maxRetries: 3,
+    initialDelayMs: 1000,
+    maxDelayMs: 30000,
+    // Retry on network errors, rate limits, and server errors
+    retryableStatuses: new Set([408, 429, 500, 502, 503, 504]),
+};
 
 class HttpClient {
     private baseUrl: string;
     private apiKey: string;
     private timeout: number;
     private fetchFn: typeof fetch;
+    private retryConfig: RetryConfig;
 
     constructor(config: ApexMailConfig) {
         this.baseUrl = config.baseUrl || 'https://api.apexmail.ee';
         this.apiKey = config.apiKey;
         this.timeout = config.timeout || 30000;
         this.fetchFn = config.fetch || fetch;
+        this.retryConfig = DEFAULT_RETRY_CONFIG;
     }
 
     async request<T>(
         method: string,
         path: string,
         body?: unknown
+    ): Promise<T> {
+        return this.requestWithRetry<T>(method, path, body, 0);
+    }
+
+    /**
+     * SECURITY FIX: Implement retry logic with exponential backoff
+     * Handles transient network errors and rate limits properly
+     */
+    private async requestWithRetry<T>(
+        method: string,
+        path: string,
+        body: unknown,
+        attempt: number
     ): Promise<T> {
         const url = `${this.baseUrl}${path}`;
         const controller = new AbortController();
@@ -296,6 +326,26 @@ class HttpClient {
 
             clearTimeout(timeoutId);
 
+            // Handle rate limiting with Retry-After header
+            if (response.status === 429) {
+                const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
+                
+                if (attempt < this.retryConfig.maxRetries) {
+                    const delay = Math.min(retryAfter * 1000, this.retryConfig.maxDelayMs);
+                    await this.sleep(delay);
+                    return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                }
+                
+                throw new RateLimitError(retryAfter);
+            }
+
+            // Retry on server errors
+            if (this.retryConfig.retryableStatuses.has(response.status) && attempt < this.retryConfig.maxRetries) {
+                const delay = this.calculateBackoff(attempt);
+                await this.sleep(delay);
+                return this.requestWithRetry<T>(method, path, body, attempt + 1);
+            }
+
             const data = await response.json().catch(() => ({})) as Record<string, unknown>;
 
             if (!response.ok) {
@@ -310,8 +360,28 @@ class HttpClient {
                 throw error;
             }
             
+            // Retry on timeout
             if (error instanceof Error && error.name === 'AbortError') {
+                if (attempt < this.retryConfig.maxRetries) {
+                    const delay = this.calculateBackoff(attempt);
+                    await this.sleep(delay);
+                    return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                }
                 throw new ApexMailError('Request timeout', 408, 'TIMEOUT_ERROR');
+            }
+
+            // Retry on network errors
+            if (error instanceof Error && (
+                error.message.includes('ECONNREFUSED') ||
+                error.message.includes('ECONNRESET') ||
+                error.message.includes('ETIMEDOUT') ||
+                error.message.includes('network')
+            )) {
+                if (attempt < this.retryConfig.maxRetries) {
+                    const delay = this.calculateBackoff(attempt);
+                    await this.sleep(delay);
+                    return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                }
             }
 
             throw new ApexMailError(
@@ -320,6 +390,19 @@ class HttpClient {
                 'NETWORK_ERROR'
             );
         }
+    }
+
+    /**
+     * Calculate exponential backoff with jitter
+     */
+    private calculateBackoff(attempt: number): number {
+        const baseDelay = this.retryConfig.initialDelayMs * Math.pow(2, attempt);
+        const jitter = Math.random() * 0.3 * baseDelay; // Add up to 30% jitter
+        return Math.min(baseDelay + jitter, this.retryConfig.maxDelayMs);
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     private handleError(response: Response, data: Record<string, unknown>): never {
@@ -331,6 +414,12 @@ class HttpClient {
                 throw new ValidationError(message, data.details as Record<string, unknown>);
             case 401:
                 throw new AuthenticationError(message);
+            case 403:
+                throw new ApexMailError(message, 403, 'FORBIDDEN', data.details as Record<string, unknown>);
+            case 404:
+                throw new ApexMailError(message, 404, 'NOT_FOUND', data.details as Record<string, unknown>);
+            case 409:
+                throw new ApexMailError(message, 409, 'CONFLICT', data.details as Record<string, unknown>);
             case 429:
                 const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
                 throw new RateLimitError(retryAfter);
@@ -655,8 +744,13 @@ export class ApexMail {
             throw new ValidationError('API key is required');
         }
 
-        if (!config.apiKey.startsWith('am_')) {
-            throw new ValidationError('Invalid API key format. Keys should start with "am_live_" or "am_test_"');
+        // SECURITY FIX: Stronger API key validation
+        // Valid formats: am_live_<32 chars> or am_test_<32 chars>
+        const apiKeyPattern = /^am_(live|test)_[a-zA-Z0-9]{32,}$/;
+        if (!apiKeyPattern.test(config.apiKey)) {
+            throw new ValidationError(
+                'Invalid API key format. Keys should match "am_live_<key>" or "am_test_<key>" where <key> is at least 32 alphanumeric characters'
+            );
         }
 
         const client = new HttpClient(config);

@@ -9,6 +9,11 @@
         "dev": "tsx watch src/index.ts",
         "build": "tsc",
         "start": "node dist/index.js",
+        "train": "tsx src/training/index.ts",
+        "train:demo": "tsx src/training/index.ts --demo",
+        "train:email": "tsx src/training/index.ts --email-only",
+        "train:subject": "tsx src/training/index.ts --subject-only",
+        "train:lead": "tsx src/training/index.ts --lead-only",
         "lint": "eslint src --ext .ts",
         "test": "vitest run --passWithNoTests",
         "test:watch": "vitest"

@@ -305,6 +305,31 @@ export class GDPRAutomation {
         );
         deletedRecords += enrollmentsResult.rowCount || 0;
 
+        // GDPR-001 FIX: Delete from backup tables
+        const backupsResult = await this.db.query(
+            `DELETE FROM subscriber_backups WHERE tenant_id = $1 AND email = $2`,
+            [request.tenantId, request.email]
+        );
+        deletedRecords += backupsResult.rowCount || 0;
+
+        // GDPR-001 FIX: Delete from audit/activity logs containing PII
+        const logsResult = await this.db.query(
+            `DELETE FROM activity_logs WHERE tenant_id = $1 AND 
+            (metadata->>'email' = $2 OR metadata->>'subscriber_email' = $2)`,
+            [request.tenantId, request.email]
+        );
+        deletedRecords += logsResult.rowCount || 0;
+
+        // GDPR-001 FIX: Clear from cache (Redis)
+        const cacheKeys = [
+            `subscriber:${request.tenantId}:${request.email}`,
+            `preferences:${request.tenantId}:${request.email}`,
+            `consent:${request.tenantId}:${request.email}`,
+        ];
+        for (const key of cacheKeys) {
+            await this.redis.del(key);
+        }
+
         // Log the deletion
         await this.logDeletion(request.tenantId, request.email, deletedRecords);
 
@@ -705,15 +730,19 @@ export class GDPRAutomation {
      */
     private async storeExport(requestId: string, data: string): Promise<string> {
         const filename = `exports/gdpr/${requestId}.json`;
+        // GDPR-002 FIX: Generate a secure access token and hash it before storage
+        const accessToken = randomToken(32);
+        const hashedToken = this.hashToken(accessToken);
 
         // In production, upload to S3/GCS
         await this.db.query(
-            `INSERT INTO gdpr_exports (request_id, filename, data, created_at)
-            VALUES ($1, $2, $3, NOW())`,
-            [requestId, filename, data]
+            `INSERT INTO gdpr_exports (request_id, filename, data, access_token_hash, created_at)
+            VALUES ($1, $2, $3, $4, NOW())`,
+            [requestId, filename, data, hashedToken]
         );
 
-        return `${this.config.exportBaseUrl}/${filename}`;
+        // Return URL with unhashed token for one-time use
+        return `${this.config.exportBaseUrl}/${filename}?token=${accessToken}`;
     }
 
     /**

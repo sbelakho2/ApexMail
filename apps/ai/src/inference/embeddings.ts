@@ -51,19 +51,29 @@ const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
 };
 
 /**
+ * AI-004 FIX: Maximum vector store size for LRU eviction
+ */
+const DEFAULT_MAX_VECTOR_STORE_SIZE = 10000;
+
+/**
  * Embeddings Service
  * 
  * Provides text embedding generation and vector similarity operations.
  * Includes an in-memory vector store for simple semantic search.
+ * AI-004 FIX: Now includes LRU eviction when max size is exceeded.
  */
 export class EmbeddingsService {
     private engine: InferenceEngine;
     private config: EmbeddingConfig;
     private vectorStore: Map<string, VectorEntry> = new Map();
+    private accessOrder: Map<string, number> = new Map(); // AI-004: Track access order for LRU
+    private accessCounter: number = 0; // AI-004: Monotonic counter for LRU ordering
+    private maxVectorStoreSize: number;
     private initialized: boolean = false;
 
-    constructor(config?: Partial<EmbeddingConfig>) {
+    constructor(config?: Partial<EmbeddingConfig>, maxStoreSize?: number) {
         this.config = { ...DEFAULT_EMBEDDING_CONFIG, ...config };
+        this.maxVectorStoreSize = maxStoreSize ?? DEFAULT_MAX_VECTOR_STORE_SIZE;
         this.engine = new InferenceEngine({
             modelPath: this.config.modelPath,
             modelName: this.config.modelName,
@@ -125,6 +135,7 @@ export class EmbeddingsService {
 
     /**
      * Add vector to store
+     * AI-004 FIX: Includes LRU eviction when store exceeds max size
      */
     async addVector(
         id: string,
@@ -132,16 +143,26 @@ export class EmbeddingsService {
         metadata: Record<string, unknown> = {}
     ): Promise<void> {
         const result = await this.embed(text);
+        
+        // AI-004 FIX: Evict LRU entries if at capacity (before adding new entry)
+        if (!this.vectorStore.has(id) && this.vectorStore.size >= this.maxVectorStoreSize) {
+            this.evictLRU();
+        }
+        
         this.vectorStore.set(id, {
             id,
             vector: result.embedding,
             metadata,
             text,
         });
+        
+        // AI-004: Update access order
+        this.accessOrder.set(id, ++this.accessCounter);
     }
 
     /**
      * Add multiple vectors to store
+     * AI-004 FIX: Includes LRU eviction when store exceeds max size
      */
     async addVectors(
         entries: Array<{ id: string; text: string; metadata?: Record<string, unknown> }>
@@ -150,19 +171,29 @@ export class EmbeddingsService {
         const embeddings = await this.embedBatch(texts);
 
         for (let i = 0; i < entries.length; i++) {
+            // AI-004 FIX: Evict LRU entries if at capacity
+            if (!this.vectorStore.has(entries[i].id) && this.vectorStore.size >= this.maxVectorStoreSize) {
+                this.evictLRU();
+            }
+            
             this.vectorStore.set(entries[i].id, {
                 id: entries[i].id,
                 vector: embeddings[i].embedding,
                 metadata: entries[i].metadata || {},
                 text: entries[i].text,
             });
+            
+            // AI-004: Update access order
+            this.accessOrder.set(entries[i].id, ++this.accessCounter);
         }
     }
 
     /**
      * Remove vector from store
+     * AI-004 FIX: Also removes from access order tracking
      */
     removeVector(id: string): boolean {
+        this.accessOrder.delete(id);
         return this.vectorStore.delete(id);
     }
 
@@ -227,9 +258,37 @@ export class EmbeddingsService {
 
     /**
      * Get vector by ID
+     * AI-004 FIX: Updates access order for LRU tracking
      */
     getVector(id: string): VectorEntry | undefined {
-        return this.vectorStore.get(id);
+        const entry = this.vectorStore.get(id);
+        if (entry) {
+            // AI-004: Update access order on read
+            this.accessOrder.set(id, ++this.accessCounter);
+        }
+        return entry;
+    }
+
+    /**
+     * AI-004 FIX: Evict least recently used entry from vector store
+     */
+    private evictLRU(): void {
+        if (this.vectorStore.size === 0) return;
+        
+        let lruId: string | null = null;
+        let lruOrder = Infinity;
+        
+        for (const [id, order] of this.accessOrder) {
+            if (order < lruOrder && this.vectorStore.has(id)) {
+                lruOrder = order;
+                lruId = id;
+            }
+        }
+        
+        if (lruId) {
+            this.vectorStore.delete(lruId);
+            this.accessOrder.delete(lruId);
+        }
     }
 
     /**
@@ -255,9 +314,12 @@ export class EmbeddingsService {
 
     /**
      * Clear all vectors
+     * AI-004 FIX: Also clears access order tracking
      */
     clearVectors(): void {
         this.vectorStore.clear();
+        this.accessOrder.clear();
+        this.accessCounter = 0;
     }
 
     /**

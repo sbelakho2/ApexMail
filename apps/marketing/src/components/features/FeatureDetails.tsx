@@ -5,7 +5,6 @@ import { useInView } from 'react-intersection-observer';
 import { Check, ArrowRight } from 'lucide-react';
 import Link from 'next/link';
 import { CodeBlock } from '@/components/ui/CodeBlock';
-import { cn } from '@/lib/utils';
 
 const detailedFeatures = [
   {

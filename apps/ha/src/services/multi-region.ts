@@ -29,6 +29,14 @@ export enum RegionRole {
   OBSERVER = 'observer',
 }
 
+// HA-003 FIX: Fencing status for STONITH mechanism
+export enum FencingStatus {
+  ACTIVE = 'active',       // Region is operating normally
+  FENCED = 'fenced',       // Region has been fenced (STONITH applied)
+  FENCING = 'fencing',     // Fencing operation in progress
+  RECOVERY = 'recovery',   // Recovering from fenced state
+}
+
 export enum RoutingMode {
   ACTIVE_ACTIVE = 'active-active',
   ACTIVE_PASSIVE = 'active-passive',
@@ -44,6 +52,7 @@ export interface RegionInfo {
   endpoint: string;
   status: RegionStatus;
   role: RegionRole;
+  fencingStatus: FencingStatus;  // HA-003 FIX: Track fencing state
   weight: number;
   latencyMs: number;
   lastCheck: Date;
@@ -87,6 +96,9 @@ export class MultiRegionService {
   private routingMode: RoutingMode;
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private syncInterval: NodeJS.Timeout | null = null;
+  
+  // HA-003 FIX: Fencing operation lock for STONITH mechanism
+  private fencingInProgress: Map<string, boolean> = new Map();
 
   constructor(db: Pool, redis: Redis) {
     this.db = db;
@@ -108,6 +120,7 @@ export class MultiRegionService {
         endpoint: `https://${regionId}.apexmail.ee`,
         status: RegionStatus.HEALTHY,
         role: isPrimary ? RegionRole.PRIMARY : RegionRole.SECONDARY,
+        fencingStatus: FencingStatus.ACTIVE,  // HA-003 FIX: Initialize fencing status
         weight: isPrimary ? 2 : 1,
         latencyMs: 0,
         lastCheck: new Date(),
@@ -300,6 +313,8 @@ export class MultiRegionService {
   /**
    * Failover to another region
    * CRITICAL: Verifies replication lag before failover to prevent data loss
+   * HA-003 FIX: Implements STONITH (Shoot The Other Node In The Head) fencing
+   * to prevent split-brain scenarios
    */
   async failoverToRegion(targetRegionId: string): Promise<Result<void>> {
     const targetRegion = this.regions.get(targetRegionId);
@@ -332,7 +347,22 @@ export class MultiRegionService {
     console.log(`[MultiRegion] Target region replication lag: ${targetRegion.replicationLagMs}ms`);
 
     try {
-      // Mark current primary as degraded
+      // HA-003 FIX: STONITH - Fence the old primary BEFORE promoting the new one
+      // This ensures only one primary can accept writes at any time
+      const fenceResult = await this.fenceRegion(currentPrimary.id, 'Failover to new primary initiated');
+      if (!fenceResult.ok) {
+        return {
+          ok: false,
+          error: new Error(
+            `STONITH FAILED: Could not fence old primary ${currentPrimary.id}. ` +
+            `Aborting failover to prevent split-brain. Error: ${fenceResult.error?.message}`
+          )
+        };
+      }
+      
+      console.log(`[MultiRegion] STONITH: Successfully fenced old primary ${currentPrimary.id}`);
+
+      // Mark current primary as degraded (already fenced)
       await this.setRegionStatus(currentPrimary.id, RegionStatus.DEGRADED);
 
       // Promote target to primary
@@ -345,19 +375,181 @@ export class MultiRegionService {
       // Update DNS/routing (in production, would call DNS API)
       await this.updateGlobalRouting(targetRegionId);
 
-      // Record failover event with replication lag data
+      // Record failover event with replication lag and fencing data
       await this.db.query(`
         INSERT INTO ha_region_failovers (
           source_region, target_region, reason, initiated_at, completed_at, metadata
         ) VALUES ($1, $2, 'manual_failover', NOW(), NOW(), $3)
-      `, [currentPrimary.id, targetRegionId, JSON.stringify({ replicationLagMs: targetRegion.replicationLagMs })]);
+      `, [currentPrimary.id, targetRegionId, JSON.stringify({ 
+        replicationLagMs: targetRegion.replicationLagMs,
+        stonithApplied: true,
+        fencedRegion: currentPrimary.id
+      })]);
 
       console.log(`[MultiRegion] Failover completed to ${targetRegionId}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
+      // HA-003 FIX: On failure, attempt to unfence the old primary to restore service
+      console.error(`[MultiRegion] Failover failed, attempting to restore old primary...`);
+      await this.unfenceRegion(currentPrimary.id, 'Failover failed - restoring previous primary');
       return { ok: false, error: error as Error };
     }
+  }
+
+  /**
+   * HA-003 FIX: STONITH - Fence a region to prevent it from accepting writes
+   * This is critical for preventing split-brain during failover
+   */
+  async fenceRegion(regionId: string, reason: string): Promise<Result<void>> {
+    const region = this.regions.get(regionId);
+    if (!region) {
+      return { ok: false, error: new Error(`Region not found: ${regionId}`) };
+    }
+
+    // Prevent concurrent fencing operations
+    if (this.fencingInProgress.get(regionId)) {
+      return { ok: false, error: new Error(`Fencing already in progress for ${regionId}`) };
+    }
+
+    this.fencingInProgress.set(regionId, true);
+    region.fencingStatus = FencingStatus.FENCING;
+
+    try {
+      // Step 1: Acquire distributed fencing lock
+      const lockKey = `ha:stonith:lock:${regionId}`;
+      const lockValue = `${this.currentRegion}:${Date.now()}`;
+      const lockAcquired = await this.redis.set(lockKey, lockValue, 'EX', 60, 'NX');
+      
+      if (!lockAcquired) {
+        return { ok: false, error: new Error(`Could not acquire fencing lock for ${regionId}`) };
+      }
+
+      try {
+        // Step 2: Signal the target region to stop accepting writes
+        // In production, this would use multiple methods:
+        // - API call to set region to read-only
+        // - Database promotion block
+        // - Load balancer drain
+        // - Network isolation (if hardware STONITH available)
+        
+        const fenceEndpoint = `${region.endpoint}/internal/fence`;
+        const fenceResponse = await fetch(fenceEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'fence',
+            reason,
+            initiator: this.currentRegion,
+            timestamp: new Date().toISOString(),
+          }),
+          signal: AbortSignal.timeout(10000),
+        }).catch(() => null);
+
+        // Even if the API call fails (region might be down), we proceed
+        // The key is to ensure the region is marked as fenced in our state
+        if (fenceResponse && !fenceResponse.ok) {
+          console.warn(`[STONITH] API fence call to ${regionId} returned non-OK, but proceeding with state fence`);
+        }
+
+        // Step 3: Block the region at the routing level
+        await this.redis.sadd('ha:fenced-regions', regionId);
+        
+        // Step 4: Publish fencing event for all services to honor
+        await this.redis.publish('ha:stonith', JSON.stringify({
+          action: 'fence',
+          regionId,
+          reason,
+          initiator: this.currentRegion,
+          timestamp: new Date().toISOString(),
+        }));
+
+        // Step 5: Update region state
+        region.fencingStatus = FencingStatus.FENCED;
+
+        // Step 6: Record fencing event
+        await this.db.query(`
+          INSERT INTO ha_fencing_events (region_id, action, reason, initiator, created_at)
+          VALUES ($1, 'fence', $2, $3, NOW())
+        `, [regionId, reason, this.currentRegion]);
+
+        console.log(`[STONITH] Successfully fenced region ${regionId}: ${reason}`);
+        return { ok: true, value: undefined };
+
+      } finally {
+        // Release fencing lock
+        await this.redis.del(lockKey);
+      }
+
+    } catch (error) {
+      region.fencingStatus = FencingStatus.ACTIVE; // Revert on failure
+      return { ok: false, error: error as Error };
+    } finally {
+      this.fencingInProgress.set(regionId, false);
+    }
+  }
+
+  /**
+   * HA-003 FIX: Unfence a region to allow it to accept writes again
+   */
+  async unfenceRegion(regionId: string, reason: string): Promise<Result<void>> {
+    const region = this.regions.get(regionId);
+    if (!region) {
+      return { ok: false, error: new Error(`Region not found: ${regionId}`) };
+    }
+
+    region.fencingStatus = FencingStatus.RECOVERY;
+
+    try {
+      // Step 1: Remove from fenced regions set
+      await this.redis.srem('ha:fenced-regions', regionId);
+
+      // Step 2: Signal the region to resume accepting writes
+      const unfenceEndpoint = `${region.endpoint}/internal/fence`;
+      await fetch(unfenceEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'unfence',
+          reason,
+          initiator: this.currentRegion,
+          timestamp: new Date().toISOString(),
+        }),
+        signal: AbortSignal.timeout(10000),
+      }).catch(() => null);
+
+      // Step 3: Publish unfencing event
+      await this.redis.publish('ha:stonith', JSON.stringify({
+        action: 'unfence',
+        regionId,
+        reason,
+        initiator: this.currentRegion,
+        timestamp: new Date().toISOString(),
+      }));
+
+      // Step 4: Update region state
+      region.fencingStatus = FencingStatus.ACTIVE;
+
+      // Step 5: Record unfencing event
+      await this.db.query(`
+        INSERT INTO ha_fencing_events (region_id, action, reason, initiator, created_at)
+        VALUES ($1, 'unfence', $2, $3, NOW())
+      `, [regionId, reason, this.currentRegion]);
+
+      console.log(`[STONITH] Successfully unfenced region ${regionId}: ${reason}`);
+      return { ok: true, value: undefined };
+
+    } catch (error) {
+      return { ok: false, error: error as Error };
+    }
+  }
+
+  /**
+   * HA-003 FIX: Check if a region is currently fenced
+   */
+  async isRegionFenced(regionId: string): Promise<boolean> {
+    const isFenced = await this.redis.sismember('ha:fenced-regions', regionId);
+    return isFenced === 1;
   }
 
   /**

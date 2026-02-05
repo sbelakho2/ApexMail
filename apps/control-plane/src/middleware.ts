@@ -35,14 +35,41 @@ const CONTROL_PLANE_API_KEY_HEADER = 'x-control-plane-key';
 
 /**
  * Validates the control plane session token
+ * SECURITY: Uses HMAC-SHA256 signature verification to prevent token tampering
  */
 async function validateSession(sessionToken: string): Promise<boolean> {
-    // In production, this would validate against a session store
-    // For now, we check if it's a valid format and not expired
     try {
         const [payload, signature] = sessionToken.split('.');
         if (!payload || !signature) return false;
         
+        // SECURITY FIX: Verify signature cryptographically
+        const secret = process.env.CONTROL_PLANE_JWT_SECRET;
+        if (!secret) {
+            console.error('[SECURITY CRITICAL] CONTROL_PLANE_JWT_SECRET not configured');
+            return false; // Fail-secure: no secret = no valid sessions
+        }
+        
+        // Compute expected signature using HMAC-SHA256
+        const crypto = await import('crypto');
+        const expectedSignature = crypto
+            .createHmac('sha256', secret)
+            .update(payload)
+            .digest('base64url');
+        
+        // Constant-time comparison to prevent timing attacks
+        const signatureBuffer = Buffer.from(signature);
+        const expectedBuffer = Buffer.from(expectedSignature);
+        
+        if (signatureBuffer.length !== expectedBuffer.length) {
+            return false;
+        }
+        
+        if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
+            console.warn('[SECURITY] Invalid session signature detected');
+            return false;
+        }
+        
+        // Signature verified, now decode and validate payload
         const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
         
         // Check expiration
@@ -55,9 +82,15 @@ async function validateSession(sessionToken: string): Promise<boolean> {
             return false;
         }
         
-        // In production: verify signature with CONTROL_PLANE_JWT_SECRET
+        // Check issued-at time (reject tokens issued too long ago even if not expired)
+        const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+        if (decoded.iat && Date.now() - decoded.iat > maxAge) {
+            return false;
+        }
+        
         return true;
-    } catch {
+    } catch (error) {
+        console.error('[SECURITY] Session validation error:', error);
         return false;
     }
 }

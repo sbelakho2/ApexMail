@@ -104,6 +104,8 @@ export class EmailProcessor {
   private readonly dkimKeys = new Map<string, { privateKey: string; publicKey: string }>();
   private readonly rateLimiter: TokenBucketRateLimiter;
   private readonly warmupCounters = new Map<string, number>();
+  // MEM-002 FIX: Store reference to warmup reset timer for cleanup
+  private warmupResetTimer: NodeJS.Timeout | null = null;
 
   constructor(options: EmailProcessorConfig) {
     this.db = options.db;
@@ -201,6 +203,12 @@ export class EmailProcessor {
     this.logger.info('Stopping email processor');
     this.isRunning = false;
 
+    // MEM-002 FIX: Clear warmup reset timer
+    if (this.warmupResetTimer) {
+      clearTimeout(this.warmupResetTimer);
+      this.warmupResetTimer = null;
+    }
+
     // Wait for active jobs to complete
     const maxWait = 30000;
     const startTime = Date.now();
@@ -216,6 +224,11 @@ export class EmailProcessor {
     // Close SMTP connection
     if (this.transporter) {
       this.transporter.close();
+    }
+
+    // Clean up IP rate limiter if initialized
+    if (this.ipRateLimiter) {
+      this.ipRateLimiter.shutdown();
     }
 
     this.logger.info('Email processor stopped');
@@ -834,7 +847,16 @@ export class EmailProcessor {
     this.warmupCounters.set(domainId, current + 1);
   }
 
+  /**
+   * MEM-002 FIX: Store timer reference and clear on shutdown
+   */
   private scheduleWarmupReset(): void {
+    // Clear any existing timer
+    if (this.warmupResetTimer) {
+      clearTimeout(this.warmupResetTimer);
+      this.warmupResetTimer = null;
+    }
+    
     // Reset counters at midnight UTC
     const now = new Date();
     const tomorrow = new Date(now);
@@ -843,11 +865,14 @@ export class EmailProcessor {
     
     const msUntilMidnight = tomorrow.getTime() - now.getTime();
 
-    setTimeout(() => {
+    this.warmupResetTimer = setTimeout(() => {
       this.warmupCounters.clear();
       this.logger.info('Warmup counters reset');
       this.scheduleWarmupReset(); // Schedule next reset
     }, msUntilMidnight);
+    
+    // Allow process to exit if this is the only timer
+    this.warmupResetTimer.unref();
   }
 }
 

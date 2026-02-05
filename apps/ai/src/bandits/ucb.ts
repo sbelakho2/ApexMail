@@ -330,13 +330,32 @@ export class UCBBandit<T = unknown> {
     // PRIVATE METHODS
     // ========================================
 
+    /**
+     * Calculate UCB score for an arm
+     * SECURITY FIX: Handle edge cases that could cause Infinity or NaN
+     */
     private calculateUCB(arm: UCBArm<T>): number {
+        // Arms with no pulls get highest priority (exploration)
         if (arm.pulls === 0) return Infinity;
 
         const mean = arm.totalReward / arm.pulls;
+        
+        // SECURITY FIX: Handle edge case where totalPulls is 0 or 1
+        // Math.log(0) = -Infinity, Math.log(1) = 0
+        // Use max(1, totalPulls) to ensure log is non-negative
+        const safeTotalPulls = Math.max(2, this.totalPulls); // At least 2 to make log > 0
+        const logValue = Math.log(safeTotalPulls);
+        
+        // SECURITY FIX: Prevent division by zero and ensure exploration bonus is finite
         const explorationBonus = Math.sqrt(
-            (this.config.explorationParam * Math.log(this.totalPulls)) / arm.pulls
+            Math.max(0, (this.config.explorationParam * logValue) / arm.pulls)
         );
+
+        // Validate the exploration bonus
+        if (!Number.isFinite(explorationBonus)) {
+            // Return just the mean if exploration bonus is invalid
+            return mean;
+        }
 
         // Apply time decay if configured
         let timeWeight = 1;
@@ -346,7 +365,10 @@ export class UCBBandit<T = unknown> {
             timeWeight = Math.pow(this.config.timeDecay, days);
         }
 
-        return (mean * timeWeight) + explorationBonus;
+        const result = (mean * timeWeight) + explorationBonus;
+        
+        // SECURITY FIX: Ensure result is a valid number
+        return Number.isFinite(result) ? result : mean;
     }
 }
 

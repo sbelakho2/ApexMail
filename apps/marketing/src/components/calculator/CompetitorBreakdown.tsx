@@ -2,8 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { CheckCircle, XCircle, AlertCircle } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { CheckCircle, AlertCircle } from 'lucide-react';
 
 interface FeatureComparison {
   feature: string;

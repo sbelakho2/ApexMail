@@ -596,36 +596,66 @@ export function deriveKeySync(
 
 /**
  * Encrypt text using AES-256-CBC with scrypt-derived key
- * Format: iv:ciphertext (both hex-encoded)
+ * Format: salt:iv:ciphertext (all hex-encoded)
+ * 
+ * SECURITY: Now generates a random salt for each encryption operation
+ * to ensure unique keys even with the same password
  */
 export function encryptAES256CBC(
   plaintext: string,
   encryptionKey: string,
-  salt: string = 'salt'
+  providedSalt?: string | Buffer
 ): string {
+  // SECURITY: Generate a random 16-byte salt if not provided
+  const salt = providedSalt 
+    ? (typeof providedSalt === 'string' ? Buffer.from(providedSalt, 'hex') : providedSalt)
+    : randomBytes(16);
+  
   const key = deriveKeySync(encryptionKey, salt, AES_256_CBC_KEY_LENGTH);
   const iv = randomBytes(AES_256_CBC_IV_LENGTH);
   const cipher = createCipheriv('aes-256-cbc', key, iv);
   let encrypted = cipher.update(plaintext, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  return iv.toString('hex') + ':' + encrypted;
+  
+  // Format: salt:iv:ciphertext (all hex)
+  const saltHex = typeof providedSalt === 'string' ? providedSalt : salt.toString('hex');
+  return saltHex + ':' + iv.toString('hex') + ':' + encrypted;
 }
 
 /**
  * Decrypt text using AES-256-CBC with scrypt-derived key
- * Expects format: iv:ciphertext (both hex-encoded)
+ * Expects format: salt:iv:ciphertext (all hex-encoded)
+ * Also supports legacy format: iv:ciphertext with explicit salt parameter
+ * 
+ * SECURITY: Salt is now embedded in the ciphertext for proper key derivation
  */
 export function decryptAES256CBC(
   ciphertext: string,
   encryptionKey: string,
-  salt: string = 'salt'
+  legacySalt?: string
 ): Result<string, Error> {
   try {
     const parts = ciphertext.split(':');
-    const ivHex = parts[0] || '';
-    const encrypted = parts[1] || '';
     
-    if (!ivHex || !encrypted) {
+    let salt: Buffer;
+    let ivHex: string;
+    let encrypted: string;
+    
+    if (parts.length === 3) {
+      // New format: salt:iv:ciphertext
+      salt = Buffer.from(parts[0] || '', 'hex');
+      ivHex = parts[1] || '';
+      encrypted = parts[2] || '';
+    } else if (parts.length === 2 && legacySalt) {
+      // Legacy format: iv:ciphertext with separate salt
+      salt = Buffer.from(legacySalt, legacySalt.length === 32 ? 'hex' : 'utf8');
+      ivHex = parts[0] || '';
+      encrypted = parts[1] || '';
+    } else {
+      return Result.err(new Error('Invalid ciphertext format - expected salt:iv:ciphertext'));
+    }
+    
+    if (!ivHex || !encrypted || salt.length === 0) {
       return Result.err(new Error('Invalid ciphertext format'));
     }
     

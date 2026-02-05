@@ -97,8 +97,16 @@ export class BounceServer {
     _session: SMTPServerSession,
     callback: (err?: Error) => void
   ): void {
-    // Bounces typically come from empty MAIL FROM (<>)
-    this.logger.debug('Bounce MAIL FROM', { from: address.address || '<>' });
+    // SECURITY FIX: RFC 5321 requires DSN/bounce notifications to come from the null sender (<>)
+    // Accepting bounces from non-null senders allows spoofed bounces (backscatter attacks)
+    const sender = address.address?.toLowerCase()?.trim() || '';
+    
+    if (sender !== '' && sender !== '<>') {
+      this.logger.warn('Bounce server rejecting non-null sender', { from: address.address });
+      return callback(new Error('550 Bounces must be sent from the null sender (<>)'));
+    }
+    
+    this.logger.debug('Bounce MAIL FROM', { from: '<>' });
     callback();
   }
 

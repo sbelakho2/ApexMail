@@ -6,14 +6,86 @@
  * - S3-compatible storage (MinIO)
  * - Streaming uploads/downloads
  * - Automatic compression
+ * 
+ * SECURITY: Path traversal protection implemented
  */
 
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
 import { createGzip, createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve, normalize } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { Result } from '../result.js';
+
+/**
+ * SECURITY: Comprehensive path sanitization to prevent directory traversal attacks
+ * 
+ * Handles:
+ * - Literal `..` sequences
+ * - URL-encoded sequences (%2e%2e, %252e%252e double encoding)
+ * - Backslash variations (Windows)
+ * - Null bytes
+ * - Unicode normalization attacks
+ * - Absolute path injection
+ */
+function sanitizePath(key: string, basePath: string): string {
+  if (!key || typeof key !== 'string') {
+    throw new Error('Invalid storage key');
+  }
+
+  // Step 1: Remove null bytes (can bypass string checks)
+  let sanitized = key.replace(/\0/g, '');
+  
+  // Step 2: URL decode multiple times to catch double/triple encoding
+  // %2e = '.', %2f = '/', %5c = '\\'
+  for (let i = 0; i < 3; i++) {
+    try {
+      const decoded = decodeURIComponent(sanitized);
+      if (decoded === sanitized) break;
+      sanitized = decoded;
+    } catch {
+      // Invalid encoding, continue with current value
+      break;
+    }
+  }
+  
+  // Step 3: Normalize unicode (some chars can normalize to '.')
+  sanitized = sanitized.normalize('NFKC');
+  
+  // Step 4: Replace backslashes with forward slashes (Windows compatibility)
+  sanitized = sanitized.replace(/\\/g, '/');
+  
+  // Step 5: Remove all variations of parent directory references
+  // Matches: .., ../, /.., /../, and variations with spaces/special chars
+  sanitized = sanitized
+    .replace(/\.{2,}/g, '')      // Multiple dots
+    .replace(/\/+/g, '/')         // Multiple slashes
+    .replace(/^\/+/, '')          // Leading slashes
+    .replace(/\/$/,'');           // Trailing slash
+  
+  // Step 6: Split and filter path components
+  const parts = sanitized.split('/').filter(part => {
+    // Remove empty parts, dots, and hidden files starting with .
+    if (!part || part === '.' || part === '..') return false;
+    // Disallow parts that are only dots and/or whitespace
+    if (/^[\s.]*$/.test(part)) return false;
+    return true;
+  });
+  
+  // Step 7: Rejoin and resolve the full path
+  const safePath = parts.join('/');
+  const fullPath = resolve(basePath, safePath);
+  
+  // Step 8: CRITICAL - Verify the resolved path is within basePath
+  const normalizedBasePath = normalize(resolve(basePath));
+  const normalizedFullPath = normalize(fullPath);
+  
+  if (!normalizedFullPath.startsWith(normalizedBasePath + '/') && normalizedFullPath !== normalizedBasePath) {
+    throw new Error('Path traversal detected - access denied');
+  }
+  
+  return fullPath;
+}
 
 export interface StorageMetadata {
   contentType?: string;
@@ -57,9 +129,8 @@ export class LocalStorageProvider implements StorageProvider {
   }
 
   private getFullPath(key: string): string {
-    // Sanitize key to prevent directory traversal
-    const sanitized = key.replace(/\.\./g, '').replace(/^\//, '');
-    return join(this.basePath, sanitized);
+    // SECURITY: Use comprehensive path sanitization
+    return sanitizePath(key, this.basePath);
   }
 
   async put(

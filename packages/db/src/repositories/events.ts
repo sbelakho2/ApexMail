@@ -575,22 +575,36 @@ export class EventsRepository {
   }
 
   async getLinkStats(
-    messageId: string
+    messageId: string,
+    tenantId?: string
   ): Promise<Result<{ linkUrl: string; clicks: number; uniqueClicks: number }[], Error>> {
+    // SECURITY: When tenantId provided, filter by tenant to prevent cross-tenant data leak
+    const query = tenantId
+      ? `SELECT 
+          link_url,
+          COUNT(*) as clicks,
+          COUNT(DISTINCT recipient_email_hash) as unique_clicks
+         FROM events
+         WHERE message_id = $1 AND tenant_id = $2 AND event_type = 'clicked' AND link_url IS NOT NULL
+         GROUP BY link_url
+         ORDER BY clicks DESC`
+      : `SELECT 
+          link_url,
+          COUNT(*) as clicks,
+          COUNT(DISTINCT recipient_email_hash) as unique_clicks
+         FROM events
+         WHERE message_id = $1 AND event_type = 'clicked' AND link_url IS NOT NULL
+         GROUP BY link_url
+         ORDER BY clicks DESC`;
+    const params = tenantId ? [messageId, tenantId] : [messageId];
+    
     const result = await this.db.query<{
       link_url: string;
       clicks: string;
       unique_clicks: string;
     }>(
-      `SELECT 
-        link_url,
-        COUNT(*) as clicks,
-        COUNT(DISTINCT recipient_email_hash) as unique_clicks
-       FROM events
-       WHERE message_id = $1 AND event_type = 'clicked' AND link_url IS NOT NULL
-       GROUP BY link_url
-       ORDER BY clicks DESC`,
-      [messageId]
+      query,
+      params
     );
 
     if (!result.ok) return result;

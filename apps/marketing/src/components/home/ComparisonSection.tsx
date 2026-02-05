@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Check, X, ArrowRight, Minus } from 'lucide-react';
+import { Check, ArrowRight, Minus } from 'lucide-react';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 

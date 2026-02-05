@@ -7,12 +7,104 @@
  * - Logical replication
  * - Replication lag tracking
  * - Synchronous/asynchronous mode control
+ * 
+ * SECURITY: All identifiers and connection strings are sanitized to prevent SQL injection
  */
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
 import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
+
+/**
+ * SECURITY: Sanitize PostgreSQL identifier names to prevent SQL injection
+ * Only allows alphanumeric characters and underscores
+ */
+function sanitizeIdentifier(name: string, identifierType: string): string {
+  if (!name || typeof name !== 'string') {
+    throw new Error(`${identifierType} must be a non-empty string`);
+  }
+  
+  // Only allow alphanumeric and underscores, PostgreSQL identifier rules
+  const sanitized = name.replace(/[^a-zA-Z0-9_]/g, '');
+  
+  if (sanitized.length === 0) {
+    throw new Error(`${identifierType} must contain valid identifier characters`);
+  }
+  
+  // Must start with letter or underscore
+  if (!/^[a-zA-Z_]/.test(sanitized)) {
+    throw new Error(`${identifierType} must start with a letter or underscore`);
+  }
+  
+  // PostgreSQL identifier limit
+  if (sanitized.length > 63) {
+    throw new Error(`${identifierType} must not exceed 63 characters`);
+  }
+  
+  return sanitized;
+}
+
+/**
+ * SECURITY: Quote PostgreSQL identifier safely
+ * Double quotes escape special characters in identifiers
+ */
+function quoteIdentifier(name: string): string {
+  // Escape any double quotes by doubling them, then wrap in quotes
+  return '"' + name.replace(/"/g, '""') + '"';
+}
+
+/**
+ * SECURITY: Sanitize replica/standby names for synchronous_standby_names
+ * These are comma-separated application names
+ */
+function sanitizeStandbyNames(names: string[]): string {
+  return names
+    .map(name => {
+      const sanitized = sanitizeIdentifier(name, 'Standby name');
+      // Each name should be quoted in the list
+      return quoteIdentifier(sanitized);
+    })
+    .join(',');
+}
+
+/**
+ * SECURITY: Validate and escape connection string components
+ * Prevents injection through connection string parameters
+ */
+function escapeConnStringValue(value: string): string {
+  // PostgreSQL connection string escaping: single quotes around values, escape ' and \
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function buildSafeConnString(options: {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+}): string {
+  // Validate host - only allow valid hostname/IP characters
+  if (!/^[a-zA-Z0-9._-]+$/.test(options.host)) {
+    throw new Error('Invalid host name');
+  }
+  
+  // Validate port
+  if (options.port < 1 || options.port > 65535 || !Number.isInteger(options.port)) {
+    throw new Error('Invalid port number');
+  }
+  
+  // Build connection string with properly escaped values
+  const parts = [
+    `host='${escapeConnStringValue(options.host)}'`,
+    `port=${options.port}`,
+    `dbname='${escapeConnStringValue(options.database)}'`,
+    `user='${escapeConnStringValue(options.user)}'`,
+    `password='${escapeConnStringValue(options.password)}'`,
+  ];
+  
+  return parts.join(' ');
+}
 
 export enum ReplicationMode {
   STREAMING = 'streaming',
@@ -98,23 +190,46 @@ export class ReplicationService {
 
   /**
    * Initialize replication service
+   * CONN-002 FIX: Clean up partial pools on init failure
    */
   async initialize(): Promise<void> {
-    // Connect to replica databases
-    for (const replicaHost of config.replicaHosts) {
-      if (!replicaHost) continue;
-      const pool = new Pool({
-        host: replicaHost,
-        port: config.dbReplicaPort,
-        database: config.dbName,
-        user: config.dbUser,
-        password: config.dbPassword,
-        max: 5,
-      });
-      this.replicaPools.set(replicaHost, pool);
-    }
+    const createdPools: Pool[] = [];
+    
+    try {
+      // Connect to replica databases
+      for (const replicaHost of config.replicaHosts) {
+        if (!replicaHost) continue;
+        const pool = new Pool({
+          host: replicaHost,
+          port: config.dbReplicaPort,
+          database: config.dbName,
+          user: config.dbUser,
+          password: config.dbPassword,
+          max: 5,
+        });
+        
+        // Test the connection to fail fast
+        const client = await pool.connect();
+        client.release();
+        
+        this.replicaPools.set(replicaHost, pool);
+        createdPools.push(pool);
+      }
 
-    console.log('[Replication] Service initialized');
+      console.log('[Replication] Service initialized');
+    } catch (error) {
+      // Clean up any pools that were successfully created
+      console.error('[Replication] Initialization failed, cleaning up pools');
+      for (const pool of createdPools) {
+        try {
+          await pool.end();
+        } catch (cleanupError) {
+          console.error('[Replication] Error closing pool during cleanup:', cleanupError);
+        }
+      }
+      this.replicaPools.clear();
+      throw error;
+    }
   }
 
   /**
@@ -397,10 +512,11 @@ export class ReplicationService {
 
   /**
    * Create subscription on a replica
+   * SECURITY: All identifiers and connection strings are properly sanitized
    */
   async createSubscription(
     replicaHost: string,
-    config: LogicalReplicationConfig
+    subscriptionConfig: LogicalReplicationConfig
   ): Promise<Result<void>> {
     const replicaPool = this.replicaPools.get(replicaHost);
     if (!replicaPool) {
@@ -410,24 +526,32 @@ export class ReplicationService {
     const client = await replicaPool.connect();
     
     try {
-      const primaryConnStr = `host=${this.primaryDb.options.host} ` +
-        `port=${this.primaryDb.options.port} ` +
-        `dbname=${this.primaryDb.options.database} ` +
-        `user=${this.primaryDb.options.user} ` +
-        `password=${this.primaryDb.options.password}`;
+      // SECURITY: Sanitize all identifiers
+      const safeSubscriptionName = sanitizeIdentifier(subscriptionConfig.subscriptionName, 'Subscription name');
+      const safePublicationName = sanitizeIdentifier(subscriptionConfig.publicationName, 'Publication name');
+      
+      // SECURITY: Build safe connection string
+      const primaryConnStr = buildSafeConnString({
+        host: this.primaryDb.options.host as string,
+        port: this.primaryDb.options.port as number,
+        database: this.primaryDb.options.database as string,
+        user: this.primaryDb.options.user as string,
+        password: this.primaryDb.options.password as string,
+      });
 
+      // SECURITY: Use quoted identifiers and properly escaped connection string
       await client.query(`
-        CREATE SUBSCRIPTION ${config.subscriptionName}
+        CREATE SUBSCRIPTION ${quoteIdentifier(safeSubscriptionName)}
         CONNECTION '${primaryConnStr}'
-        PUBLICATION ${config.publicationName}
+        PUBLICATION ${quoteIdentifier(safePublicationName)}
         WITH (
-          copy_data = ${config.copyData},
+          copy_data = ${subscriptionConfig.copyData ? 'true' : 'false'},
           create_slot = true,
           enabled = true
         )
       `);
 
-      console.log(`[Replication] Created subscription: ${config.subscriptionName} on ${replicaHost}`);
+      console.log(`[Replication] Created subscription: ${safeSubscriptionName} on ${replicaHost}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -439,13 +563,15 @@ export class ReplicationService {
 
   /**
    * Switch synchronous replication mode
+   * SECURITY: Replica names are sanitized to prevent SQL injection
    */
   async setSynchronousMode(replicaNames: string[], mode: 'on' | 'off'): Promise<Result<void>> {
     try {
       if (mode === 'on' && replicaNames.length > 0) {
-        const syncStandbyNames = replicaNames.join(',');
+        // SECURITY: Sanitize all standby names to prevent injection
+        const safeSyncStandbyNames = sanitizeStandbyNames(replicaNames);
         await this.primaryDb.query(
-          `ALTER SYSTEM SET synchronous_standby_names = '${syncStandbyNames}'`
+          `ALTER SYSTEM SET synchronous_standby_names = '${safeSyncStandbyNames}'`
         );
       } else {
         await this.primaryDb.query(

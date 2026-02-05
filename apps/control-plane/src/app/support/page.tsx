@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { cn, timeAgo } from '../../lib/utils';
+
+export const dynamic = 'force-dynamic';
 
 /**
  * Support Tickets - Customer support helpdesk
@@ -157,7 +159,7 @@ const DEMO_TICKETS: Ticket[] = [
 
 const TEAM_MEMBERS = ['Alex (Support)', 'Jordan (Support)', 'Sam (Engineering)', 'Taylor (Billing)'];
 
-export default function SupportPage() {
+function SupportPageContent() {
     const searchParams = useSearchParams();
     const tenantFilter = searchParams.get('tenant');
     
@@ -521,5 +523,13 @@ export default function SupportPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function SupportPage() {
+    return (
+        <Suspense fallback={<div>Loading...</div>}>
+            <SupportPageContent />
+        </Suspense>
     );
 }

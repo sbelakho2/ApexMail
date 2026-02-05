@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { EventsRepository, MessagesRepository, DomainsRepository, SuppressionsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 
 const intervalSchema = z.enum(['minute', 'hour', 'day', 'week', 'month']);
 
@@ -18,7 +19,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   const suppressionsRepo = new SuppressionsRepository(ctx.db);
 
   // Dashboard overview
-  router.get('/dashboard', async (c) => {
+  router.get('/dashboard', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');

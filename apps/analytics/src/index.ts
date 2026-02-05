@@ -23,7 +23,7 @@ export { QueryEngine } from './query-engine.js';
 
 // New competitive edge features
 export { BotDetectionService, createBotDetectionService } from './bot-detection.js';
-export { InboxPlacementService, createInboxPlacementService } from './inbox-placement.js';
+export { InboxPlacementService } from './inbox-placement.js';
 export { ReplyTrackingService, createReplyTrackingService } from './reply-tracking.js';
 export { EngagementTrustService, createEngagementTrustService } from './engagement-trust.js';
 

@@ -10,12 +10,39 @@
 /**
  * Beta distribution sampler using the Gamma distribution method
  * More numerically stable than inverse CDF method
+ * 
+ * SECURITY FIX: Handles edge cases to prevent division by zero
  */
 function sampleBeta(alpha: number, beta: number): number {
+    // SECURITY FIX: Validate inputs to prevent numerical issues
+    // Alpha and beta must be positive
+    if (alpha <= 0 || beta <= 0) {
+        // Default to 0.5 (equivalent to uniform prior with no data)
+        return 0.5;
+    }
+    
+    // Handle very small values that could cause numerical instability
+    const minParam = 1e-10;
+    const safeAlpha = Math.max(alpha, minParam);
+    const safeBeta = Math.max(beta, minParam);
+    
     // Use Gamma sampling: Beta(a,b) = Gamma(a,1) / (Gamma(a,1) + Gamma(b,1))
-    const gammaA = sampleGamma(alpha);
-    const gammaB = sampleGamma(beta);
-    return gammaA / (gammaA + gammaB);
+    const gammaA = sampleGamma(safeAlpha);
+    const gammaB = sampleGamma(safeBeta);
+    
+    // SECURITY FIX: Prevent division by zero
+    const sum = gammaA + gammaB;
+    if (sum === 0 || !Number.isFinite(sum)) {
+        return 0.5;
+    }
+    
+    const result = gammaA / sum;
+    
+    // Ensure result is in valid range [0, 1]
+    if (!Number.isFinite(result)) {
+        return 0.5;
+    }
+    return Math.max(0, Math.min(1, result));
 }
 
 /**

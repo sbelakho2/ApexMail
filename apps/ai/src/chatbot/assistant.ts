@@ -63,10 +63,71 @@ const DEFAULT_CHATBOT_CONFIG: ChatbotConfig = {
 
 /**
  * Chatbot Session Manager
+ * AI-005 FIX: Sessions now expire after a configurable TTL with automatic cleanup
  */
 export class SessionManager {
     private sessions: Map<string, ChatSession> = new Map();
     private maxSessions: number = 1000;
+    private sessionTTLMs: number = 30 * 60 * 1000; // AI-005: Default 30 minute session TTL
+    private cleanupIntervalMs: number = 60 * 1000; // AI-005: Cleanup every minute
+    private cleanupInterval: NodeJS.Timeout | null = null;
+
+    constructor(options?: { maxSessions?: number; sessionTTLMs?: number; cleanupIntervalMs?: number }) {
+        this.maxSessions = options?.maxSessions ?? 1000;
+        this.sessionTTLMs = options?.sessionTTLMs ?? 30 * 60 * 1000;
+        this.cleanupIntervalMs = options?.cleanupIntervalMs ?? 60 * 1000;
+        
+        // AI-005 FIX: Start automatic session cleanup interval
+        this.startCleanupInterval();
+    }
+
+    /**
+     * AI-005 FIX: Start the cleanup interval for expired sessions
+     */
+    private startCleanupInterval(): void {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+        }
+        this.cleanupInterval = setInterval(() => {
+            this.cleanupExpiredSessions();
+        }, this.cleanupIntervalMs);
+        
+        // Don't prevent process exit
+        if (this.cleanupInterval.unref) {
+            this.cleanupInterval.unref();
+        }
+    }
+
+    /**
+     * AI-005 FIX: Stop the cleanup interval (for graceful shutdown)
+     */
+    stopCleanupInterval(): void {
+        if (this.cleanupInterval) {
+            clearInterval(this.cleanupInterval);
+            this.cleanupInterval = null;
+        }
+    }
+
+    /**
+     * AI-005 FIX: Remove all expired sessions
+     */
+    private cleanupExpiredSessions(): void {
+        const now = Date.now();
+        for (const [sessionId, session] of this.sessions) {
+            const lastActivity = session.updatedAt.getTime();
+            if (now - lastActivity > this.sessionTTLMs) {
+                this.sessions.delete(sessionId);
+            }
+        }
+    }
+
+    /**
+     * AI-005 FIX: Check if a session is expired
+     */
+    private isSessionExpired(session: ChatSession): boolean {
+        const now = Date.now();
+        return now - session.updatedAt.getTime() > this.sessionTTLMs;
+    }
 
     /**
      * Create a new session
@@ -98,9 +159,16 @@ export class SessionManager {
 
     /**
      * Get session by ID
+     * AI-005 FIX: Returns undefined for expired sessions
      */
     getSession(sessionId: string): ChatSession | undefined {
-        return this.sessions.get(sessionId);
+        const session = this.sessions.get(sessionId);
+        if (session && this.isSessionExpired(session)) {
+            // AI-005: Automatically delete expired session
+            this.sessions.delete(sessionId);
+            return undefined;
+        }
+        return session;
     }
 
     /**

@@ -146,20 +146,6 @@ export class DataIsolationService {
   }
 
   /**
-   * Sanitize identifier (schema/table name) for safe use in SQL
-   * SECURITY: Removes any characters that could enable SQL injection
-   */
-  private sanitizeIdentifier(id: string): string {
-    // Remove all non-alphanumeric/underscore characters
-    const sanitized = id.replace(/[^a-zA-Z0-9_]/g, '_');
-    // Ensure it starts with a letter or underscore
-    if (!/^[a-zA-Z_]/.test(sanitized)) {
-      return `_${sanitized}`;
-    }
-    return sanitized;
-  }
-
-  /**
    * Create an isolated database connection for a workspace with ownership tracking
    * SECURITY: Wraps connection in tracking wrapper to detect leaks
    * 

@@ -4,6 +4,9 @@ import { InteractiveConsole } from '@/components/api-console/InteractiveConsole'
 import { EndpointExplorer } from '@/components/api-console/EndpointExplorer';
 import { APIConsoleCTA } from '@/components/api-console/APIConsoleCTA';
 
+// Force dynamic rendering to avoid ESM/CommonJS issues with html-encoding-sniffer
+export const dynamic = 'force-dynamic';
+
 export const metadata: Metadata = {
   title: 'Live API Console | Try Without Signing Up',
   description:

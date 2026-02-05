@@ -105,116 +105,42 @@ export interface AuditLogQuery {
 export class AuditLogsRepository {
   constructor(private readonly db: DatabasePool) {}
 
+  /**
+   * RACE-003 FIX: Use advisory lock to ensure atomic hash chain insertion.
+   * This prevents TOCTOU where two concurrent inserts could get the same previous_hash.
+   */
   async create(input: CreateAuditLogInput): Promise<Result<AuditLog, Error>> {
     const id = generateUuid();
     const now = new Date();
 
-    // Get the previous hash for chain integrity
-    const previousResult = await this.db.query<{ hash: string }>(
-      `SELECT hash FROM audit_logs 
-       WHERE tenant_id = $1 
-       ORDER BY timestamp DESC, id DESC 
-       LIMIT 1`,
-      [input.tenantId]
-    );
-
-    if (!previousResult.ok) return previousResult;
-
-    const previousHash = previousResult.value.rows[0]?.hash ?? null;
-
-    // Create the hash chain entry
-    const dataToHash = {
-      id,
-      tenantId: input.tenantId,
-      userId: input.userId ?? null,
-      action: input.action,
-      resourceType: input.resourceType,
-      resourceId: input.resourceId ?? null,
-      changes: input.changes ?? null,
-      metadata: input.metadata ?? {},
-      timestamp: now.toISOString(),
-    };
-
-    const hashEntry = createHashChainEntry(dataToHash, previousHash);
-
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      action: AuditAction;
-      resource_type: string;
-      resource_id: string | null;
-      ip_address: string | null;
-      user_agent: string | null;
-      changes: string | null;
-      metadata: string;
-      previous_hash: string | null;
-      hash: string;
-      timestamp: Date;
-    }>(
-      `INSERT INTO audit_logs (
-        id, tenant_id, user_id, action, resource_type, resource_id,
-        ip_address, user_agent, changes, metadata, previous_hash, hash, timestamp
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING *`,
-      [
-        id,
-        input.tenantId,
-        input.userId ?? null,
-        input.action,
-        input.resourceType,
-        input.resourceId ?? null,
-        input.ipAddress ?? null,
-        input.userAgent ?? null,
-        input.changes ? JSON.stringify(input.changes) : null,
-        JSON.stringify(input.metadata ?? {}),
-        previousHash,
-        hashEntry.hash,
-        now,
-      ]
-    );
-
-    if (!result.ok) return result;
-
-    const row = result.value.rows[0];
-    if (!row) {
-      return Result.err(new Error('Failed to create audit log'));
+    // Get a client for transaction
+    let client;
+    try {
+      client = await this.db.getClient();
+    } catch (error) {
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
 
-    return Result.ok(this.mapRow(row));
-  }
+    try {
+      await client.query('BEGIN');
+      
+      // Advisory lock per tenant to serialize hash chain updates
+      // Use hashCode of tenantId to get a consistent lock key
+      const lockKey = this.hashString(input.tenantId);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
 
-  async createBulk(inputs: CreateAuditLogInput[]): Promise<Result<number, Error>> {
-    if (inputs.length === 0) {
-      return Result.ok(0);
-    }
+      // Get the previous hash for chain integrity (now safe within lock)
+      const previousResult = await client.query<{ hash: string }>(
+        `SELECT hash FROM audit_logs 
+         WHERE tenant_id = $1 
+         ORDER BY timestamp DESC, id DESC 
+         LIMIT 1`,
+        [input.tenantId]
+      );
 
-    // For bulk inserts, we need to chain hashes sequentially
-    // Get the last hash for the tenant
-    const firstInput = inputs[0];
-    if (!firstInput) {
-      return Result.ok(0);
-    }
-    const tenantId = firstInput.tenantId;
-    const previousResult = await this.db.query<{ hash: string }>(
-      `SELECT hash FROM audit_logs 
-       WHERE tenant_id = $1 
-       ORDER BY timestamp DESC, id DESC 
-       LIMIT 1`,
-      [tenantId]
-    );
+      const previousHash = previousResult.rows[0]?.hash ?? null;
 
-    if (!previousResult.ok) return previousResult;
-
-    let previousHash = previousResult.value.rows[0]?.hash ?? null;
-    const values: unknown[] = [];
-    const placeholders: string[] = [];
-    let paramIndex = 1;
-    const now = new Date();
-
-    for (const input of inputs) {
-      const id = generateUuid();
-
+      // Create the hash chain entry
       const dataToHash = {
         id,
         tenantId: input.tenantId,
@@ -229,40 +155,170 @@ export class AuditLogsRepository {
 
       const hashEntry = createHashChainEntry(dataToHash, previousHash);
 
-      placeholders.push(
-        `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`
+      const result = await client.query<{
+        id: string;
+        tenant_id: string;
+        user_id: string | null;
+        action: AuditAction;
+        resource_type: string;
+        resource_id: string | null;
+        ip_address: string | null;
+        user_agent: string | null;
+        changes: string | null;
+        metadata: string;
+        previous_hash: string | null;
+        hash: string;
+        timestamp: Date;
+      }>(
+        `INSERT INTO audit_logs (
+          id, tenant_id, user_id, action, resource_type, resource_id,
+          ip_address, user_agent, changes, metadata, previous_hash, hash, timestamp
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        RETURNING *`,
+        [
+          id,
+          input.tenantId,
+          input.userId ?? null,
+          input.action,
+          input.resourceType,
+          input.resourceId ?? null,
+          input.ipAddress ?? null,
+          input.userAgent ?? null,
+          input.changes ? JSON.stringify(input.changes) : null,
+          JSON.stringify(input.metadata ?? {}),
+          previousHash,
+          hashEntry.hash,
+          now,
+        ]
       );
 
-      values.push(
-        id,
-        input.tenantId,
-        input.userId ?? null,
-        input.action,
-        input.resourceType,
-        input.resourceId ?? null,
-        input.ipAddress ?? null,
-        input.userAgent ?? null,
-        input.changes ? JSON.stringify(input.changes) : null,
-        JSON.stringify(input.metadata ?? {}),
-        previousHash,
-        hashEntry.hash,
-        now
-      );
+      await client.query('COMMIT');
 
-      previousHash = hashEntry.hash;
+      const row = result.rows[0];
+      if (!row) {
+        return Result.err(new Error('Failed to create audit log'));
+      }
+
+      return Result.ok(this.mapRow(row));
+    } catch (error) {
+      await client.query('ROLLBACK');
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Hash a string to a consistent integer for advisory lock key
+   */
+  private hashString(str: string): number {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash;
+  }
+
+  async createBulk(inputs: CreateAuditLogInput[]): Promise<Result<number, Error>> {
+    if (inputs.length === 0) {
+      return Result.ok(0);
     }
 
-    const result = await this.db.query(
-      `INSERT INTO audit_logs (
-        id, tenant_id, user_id, action, resource_type, resource_id,
-        ip_address, user_agent, changes, metadata, previous_hash, hash, timestamp
-      ) VALUES ${placeholders.join(', ')}`,
-      values
-    );
+    // For bulk inserts, we need to chain hashes sequentially
+    // Get the last hash for the tenant
+    const firstInput = inputs[0];
+    if (!firstInput) {
+      return Result.ok(0);
+    }
+    const tenantId = firstInput.tenantId;
 
-    if (!result.ok) return result;
+    // RACE-003 FIX: Use advisory lock to ensure atomic hash chain bulk insertion
+    let client;
+    try {
+      client = await this.db.getClient();
+    } catch (error) {
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
 
-    return Result.ok(inputs.length);
+    try {
+      await client.query('BEGIN');
+      
+      // Advisory lock per tenant to serialize hash chain updates
+      const lockKey = this.hashString(tenantId);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+
+      const previousResult = await client.query<{ hash: string }>(
+        `SELECT hash FROM audit_logs 
+         WHERE tenant_id = $1 
+         ORDER BY timestamp DESC, id DESC 
+         LIMIT 1`,
+        [tenantId]
+      );
+
+      let previousHash = previousResult.rows[0]?.hash ?? null;
+      const values: unknown[] = [];
+      const placeholders: string[] = [];
+      let paramIndex = 1;
+      const now = new Date();
+
+      for (const input of inputs) {
+        const id = generateUuid();
+
+        const dataToHash = {
+          id,
+          tenantId: input.tenantId,
+          userId: input.userId ?? null,
+          action: input.action,
+          resourceType: input.resourceType,
+          resourceId: input.resourceId ?? null,
+          changes: input.changes ?? null,
+          metadata: input.metadata ?? {},
+          timestamp: now.toISOString(),
+        };
+
+        const hashEntry = createHashChainEntry(dataToHash, previousHash);
+
+        placeholders.push(
+          `($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`
+        );
+
+        values.push(
+          id,
+          input.tenantId,
+          input.userId ?? null,
+          input.action,
+          input.resourceType,
+          input.resourceId ?? null,
+          input.ipAddress ?? null,
+          input.userAgent ?? null,
+          input.changes ? JSON.stringify(input.changes) : null,
+          JSON.stringify(input.metadata ?? {}),
+          previousHash,
+          hashEntry.hash,
+          now
+        );
+
+        previousHash = hashEntry.hash;
+      }
+
+      await client.query(
+        `INSERT INTO audit_logs (
+          id, tenant_id, user_id, action, resource_type, resource_id,
+          ip_address, user_agent, changes, metadata, previous_hash, hash, timestamp
+        ) VALUES ${placeholders.join(', ')}`,
+        values
+      );
+
+      await client.query('COMMIT');
+      return Result.ok(inputs.length);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      client.release();
+    }
   }
 
   async findById(id: string): Promise<Result<AuditLog | null, Error>> {

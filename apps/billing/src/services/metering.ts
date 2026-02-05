@@ -1,6 +1,11 @@
 /**
  * Usage Metering Service
  * Idempotent event counting with exactly-once semantics
+ * 
+ * SECURITY FIXES:
+ * - Fixed race condition in flush lock using atomic Redis SETNX
+ * - Fixed event loss window by persisting before dedup key
+ * - Buffer now preserved until successful DB write
  */
 
 import type { Redis } from 'ioredis';
@@ -55,8 +60,10 @@ export interface MeteringConfig {
 export class MeteringService {
   private buffer: MeterEvent[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
-  private isFlushInProgress = false; // Prevents concurrent flushes
   private readonly config: MeteringConfig;
+  // SECURITY: Use Redis lock instead of local boolean for distributed safety
+  private readonly flushLockKey = 'meter:flush:lock';
+  private readonly flushLockTTL = 30; // 30 seconds max lock
 
   constructor(
     private readonly db: DatabasePool,
@@ -72,6 +79,7 @@ export class MeteringService {
 
   /**
    * Record a metered event with exactly-once semantics
+   * SECURITY FIX: Persist event BEFORE setting dedup key to prevent event loss
    */
   async recordEvent(
     tenantId: string,
@@ -82,15 +90,6 @@ export class MeteringService {
   ): Promise<Result<boolean, Error>> {
     const id = eventId ?? generateId('mtr');
     
-    // Check idempotency in Redis first (fast path)
-    const dedupKey = `meter:dedup:${id}`;
-    const wasSet = await this.redis.set(dedupKey, '1', 'EX', 86400, 'NX');
-    
-    if (!wasSet) {
-      // Event already processed - idempotent success
-      return Result.ok(false);
-    }
-
     const event: MeterEvent = {
       id,
       tenantId,
@@ -100,12 +99,23 @@ export class MeteringService {
       metadata,
     };
 
-    // CRITICAL: Persist to Redis immediately for crash recovery
-    // This ensures events survive process crashes before DB flush
+    // SECURITY FIX: Persist to Redis FIRST for crash recovery
+    // This ensures events survive process crashes
     const pendingKey = `meter:pending:${id}`;
     await this.redis.setex(pendingKey, 3600, JSON.stringify(event)); // 1 hour TTL
+    
+    // Now check/set idempotency key AFTER persistence
+    // If this fails, event is still in pending queue for recovery
+    const dedupKey = `meter:dedup:${id}`;
+    const wasSet = await this.redis.set(dedupKey, '1', 'EX', 86400, 'NX');
+    
+    if (!wasSet) {
+      // Event already processed - clean up pending key and return idempotent success
+      await this.redis.del(pendingKey);
+      return Result.ok(false);
+    }
 
-    // Add to buffer
+    // Add to buffer (event is safely persisted in Redis)
     this.buffer.push(event);
 
     // Flush if batch size reached
@@ -233,23 +243,33 @@ export class MeteringService {
   /**
    * Flush buffered events to database
    * Events are backed by Redis for crash recovery
-   * Uses a lock to prevent concurrent flushes
+   * SECURITY FIX: Uses atomic Redis lock to prevent concurrent flushes
+   * SECURITY FIX: Buffer preserved until successful DB write
    */
   async flush(): Promise<Result<number, Error>> {
-    // Prevent concurrent flushes to avoid race conditions
-    if (this.isFlushInProgress) {
-      return Result.ok(0);
-    }
-
     if (this.buffer.length === 0) {
       return Result.ok(0);
     }
 
-    this.isFlushInProgress = true;
+    // SECURITY FIX: Use atomic Redis lock instead of local boolean
+    // This prevents race conditions in distributed deployments
+    const lockAcquired = await this.redis.set(
+      this.flushLockKey,
+      process.pid.toString(),
+      'EX', this.flushLockTTL,
+      'NX'
+    );
     
+    if (!lockAcquired) {
+      // Another process is flushing - skip this cycle
+      return Result.ok(0);
+    }
+
     try {
+      // SECURITY FIX: Take a snapshot but DON'T clear buffer yet
+      // Buffer will only be cleared after successful DB write
       const eventsToFlush = [...this.buffer];
-      this.buffer = [];
+      const flushedCount = eventsToFlush.length;
 
       // Build bulk insert
       const values: unknown[] = [];
@@ -278,10 +298,14 @@ export class MeteringService {
       );
 
       if (!result.ok) {
-        // Re-add failed events to buffer
-        this.buffer.unshift(...eventsToFlush);
+        // Don't clear buffer - events will be retried on next flush
         return Result.err(result.error);
       }
+
+      // SUCCESS: Now safe to remove flushed events from buffer
+      // Remove only the events we successfully flushed (in case new events arrived)
+      const flushedIds = new Set(eventsToFlush.map(e => e.id));
+      this.buffer = this.buffer.filter(e => !flushedIds.has(e.id));
 
       // Clean up Redis pending keys after successful DB write
       const pipeline = this.redis.pipeline();
@@ -300,9 +324,10 @@ export class MeteringService {
 
       await pipeline.exec();
 
-      return Result.ok(eventsToFlush.length);
+      return Result.ok(flushedCount);
     } finally {
-      this.isFlushInProgress = false;
+      // SECURITY FIX: Always release the Redis lock
+      await this.redis.del(this.flushLockKey);
     }
   }
 

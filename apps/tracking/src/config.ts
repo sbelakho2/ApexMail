@@ -34,6 +34,16 @@ const configSchema = z.object({
     // Base URL for tracking redirects
     baseUrl: z.string().default('https://t.apexmail.ee'),
     
+    // SECURITY: Trusted proxy IP ranges (CIDR notation)
+    // Configure these based on your infrastructure (load balancers, CDN, etc.)
+    // Only trust X-Forwarded-For headers from these IPs
+    trustedProxies: z.array(z.string()).default([
+      '127.0.0.0/8',      // Localhost
+      '10.0.0.0/8',       // Private network (internal load balancers)
+      '172.16.0.0/12',    // Private network
+      '192.168.0.0/16',   // Private network
+    ]),
+    
     // Pixel configuration
     pixel: z.object({
       // Path prefix for open tracking
@@ -122,6 +132,7 @@ function loadConfig() {
     
     tracking: {
       baseUrl: process.env.TRACKING_BASE_URL,
+      trustedProxies: process.env.TRUSTED_PROXIES ? process.env.TRUSTED_PROXIES.split(',').map(s => s.trim()) : undefined,
       pixel: {
         path: process.env.TRACKING_PIXEL_PATH,
         cacheControl: process.env.TRACKING_PIXEL_CACHE_CONTROL,

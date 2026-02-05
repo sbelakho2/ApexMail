@@ -253,7 +253,13 @@ export class TemplatesRepository {
     return result.ok ? Result.ok(undefined) : result;
   }
 
-  async findById(id: string): Promise<Result<Template | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<Template | null, Error>> {
+    // SECURITY: When tenantId provided, filter in query for tenant isolation
+    const query = tenantId
+      ? 'SELECT * FROM templates WHERE id = $1 AND tenant_id = $2'
+      : 'SELECT * FROM templates WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
+    
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -276,8 +282,8 @@ export class TemplatesRepository {
       updated_at: Date;
       published_at: Date | null;
     }>(
-      'SELECT * FROM templates WHERE id = $1',
-      [id]
+      query,
+      params
     );
 
     if (!result.ok) return result;

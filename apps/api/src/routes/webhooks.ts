@@ -2,15 +2,159 @@
  * Webhooks Routes - Manage webhook endpoints for event delivery
  * 
  * FIXED: Now uses database-backed WebhooksRepository instead of in-memory store
+ * SECURITY: Added SSRF protection to prevent access to internal networks
  */
 
 import { Hono } from 'hono';
 import { z } from 'zod';
+import * as dns from 'dns/promises';
+import * as net from 'net';
 import type { AppEnv, AppContext } from '../app.js';
 import { AuditLogsRepository, WebhooksRepository, type Webhook, type WebhookInsert, type WebhookUpdate } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 import { hmacSign, randomToken, timingSafeCompareBuffers } from '@apexmail/lib/crypto';
 import { generateId } from '@apexmail/lib';
+
+/**
+ * SSRF Protection - Check if IP address is internal/private
+ * Blocks access to:
+ * - Loopback (127.0.0.0/8, ::1)
+ * - Private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+ * - Link-local (169.254.0.0/16, fe80::/10)
+ * - Cloud metadata endpoints (169.254.169.254)
+ * - Multicast (224.0.0.0/4, ff00::/8)
+ */
+function isPrivateIP(ip: string): boolean {
+  // Check IPv4
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map(Number);
+    const [a, b, c] = parts;
+    
+    // Ensure we have valid parts
+    if (a === undefined || b === undefined || c === undefined) return false;
+    
+    // Loopback (127.0.0.0/8)
+    if (a === 127) return true;
+    
+    // Private Class A (10.0.0.0/8)
+    if (a === 10) return true;
+    
+    // Private Class B (172.16.0.0/12)
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    
+    // Private Class C (192.168.0.0/16)
+    if (a === 192 && b === 168) return true;
+    
+    // Link-local (169.254.0.0/16) - includes AWS/GCP metadata
+    if (a === 169 && b === 254) return true;
+    
+    // Multicast (224.0.0.0/4)
+    if (a >= 224 && a <= 239) return true;
+    
+    // Reserved/broadcast
+    if (a === 0 || a === 255) return true;
+    
+    // Documentation ranges (TEST-NET)
+    if (a === 192 && b === 0 && c === 2) return true;    // 192.0.2.0/24
+    if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24
+    if (a === 203 && b === 0 && c === 113) return true;  // 203.0.113.0/24
+    
+    return false;
+  }
+  
+  // Check IPv6
+  if (net.isIPv6(ip)) {
+    const normalized = ip.toLowerCase();
+    
+    // Loopback (::1)
+    if (normalized === '::1') return true;
+    
+    // Unspecified (::)
+    if (normalized === '::') return true;
+    
+    // Link-local (fe80::/10)
+    if (normalized.startsWith('fe80:') || normalized.startsWith('fe8') || 
+        normalized.startsWith('fe9') || normalized.startsWith('fea') || 
+        normalized.startsWith('feb')) return true;
+    
+    // Unique local (fc00::/7) - like private IPv4
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+    
+    // Multicast (ff00::/8)
+    if (normalized.startsWith('ff')) return true;
+    
+    // IPv4-mapped IPv6 (::ffff:x.x.x.x) - check the IPv4 portion
+    if (normalized.startsWith('::ffff:')) {
+      const ipv4Part = normalized.slice(7);
+      if (net.isIPv4(ipv4Part)) {
+        return isPrivateIP(ipv4Part);
+      }
+    }
+    
+    return false;
+  }
+  
+  // Unknown format - deny by default
+  return true;
+}
+
+/**
+ * Validate webhook URL for SSRF vulnerabilities
+ * Performs DNS resolution and checks all resolved IPs
+ */
+async function validateWebhookUrl(urlString: string): Promise<void> {
+  const url = new URL(urlString);
+  const hostname = url.hostname;
+  
+  // Block localhost variations
+  const blockedHostnames = [
+    'localhost',
+    'localhost.localdomain',
+    '127.0.0.1',
+    '::1',
+    '0.0.0.0',
+    '[::1]',
+    'metadata.google.internal',        // GCP metadata
+    'metadata.google.com',              // GCP
+    'instance-data',                    // AWS alias
+    'kubernetes.default',               // K8s internal
+    'kubernetes.default.svc',
+    'kubernetes.default.svc.cluster.local',
+  ];
+  
+  if (blockedHostnames.some(h => hostname.toLowerCase() === h || hostname.toLowerCase().endsWith('.' + h))) {
+    throw ApiError.badRequest('Webhook URL cannot point to internal/localhost addresses');
+  }
+  
+  // Check if hostname is already an IP
+  if (net.isIP(hostname)) {
+    if (isPrivateIP(hostname)) {
+      throw ApiError.badRequest('Webhook URL cannot point to private/internal IP addresses');
+    }
+    return;
+  }
+  
+  // Resolve DNS and check all IPs
+  try {
+    const addresses = await dns.resolve4(hostname).catch(() => []);
+    const addresses6 = await dns.resolve6(hostname).catch(() => []);
+    const allAddresses = [...addresses, ...addresses6];
+    
+    if (allAddresses.length === 0) {
+      throw ApiError.badRequest('Webhook URL hostname could not be resolved');
+    }
+    
+    for (const ip of allAddresses) {
+      if (isPrivateIP(ip)) {
+        throw ApiError.badRequest(`Webhook URL resolves to private IP address (${ip}). This is not allowed for security reasons.`);
+      }
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw ApiError.badRequest(`Failed to validate webhook URL: ${error instanceof Error ? error.message : 'DNS resolution failed'}`);
+  }
+}
 
 const eventTypes = [
   'message.accepted',
@@ -60,7 +204,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   const auditRepo = new AuditLogsRepository(ctx.db);
 
   // Create webhook
-  router.post('/', async (c) => {
+  router.post('/', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -73,6 +217,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
       throw ApiError.badRequest('Webhook URL must use HTTPS in production');
     }
+
+    // SECURITY: Validate URL for SSRF vulnerabilities
+    await validateWebhookUrl(input.url);
 
     // Generate or use provided secret
     const secret = input.secret ?? randomToken(32);
@@ -122,7 +269,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get webhook by ID
-  router.get('/:id', async (c) => {
+  router.get('/:id', requireScopes('webhooks:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
 
@@ -151,7 +298,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // List webhooks
-  router.get('/', async (c) => {
+  router.get('/', requireScopes('webhooks:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const enabled = c.req.query('enabled');
     const event = c.req.query('event');
@@ -188,7 +335,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Update webhook
-  router.patch('/:id', async (c) => {
+  router.patch('/:id', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
@@ -209,6 +356,8 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
         throw ApiError.badRequest('Webhook URL must use HTTPS in production');
       }
+      // SECURITY: Validate URL for SSRF vulnerabilities
+      await validateWebhookUrl(input.url);
     }
 
     const updateData: WebhookUpdate = {};
@@ -301,6 +450,9 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     if (!webhook) {
       throw ApiError.notFound('Webhook');
     }
+
+    // SECURITY: Re-validate URL before making request (DNS may have changed)
+    await validateWebhookUrl(webhook.url);
 
     const body = await c.req.json().catch(() => ({}));
     const { eventType } = testWebhookSchema.parse(body);
@@ -411,7 +563,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Enable webhook
-  router.post('/:id/enable', async (c) => {
+  router.post('/:id/enable', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
@@ -449,7 +601,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Disable webhook
-  router.post('/:id/disable', async (c) => {
+  router.post('/:id/disable', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
@@ -487,7 +639,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Delete webhook
-  router.delete('/:id', async (c) => {
+  router.delete('/:id', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
@@ -519,7 +671,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Verify webhook signature (utility endpoint)
-  router.post('/verify-signature', async (c) => {
+  router.post('/verify-signature', requireScopes('webhooks:read'), async (c) => {
     const body = await c.req.json();
     const schema = z.object({
       payload: z.unknown(),

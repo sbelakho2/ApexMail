@@ -136,11 +136,36 @@ export class StripeService {
       // We should delete the Stripe customer we just created if it was a duplicate
       if (row.stripe_customer_id !== stripeCustomer.id) {
         // Another request won the race - delete the duplicate Stripe customer
+        // BILL-004 FIX: Log detailed error information for debugging and billing reconciliation
         try {
           await this.stripe.customers.del(stripeCustomer.id);
-          logger.info('Deleted duplicate Stripe customer', { duplicateId: stripeCustomer.id, existingId: row.stripe_customer_id });
+          logger.info('Deleted duplicate Stripe customer', { 
+            duplicateId: stripeCustomer.id, 
+            existingId: row.stripe_customer_id,
+            tenantId,
+            email 
+          });
         } catch (deleteError) {
-          logger.error('Failed to delete duplicate Stripe customer', { error: deleteError, customerId: stripeCustomer.id });
+          // BILL-004 FIX: Do NOT swallow this error - log with full context for billing ops to investigate
+          // Orphaned Stripe customers can cause billing issues and need manual cleanup
+          logger.error('CRITICAL: Failed to delete duplicate Stripe customer - manual cleanup required', { 
+            error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+            errorStack: deleteError instanceof Error ? deleteError.stack : undefined,
+            duplicateCustomerId: stripeCustomer.id, 
+            existingCustomerId: row.stripe_customer_id,
+            tenantId,
+            email,
+            action: 'MANUAL_STRIPE_CUSTOMER_CLEANUP_REQUIRED'
+          });
+          // Record orphaned customer for later cleanup
+          await this.db.query(
+            `INSERT INTO stripe_orphaned_customers (id, stripe_customer_id, tenant_id, reason, created_at)
+             VALUES (gen_random_uuid(), $1, $2, 'race_condition_duplicate', NOW())
+             ON CONFLICT (stripe_customer_id) DO NOTHING`,
+            [stripeCustomer.id, tenantId]
+          ).catch(dbErr => {
+            logger.error('Failed to record orphaned customer', { error: dbErr, customerId: stripeCustomer.id });
+          });
         }
       }
       
@@ -223,9 +248,15 @@ export class StripeService {
         },
       });
 
+      // SECURITY FIX: Validate session URL exists before returning
+      if (!session.url) {
+        logger.error('Stripe checkout session created without URL', { sessionId: session.id, tenantId });
+        return Result.err(new Error('Stripe returned a session without a URL'));
+      }
+
       return Result.ok({
         sessionId: session.id,
-        url: session.url!,
+        url: session.url,
       });
     } catch (error) {
       logger.error('Failed to create checkout session', { error, tenantId, priceId });
@@ -267,6 +298,7 @@ export class StripeService {
 
   /**
    * Process Stripe webhook event with idempotency
+   * SECURITY FIX: Record event AFTER successful processing to allow retries on failures
    */
   async processWebhook(
     payload: string | Buffer,
@@ -286,31 +318,57 @@ export class StripeService {
       return Result.err(new Error('Invalid webhook signature'));
     }
 
-    // Check idempotency
-    const idempotencyResult = await this.db.query<{ id: string }>(
-      `SELECT id FROM stripe_webhook_events WHERE stripe_event_id = $1`,
+    // Check idempotency - only skip if successfully processed (status = 'processed')
+    const idempotencyResult = await this.db.query<{ id: string; status: string }>(
+      `SELECT id, status FROM stripe_webhook_events WHERE stripe_event_id = $1`,
       [event.id]
     );
 
     if (!idempotencyResult.ok) return Result.err(idempotencyResult.error);
 
-    if (idempotencyResult.value.rows.length > 0) {
-      logger.info('Duplicate webhook event, skipping', { eventId: event.id });
-      return Result.ok({ eventType: event.type, processed: false });
+    const existingEvent = idempotencyResult.value.rows[0];
+    if (existingEvent) {
+      if (existingEvent.status === 'processed') {
+        logger.info('Duplicate webhook event already processed, skipping', { eventId: event.id });
+        return Result.ok({ eventType: event.type, processed: false });
+      }
+      // If status is 'failed' or 'pending', we should retry
+      logger.info('Retrying previously failed webhook event', { eventId: event.id, previousStatus: existingEvent.status });
     }
 
-    // Record event
-    await this.db.query(
-      `INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, processed_at, created_at)
-       VALUES (gen_random_uuid(), $1, $2, NOW(), NOW())`,
+    // CRITICAL FIX: Insert event as 'pending' first (or update if retrying)
+    const upsertResult = await this.db.query(
+      `INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, created_at, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, 'pending', NOW(), NOW())
+       ON CONFLICT (stripe_event_id) DO UPDATE SET status = 'pending', updated_at = NOW()
+       RETURNING id`,
       [event.id, event.type]
     );
+
+    if (!upsertResult.ok) return Result.err(upsertResult.error);
 
     // Process event
     try {
       await this.handleStripeEvent(event);
+      
+      // CRITICAL: Only mark as processed AFTER successful handling
+      await this.db.query(
+        `UPDATE stripe_webhook_events 
+         SET status = 'processed', processed_at = NOW(), updated_at = NOW() 
+         WHERE stripe_event_id = $1`,
+        [event.id]
+      );
+      
       return Result.ok({ eventType: event.type, processed: true });
     } catch (error) {
+      // Mark as failed so Stripe can retry
+      await this.db.query(
+        `UPDATE stripe_webhook_events 
+         SET status = 'failed', error = $2, updated_at = NOW() 
+         WHERE stripe_event_id = $1`,
+        [event.id, error instanceof Error ? error.message : String(error)]
+      );
+      
       logger.error('Failed to process webhook', { error, eventType: event.type });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
@@ -651,13 +709,42 @@ export class StripeService {
       return Result.err(new Error(`No Stripe price configured for ${planName} (${billingInterval})`));
     }
 
+    // BILL-002 FIX: Use saga pattern - record intention first, update Stripe, then confirm
+    // This prevents data inconsistency if Stripe succeeds but DB fails
+    const sagaId = `saga_switch_${tenantId}_${Date.now()}`;
+    
     try {
-      // Get the current subscription from Stripe
+      // Step 1: Record intention in DB (saga start)
+      const intentResult = await this.db.query<{ id: string }>(
+        `INSERT INTO subscription_change_saga (
+          id, tenant_id, subscription_id, from_price_id, to_price_id, 
+          from_interval, to_interval, status, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW(), NOW())
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id`,
+        [
+          sagaId, 
+          tenantId, 
+          subscriptionResult.value.id,
+          subscriptionResult.value.stripePriceId,
+          newPriceId,
+          subscriptionResult.value.billingInterval,
+          billingInterval
+        ]
+      );
+
+      if (!intentResult.ok) {
+        logger.error('Failed to record subscription change intention', { error: intentResult.error, sagaId });
+        return Result.err(intentResult.error);
+      }
+
+      // Step 2: Get the current subscription from Stripe
       const stripeSubscription = await this.stripe.subscriptions.retrieve(
         subscriptionResult.value.stripeSubscriptionId
       );
 
-      // Update the subscription with proration
+      // Step 3: Update the subscription with proration in Stripe
       const updatedSubscription = await this.stripe.subscriptions.update(
         subscriptionResult.value.stripeSubscriptionId,
         {
@@ -668,38 +755,91 @@ export class StripeService {
             },
           ],
           proration_behavior: 'create_prorations',
+          metadata: {
+            ...stripeSubscription.metadata,
+            saga_id: sagaId, // Track saga for reconciliation
+          },
         }
       );
 
-      // Calculate proration amount from upcoming invoice
-      const upcomingInvoice = await this.stripe.invoices.retrieveUpcoming({
-        customer: subscriptionResult.value.stripeCustomerId,
-      });
-
-      const prorationAmount = upcomingInvoice.lines.data
-        .filter(line => line.proration)
-        .reduce((sum, line) => sum + line.amount, 0);
-
-      // Update local database
+      // Step 4: Mark saga as stripe_completed
       await this.db.query(
-        `UPDATE subscriptions 
-         SET stripe_price_id = $1, billing_interval = $2, updated_at = NOW()
-         WHERE id = $3`,
-        [newPriceId, billingInterval, subscriptionResult.value.id]
+        `UPDATE subscription_change_saga SET status = 'stripe_completed', stripe_response = $2, updated_at = NOW() WHERE id = $1`,
+        [sagaId, JSON.stringify({ subscriptionId: updatedSubscription.id, status: updatedSubscription.status })]
       );
 
-      // Update tenant plan
-      await this.db.query(
-        `UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2`,
-        [planName, tenantId]
+      // Step 5: Calculate proration amount from upcoming invoice
+      let prorationAmount = 0;
+      try {
+        const upcomingInvoice = await this.stripe.invoices.retrieveUpcoming({
+          customer: subscriptionResult.value.stripeCustomerId,
+        });
+        prorationAmount = upcomingInvoice.lines.data
+          .filter(line => line.proration)
+          .reduce((sum, line) => sum + line.amount, 0);
+      } catch (invoiceError) {
+        // Non-fatal: proration calculation failed but subscription was updated
+        logger.warn('Failed to calculate proration amount', { error: invoiceError, sagaId });
+      }
+
+      // Step 6: Atomically update local database and complete saga
+      const finalizeResult = await this.db.query(
+        `WITH update_subscription AS (
+          UPDATE subscriptions 
+          SET stripe_price_id = $1, billing_interval = $2, updated_at = NOW()
+          WHERE id = $3
+          RETURNING id
+        ),
+        update_tenant AS (
+          UPDATE tenants SET plan = $4, updated_at = NOW() WHERE id = $5
+          RETURNING id
+        ),
+        complete_saga AS (
+          UPDATE subscription_change_saga 
+          SET status = 'completed', proration_amount = $6, updated_at = NOW() 
+          WHERE id = $7
+          RETURNING id
+        )
+        SELECT 
+          EXISTS (SELECT 1 FROM update_subscription) as subscription_updated,
+          EXISTS (SELECT 1 FROM update_tenant) as tenant_updated,
+          EXISTS (SELECT 1 FROM complete_saga) as saga_completed`,
+        [newPriceId, billingInterval, subscriptionResult.value.id, planName, tenantId, prorationAmount, sagaId]
       );
+
+      if (!finalizeResult.ok) {
+        // Stripe was updated but DB failed - mark saga for manual reconciliation
+        await this.db.query(
+          `UPDATE subscription_change_saga SET status = 'db_failed', error = $2, updated_at = NOW() WHERE id = $1`,
+          [sagaId, finalizeResult.error.message]
+        ).catch(() => {}); // Best effort
+        
+        logger.error('CRITICAL: Stripe updated but DB failed - manual reconciliation required', {
+          sagaId,
+          tenantId,
+          stripeSubscriptionId: updatedSubscription.id,
+          error: finalizeResult.error.message,
+          action: 'MANUAL_SUBSCRIPTION_RECONCILIATION_REQUIRED'
+        });
+        return Result.err(finalizeResult.error);
+      }
+
+      logger.info('Subscription switch completed', { sagaId, tenantId, planName, billingInterval });
 
       return Result.ok({
         subscription: updatedSubscription,
         prorationAmount,
       });
     } catch (error) {
-      logger.error('Failed to switch subscription', { error, tenantId, planName });
+      // Mark saga as failed for investigation
+      await this.db.query(
+        `UPDATE subscription_change_saga 
+         SET status = 'failed', error = $2, updated_at = NOW() 
+         WHERE id = $1`,
+        [sagaId, error instanceof Error ? error.message : String(error)]
+      ).catch(() => {}); // Best effort
+      
+      logger.error('Failed to switch subscription', { error, tenantId, planName, sagaId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
   }

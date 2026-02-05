@@ -58,6 +58,8 @@ export class AnalyticsProcessor {
   private activeJobs = 0;
   private eventBuffer: AnalyticsEvent[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
+  // MEM-003 FIX: Store reference to hourly aggregation timer for cleanup
+  private hourlyAggregationTimer: NodeJS.Timeout | null = null;
   private readonly aggregationBuffer = new Map<string, AggregatedStats>();
 
   constructor(options: AnalyticsProcessorConfig) {
@@ -97,6 +99,12 @@ export class AnalyticsProcessor {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
+    }
+
+    // MEM-003 FIX: Clear hourly aggregation timer
+    if (this.hourlyAggregationTimer) {
+      clearTimeout(this.hourlyAggregationTimer);
+      this.hourlyAggregationTimer = null;
     }
 
     // Flush remaining buffers
@@ -262,6 +270,11 @@ export class AnalyticsProcessor {
     }
   }
 
+  /**
+   * BUF-001 FIX: Buffer is cleared only AFTER successful write to prevent data loss.
+   * Previously, buffer was cleared before try block, creating a window where 
+   * new events could arrive and be lost if the write failed.
+   */
   private async flushBuffers(): Promise<void> {
     if (this.eventBuffer.length === 0 && this.aggregationBuffer.size === 0) {
       return;
@@ -272,11 +285,13 @@ export class AnalyticsProcessor {
       aggregations: this.aggregationBuffer.size,
     });
 
+    // Take snapshots but DON'T clear buffers yet
     const events = [...this.eventBuffer];
     const aggregations = new Map(this.aggregationBuffer);
-
-    this.eventBuffer = [];
-    this.aggregationBuffer.clear();
+    
+    // Create sets to track which items we took for flushing
+    const eventIds = new Set(events.map((_, i) => i));
+    const aggregationKeys = new Set(aggregations.keys());
 
     try {
       // Write aggregations to database
@@ -285,31 +300,24 @@ export class AnalyticsProcessor {
       // Update real-time counters in Redis
       await this.updateRedisCounters(events);
 
+      // SUCCESS: Now safe to remove flushed items from buffers
+      // Only remove the specific events we flushed (keep any new arrivals)
+      this.eventBuffer = this.eventBuffer.filter((_, i) => !eventIds.has(i));
+      
+      // Remove only the aggregation keys we successfully flushed
+      for (const key of aggregationKeys) {
+        this.aggregationBuffer.delete(key);
+      }
+
       this.logger.debug('Buffers flushed successfully', {
         events: events.length,
         aggregations: aggregations.size,
       });
 
     } catch (error) {
-      // On error, restore buffers for retry
-      this.eventBuffer.push(...events);
-      for (const [key, value] of aggregations) {
-        const existing = this.aggregationBuffer.get(key);
-        if (existing) {
-          existing.sent += value.sent;
-          existing.delivered += value.delivered;
-          existing.opened += value.opened;
-          existing.clicked += value.clicked;
-          existing.bounced += value.bounced;
-          existing.unsubscribed += value.unsubscribed;
-          existing.complained += value.complained;
-          existing.failed += value.failed;
-        } else {
-          this.aggregationBuffer.set(key, value);
-        }
-      }
-
-      this.logger.error('Failed to flush buffers', { error });
+      // On error, don't clear - items remain in buffer for retry
+      // Any new events that arrived during flush attempt are preserved
+      this.logger.error('Failed to flush buffers - will retry', { error });
       throw error;
     }
   }
@@ -412,7 +420,8 @@ export class AnalyticsProcessor {
     
     const msUntilNextHour = nextHour.getTime() - now.getTime();
 
-    setTimeout(() => {
+    // MEM-003 FIX: Store timer reference for cleanup
+    this.hourlyAggregationTimer = setTimeout(() => {
       this.runHourlyAggregation().catch(err => {
         this.logger.error('Hourly aggregation error', { error: err });
       });

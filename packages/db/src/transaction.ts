@@ -43,6 +43,38 @@ const DEFAULT_OPTIONS: TransactionOptions = {
   retryDelay: 100,
 };
 
+/**
+ * SECURITY: Validate and sanitize savepoint names to prevent SQL injection
+ * PostgreSQL savepoint names must be valid identifiers
+ */
+function sanitizeSavepointName(name: string): string {
+  // Only allow alphanumeric characters and underscores, max 63 characters (PostgreSQL limit)
+  if (!name || typeof name !== 'string') {
+    throw new Error('Savepoint name must be a non-empty string');
+  }
+  
+  // Check for valid identifier pattern: starts with letter or underscore, followed by alphanumeric/underscore
+  const sanitized = name.replace(/[^a-zA-Z0-9_]/g, '');
+  
+  if (sanitized.length === 0) {
+    throw new Error('Savepoint name must contain at least one alphanumeric character');
+  }
+  
+  // Ensure it starts with a letter or underscore (PostgreSQL identifier rule)
+  if (!/^[a-zA-Z_]/.test(sanitized)) {
+    throw new Error('Savepoint name must start with a letter or underscore');
+  }
+  
+  // PostgreSQL identifier max length is 63 characters
+  if (sanitized.length > 63) {
+    throw new Error('Savepoint name must not exceed 63 characters');
+  }
+  
+  // Double-quote the identifier for safety (handles reserved words)
+  // This is the PostgreSQL way to quote identifiers
+  return `"${sanitized}"`;
+}
+
 const logger: Logger = getLogger().child({ component: 'transaction' });
 
 /**
@@ -104,13 +136,16 @@ export async function withTransaction<T>(
       const ctx: TransactionContext = {
         client,
         async savepoint(name: string): Promise<void> {
-          await client.query(`SAVEPOINT ${name}`);
+          const safeName = sanitizeSavepointName(name);
+          await client.query(`SAVEPOINT ${safeName}`);
         },
         async rollbackTo(name: string): Promise<void> {
-          await client.query(`ROLLBACK TO SAVEPOINT ${name}`);
+          const safeName = sanitizeSavepointName(name);
+          await client.query(`ROLLBACK TO SAVEPOINT ${safeName}`);
         },
         async releaseSavepoint(name: string): Promise<void> {
-          await client.query(`RELEASE SAVEPOINT ${name}`);
+          const safeName = sanitizeSavepointName(name);
+          await client.query(`RELEASE SAVEPOINT ${safeName}`);
         },
       };
 

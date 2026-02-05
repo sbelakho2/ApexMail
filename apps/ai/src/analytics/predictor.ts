@@ -367,15 +367,19 @@ export class PredictiveAnalytics {
         const avgClickRate = this.average(this.historicalData.map((d) => d.clickRate));
         const avgUnsubRate = this.average(this.historicalData.map((d) => d.unsubscribeRate));
 
-        // Update base coefficients
-        const openCoeffs = this.modelCoefficients.get('open_rate')!;
+        // AI-003 FIX: Clone coefficients before mutation to ensure immutability
+        // This prevents unintended side effects from shared references
+        const openCoeffs = [...(this.modelCoefficients.get('open_rate') ?? [])];
         openCoeffs[0] = avgOpenRate;
+        this.modelCoefficients.set('open_rate', openCoeffs);
 
-        const clickCoeffs = this.modelCoefficients.get('click_rate')!;
+        const clickCoeffs = [...(this.modelCoefficients.get('click_rate') ?? [])];
         clickCoeffs[0] = avgClickRate;
+        this.modelCoefficients.set('click_rate', clickCoeffs);
 
-        const unsubCoeffs = this.modelCoefficients.get('unsubscribe_rate')!;
+        const unsubCoeffs = [...(this.modelCoefficients.get('unsubscribe_rate') ?? [])];
         unsubCoeffs[0] = avgUnsubRate;
+        this.modelCoefficients.set('unsubscribe_rate', unsubCoeffs);
 
         this.lastModelUpdate = new Date();
     }

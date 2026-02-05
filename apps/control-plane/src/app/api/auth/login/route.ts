@@ -13,7 +13,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
-// @ts-expect-error - bcrypt has types but they're not always resolved correctly in Next.js
 import bcrypt from 'bcrypt';
 
 // Rate limiting store (in production, use Redis)
@@ -116,15 +115,10 @@ async function verifyCredentials(email: string, password: string): Promise<{ val
  * Implements RFC 6238 TOTP algorithm
  */
 function verifyMfaCode(userId: string, code: string): boolean {
-    // SECURITY: In production, implement proper TOTP verification
-    // using a library like `otplib`
+    // SECURITY: Proper TOTP verification using RFC 6238
+    // No bypass codes allowed - NODE_ENV checks are unreliable
     
-    // For development, allow a bypass code
-    if (process.env.NODE_ENV === 'development' && code === '000000') {
-        return true;
-    }
-    
-    // In production, verify against stored TOTP secret
+    // Verify against stored TOTP secret
     const MFA_SECRET = process.env.CONTROL_PLANE_MFA_SECRET;
     if (!MFA_SECRET) {
         console.error('[SECURITY] CONTROL_PLANE_MFA_SECRET not configured');

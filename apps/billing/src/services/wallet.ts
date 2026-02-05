@@ -523,25 +523,76 @@ export class WalletService {
     reference?: string,
     metadata: Record<string, unknown> = {}
   ): Promise<Result<WalletTransaction, Error>> {
-    // Update balance atomically
-    const updateResult = await this.db.query<{
+    // SECURITY FIX: Use atomic CTE to update balance AND record transaction in single operation
+    // This prevents data inconsistency if process crashes between operations
+    const result = await this.db.query<{
+      tx_id: string;
+      tenant_id: string;
+      type: WalletTransaction['type'];
+      amount: number;
       balance: number;
+      description: string;
+      reference: string | null;
+      metadata: string;
+      created_at: Date;
     }>(
-      `UPDATE wallets
-       SET balance = balance + $1, updated_at = NOW()
-       WHERE tenant_id = $2
-       RETURNING balance`,
-      [amount, tenantId]
+      `WITH updated_wallet AS (
+        UPDATE wallets
+        SET balance = balance + $1, updated_at = NOW()
+        WHERE tenant_id = $2
+        RETURNING balance
+      ),
+      new_transaction AS (
+        INSERT INTO wallet_transactions (
+          id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+        )
+        SELECT 
+          gen_random_uuid(), 
+          $2, 
+          $3, 
+          $1, 
+          (SELECT balance FROM updated_wallet), 
+          $4, 
+          $5, 
+          $6, 
+          NOW()
+        WHERE EXISTS (SELECT 1 FROM updated_wallet)
+        RETURNING id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+      )
+      SELECT 
+        id as tx_id, tenant_id, type, amount, balance, description, reference, metadata, created_at
+      FROM new_transaction`,
+      [amount, tenantId, type, description, reference ?? null, JSON.stringify(metadata)]
     );
 
-    if (!updateResult.ok) return Result.err(updateResult.error);
+    if (!result.ok) return Result.err(result.error);
 
-    const newBalance = updateResult.value.rows[0]?.balance ?? 0;
+    const row = result.value.rows[0];
+    if (!row) {
+      return Result.err(new Error('Failed to execute wallet transaction - wallet may not exist'));
+    }
 
-    // Invalidate cache
+    // Invalidate cache AFTER successful transaction
     await this.redis.del(`wallet:balance:${tenantId}`);
 
-    return this.recordTransaction(tenantId, type, amount, description, reference, metadata, newBalance);
+    let parsedMetadata: Record<string, unknown> = {};
+    try {
+      parsedMetadata = JSON.parse(row.metadata || '{}');
+    } catch {
+      parsedMetadata = {};
+    }
+
+    return Result.ok({
+      id: row.tx_id,
+      tenantId: row.tenant_id,
+      type: row.type,
+      amount: row.amount,
+      balance: row.balance,
+      description: row.description,
+      reference: row.reference,
+      metadata: parsedMetadata,
+      createdAt: row.created_at,
+    });
   }
 
   private async recordTransaction(

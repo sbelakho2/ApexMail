@@ -194,8 +194,9 @@ describe('Phase 4-6: Email Processing Deep Bug Detection', () => {
               checkDir(filePath);
             } else if (file.endsWith('.ts')) {
               const content = readSource(filePath);
-              // Check files that handle SMTP error codes (4xx or 5xx)
-              if (content && content.match(/[45]\d{2}/) && !file.includes('auth')) {
+              // Check files that handle SMTP error codes (4xx or 5xx in error messages)
+              // Match error codes in quotes like '451' or "550" to avoid false positives like "X.509"
+              if (content && content.match(/['"][45]\d{2}/) && !file.includes('auth')) {
                 // Has SMTP error codes
                 foundSmtpErrors = true;
                 

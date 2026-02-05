@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import { cn, timeAgo } from '../../lib/utils';
 import { useSearchParams } from 'next/navigation';
+
+export const dynamic = 'force-dynamic';
 
 /**
  * Content & CMS - Manage marketing content
@@ -157,7 +159,7 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; d
     archived: { label: 'Archived', bg: 'bg-surface-100', text: 'text-surface-500', dot: 'bg-surface-300' },
 };
 
-export default function ContentPage() {
+function ContentPageContent() {
     const searchParams = useSearchParams();
     const [content, setContent] = useState<ContentItem[]>([]);
     const [loading, setLoading] = useState(true);
@@ -633,5 +635,13 @@ export default function ContentPage() {
                 </div>
             )}
         </div>
+    );
+}
+
+export default function ContentPage() {
+    return (
+        <Suspense fallback={<div>Loading...</div>}>
+            <ContentPageContent />
+        </Suspense>
     );
 }

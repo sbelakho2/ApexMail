@@ -7,7 +7,6 @@ import {
   decryptAES128GCM,
   deriveKeyHMAC,
   hmacBuffer,
-  hmacSign,
   timingSafeCompareBuffers,
 } from '@apexmail/lib/crypto';
 
@@ -278,10 +277,12 @@ export class LinkRewriter {
   private readonly baseUrl: string;
   private readonly codec: TrackingCodec;
   private readonly clickPath: string;
+  private readonly signatureKey: Buffer;
 
-  constructor(baseUrl: string, codec: TrackingCodec, clickPath: string = '/c') {
+  constructor(baseUrl: string, codec: TrackingCodec, signatureKey: Buffer, clickPath: string = '/c') {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.codec = codec;
+    this.signatureKey = signatureKey;
     this.clickPath = clickPath;
   }
 
@@ -323,9 +324,11 @@ export class LinkRewriter {
 
   /**
    * Generate a link ID from URL and position
+   * SECURITY: Uses instance signatureKey derived from secure random secret
    */
   generateLinkId(url: string, position: number): string {
-    const hash = hmacSign('link-id', `${url}:${position}`, 'sha256')
+    const hash = hmacBuffer(this.signatureKey, `${url}:${position}`, 'sha256')
+      .toString('hex')
       .substring(0, 8);
     return `lnk_${hash}`;
   }

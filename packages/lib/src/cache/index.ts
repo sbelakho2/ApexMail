@@ -236,17 +236,25 @@ export class RedisCacheProvider implements CacheProvider {
 
 /**
  * In-memory cache implementation (for development/testing)
+ * SECURITY FIX: Now properly clears cleanup timer on disconnect to prevent memory leaks
  */
 export class InMemoryCacheProvider implements CacheProvider {
   private readonly store: Map<string, { value: string; expiresAt?: number }> = new Map();
   private readonly prefix: string;
   private readonly subscriptions: Map<string, Set<(message: string) => void>> = new Map();
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(options: { prefix?: string } = {}) {
     this.prefix = options.prefix ?? 'apexmail:';
     
     // Cleanup expired entries every 10 seconds
-    setInterval(() => this.cleanup(), 10000);
+    // Store reference so we can clear it on disconnect
+    this.cleanupTimer = setInterval(() => this.cleanup(), 10000);
+    
+    // Ensure timer doesn't prevent process from exiting
+    if (this.cleanupTimer.unref) {
+      this.cleanupTimer.unref();
+    }
   }
 
   private key(k: string): string {
@@ -409,6 +417,11 @@ export class InMemoryCacheProvider implements CacheProvider {
   }
 
   async disconnect(): Promise<void> {
+    // SECURITY FIX: Clear cleanup timer to prevent memory leak
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
     this.store.clear();
     this.subscriptions.clear();
   }

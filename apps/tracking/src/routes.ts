@@ -1,5 +1,7 @@
 /**
  * Tracking Routes - Open pixel, click tracking, unsubscribe handling
+ * 
+ * SECURITY: IP address extraction validates proxy headers against trusted proxy list
  */
 
 import { Hono } from 'hono';
@@ -108,6 +110,110 @@ function matchDomainPattern(domain: string, pattern: string): boolean {
   return false;
 }
 
+/**
+ * SECURITY FIX: Safely extract client IP address with proxy validation
+ * Only trusts X-Forwarded-For/X-Real-IP if request comes from a trusted proxy
+ * 
+ * @param c - Hono context
+ * @param connectingIP - Direct socket IP (from c.env.incoming.socket.remoteAddress or similar)
+ * @returns The actual client IP address
+ */
+function getClientIP(c: any): string {
+  // Get the direct connecting IP (the IP of the immediate client or proxy)
+  // This is the socket-level IP and cannot be spoofed
+  const connectingIP = (c.req.raw as any)?.socket?.remoteAddress || 'unknown';
+  
+  // SECURITY: Get trusted proxy IP ranges from config
+  // Configure via TRUSTED_PROXIES env var (comma-separated CIDR ranges)
+  // Only trust X-Forwarded-For headers from these IPs
+  const trustedProxies = config.tracking.trustedProxies;
+  
+  // Check if connecting IP is a trusted proxy
+  if (!isIPInRanges(connectingIP, trustedProxies)) {
+    // Not from a trusted proxy - use the direct IP, ignore headers
+    return connectingIP;
+  }
+  
+  // From a trusted proxy - we can trust the forwarded headers
+  // X-Forwarded-For format: client, proxy1, proxy2, ...
+  const xForwardedFor = c.req.header('x-forwarded-for');
+  if (xForwardedFor) {
+    // Get the leftmost IP that isn't a trusted proxy
+    const ips = xForwardedFor.split(',').map((ip: string) => ip.trim());
+    for (const ip of ips) {
+      if (!isIPInRanges(ip, trustedProxies)) {
+        return ip;
+      }
+    }
+  }
+  
+  // Check X-Real-IP (typically set by nginx)
+  const xRealIP = c.req.header('x-real-ip');
+  if (xRealIP) {
+    return xRealIP.trim();
+  }
+  
+  // Fallback to connecting IP
+  return connectingIP;
+}
+
+/**
+ * Check if an IP address falls within any of the given CIDR ranges
+ */
+function isIPInRanges(ip: string, ranges: string[]): boolean {
+  // Handle IPv4-mapped IPv6 addresses
+  const normalizedIP = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+  
+  for (const range of ranges) {
+    if (ipInCIDR(normalizedIP, range)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if an IP is within a CIDR range
+ */
+function ipInCIDR(ip: string, cidr: string): boolean {
+  const [rangeIP, prefixStr] = cidr.split('/');
+  const prefix = parseInt(prefixStr || '32', 10);
+  
+  if (!rangeIP) {
+    return false;
+  }
+  
+  const ipNum = ipToNumber(ip);
+  const rangeNum = ipToNumber(rangeIP);
+  
+  if (ipNum === null || rangeNum === null) {
+    return false;
+  }
+  
+  const mask = ~(0xFFFFFFFF >>> prefix);
+  return (ipNum & mask) === (rangeNum & mask);
+}
+
+/**
+ * Convert IPv4 address to 32-bit number
+ */
+function ipToNumber(ip: string): number | null {
+  const parts = ip.split('.');
+  if (parts.length !== 4) {
+    return null;
+  }
+  
+  let num = 0;
+  for (const part of parts) {
+    const octet = parseInt(part, 10);
+    if (isNaN(octet) || octet < 0 || octet > 255) {
+      return null;
+    }
+    num = (num << 8) | octet;
+  }
+  return num >>> 0; // Convert to unsigned
+}
+
 export function createRoutes(ctx: TrackingContext): Hono {
   const { db, redis, logger, codec, processor } = ctx;
   const app = new Hono();
@@ -126,9 +232,8 @@ export function createRoutes(ctx: TrackingContext): Hono {
   app.get(`${config.tracking.pixel.path}/:trackingId`, async (c) => {
     const trackingId = c.req.param('trackingId');
     const userAgent = c.req.header('user-agent');
-    const ipAddress = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() 
-                   || c.req.header('x-real-ip')
-                   || 'unknown';
+    // SECURITY FIX: Use validated IP extraction instead of blindly trusting headers
+    const ipAddress = getClientIP(c);
 
     logger.debug('Open pixel request', { trackingId: trackingId.substring(0, 20) + '...' });
 
@@ -168,9 +273,8 @@ export function createRoutes(ctx: TrackingContext): Hono {
     
     if (trackingId) {
       const userAgent = c.req.header('user-agent');
-      const ipAddress = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() 
-                     || c.req.header('x-real-ip')
-                     || 'unknown';
+      // SECURITY FIX: Use validated IP extraction
+      const ipAddress = getClientIP(c);
       
       const data = codec.decode(trackingId);
       
@@ -202,9 +306,8 @@ export function createRoutes(ctx: TrackingContext): Hono {
     const trackingId = c.req.param('trackingId');
     const originalUrl = c.req.query('r');
     const userAgent = c.req.header('user-agent');
-    const ipAddress = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() 
-                   || c.req.header('x-real-ip')
-                   || 'unknown';
+    // SECURITY FIX: Use validated IP extraction
+    const ipAddress = getClientIP(c);
 
     logger.debug('Click tracking request', { 
       trackingId: trackingId.substring(0, 20) + '...',
@@ -283,9 +386,8 @@ export function createRoutes(ctx: TrackingContext): Hono {
     const token = c.req.param('token');
     const body = await c.req.text();
     const userAgent = c.req.header('user-agent');
-    const ipAddress = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() 
-                   || c.req.header('x-real-ip')
-                   || 'unknown';
+    // SECURITY FIX: Use validated IP extraction
+    const ipAddress = getClientIP(c);
 
     logger.info('One-click unsubscribe request', { 
       token: token.substring(0, 20) + '...',
@@ -351,9 +453,8 @@ export function createRoutes(ctx: TrackingContext): Hono {
     // If confirm=1, process the unsubscribe
     if (confirm === '1') {
       const userAgent = c.req.header('user-agent');
-      const ipAddress = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() 
-                     || c.req.header('x-real-ip')
-                     || 'unknown';
+      // SECURITY FIX: Use validated IP extraction
+      const ipAddress = getClientIP(c);
 
       const messageResult = await db.query<{ id: string }>(`
         SELECT id FROM messages

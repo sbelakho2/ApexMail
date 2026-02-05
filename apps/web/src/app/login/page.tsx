@@ -8,14 +8,39 @@ import { Shield, ArrowRight } from 'lucide-react';
 export default function LoginPage() {
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setIsLoading(true);
-    // Simulate login for now - integration would connect to auth API
-    setTimeout(() => {
+    setError('');
+    
+    const formData = new FormData(e.currentTarget);
+    const email = formData.get('email') as string;
+    const password = formData.get('password') as string;
+    
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+        credentials: 'include',
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        setError(data.error || 'Invalid credentials');
+        setIsLoading(false);
+        return;
+      }
+      
+      // Authentication successful - redirect to dashboard
       router.push('/dashboard');
-    }, 1000);
+    } catch {
+      setError('Network error. Please try again.');
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -40,12 +65,18 @@ export default function LoginPage() {
         {/* Login Card */}
         <div className="bg-card rounded-2xl shadow-xl border border-border overflow-hidden">
           <form onSubmit={handleSubmit} className="p-8 space-y-5">
+            {error && (
+              <div className="bg-destructive/10 border border-destructive/20 text-destructive text-sm rounded-lg p-3">
+                {error}
+              </div>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-semibold text-foreground" htmlFor="email">
                 Email
               </label>
               <input
                 id="email"
+                name="email"
                 type="email"
                 required
                 placeholder="name@company.com"
@@ -67,6 +98,7 @@ export default function LoginPage() {
               </div>
               <input
                 id="password"
+                name="password"
                 type="password"
                 required
                 className="w-full px-4 py-3 rounded-lg border border-input focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all bg-muted/30 text-foreground"

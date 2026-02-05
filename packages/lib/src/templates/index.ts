@@ -6,9 +6,78 @@
  * - Handlebars for variable interpolation
  * - Plain HTML passthrough
  * - Safe rendering with XSS prevention
+ * 
+ * SECURITY: All user-provided attributes are sanitized to prevent XSS
  */
 
 import Handlebars from 'handlebars';
+
+// ============================================================================
+// XSS Prevention Utilities
+// ============================================================================
+
+/**
+ * SECURITY: Escape HTML special characters to prevent XSS
+ */
+function escapeHtml(str: string): string {
+    if (!str || typeof str !== 'string') return '';
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/**
+ * SECURITY: Sanitize URL to prevent javascript: and data: XSS attacks
+ * Only allows http, https, mailto, and tel protocols
+ */
+function sanitizeUrl(url: string): string {
+    if (!url || typeof url !== 'string') return '#';
+    
+    const trimmed = url.trim().toLowerCase();
+    
+    // Block dangerous protocols
+    const dangerousProtocols = [
+        'javascript:',
+        'data:',
+        'vbscript:',
+        'file:',
+        'about:',
+        'blob:',
+    ];
+    
+    for (const protocol of dangerousProtocols) {
+        if (trimmed.startsWith(protocol)) {
+            return '#';
+        }
+    }
+    
+    // Allow safe protocols
+    const safeProtocols = ['http:', 'https:', 'mailto:', 'tel:'];
+    
+    // Check if it's a relative URL or has a safe protocol
+    if (!trimmed.includes(':') || safeProtocols.some(p => trimmed.startsWith(p))) {
+        // Escape HTML entities in the URL (but preserve URL encoding)
+        return url
+            .replace(/"/g, '%22')
+            .replace(/'/g, '%27')
+            .replace(/</g, '%3C')
+            .replace(/>/g, '%3E');
+    }
+    
+    // Unknown protocol, block it
+    return '#';
+}
+
+/**
+ * SECURITY: Sanitize attribute value for safe HTML insertion
+ */
+function sanitizeAttr(value: string): string {
+    if (!value || typeof value !== 'string') return '';
+    return escapeHtml(value);
+}
 
 // ============================================================================
 // Types
@@ -95,31 +164,36 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     );
     
     // Convert MJML buttons
+    // SECURITY: Sanitize href to prevent javascript: XSS
     content = content.replace(
         /<mj-button([^>]*)>([\s\S]*?)<\/mj-button>/gi,
         (_match, attrs, inner) => {
-            const href = extractAttr(attrs, 'href') || '#';
-            const bgColor = extractAttr(attrs, 'background-color') || '#007bff';
-            const color = extractAttr(attrs, 'color') || '#ffffff';
-            const borderRadius = extractAttr(attrs, 'border-radius') || '4px';
-            const padding = extractAttr(attrs, 'inner-padding') || '12px 24px';
-            const fontSize = extractAttr(attrs, 'font-size') || '14px';
-            return `<table cellpadding="0" cellspacing="0" style="margin:10px 0"><tr><td style="background-color:${bgColor};border-radius:${borderRadius};padding:${padding}"><a href="${href}" style="color:${color};text-decoration:none;font-size:${fontSize};font-weight:bold;display:inline-block">${inner}</a></td></tr></table>`;
+            const href = sanitizeUrl(extractAttr(attrs, 'href') || '#');
+            const bgColor = sanitizeAttr(extractAttr(attrs, 'background-color') || '#007bff');
+            const color = sanitizeAttr(extractAttr(attrs, 'color') || '#ffffff');
+            const borderRadius = sanitizeAttr(extractAttr(attrs, 'border-radius') || '4px');
+            const padding = sanitizeAttr(extractAttr(attrs, 'inner-padding') || '12px 24px');
+            const fontSize = sanitizeAttr(extractAttr(attrs, 'font-size') || '14px');
+            // Inner content is typically user-provided button text - escape it
+            const safeInner = escapeHtml(inner);
+            return `<table cellpadding="0" cellspacing="0" style="margin:10px 0"><tr><td style="background-color:${bgColor};border-radius:${borderRadius};padding:${padding}"><a href="${href}" style="color:${color};text-decoration:none;font-size:${fontSize};font-weight:bold;display:inline-block">${safeInner}</a></td></tr></table>`;
         }
     );
     
     // Convert MJML images
+    // SECURITY: Sanitize src and href to prevent XSS, escape alt text
     content = content.replace(
         /<mj-image([^>]*)\/?>/gi,
         (_match, attrs) => {
-            const src = extractAttr(attrs, 'src') || '';
-            const alt = extractAttr(attrs, 'alt') || '';
-            const width = extractAttr(attrs, 'width') || 'auto';
-            const align = extractAttr(attrs, 'align') || 'center';
+            const src = sanitizeUrl(extractAttr(attrs, 'src') || '');
+            const alt = sanitizeAttr(extractAttr(attrs, 'alt') || '');
+            const width = sanitizeAttr(extractAttr(attrs, 'width') || 'auto');
+            const align = sanitizeAttr(extractAttr(attrs, 'align') || 'center');
             const href = extractAttr(attrs, 'href');
             const img = `<img src="${src}" alt="${alt}" style="max-width:${width};width:100%;display:block;margin:0 auto" />`;
             if (href) {
-                return `<div style="text-align:${align}"><a href="${href}">${img}</a></div>`;
+                const safeHref = sanitizeUrl(href);
+                return `<div style="text-align:${align}"><a href="${safeHref}">${img}</a></div>`;
             }
             return `<div style="text-align:${align}">${img}</div>`;
         }
@@ -140,7 +214,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     content = content.replace(
         /<mj-spacer([^>]*)\/?>/gi,
         (_match, attrs) => {
-            const height = extractAttr(attrs, 'height') || '20px';
+            const height = sanitizeAttr(extractAttr(attrs, 'height') || '20px');
             return `<div style="height:${height}"></div>`;
         }
     );
@@ -153,17 +227,20 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
         }
     );
     
+    // SECURITY: Sanitize social element URLs and text
     content = content.replace(
         /<mj-social-element([^>]*)>([\s\S]*?)<\/mj-social-element>/gi,
         (_match, attrs, inner) => {
-            const href = extractAttr(attrs, 'href') || '#';
+            const href = sanitizeUrl(extractAttr(attrs, 'href') || '#');
             const src = extractAttr(attrs, 'src') || '';
-            const name = extractAttr(attrs, 'name') || '';
-            const iconSize = extractAttr(attrs, 'icon-size') || '24px';
+            const name = sanitizeAttr(extractAttr(attrs, 'name') || '');
+            const iconSize = sanitizeAttr(extractAttr(attrs, 'icon-size') || '24px');
             
             // Use inline SVG icons for common social networks
-            const icon = src || getSocialIcon(name);
-            return `<a href="${href}" style="display:inline-block;margin:0 8px;text-decoration:none"><img src="${icon}" alt="${inner || name}" style="width:${iconSize};height:${iconSize}" /></a>`;
+            // SECURITY: getSocialIcon returns safe, predefined URLs
+            const icon = src ? sanitizeUrl(src) : getSocialIcon(name);
+            const safeAlt = sanitizeAttr(inner || name);
+            return `<a href="${href}" style="display:inline-block;margin:0 8px;text-decoration:none"><img src="${icon}" alt="${safeAlt}" style="width:${iconSize};height:${iconSize}" /></a>`;
         }
     );
     

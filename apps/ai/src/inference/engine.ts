@@ -140,6 +140,8 @@ export class InferenceEngine extends EventEmitter {
     private metrics: ModelMetrics;
     private status: ModelStatus = 'unloaded';
     private loadedAt: Date | null = null;
+    // AI-006 FIX: Loading lock to prevent concurrent model loads
+    private loadingPromise: Promise<void> | null = null;
 
     constructor(config?: Partial<InferenceConfig>) {
         super();
@@ -155,9 +157,36 @@ export class InferenceEngine extends EventEmitter {
 
     /**
      * Load the ONNX model into memory
+     * AI-006 FIX: Uses loading lock to prevent concurrent loads (race condition)
      */
     async loadModel(modelPath?: string): Promise<void> {
+        // AI-006 FIX: If already loading, return the existing promise to prevent race condition
+        if (this.loadingPromise) {
+            return this.loadingPromise;
+        }
+        
+        // AI-006 FIX: If already loaded, return immediately
+        if (this.status === 'ready' && this.session !== null) {
+            return;
+        }
+        
         const path = modelPath || this.config.modelPath;
+        
+        // AI-006 FIX: Create and store the loading promise
+        this.loadingPromise = this._doLoadModel(path);
+        
+        try {
+            await this.loadingPromise;
+        } finally {
+            // AI-006 FIX: Clear the loading promise when done (success or failure)
+            this.loadingPromise = null;
+        }
+    }
+    
+    /**
+     * AI-006 FIX: Internal method to perform actual model loading
+     */
+    private async _doLoadModel(path: string): Promise<void> {
         this.status = 'loading';
         this.emit('status', this.status);
 

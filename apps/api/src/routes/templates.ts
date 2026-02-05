@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { TemplatesRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 
 const createTemplateSchema = z.object({
   name: z.string().min(1).max(100),
@@ -36,7 +37,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   const auditRepo = new AuditLogsRepository(ctx.db);
 
   // Create template
-  router.post('/', async (c) => {
+  router.post('/', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -44,13 +45,9 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const input = createTemplateSchema.parse(body);
 
-    // Check for duplicate slug
-    if (input.slug) {
-      const existing = await templatesRepo.findBySlug(input.slug, tenantId);
-      if (existing.ok && existing.value) {
-        throw ApiError.conflict(`Template with slug '${input.slug}' already exists`, 'SLUG_EXISTS');
-      }
-    }
+    // RACE-001 FIX: Removed pre-check for duplicate slug - rely on database 
+    // unique constraint to prevent race conditions (TOCTOU vulnerability).
+    // The constraint UNIQUE(tenant_id, slug, version) ensures atomicity.
 
     const result = await templatesRepo.create({
       tenantId,
@@ -69,6 +66,12 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     });
 
     if (!result.ok) {
+      // Check for unique constraint violation (duplicate slug)
+      const errorMessage = result.error.message || '';
+      if (errorMessage.includes('unique') || errorMessage.includes('duplicate') || 
+          errorMessage.includes('23505') || errorMessage.includes('UNIQUE constraint')) {
+        throw ApiError.conflict(`Template with slug '${input.slug || input.name}' already exists`, 'SLUG_EXISTS');
+      }
       logger.error('Failed to create template', { error: result.error });
       throw ApiError.internal('Failed to create template');
     }
@@ -104,17 +107,18 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get template by ID
-  router.get('/:id', async (c) => {
+  router.get('/:id', requireScopes('templates:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
 
-    const result = await templatesRepo.findById(templateId);
+    // SECURITY: Filter by tenant_id in query to prevent fetch-before-check vulnerability
+    const result = await templatesRepo.findById(templateId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch template');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Template');
     }
 
@@ -144,7 +148,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get template by slug
-  router.get('/slug/:slug', async (c) => {
+  router.get('/slug/:slug', requireScopes('templates:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const slug = c.req.param('slug');
 
@@ -184,7 +188,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // List templates
-  router.get('/', async (c) => {
+  router.get('/', requireScopes('templates:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const category = c.req.query('category');
     const isActive = c.req.query('active');
@@ -230,7 +234,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Update template
-  router.patch('/:id', async (c) => {
+  router.patch('/:id', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const templateId = c.req.param('id');
@@ -302,7 +306,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Publish template
-  router.post('/:id/publish', async (c) => {
+  router.post('/:id/publish', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const templateId = c.req.param('id');
@@ -344,7 +348,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get template versions
-  router.get('/:id/versions', async (c) => {
+  router.get('/:id/versions', requireScopes('templates:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
 
@@ -373,7 +377,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get specific version
-  router.get('/:id/versions/:version', async (c) => {
+  router.get('/:id/versions/:version', requireScopes('templates:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
     const version = parseInt(c.req.param('version'), 10);
@@ -415,7 +419,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Rollback to version
-  router.post('/:id/rollback/:version', async (c) => {
+  router.post('/:id/rollback/:version', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const templateId = c.req.param('id');
@@ -462,7 +466,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Render template (preview)
-  router.post('/:id/render', async (c) => {
+  router.post('/:id/render', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
 
@@ -497,7 +501,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Duplicate template
-  router.post('/:id/duplicate', async (c) => {
+  router.post('/:id/duplicate', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const templateId = c.req.param('id');
@@ -543,7 +547,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Delete template
-  router.delete('/:id', async (c) => {
+  router.delete('/:id', requireScopes('templates:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const templateId = c.req.param('id');

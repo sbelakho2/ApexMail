@@ -4,26 +4,29 @@ import { ApexMail, ValidationError, AuthenticationError, RateLimitError, ApexMai
 // Mock fetch
 const mockFetch = vi.fn();
 
+// Valid test API key (32+ alphanumeric chars after am_test_)
+const VALID_TEST_KEY = 'am_test_abcdefghij1234567890abcdefghij1234567890';
+
 describe('ApexMail SDK', () => {
     let client: ApexMail;
 
     beforeEach(() => {
         mockFetch.mockReset();
         client = new ApexMail({
-            apiKey: 'am_test_xxxxxxxxxxxx',
+            apiKey: VALID_TEST_KEY,
             fetch: mockFetch as unknown as typeof fetch,
         });
     });
 
     describe('Constructor', () => {
         it('should accept API key string', () => {
-            const sdk = new ApexMail('am_test_key123');
+            const sdk = new ApexMail(VALID_TEST_KEY);
             expect(sdk).toBeInstanceOf(ApexMail);
         });
 
         it('should accept config object', () => {
             const sdk = new ApexMail({
-                apiKey: 'am_test_key123',
+                apiKey: VALID_TEST_KEY,
                 baseUrl: 'https://custom.api.com',
                 timeout: 5000,
             });
@@ -39,7 +42,7 @@ describe('ApexMail SDK', () => {
         });
 
         it('should expose all resource APIs', () => {
-            const sdk = new ApexMail('am_test_key');
+            const sdk = new ApexMail(VALID_TEST_KEY);
             expect(sdk.emails).toBeDefined();
             expect(sdk.domains).toBeDefined();
             expect(sdk.apiKeys).toBeDefined();
@@ -69,7 +72,7 @@ describe('ApexMail SDK', () => {
                 expect.objectContaining({
                     method: 'POST',
                     headers: expect.objectContaining({
-                        'Authorization': 'Bearer am_test_xxxxxxxxxxxx',
+                        'Authorization': `Bearer ${VALID_TEST_KEY}`,
                         'Content-Type': 'application/json',
                     }),
                 })
@@ -349,12 +352,18 @@ describe('ApexMail SDK', () => {
         });
 
         it('should throw RateLimitError on 429 with retryAfter', async () => {
-            mockFetch.mockResolvedValueOnce({
+            // Mock 4 responses (initial + 3 retries) since SDK has retry logic
+            const mockResponse = {
                 ok: false,
                 status: 429,
-                headers: new Map([['Retry-After', '60']]),
+                headers: { get: (name: string) => name === 'Retry-After' ? '1' : null },
                 json: async () => ({ message: 'Rate limited' }),
-            });
+            };
+            mockFetch
+                .mockResolvedValueOnce(mockResponse)
+                .mockResolvedValueOnce(mockResponse)
+                .mockResolvedValueOnce(mockResponse)
+                .mockResolvedValueOnce(mockResponse);
 
             try {
                 await client.emails.send({
@@ -363,11 +372,12 @@ describe('ApexMail SDK', () => {
                     subject: 'Test',
                     html: '<p>Hi</p>',
                 });
+                expect.fail('Expected RateLimitError to be thrown');
             } catch (error) {
                 expect(error).toBeInstanceOf(RateLimitError);
-                expect((error as RateLimitError).retryAfter).toBe(60);
+                expect((error as RateLimitError).retryAfter).toBe(1);
             }
-        });
+        }, 15000); // Increase timeout for retries
 
         it('should throw ApexMailError on other errors', async () => {
             mockFetch.mockResolvedValueOnce({

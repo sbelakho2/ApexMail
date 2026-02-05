@@ -118,7 +118,8 @@ export const config: Config = {
     })(),
     dataKeyRotationDays: parseInt(getEnv('DATA_KEY_ROTATION_DAYS', '90')),
     auditRetentionDays: parseInt(getEnv('AUDIT_RETENTION_DAYS', '365')),
-    sessionTimeoutMinutes: parseInt(getEnv('SESSION_TIMEOUT_MINUTES', '60')),
+    // SOC2-001 FIX: Changed from 60 to 30 minutes for SOC2 compliance
+    sessionTimeoutMinutes: parseInt(getEnv('SESSION_TIMEOUT_MINUTES', '30')),
   },
 
   cors: {

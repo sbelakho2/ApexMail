@@ -2,18 +2,29 @@
  * Encryption Service
  * 
  * Data encryption at rest:
- * - Field-level encryption
+ * - Field-level encryption using AES-256-GCM (authenticated encryption)
  * - Key management
  * - Key rotation
  * - Encrypted storage
+ * 
+ * SECURITY FIXES:
+ * - Replaced CBC mode with GCM mode for authenticated encryption
+ * - Added proper IV/nonce handling
+ * - Uses Node.js crypto module instead of CryptoJS for better security
  */
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
-import CryptoJS from 'crypto-js';
+import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { Result } from '@apexmail/lib';
 import { config } from '../config.js';
+
+// AES-256-GCM constants
+const ALGORITHM = 'aes-256-gcm';
+const KEY_LENGTH = 32; // 256 bits
+const IV_LENGTH = 12;  // 96 bits (recommended for GCM)
+const AUTH_TAG_LENGTH = 16; // 128 bits
 
 export interface EncryptionKey {
   id: string;
@@ -31,6 +42,7 @@ export interface EncryptedField {
   keyId: string;
   algorithm: string;
   iv: string;
+  authTag: string; // Added for GCM authentication
 }
 
 export interface EncryptionPolicy {
@@ -42,6 +54,17 @@ export interface EncryptionPolicy {
   keyRotationDays: number;
 }
 
+/**
+ * Derive a key from the master key using HKDF for proper key derivation
+ * SECURITY: Uses HKDF instead of raw key material
+ */
+function deriveKey(masterKey: string, salt: Buffer, info: string): Buffer {
+  // Use HKDF to derive a proper AES key from the master key
+  const ikm = Buffer.from(masterKey, 'utf-8');
+  const derivedKey = crypto.hkdfSync('sha256', ikm, salt, info, KEY_LENGTH);
+  return Buffer.from(derivedKey);
+}
+
 export class EncryptionService {
   private db: Pool;
   // @ts-expect-error - reserved for future caching
@@ -49,11 +72,18 @@ export class EncryptionService {
   private masterKey: string;
   private activeKeys: Map<string, EncryptionKey> = new Map();
   private policies: Map<string, EncryptionPolicy> = new Map();
+  
+  // Salt for master key derivation (should be stored securely in production)
+  private masterSalt: Buffer;
 
   constructor(db: Pool, redis: Redis) {
     this.db = db;
     this._redis = redis;
     this.masterKey = config.security.encryptionKey;
+    
+    // SECURITY: Generate a consistent salt from the master key for key derivation
+    // In production, this should be stored separately
+    this.masterSalt = crypto.createHash('sha256').update(this.masterKey + '-salt').digest().subarray(0, 16);
   }
 
   /**
@@ -66,7 +96,57 @@ export class EncryptionService {
     // Check for key rotation needs
     await this.checkKeyRotation();
 
-    console.log('[Encryption] Service initialized');
+    console.log('[Encryption] Service initialized with AES-256-GCM');
+  }
+
+  /**
+   * Encrypt the data key with the master key using AES-256-GCM
+   * SECURITY: Uses authenticated encryption for key wrapping
+   */
+  private encryptDataKey(rawKey: Buffer): string {
+    const derivedMasterKey = deriveKey(this.masterKey, this.masterSalt, 'data-key-encryption');
+    const iv = crypto.randomBytes(IV_LENGTH);
+    
+    const cipher = crypto.createCipheriv(ALGORITHM, derivedMasterKey, iv, {
+      authTagLength: AUTH_TAG_LENGTH,
+    });
+    
+    const encrypted = Buffer.concat([cipher.update(rawKey), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    
+    // Format: iv:authTag:ciphertext (all base64)
+    return `${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted.toString('base64')}`;
+  }
+
+  /**
+   * Decrypt the data key with the master key using AES-256-GCM
+   * SECURITY: Uses authenticated encryption for key unwrapping
+   */
+  private decryptDataKey(encryptedKey: string): Buffer {
+    const parts = encryptedKey.split(':');
+    
+    if (parts.length !== 3) {
+      throw new Error('Invalid encrypted key format');
+    }
+    
+    // Ensure parts exist before converting to Buffer
+    if (!parts[0] || !parts[1] || !parts[2]) {
+      throw new Error('Encrypted key has missing components');
+    }
+    
+    const iv = Buffer.from(parts[0], 'base64');
+    const authTag = Buffer.from(parts[1], 'base64');
+    const encrypted = Buffer.from(parts[2], 'base64');
+    
+    const derivedMasterKey = deriveKey(this.masterKey, this.masterSalt, 'data-key-encryption');
+    
+    const decipher = crypto.createDecipheriv(ALGORITHM, derivedMasterKey, iv, {
+      authTagLength: AUTH_TAG_LENGTH,
+    });
+    decipher.setAuthTag(authTag);
+    
+    const decryptedParts = [decipher.update(encrypted), decipher.final()];
+    return Buffer.concat(decryptedParts);
   }
 
   /**
@@ -77,11 +157,11 @@ export class EncryptionService {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + config.security.dataKeyRotationDays * 24 * 60 * 60 * 1000);
 
-    // Generate random key
-    const rawKey = CryptoJS.lib.WordArray.random(32).toString();
+    // SECURITY: Generate cryptographically secure random key
+    const rawKey = crypto.randomBytes(KEY_LENGTH);
     
-    // Encrypt with master key
-    const encryptedKey = CryptoJS.AES.encrypt(rawKey, this.masterKey).toString();
+    // Encrypt with master key using authenticated encryption
+    const encryptedKey = this.encryptDataKey(rawKey);
 
     // Get next version
     const versionResult = await this.db.query(`
@@ -129,7 +209,8 @@ export class EncryptionService {
   }
 
   /**
-   * Encrypt a value
+   * Encrypt a value using AES-256-GCM (authenticated encryption)
+   * SECURITY: Uses GCM mode which provides both confidentiality and integrity
    */
   async encrypt(organizationId: string, plaintext: string): Promise<Result<EncryptedField>> {
     // Get active key for organization
@@ -147,34 +228,39 @@ export class EncryptionService {
     const key = activeKeyResult.value;
 
     try {
-      // Decrypt the data key
-      const decryptedKey = CryptoJS.AES.decrypt(key.encryptedKey, this.masterKey).toString(CryptoJS.enc.Utf8);
+      // Decrypt the data key using authenticated decryption
+      const decryptedKey = this.decryptDataKey(key.encryptedKey);
 
-      // Generate IV
-      const iv = CryptoJS.lib.WordArray.random(16).toString();
+      // Generate cryptographically secure IV (nonce) for GCM
+      const iv = crypto.randomBytes(IV_LENGTH);
+
+      // Create cipher with AES-256-GCM
+      const cipher = crypto.createCipheriv(ALGORITHM, decryptedKey, iv, {
+        authTagLength: AUTH_TAG_LENGTH,
+      });
 
       // Encrypt the data
-      const ciphertext = CryptoJS.AES.encrypt(plaintext, decryptedKey, {
-        iv: CryptoJS.enc.Hex.parse(iv),
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7,
-      }).toString();
+      const plaintextBuffer = Buffer.from(plaintext, 'utf-8');
+      const encrypted = Buffer.concat([cipher.update(plaintextBuffer), cipher.final()]);
+      const authTag = cipher.getAuthTag();
 
-      const encrypted: EncryptedField = {
-        ciphertext,
+      const encryptedField: EncryptedField = {
+        ciphertext: encrypted.toString('base64'),
         keyId: key.id,
-        algorithm: key.algorithm,
-        iv,
+        algorithm: 'AES-256-GCM',
+        iv: iv.toString('base64'),
+        authTag: authTag.toString('base64'),
       };
 
-      return { ok: true, value: encrypted };
+      return { ok: true, value: encryptedField };
     } catch (error) {
       return { ok: false, error: error as Error };
     }
   }
 
   /**
-   * Decrypt a value
+   * Decrypt a value using AES-256-GCM (authenticated decryption)
+   * SECURITY: Verifies authentication tag to detect tampering
    */
   async decrypt(encrypted: EncryptedField): Promise<Result<string>> {
     // Get the key used for encryption
@@ -182,21 +268,38 @@ export class EncryptionService {
     if (!keyResult.ok) return keyResult;
 
     try {
-      // Decrypt the data key
-      const decryptedKey = CryptoJS.AES.decrypt(
-        keyResult.value.encryptedKey,
-        this.masterKey
-      ).toString(CryptoJS.enc.Utf8);
+      // Decrypt the data key using authenticated decryption
+      const decryptedKey = this.decryptDataKey(keyResult.value.encryptedKey);
 
-      // Decrypt the data
-      const plaintext = CryptoJS.AES.decrypt(encrypted.ciphertext, decryptedKey, {
-        iv: CryptoJS.enc.Hex.parse(encrypted.iv),
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7,
-      }).toString(CryptoJS.enc.Utf8);
+      // Parse the encrypted components
+      if (!encrypted.iv || !encrypted.ciphertext) {
+        return { ok: false, error: new Error('Missing required encryption parameters') };
+      }
+      const iv = Buffer.from(encrypted.iv, 'base64');
+      const ciphertext = Buffer.from(encrypted.ciphertext, 'base64');
+      
+      // SECURITY: Require auth tag for GCM mode
+      if (!encrypted.authTag) {
+        return { ok: false, error: new Error('Missing authentication tag - data may have been tampered with') };
+      }
+      const authTag = Buffer.from(encrypted.authTag, 'base64');
+
+      // Create decipher with AES-256-GCM
+      const decipher = crypto.createDecipheriv(ALGORITHM, decryptedKey, iv, {
+        authTagLength: AUTH_TAG_LENGTH,
+      });
+      decipher.setAuthTag(authTag);
+
+      // Decrypt the data (authentication is verified automatically)
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      const plaintext = decrypted.toString('utf-8');
 
       return { ok: true, value: plaintext };
     } catch (error) {
+      // GCM mode will throw if authentication fails (tampering detected)
+      if (error instanceof Error && error.message.includes('Unsupported state or unable to authenticate')) {
+        return { ok: false, error: new Error('Decryption failed - data may have been tampered with') };
+      }
       return { ok: false, error: error as Error };
     }
   }
@@ -372,14 +475,14 @@ export class EncryptionService {
    */
   hash(value: string, salt?: string): string {
     const toHash = salt ? `${salt}:${value}` : value;
-    return CryptoJS.SHA256(toHash).toString();
+    return crypto.createHash('sha256').update(toHash).digest('hex');
   }
 
   /**
    * Generate a secure random token
    */
   generateToken(length: number = 32): string {
-    return CryptoJS.lib.WordArray.random(length).toString();
+    return crypto.randomBytes(length).toString('hex');
   }
 
   // ==================== Private Methods ====================

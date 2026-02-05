@@ -13,9 +13,10 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { DomainsRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 import { generateDKIMKeyPair } from '@apexmail/lib/crypto';
-import { verifyMTASTS, generateMTASTSPolicy, generateMTASTSDNSRecord, verifyTLSRPT, generateTLSRPTRecord } from '../../mta/src/auth/mta-sts.js';
-import { verifyBIMI, getBIMISetupInstructions, validateBIMILogo } from '../../mta/src/auth/bimi.js';
+import { verifyMTASTS, generateMTASTSPolicy, generateMTASTSDNSRecord, verifyTLSRPT, generateTLSRPTRecord } from '../../../mta/dist/auth/mta-sts.js';
+import { verifyBIMI, getBIMISetupInstructions, validateBIMILogo } from '../../../mta/dist/auth/bimi.js';
 
 const addDomainSchema = z.object({
   domain: z.string()
@@ -31,7 +32,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   const auditRepo = new AuditLogsRepository(ctx.db);
 
   // Add a new domain
-  router.post('/', async (c) => {
+  router.post('/', requireScopes('domains:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -39,11 +40,9 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const { domain, verificationMethod } = addDomainSchema.parse(body);
 
-    // Check if domain already exists for this tenant
-    const existing = await domainsRepo.findByDomain(domain, tenantId);
-    if (existing.ok && existing.value) {
-      throw ApiError.conflict(`Domain ${domain} already exists`, 'DOMAIN_EXISTS');
-    }
+    // RACE-002 FIX: Removed pre-check for duplicate domain - rely on database 
+    // unique constraint to prevent race conditions (TOCTOU vulnerability).
+    // The database has a UNIQUE constraint on (tenant_id, domain).
 
     // Create the domain
     const result = await domainsRepo.create({
@@ -53,6 +52,12 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     });
 
     if (!result.ok) {
+      // Check for unique constraint violation (duplicate domain)
+      const errorMessage = result.error.message || '';
+      if (errorMessage.includes('unique') || errorMessage.includes('duplicate') || 
+          errorMessage.includes('23505') || errorMessage.includes('UNIQUE constraint')) {
+        throw ApiError.conflict(`Domain ${domain} already exists`, 'DOMAIN_EXISTS');
+      }
       logger.error('Failed to create domain', { error: result.error });
       throw ApiError.internal('Failed to add domain');
     }
@@ -118,7 +123,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get domain by ID
-  router.get('/:id', async (c) => {
+  router.get('/:id', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -154,7 +159,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // List domains
-  router.get('/', async (c) => {
+  router.get('/', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const status = c.req.query('status') as 'pending' | 'verified' | 'failed' | 'expired' | undefined;
     const limit = parseInt(c.req.query('limit') ?? '50', 10);
@@ -189,7 +194,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Verify domain
-  router.post('/:id/verify', async (c) => {
+  router.post('/:id/verify', requireScopes('domains:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const domainId = c.req.param('id');
@@ -252,7 +257,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Check DNS health
-  router.get('/:id/health', async (c) => {
+  router.get('/:id/health', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -285,7 +290,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Delete domain
-  router.delete('/:id', async (c) => {
+  router.delete('/:id', requireScopes('domains:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const domainId = c.req.param('id');
@@ -327,7 +332,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get DNS records for domain
-  router.get('/:id/dns-records', async (c) => {
+  router.get('/:id/dns-records', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -360,7 +365,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
    * MTA-STS ensures TLS is enforced (not opportunistic) for email delivery
    * @see RFC 8461
    */
-  router.get('/:id/mta-sts', async (c) => {
+  router.get('/:id/mta-sts', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -407,7 +412,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
    * BIMI displays sender brand logo in supporting email clients
    * @see https://bimigroup.org
    */
-  router.get('/:id/bimi', async (c) => {
+  router.get('/:id/bimi', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -442,7 +447,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
    * Validate a BIMI logo SVG file
    * Checks compliance with SVG Tiny PS requirements
    */
-  router.post('/:id/bimi/validate-logo', async (c) => {
+  router.post('/:id/bimi/validate-logo', requireScopes('domains:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -475,7 +480,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
    * Companion to MTA-STS for receiving TLS connection reports
    * @see RFC 8460
    */
-  router.get('/:id/tlsrpt', async (c) => {
+  router.get('/:id/tlsrpt', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
@@ -509,7 +514,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
    * Get comprehensive authentication status for a domain
    * Checks SPF, DKIM, DMARC, MTA-STS, BIMI, and TLSRPT
    */
-  router.get('/:id/auth-status', async (c) => {
+  router.get('/:id/auth-status', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 

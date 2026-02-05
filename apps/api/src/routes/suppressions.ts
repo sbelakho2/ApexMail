@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
 import { SuppressionsRepository, AuditLogsRepository, type SuppressionType, type SuppressionScope } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
+import { requireScopes } from '../middleware/auth.js';
 import { sha256 } from '@apexmail/lib/crypto';
 
 const addSuppressionSchema = z.object({
@@ -40,7 +41,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   const auditRepo = new AuditLogsRepository(ctx.db);
 
   // Add suppression
-  router.post('/', async (c) => {
+  router.post('/', requireScopes('suppressions:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -240,7 +241,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // List suppressions
-  router.get('/', async (c) => {
+  router.get('/', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const type = c.req.query('reason') as SuppressionType | undefined; // reason maps to type
     const scope = c.req.query('scope') as SuppressionScope | undefined;
@@ -342,7 +343,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Remove suppression by ID
-  router.delete('/:id', async (c) => {
+  router.delete('/:id', requireScopes('suppressions:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const suppressionId = c.req.param('id');

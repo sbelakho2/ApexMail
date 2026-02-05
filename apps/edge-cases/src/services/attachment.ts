@@ -258,6 +258,7 @@ export class AttachmentService {
 
   /**
    * Scan content for viruses using ClamAV
+   * SECURITY FIX: Scan failures must NOT return clean - treat as unknown/fail
    */
   private async scanForVirus(content: Buffer): Promise<VirusScanResult> {
     const startTime = Date.now();
@@ -269,20 +270,24 @@ export class AttachmentService {
 
         socket.setTimeout(config.clamav.timeout);
 
+        // SECURITY FIX: Timeout = scan failed, NOT clean
         socket.on('timeout', () => {
           socket.destroy();
           resolve({
-            isClean: true,
+            isClean: false,  // CHANGED: false = assume unsafe on failure
             scanTime: Date.now() - startTime,
-            error: 'Scan timeout',
+            error: 'Scan timeout - treating as potentially unsafe',
+            virusName: 'SCAN_TIMEOUT',
           });
         });
 
+        // SECURITY FIX: Error = scan failed, NOT clean
         socket.on('error', (err) => {
           resolve({
-            isClean: true,
+            isClean: false,  // CHANGED: false = assume unsafe on failure
             scanTime: Date.now() - startTime,
-            error: err.message,
+            error: `Scan error - treating as potentially unsafe: ${err.message}`,
+            virusName: 'SCAN_ERROR',
           });
         });
 
@@ -326,10 +331,13 @@ export class AttachmentService {
         });
       });
     } catch (error) {
+      // EDGE-001 & EDGE-002 FIX: Scan failures must NOT return clean
+      // Treat any scan error as potentially unsafe to prevent malware bypass
       return {
-        isClean: true,
+        isClean: false,  // CRITICAL: Never assume clean on error
         scanTime: Date.now() - startTime,
-        error: error instanceof Error ? error.message : String(error),
+        error: `Scan failed - treating as potentially unsafe: ${error instanceof Error ? error.message : String(error)}`,
+        virusName: 'SCAN_FAILURE',
       };
     }
   }

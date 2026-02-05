@@ -296,7 +296,7 @@ export class EngagementTrustService {
    */
   private generateInterpretation(
     score: number,
-    engagement: SubscriberEngagement
+    _engagement: SubscriberEngagement
   ): string {
     if (score >= 85) {
       return 'This subscriber has high trust in your brand. They engage regularly, provide feedback, and value your communications.';

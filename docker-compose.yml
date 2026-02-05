@@ -1,14 +1,11 @@
 # =============================================================================
-# ApexMail Docker Compose - Production Deployment
+# ApexMail Docker Compose - Development Deployment
 # =============================================================================
-# This compose file provides a complete production-ready deployment including:
-# - API Server (port 3000)
-# - Worker (email sending, webhooks, analytics)
-# - Tracking Server (port 3001)
-# - PostgreSQL Database
-# - Redis for queues and caching
-# - Prometheus for metrics
-# - Mailpit (development SMTP server)
+# WARNING: This configuration is for DEVELOPMENT only.
+# For production, use docker-compose.prod.yml which:
+# - Requires all secrets to be set via environment variables
+# - Does not expose database ports to host
+# - Uses proper resource limits
 #
 # Usage:
 #   Development: docker-compose up -d
@@ -26,14 +23,18 @@ services:
     container_name: apexmail-postgres
     restart: unless-stopped
     environment:
+      # SECURITY: In production, POSTGRES_PASSWORD must be set via environment
+      # Never use default values in production!
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apexmail_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./tools/migrations:/docker-entrypoint-initdb.d:ro
+    # SECURITY: Port exposure controlled via environment variable
+    # Set to empty in production to disable host binding
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d ${POSTGRES_DB:-apexmail}"]
       interval: 10s
@@ -41,6 +42,13 @@ services:
       retries: 5
     networks:
       - apexmail
+    # SECURITY: Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
 
   # ===========================================================================
   # REDIS
@@ -49,18 +57,31 @@ services:
     image: redis:7-alpine
     container_name: apexmail-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # SECURITY: Enable password authentication
+    command: >
+      redis-server 
+      --appendonly yes 
+      --maxmemory 256mb 
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
       - redis_data:/data
+    # SECURITY: Port exposure controlled via environment variable
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "${REDIS_PASSWORD:+-a ${REDIS_PASSWORD}}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - apexmail
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # ===========================================================================
   # API SERVER
@@ -79,15 +100,22 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3000
-      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:-apexmail_dev_password}@postgres:5432/${POSTGRES_DB:-apexmail}
-      REDIS_URL: redis://redis:6379
-      JWT_SECRET: ${JWT_SECRET:-change-this-in-production}
-      API_KEY_SECRET: ${API_KEY_SECRET:-change-this-in-production}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
+      # SECURITY: These secrets MUST be set in production
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      API_KEY_SECRET: ${API_KEY_SECRET:?API_KEY_SECRET must be set}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost:3001}
     ports:
       - "${API_PORT:-3000}:3000"
     networks:
       - apexmail
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
 
   # ===========================================================================
   # WORKER
@@ -105,8 +133,8 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:-apexmail_dev_password}@postgres:5432/${POSTGRES_DB:-apexmail}
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
       # SMTP Configuration
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
@@ -130,6 +158,12 @@ services:
       - "${WORKER_METRICS_PORT:-9090}:9090"
     networks:
       - apexmail
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
 
   # ===========================================================================
   # TRACKING SERVER
@@ -148,18 +182,25 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: 3001
-      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD:-apexmail_dev_password}@postgres:5432/${POSTGRES_DB:-apexmail}
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}
+      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
     ports:
       - "${TRACKING_PORT:-3001}:3001"
     networks:
       - apexmail
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # ===========================================================================
   # DEVELOPMENT SMTP (Mailpit)
   # ===========================================================================
   mailpit:
-    image: axllent/mailpit:latest
+    # SECURITY: Pin to specific version to ensure reproducible builds
+    image: axllent/mailpit:v1.21
     container_name: apexmail-mailpit
     restart: unless-stopped
     ports:
@@ -177,7 +218,8 @@ services:
   # PROMETHEUS (Optional metrics collection)
   # ===========================================================================
   prometheus:
-    image: prom/prometheus:latest
+    # SECURITY: Pin to specific version to ensure reproducible builds
+    image: prom/prometheus:v2.54.1
     container_name: apexmail-prometheus
     restart: unless-stopped
     volumes:
@@ -198,7 +240,8 @@ services:
   # GRAFANA (Optional dashboards)
   # ===========================================================================
   grafana:
-    image: grafana/grafana:latest
+    # SECURITY: Pin to specific version to ensure reproducible builds
+    image: grafana/grafana:11.3.0
     container_name: apexmail-grafana
     restart: unless-stopped
     depends_on:
@@ -206,15 +249,24 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
+      # SECURITY: Set GRAFANA_PASSWORD in production - no weak defaults
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: false
+      GF_SECURITY_DISABLE_GRAVATAR: true
+      GF_ANALYTICS_REPORTING_ENABLED: false
     ports:
-      - "${GRAFANA_PORT:-3002}:3000"
+      - "${GRAFANA_PORT:-127.0.0.1:3002}:3000"
     networks:
       - apexmail
     profiles:
       - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
 # ===========================================================================
 # VOLUMES
