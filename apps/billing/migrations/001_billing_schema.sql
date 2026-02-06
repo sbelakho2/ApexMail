@@ -27,7 +27,7 @@ CREATE INDEX idx_plans_active ON plans(is_active);
 -- Plan overrides (admin-applied)
 CREATE TABLE IF NOT EXISTS plan_overrides (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     plan_id UUID NOT NULL REFERENCES plans(id),
     reason TEXT NOT NULL,
     admin_id UUID NOT NULL,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS plan_overrides (
 -- Stripe customers
 CREATE TABLE IF NOT EXISTS stripe_customers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     stripe_customer_id VARCHAR(255) UNIQUE NOT NULL,
     email VARCHAR(255),
     name VARCHAR(255),
@@ -55,7 +55,7 @@ CREATE INDEX idx_stripe_customers_stripe_id ON stripe_customers(stripe_customer_
 -- Stripe subscriptions
 CREATE TABLE IF NOT EXISTS stripe_subscriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     stripe_subscription_id VARCHAR(255) UNIQUE NOT NULL,
     stripe_customer_id VARCHAR(255) NOT NULL,
     plan_id UUID REFERENCES plans(id),
@@ -95,7 +95,7 @@ CREATE INDEX idx_stripe_webhook_events_type ON stripe_webhook_events(event_type)
 -- Invoices
 CREATE TABLE IF NOT EXISTS invoices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     invoice_number VARCHAR(20) UNIQUE NOT NULL,
     stripe_invoice_id VARCHAR(255) UNIQUE,
     status VARCHAR(20) NOT NULL DEFAULT 'draft',
@@ -129,7 +129,7 @@ CREATE SEQUENCE IF NOT EXISTS invoice_number_seq START WITH 1;
 -- Metering events
 CREATE TABLE IF NOT EXISTS metering_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     event_type VARCHAR(50) NOT NULL,
     quantity BIGINT NOT NULL DEFAULT 1,
     period_key VARCHAR(10) NOT NULL,
@@ -145,7 +145,7 @@ CREATE INDEX idx_metering_events_recorded ON metering_events(recorded_at);
 -- Metering aggregates (daily rollups)
 CREATE TABLE IF NOT EXISTS metering_aggregates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     event_type VARCHAR(50) NOT NULL,
     period_date DATE NOT NULL,
     total_quantity BIGINT NOT NULL DEFAULT 0,
@@ -159,7 +159,7 @@ CREATE INDEX idx_metering_aggregates_date ON metering_aggregates(period_date);
 -- Usage alerts configuration
 CREATE TABLE IF NOT EXISTS usage_alert_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     metric_type VARCHAR(50) NOT NULL,
     threshold_percent INTEGER NOT NULL,
     notification_channel VARCHAR(20) NOT NULL DEFAULT 'email',
@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS usage_alert_configs (
 -- Usage alerts sent
 CREATE TABLE IF NOT EXISTS usage_alerts_sent (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     config_id UUID NOT NULL REFERENCES usage_alert_configs(id) ON DELETE CASCADE,
     period_key VARCHAR(10) NOT NULL,
     current_usage BIGINT NOT NULL,
@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS usage_alerts_sent (
 -- Dunning states
 CREATE TABLE IF NOT EXISTS dunning_states (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     dunning_state VARCHAR(30) NOT NULL DEFAULT 'healthy',
     amount_owed INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
@@ -208,7 +208,7 @@ CREATE INDEX idx_dunning_next_retry ON dunning_states(next_retry_at);
 -- Dunning history
 CREATE TABLE IF NOT EXISTS dunning_history (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     action VARCHAR(50) NOT NULL,
     details JSONB DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -219,7 +219,7 @@ CREATE INDEX idx_dunning_history_tenant ON dunning_history(tenant_id);
 -- SLA metrics
 CREATE TABLE IF NOT EXISTS sla_metrics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     period_month DATE NOT NULL,
     uptime_percent DECIMAL(6, 4) NOT NULL DEFAULT 100.0000,
     total_minutes INTEGER NOT NULL DEFAULT 0,
@@ -233,11 +233,11 @@ CREATE TABLE IF NOT EXISTS sla_metrics (
 -- SLA credits
 CREATE TABLE IF NOT EXISTS sla_credits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     period_month DATE NOT NULL,
-    breach_percent DECIMAL(6, 4) NOT NULL,
-    credit_percent DECIMAL(5, 2) NOT NULL,
-    credit_amount INTEGER NOT NULL,
+    breach_percent DECIMAL(6, 4) NOT NULL DEFAULT 0,
+    credit_percent DECIMAL(5, 2) NOT NULL DEFAULT 0,
+    credit_amount INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
     applied_at TIMESTAMPTZ,
@@ -251,7 +251,7 @@ CREATE INDEX idx_sla_credits_status ON sla_credits(status);
 -- Wallets
 CREATE TABLE IF NOT EXISTS wallets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     balance INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     reserved INTEGER NOT NULL DEFAULT 0,
@@ -263,12 +263,12 @@ CREATE TABLE IF NOT EXISTS wallets (
 -- Wallet transactions
 CREATE TABLE IF NOT EXISTS wallet_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
-    type VARCHAR(10) NOT NULL,
-    amount INTEGER NOT NULL,
-    balance_after INTEGER NOT NULL,
-    description TEXT NOT NULL,
+    type VARCHAR(10) NOT NULL DEFAULT 'credit',
+    amount INTEGER NOT NULL DEFAULT 0,
+    balance_after INTEGER NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
     reference VARCHAR(255),
     expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -280,13 +280,13 @@ CREATE INDEX idx_wallet_transactions_created ON wallet_transactions(created_at);
 -- Wallet reservations
 CREATE TABLE IF NOT EXISTS wallet_reservations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     wallet_id UUID NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
-    amount INTEGER NOT NULL,
-    description TEXT NOT NULL,
+    amount INTEGER NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
     reference VARCHAR(255),
     status VARCHAR(20) NOT NULL DEFAULT 'active',
-    expires_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours'),
     captured_at TIMESTAMPTZ,
     released_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -298,12 +298,12 @@ CREATE INDEX idx_wallet_reservations_expires ON wallet_reservations(expires_at);
 -- Enterprise contracts
 CREATE TABLE IF NOT EXISTS enterprise_contracts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     contract_number VARCHAR(30) UNIQUE NOT NULL,
     status VARCHAR(30) NOT NULL DEFAULT 'draft',
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
-    base_fee INTEGER NOT NULL,
+    base_fee INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     committed_volume JSONB NOT NULL DEFAULT '{}',
     overage_rates JSONB NOT NULL DEFAULT '{}',
@@ -344,10 +344,10 @@ CREATE INDEX idx_contract_amendments_contract ON contract_amendments(contract_id
 -- Purchase orders
 CREATE TABLE IF NOT EXISTS purchase_orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     contract_id UUID REFERENCES enterprise_contracts(id) ON DELETE SET NULL,
     po_number VARCHAR(100) NOT NULL,
-    amount INTEGER NOT NULL,
+    amount INTEGER NOT NULL DEFAULT 0,
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     issued_date DATE NOT NULL,
     expiry_date DATE,
@@ -362,7 +362,7 @@ CREATE INDEX idx_purchase_orders_contract ON purchase_orders(contract_id);
 -- Viral loop tracking
 CREATE TABLE IF NOT EXISTS viral_impressions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    referrer_tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    referrer_tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email_id UUID,
     recipient_domain VARCHAR(255) NOT NULL,
     ip_address INET,
@@ -377,7 +377,7 @@ CREATE INDEX idx_viral_impressions_created ON viral_impressions(created_at);
 CREATE TABLE IF NOT EXISTS viral_clicks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     impression_id UUID REFERENCES viral_impressions(id) ON DELETE SET NULL,
-    referrer_tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    referrer_tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     click_url TEXT NOT NULL,
     ip_address INET,
     user_agent TEXT,
@@ -389,8 +389,8 @@ CREATE INDEX idx_viral_clicks_referrer ON viral_clicks(referrer_tenant_id);
 -- Viral conversions
 CREATE TABLE IF NOT EXISTS viral_conversions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    referrer_tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    converted_tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    referrer_tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    converted_tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     click_id UUID REFERENCES viral_clicks(id) ON DELETE SET NULL,
     conversion_type VARCHAR(30) NOT NULL DEFAULT 'signup',
     attributed BOOLEAN NOT NULL DEFAULT FALSE,
@@ -407,7 +407,7 @@ CREATE INDEX idx_viral_conversions_attributed ON viral_conversions(attributed);
 -- Tenant costs
 CREATE TABLE IF NOT EXISTS tenant_costs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     recorded_at DATE NOT NULL,
     storage_gb DECIMAL(12, 4) NOT NULL DEFAULT 0,
     storage_cost INTEGER NOT NULL DEFAULT 0,
@@ -430,7 +430,7 @@ CREATE INDEX idx_tenant_costs_margin ON tenant_costs(margin_percent);
 -- Cost alerts
 CREATE TABLE IF NOT EXISTS cost_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     alert_type VARCHAR(30) NOT NULL,
     margin_percent DECIMAL(5, 2),
     details JSONB DEFAULT '{}',
@@ -444,10 +444,10 @@ CREATE INDEX idx_cost_alerts_unresolved ON cost_alerts(tenant_id) WHERE resolved
 -- Billing audit log
 CREATE TABLE IF NOT EXISTS billing_audit_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id VARCHAR(26) REFERENCES tenants(id) ON DELETE SET NULL,
     action VARCHAR(100) NOT NULL,
     actor_id UUID,
-    actor_type VARCHAR(20) NOT NULL,
+    actor_type VARCHAR(20) NOT NULL DEFAULT 'system',
     details JSONB DEFAULT '{}',
     ip_address INET,
     user_agent TEXT,

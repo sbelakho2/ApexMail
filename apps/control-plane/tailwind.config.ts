@@ -1,6 +1,7 @@
 import type { Config } from 'tailwindcss';
 
 const config: Config = {
+    darkMode: ['class'],
     content: [
         './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
         './src/components/**/*.{js,ts,jsx,tsx,mdx}',
@@ -11,38 +12,50 @@ const config: Config = {
             // Control Plane uses IDENTICAL design tokens as customer console
             // This enforces the "Theme Lock" requirement from checklist 6.5.3
             colors: {
-                border: 'hsl(var(--border))',
-                input: 'hsl(var(--input))',
-                ring: 'hsl(var(--ring))',
-                background: 'hsl(var(--background))',
-                foreground: 'hsl(var(--foreground))',
+                border: 'rgb(var(--border) / <alpha-value>)',
+                input: 'rgb(var(--input) / <alpha-value>)',
+                ring: 'rgb(var(--ring) / <alpha-value>)',
+                background: 'rgb(var(--background) / <alpha-value>)',
+                foreground: 'rgb(var(--foreground) / <alpha-value>)',
                 primary: {
-                    DEFAULT: 'hsl(var(--primary))',
-                    foreground: 'hsl(var(--primary-foreground))',
+                    DEFAULT: 'rgb(var(--primary) / <alpha-value>)',
+                    foreground: 'rgb(var(--primary-foreground) / <alpha-value>)',
                 },
                 secondary: {
-                    DEFAULT: 'hsl(var(--secondary))',
-                    foreground: 'hsl(var(--secondary-foreground))',
+                    DEFAULT: 'rgb(var(--secondary) / <alpha-value>)',
+                    foreground: 'rgb(var(--secondary-foreground) / <alpha-value>)',
                 },
                 destructive: {
-                    DEFAULT: 'hsl(var(--destructive))',
-                    foreground: 'hsl(var(--destructive-foreground))',
+                    DEFAULT: 'rgb(var(--destructive) / <alpha-value>)',
+                    foreground: 'rgb(var(--destructive-foreground) / <alpha-value>)',
                 },
                 muted: {
-                    DEFAULT: 'hsl(var(--muted))',
-                    foreground: 'hsl(var(--muted-foreground))',
+                    DEFAULT: 'rgb(var(--muted) / <alpha-value>)',
+                    foreground: 'rgb(var(--muted-foreground) / <alpha-value>)',
                 },
                 accent: {
-                    DEFAULT: 'hsl(var(--accent))',
-                    foreground: 'hsl(var(--accent-foreground))',
+                    DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
+                    foreground: 'rgb(var(--accent-foreground) / <alpha-value>)',
                 },
                 popover: {
-                    DEFAULT: 'hsl(var(--popover))',
-                    foreground: 'hsl(var(--popover-foreground))',
+                    DEFAULT: 'rgb(var(--popover) / <alpha-value>)',
+                    foreground: 'rgb(var(--popover-foreground) / <alpha-value>)',
                 },
                 card: {
-                    DEFAULT: 'hsl(var(--card))',
-                    foreground: 'hsl(var(--card-foreground))',
+                    DEFAULT: 'rgb(var(--card) / <alpha-value>)',
+                    foreground: 'rgb(var(--card-foreground) / <alpha-value>)',
+                },
+                success: {
+                    DEFAULT: 'rgb(var(--success-500) / <alpha-value>)',
+                    foreground: 'rgb(var(--success-100) / <alpha-value>)',
+                },
+                warning: {
+                    DEFAULT: 'rgb(var(--warning-500) / <alpha-value>)',
+                    foreground: 'rgb(var(--warning-100) / <alpha-value>)',
+                },
+                info: {
+                    DEFAULT: 'rgb(var(--info-500) / <alpha-value>)',
+                    foreground: 'rgb(var(--info-100) / <alpha-value>)',
                 },
                 surface: {
                     0: 'rgb(var(--surface-0) / <alpha-value>)',
@@ -59,14 +72,15 @@ const config: Config = {
                 },
                 // Control plane accent - subtle indicator this is admin UI
                 'control-plane': {
-                    DEFAULT: 'hsl(var(--control-plane))',
-                    foreground: 'hsl(var(--control-plane-foreground))',
+                    DEFAULT: 'rgb(var(--control-plane) / <alpha-value>)',
+                    foreground: 'rgb(var(--control-plane-foreground) / <alpha-value>)',
                 },
             },
             borderRadius: {
-                lg: 'var(--radius)',
-                md: 'calc(var(--radius) - 2px)',
-                sm: 'calc(var(--radius) - 4px)',
+                xl: 'var(--radius-xl)',
+                lg: 'var(--radius-lg)',
+                md: 'var(--radius-md)',
+                sm: 'var(--radius-sm)',
             },
         },
     },

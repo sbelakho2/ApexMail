@@ -10,6 +10,7 @@ import { MessagesRepository, EventsRepository, DomainsRepository, SuppressionsRe
 import { createTransport, type Transporter, type SentMessageInfo } from 'nodemailer';
 import { CircuitBreakerFactory } from '../circuit-breaker.js';
 import { IPRateLimiter } from '../services/ip-rate-limiter.js';
+import type { QueueNotifier } from '../queue-notifier.js';
 
 interface EmailProcessorConfig {
   db: Pool;
@@ -52,6 +53,7 @@ interface EmailProcessorConfig {
     enabled: boolean;
     ipAddress?: string; // The IP this worker sends from
   };
+  notifier?: QueueNotifier;
   logger: Logger;
 }
 
@@ -90,6 +92,7 @@ export class EmailProcessor {
   private readonly trackingConfig: EmailProcessorConfig['tracking'];
   private readonly warmupConfig: EmailProcessorConfig['warmup'];
   private readonly ipRateLimitingConfig: EmailProcessorConfig['ipRateLimiting'];
+  private readonly notifier: QueueNotifier | undefined;
   private readonly logger: Logger;
   
   private readonly messagesRepo: MessagesRepository;
@@ -106,6 +109,7 @@ export class EmailProcessor {
   private readonly warmupCounters = new Map<string, number>();
   // MEM-002 FIX: Store reference to warmup reset timer for cleanup
   private warmupResetTimer: NodeJS.Timeout | null = null;
+  private dkimRefreshTimer: NodeJS.Timeout | null = null;
 
   constructor(options: EmailProcessorConfig) {
     this.db = options.db;
@@ -117,6 +121,7 @@ export class EmailProcessor {
     this.trackingConfig = options.tracking;
     this.warmupConfig = options.warmup;
     this.ipRateLimitingConfig = options.ipRateLimiting;
+    this.notifier = options.notifier;
     this.logger = options.logger;
     
     // Create repositories using the DatabasePool
@@ -174,7 +179,7 @@ export class EmailProcessor {
       maxConnections: this.smtpConfig.maxConnections,
       maxMessages: this.smtpConfig.maxMessages,
       tls: {
-        rejectUnauthorized: process.env.NODE_ENV === 'production',
+        rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
       },
     } as Parameters<typeof createTransport>[0]);
 
@@ -190,6 +195,11 @@ export class EmailProcessor {
     // Load DKIM keys if enabled
     if (this.dkimConfig.enabled) {
       await this.loadDkimKeys();
+      this.dkimRefreshTimer = setInterval(() => {
+        this.loadDkimKeys().catch((error) => {
+          this.logger.error('Failed to refresh DKIM keys', { error });
+        });
+      }, 5 * 60 * 1000); // refresh every 5 minutes
     }
 
     // Reset warmup counters at midnight
@@ -207,6 +217,11 @@ export class EmailProcessor {
     if (this.warmupResetTimer) {
       clearTimeout(this.warmupResetTimer);
       this.warmupResetTimer = null;
+    }
+
+    if (this.dkimRefreshTimer) {
+      clearInterval(this.dkimRefreshTimer);
+      this.dkimRefreshTimer = null;
     }
 
     // Wait for active jobs to complete
@@ -248,7 +263,12 @@ export class EmailProcessor {
         const jobs = await this.fetchJobs(availableSlots);
         
         if (jobs.length === 0) {
-          await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+          // LISTEN/NOTIFY wakeup: sleep until notified or fallback timeout
+          if (this.notifier) {
+            await this.notifier.waitForNotification('queue_email_queue', 30_000);
+          } else {
+            await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+          }
           continue;
         }
 
@@ -335,7 +355,7 @@ export class EmailProcessor {
 
       // Check warmup limits
       if (this.warmupConfig.enabled) {
-        const canSend = await this.checkWarmupLimit(job.domainId);
+        const canSend = await this.checkWarmupLimit(job.domainId, job.tenantId);
         if (!canSend) {
           await this.requeueJob(job, 'warmup_limit');
           return;
@@ -825,21 +845,30 @@ export class EmailProcessor {
     this.logger.info('DKIM keys loaded', { count: result.rows.length });
   }
 
-  private async checkWarmupLimit(domainId: string): Promise<boolean> {
+  private async checkWarmupLimit(domainId: string, tenantId: string): Promise<boolean> {
     const schedule = this.warmupConfig.schedule[domainId];
     if (!schedule) return true; // No warmup schedule, no limit
 
-    const dayOfWarmup = this.calculateWarmupDay(domainId);
+    const dayOfWarmup = await this.calculateWarmupDay(domainId, tenantId);
     const dailyLimit = schedule[dayOfWarmup] ?? schedule[schedule.length - 1] ?? Number.MAX_SAFE_INTEGER;
     const currentCount = this.warmupCounters.get(domainId) ?? 0;
 
     return currentCount < dailyLimit;
   }
 
-  private calculateWarmupDay(_domainId: string): number {
-    // In production, calculate from domain verification date
-    void _domainId;
-    return 0;
+  private async calculateWarmupDay(domainId: string, tenantId: string): Promise<number> {
+    const result = await this.domainsRepo.findById(domainId, tenantId);
+    if (!result.ok || !result.value) {
+      this.logger.warn('Warmup day calculation: domain not found', { domainId, tenantId });
+      return 0;
+    }
+
+    const domain = result.value;
+    const baseDate = domain.verifiedAt ?? domain.createdAt ?? new Date();
+    const diffMs = Date.now() - baseDate.getTime();
+    const days = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+
+    return Math.max(0, days);
   }
 
   private incrementWarmupCounter(domainId: string): void {
@@ -905,13 +934,15 @@ class TokenBucketRateLimiter {
   private readonly capacity: number;
   private readonly refillRate: number;
   private lastRefill: number;
-  private readonly waitQueue: Array<() => void> = [];
+  private readonly waitQueue: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
+  private readonly maxQueueSize: number;
 
-  constructor(capacity: number, refillRate: number) {
+  constructor(capacity: number, refillRate: number, maxQueueSize = 10000) {
     this.capacity = capacity;
     this.refillRate = refillRate;
     this.tokens = capacity;
     this.lastRefill = Date.now();
+    this.maxQueueSize = maxQueueSize;
   }
 
   async acquire(): Promise<void> {
@@ -923,8 +954,12 @@ class TokenBucketRateLimiter {
     }
 
     // Wait for a token
-    return new Promise(resolve => {
-      this.waitQueue.push(resolve);
+    if (this.waitQueue.length >= this.maxQueueSize) {
+      return Promise.reject(new Error('Rate limiter queue is full'));
+    }
+
+    return new Promise((resolve, reject) => {
+      this.waitQueue.push({ resolve, reject });
       setTimeout(() => this.processQueue(), 1000 / this.refillRate);
     });
   }
@@ -943,8 +978,8 @@ class TokenBucketRateLimiter {
     
     while (this.waitQueue.length > 0 && this.tokens >= 1) {
       this.tokens--;
-      const resolve = this.waitQueue.shift()!;
-      resolve();
+      const next = this.waitQueue.shift()!;
+      next.resolve();
     }
   }
 }

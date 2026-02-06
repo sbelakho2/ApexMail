@@ -56,10 +56,16 @@ export class RedisCacheProvider implements CacheProvider {
     this.prefix = options.prefix ?? 'apexmail:';
     this.logger = getLogger().child({ component: 'cache' });
 
+    // SECURITY: Require REDIS_PASSWORD in production
+    const redisPassword = process.env['REDIS_PASSWORD'] ?? undefined;
+    if (process.env['NODE_ENV'] === 'production' && !redisPassword && !options.password) {
+      throw new Error('REDIS_PASSWORD is required in production');
+    }
+
     const redisConfig: RedisOptions = {
       host: process.env['REDIS_HOST'] ?? 'localhost',
       port: parseInt(process.env['REDIS_PORT'] ?? '6379', 10),
-      password: process.env['REDIS_PASSWORD'] ?? undefined,
+      password: redisPassword,
       db: parseInt(process.env['REDIS_DB'] ?? '0', 10),
       maxRetriesPerRequest: 3,
       retryStrategy: (times) => {

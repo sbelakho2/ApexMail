@@ -35,7 +35,7 @@ export function ConsentLedger() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  className="order-2 lg:order-1"
  >
- <div className="bg-white rounded-xl border border-surface-200 overflow-hidden shadow-sm">
+ <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">
  {/* Header */}
  <div className="flex items-center gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50/50">
  <Database className="w-4 h-4 text-surface-500" />
@@ -53,7 +53,7 @@ export function ConsentLedger() {
  <div className="w-10 h-10 rounded-lg bg-surface-50 border border-surface-200 flex items-center justify-center ">
  <Hash className="w-4 h-4 text-surface-900" />
  </div>
- {i < 4 && <LinkIcon className="w-3 h-3 text-surface-300" />}
+ {i < 4 && <LinkIcon className="w-4 h-4 text-surface-300" />}
  </div>
  ))}
  </div>
@@ -74,7 +74,7 @@ export function ConsentLedger() {
  className="order-1 lg:order-2"
  >
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
-          <Database className="w-3.5 h-3.5" />
+          <Database className="w-4 h-4" />
           Consent Ledger
         </div>
  <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
@@ -101,7 +101,7 @@ export function ConsentLedger() {
  ))}
  </ul>
 
- <div className="p-6 rounded-xl bg-white border border-surface-200 shadow-sm">
+ <div className="p-6 rounded-lg bg-white border border-surface-200 shadow-sm">
  <p className="text-sm text-surface-600 leading-relaxed">
  <strong className="text-surface-900 font-semibold block mb-1">Auditor-Ready</strong>
  Our consent ledger has been reviewed and approved by DPOs at 

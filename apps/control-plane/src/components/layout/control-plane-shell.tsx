@@ -19,22 +19,22 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
     return (
         <>
             {/* Control Plane Indicator Banner */}
-            <div className="fixed top-0 left-0 right-0 z-50 bg-blue-600 text-white text-center text-xs py-1 font-medium">
+            <div className="fixed top-0 left-0 right-0 z-50 bg-control-plane text-control-plane-foreground text-center text-xs py-1 font-medium shadow-sm">
                 🔒 ApexMail Control Plane — Internal Use Only
             </div>
             
-            <div className="pt-6 min-h-screen bg-surface-50">
+            <div className="pt-6 min-h-screen bg-background">
                 {/* Mobile Header */}
-                <div className="md:hidden flex items-center justify-between p-4 bg-white border-b border-surface-200 sticky top-6 z-40">
+                <div className="md:hidden flex items-center justify-between p-4 bg-card border-b border-border sticky top-6 z-40">
                     <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 bg-gradient-to-br from-blue-600 to-blue-700 rounded-lg flex items-center justify-center text-white font-bold text-sm">
+                        <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center text-primary-foreground font-bold text-sm">
                             A
                         </div>
-                        <span className="text-sm font-semibold text-surface-900">Control Plane</span>
+                        <span className="text-sm font-semibold text-foreground">Control Plane</span>
                     </div>
                     <button
                         onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                        className="p-2 text-surface-600 hover:text-surface-900 hover:bg-surface-100 rounded-lg transition-colors"
+                        className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-lg transition-colors"
                         aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
                     >
                         {mobileMenuOpen ? (

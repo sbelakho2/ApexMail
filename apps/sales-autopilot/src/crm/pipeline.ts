@@ -4,6 +4,7 @@
  */
 
 import { createLogger, generateId } from '@apexmail/lib';
+import type { Pool } from 'pg';
 import type {
     Lead,
     PipelineConfig,
@@ -21,16 +22,122 @@ import type {
 
 const logger = createLogger({ name: 'crm-pipeline', level: 'info' });
 
-// In-memory storage for demo - in production, use database
-const pipelines = new Map<string, PipelineConfig>();
-const leads = new Map<string, Lead>();
-const activities = new Map<string, LeadActivity[]>();
-const tasks = new Map<string, LeadTask[]>();
+let dbPool: Pool | null = null;
+
+export function initCrmDatabase(pool: Pool): void {
+    dbPool = pool;
+}
+
+function requireDb(): Pool {
+    if (!dbPool) {
+        throw new Error('CRM database pool not initialized');
+    }
+    return dbPool;
+}
+
+function parseJsonValue<T>(value: unknown, fallback: T): T {
+    if (value === null || value === undefined) {
+        return fallback;
+    }
+
+    if (typeof value === 'string') {
+        try {
+            return JSON.parse(value) as T;
+        } catch {
+            return fallback;
+        }
+    }
+
+    return value as T;
+}
+
+function mapLeadRow(row: Record<string, unknown>): Lead {
+    const tagsJson = row.tags_json ?? row.tags ?? [];
+
+    return {
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        companyName: row.company_name as string,
+        domain: row.domain as string,
+        website: (row.website as string | null) ?? null,
+        email: (row.email as string | null) ?? (row.contact_email as string | null) ?? null,
+        emailVerified: Boolean(row.email_verified),
+        phone: (row.phone as string | null) ?? null,
+        industry: (row.industry as string | null) ?? null,
+        employeeCount: (row.employee_count as string | null) ?? (row.employees as string | null) ?? null,
+        revenue: (row.revenue as string | null) ?? null,
+        technologies: parseJsonValue((row.technologies as string) ?? row.technologies, []),
+        socialProfiles: parseJsonValue((row.social_profiles as string) ?? row.social_profiles, []),
+        location: row.location ? parseJsonValue(row.location, null) : null,
+        source: row.source as Lead['source'],
+        sourceUrl: (row.source_url as string | null) ?? null,
+        score: Number(row.score ?? 0),
+        status: row.status as Lead['status'],
+        stage: (row.stage as Lead['stage']) ?? 'prospect',
+        assignedTo: (row.assigned_to as string | null) ?? null,
+        tags: parseJsonValue(tagsJson, []),
+        customFields: parseJsonValue((row.custom_fields as string) ?? row.custom_fields, {}),
+        mxRecords: parseJsonValue((row.mx_records as string) ?? row.mx_records, []),
+        emailProvider: (row.email_provider as string | null) ?? null,
+        lastContactedAt: (row.last_contacted_at as Date | null) ?? null,
+        nextFollowUpAt: (row.next_follow_up_at as Date | null) ?? null,
+        createdAt: row.created_at as Date,
+        updatedAt: row.updated_at as Date,
+    };
+}
+
+function mapPipelineRow(row: Record<string, unknown>): PipelineConfig {
+    return {
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        name: row.name as string,
+        stages: parseJsonValue(row.stages, []),
+        defaultStage: row.default_stage as string,
+        wonStage: row.won_stage as string,
+        lostStage: row.lost_stage as string,
+        createdAt: row.created_at as Date,
+        updatedAt: row.updated_at as Date,
+    };
+}
+
+function mapActivityRow(row: Record<string, unknown>): LeadActivity {
+    return {
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        leadId: row.lead_id as string,
+        type: row.type as ActivityType,
+        description: row.description as string,
+        data: parseJsonValue((row.data as string) ?? row.data, {}),
+        userId: (row.user_id as string | null) ?? null,
+        createdAt: row.created_at as Date,
+    };
+}
+
+function mapTaskRow(row: Record<string, unknown>): LeadTask {
+    return {
+        id: row.id as string,
+        tenantId: row.tenant_id as string,
+        leadId: row.lead_id as string,
+        title: row.title as string,
+        description: (row.description as string | null) ?? null,
+        type: row.type as TaskType,
+        priority: row.priority as TaskPriority,
+        status: row.status as TaskStatus,
+        dueAt: (row.due_at as Date | null) ?? null,
+        assignedTo: (row.assigned_to as string | null) ?? null,
+        completedAt: (row.completed_at as Date | null) ?? null,
+        completedBy: (row.completed_by as string | null) ?? null,
+        createdBy: (row.created_by as string | null) ?? 'system',
+        createdAt: row.created_at as Date,
+        updatedAt: row.updated_at as Date,
+    };
+}
 
 /**
  * Creates the default pipeline configuration
  */
-export function createDefaultPipeline(tenantId: string): PipelineConfig {
+export async function createDefaultPipeline(tenantId: string): Promise<PipelineConfig> {
+    const db = requireDb();
     const pipeline: PipelineConfig = {
         id: generateId('pipeline'),
         tenantId,
@@ -116,37 +223,68 @@ export function createDefaultPipeline(tenantId: string): PipelineConfig {
         updatedAt: new Date(),
     };
 
-    pipelines.set(pipeline.id, pipeline);
-    logger.info('Created default pipeline', { pipelineId: pipeline.id, tenantId });
+    const existing = await db.query(
+        'SELECT * FROM sales_pipelines WHERE tenant_id = $1',
+        [tenantId]
+    );
 
-    return pipeline;
+    if (existing.rows.length > 0) {
+        return mapPipelineRow(existing.rows[0]);
+    }
+
+    const insertResult = await db.query(
+        `INSERT INTO sales_pipelines (
+            id, tenant_id, name, stages, default_stage, won_stage, lost_stage,
+            created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        RETURNING *`,
+        [
+            pipeline.id,
+            pipeline.tenantId,
+            pipeline.name,
+            JSON.stringify(pipeline.stages),
+            pipeline.defaultStage,
+            pipeline.wonStage,
+            pipeline.lostStage,
+        ]
+    );
+
+    logger.info('Created default pipeline', { pipelineId: pipeline.id, tenantId });
+    return mapPipelineRow(insertResult.rows[0]);
 }
 
 /**
  * Gets pipeline for a tenant
  */
-export function getPipeline(tenantId: string): PipelineConfig | null {
-    return (
-        Array.from(pipelines.values()).find((p) => p.tenantId === tenantId) || null
-    );
+export async function getPipeline(tenantId: string): Promise<PipelineConfig | null> {
+    const db = requireDb();
+    const result = await db.query('SELECT * FROM sales_pipelines WHERE tenant_id = $1', [tenantId]);
+    return result.rows[0] ? mapPipelineRow(result.rows[0]) : null;
 }
 
 /**
  * Adds a stage automation
  */
-export function addStageAutomation(
+export async function addStageAutomation(
     pipelineId: string,
     stageId: string,
     automation: StageAutomation
-): boolean {
-    const pipeline = pipelines.get(pipelineId);
-    if (!pipeline) return false;
+): Promise<boolean> {
+    const db = requireDb();
 
+    const result = await db.query('SELECT * FROM sales_pipelines WHERE id = $1', [pipelineId]);
+    const row = result.rows[0];
+    if (!row) return false;
+    const pipeline = mapPipelineRow(row);
     const stage = pipeline.stages.find((s) => s.id === stageId);
     if (!stage) return false;
 
     stage.automations.push(automation);
-    pipeline.updatedAt = new Date();
+
+    await db.query(
+        'UPDATE sales_pipelines SET stages = $2, updated_at = NOW() WHERE id = $1',
+        [pipelineId, JSON.stringify(pipeline.stages)]
+    );
 
     return true;
 }
@@ -154,67 +292,181 @@ export function addStageAutomation(
 /**
  * Stores a lead
  */
-export function storeLead(lead: Lead): void {
-    leads.set(lead.id, lead);
-    activities.set(lead.id, []);
-    tasks.set(lead.id, []);
+export async function storeLead(lead: Lead): Promise<void> {
+    const db = requireDb();
+    await db.query(
+        `INSERT INTO sales_leads (
+            id, tenant_id, company_name, domain, website, email, email_verified,
+            phone, industry, employee_count, revenue, technologies, social_profiles,
+            location, source, source_url, score, status, stage, assigned_to,
+            tags_json, custom_fields, mx_records, email_provider, last_contacted_at,
+            next_follow_up_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18, $19, $20,
+            $21, $22, $23, $24, $25, $26, NOW(), NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            company_name = EXCLUDED.company_name,
+            domain = EXCLUDED.domain,
+            website = EXCLUDED.website,
+            email = EXCLUDED.email,
+            email_verified = EXCLUDED.email_verified,
+            phone = EXCLUDED.phone,
+            industry = EXCLUDED.industry,
+            employee_count = EXCLUDED.employee_count,
+            revenue = EXCLUDED.revenue,
+            technologies = EXCLUDED.technologies,
+            social_profiles = EXCLUDED.social_profiles,
+            location = EXCLUDED.location,
+            source = EXCLUDED.source,
+            source_url = EXCLUDED.source_url,
+            score = EXCLUDED.score,
+            status = EXCLUDED.status,
+            stage = EXCLUDED.stage,
+            assigned_to = EXCLUDED.assigned_to,
+            tags_json = EXCLUDED.tags_json,
+            custom_fields = EXCLUDED.custom_fields,
+            mx_records = EXCLUDED.mx_records,
+            email_provider = EXCLUDED.email_provider,
+            last_contacted_at = EXCLUDED.last_contacted_at,
+            next_follow_up_at = EXCLUDED.next_follow_up_at,
+            updated_at = NOW()
+        `,
+        [
+            lead.id,
+            lead.tenantId,
+            lead.companyName,
+            lead.domain,
+            lead.website,
+            lead.email,
+            lead.emailVerified,
+            lead.phone,
+            lead.industry,
+            lead.employeeCount,
+            lead.revenue,
+            JSON.stringify(lead.technologies),
+            JSON.stringify(lead.socialProfiles),
+            lead.location ? JSON.stringify(lead.location) : null,
+            lead.source,
+            lead.sourceUrl,
+            lead.score,
+            lead.status,
+            lead.stage,
+            lead.assignedTo,
+            JSON.stringify(lead.tags),
+            JSON.stringify(lead.customFields),
+            JSON.stringify(lead.mxRecords),
+            lead.emailProvider,
+            lead.lastContactedAt,
+            lead.nextFollowUpAt,
+        ]
+    );
 }
 
 /**
  * Gets a lead by ID
  */
-export function getLead(leadId: string): Lead | null {
-    return leads.get(leadId) || null;
+export async function getLead(leadId: string): Promise<Lead | null> {
+    const db = requireDb();
+    const result = await db.query('SELECT * FROM sales_leads WHERE id = $1', [leadId]);
+    return result.rows[0] ? mapLeadRow(result.rows[0]) : null;
 }
 
 /**
  * Updates a lead
  */
-export function updateLead(
+export async function updateLead(
     leadId: string,
     updates: Partial<Lead>
-): Lead | null {
-    const lead = leads.get(leadId);
-    if (!lead) return null;
+): Promise<Lead | null> {
+    const db = requireDb();
+    const existingLead = await getLead(leadId);
+    if (!existingLead) {
+        return null;
+    }
+    const fields: string[] = [];
+    const values: unknown[] = [leadId];
+    let index = 2;
 
-    const oldLead = { ...lead };
+    const setField = (name: string, value: unknown) => {
+        fields.push(`${name} = $${index++}`);
+        values.push(value);
+    };
 
-    Object.assign(lead, updates, { updatedAt: new Date() });
+    if (updates.companyName !== undefined) setField('company_name', updates.companyName);
+    if (updates.domain !== undefined) setField('domain', updates.domain);
+    if (updates.website !== undefined) setField('website', updates.website);
+    if (updates.email !== undefined) setField('email', updates.email);
+    if (updates.emailVerified !== undefined) setField('email_verified', updates.emailVerified);
+    if (updates.phone !== undefined) setField('phone', updates.phone);
+    if (updates.industry !== undefined) setField('industry', updates.industry);
+    if (updates.employeeCount !== undefined) setField('employee_count', updates.employeeCount);
+    if (updates.revenue !== undefined) setField('revenue', updates.revenue);
+    if (updates.technologies !== undefined) setField('technologies', JSON.stringify(updates.technologies));
+    if (updates.socialProfiles !== undefined) setField('social_profiles', JSON.stringify(updates.socialProfiles));
+    if (updates.location !== undefined) setField('location', updates.location ? JSON.stringify(updates.location) : null);
+    if (updates.source !== undefined) setField('source', updates.source);
+    if (updates.sourceUrl !== undefined) setField('source_url', updates.sourceUrl);
+    if (updates.score !== undefined) setField('score', updates.score);
+    if (updates.status !== undefined) setField('status', updates.status);
+    if (updates.stage !== undefined) setField('stage', updates.stage);
+    if (updates.assignedTo !== undefined) setField('assigned_to', updates.assignedTo);
+    if (updates.tags !== undefined) setField('tags_json', JSON.stringify(updates.tags));
+    if (updates.customFields !== undefined) setField('custom_fields', JSON.stringify(updates.customFields));
+    if (updates.mxRecords !== undefined) setField('mx_records', JSON.stringify(updates.mxRecords));
+    if (updates.emailProvider !== undefined) setField('email_provider', updates.emailProvider);
+    if (updates.lastContactedAt !== undefined) setField('last_contacted_at', updates.lastContactedAt);
+    if (updates.nextFollowUpAt !== undefined) setField('next_follow_up_at', updates.nextFollowUpAt);
 
-    // Record activity for significant changes
-    if (updates.stage && updates.stage !== oldLead.stage) {
-        recordActivity(leadId, {
-            type: 'stage_changed',
-            description: `Stage changed from ${oldLead.stage} to ${updates.stage}`,
-            data: { from: oldLead.stage, to: updates.stage },
-            userId: null,
-        });
+    if (fields.length === 0) {
+        return existingLead;
     }
 
-    if (updates.status && updates.status !== oldLead.status) {
-        recordActivity(leadId, {
-            type: 'updated',
-            description: `Status changed from ${oldLead.status} to ${updates.status}`,
-            data: { from: oldLead.status, to: updates.status },
-            userId: null,
-        });
+    const result = await db.query(
+        `UPDATE sales_leads SET ${fields.join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        values
+    );
+    const updated = result.rows[0] ? mapLeadRow(result.rows[0]) : null;
+
+    if (updated) {
+        if (updates.stage && updates.stage !== existingLead.stage) {
+            await recordActivity(leadId, {
+                type: 'stage_changed',
+                description: `Stage changed from ${existingLead.stage} to ${updates.stage}`,
+                data: { from: existingLead.stage, to: updates.stage },
+                userId: null,
+            });
+        }
+
+        if (updates.status && updates.status !== existingLead.status) {
+            await recordActivity(leadId, {
+                type: 'updated',
+                description: `Status changed from ${existingLead.status} to ${updates.status}`,
+                data: { from: existingLead.status, to: updates.status },
+                userId: null,
+            });
+        }
     }
 
-    return lead;
+    return updated;
 }
 
 /**
  * Moves lead to a different stage
  */
-export function moveLeadToStage(
+export async function moveLeadToStage(
     leadId: string,
     newStage: PipelineStage,
     userId?: string
-): Lead | null {
-    const lead = leads.get(leadId);
-    if (!lead) return null;
+): Promise<Lead | null> {
+    const db = requireDb();
+    const result = await db.query('SELECT * FROM sales_leads WHERE id = $1', [leadId]);
+    if (result.rows.length === 0) return null;
+    const lead = mapLeadRow(result.rows[0]);
 
-    const pipeline = getPipeline(lead.tenantId);
+    const pipeline = await getPipeline(lead.tenantId);
     if (!pipeline) return null;
 
     const stageConfig = pipeline.stages.find(
@@ -222,20 +474,23 @@ export function moveLeadToStage(
     );
 
     const oldStage = lead.stage;
-    lead.stage = newStage;
-    lead.updatedAt = new Date();
-
-    // Update status based on stage
+    let status = lead.status;
     if (newStage === 'closed_won') {
-        lead.status = 'converted';
+        status = 'converted';
     } else if (newStage === 'closed_lost') {
-        lead.status = 'lost';
+        status = 'lost';
     } else if (newStage !== 'prospect') {
-        lead.status = 'contacted';
+        status = 'contacted';
     }
 
-    // Record activity
-    recordActivity(leadId, {
+    const updateResult = await db.query(
+        `UPDATE sales_leads SET stage = $2, status = $3, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [leadId, newStage, status]
+    );
+
+    const updatedLead = mapLeadRow(updateResult.rows[0]);
+
+    await recordActivity(leadId, {
         type: 'stage_changed',
         description: `Moved from ${oldStage} to ${newStage}`,
         data: {
@@ -246,30 +501,28 @@ export function moveLeadToStage(
         userId: userId || null,
     });
 
-    // Execute stage automations
     if (stageConfig) {
-        executeStageAutomations(lead, stageConfig, 'enter');
+        await executeStageAutomations(updatedLead, stageConfig, 'enter');
     }
 
     logger.info('Moved lead to stage', { leadId, oldStage, newStage });
-
-    return lead;
+    return updatedLead;
 }
 
 /**
  * Executes automations for a stage
  */
-function executeStageAutomations(
+async function executeStageAutomations(
     lead: Lead,
     stageConfig: PipelineStageConfig,
     trigger: 'enter' | 'exit' | 'rotten'
-): void {
+): Promise<void> {
     const automations = stageConfig.automations.filter((a) => a.trigger === trigger);
 
     for (const automation of automations) {
         switch (automation.action) {
             case 'create_task':
-                createTask(lead.id, lead.tenantId, {
+                await createTask(lead.id, lead.tenantId, {
                     title: (automation.config['title'] as string) || `Follow up - ${stageConfig.name}`,
                     description: automation.config['description'] as string | undefined,
                     type: (automation.config['taskType'] as TaskType) || 'follow_up',
@@ -286,8 +539,9 @@ function executeStageAutomations(
 
             case 'add_tag':
                 if (!lead.tags.includes(automation.config['tag'] as string)) {
-                    lead.tags.push(automation.config['tag'] as string);
-                    recordActivity(lead.id, {
+                    const nextTags = [...lead.tags, automation.config['tag'] as string];
+                    await updateLead(lead.id, { tags: nextTags });
+                    await recordActivity(lead.id, {
                         type: 'tag_added',
                         description: `Tag added: ${automation.config['tag']}`,
                         data: { tag: automation.config['tag'] },
@@ -299,8 +553,9 @@ function executeStageAutomations(
             case 'remove_tag': {
                 const tagIndex = lead.tags.indexOf(automation.config['tag'] as string);
                 if (tagIndex > -1) {
-                    lead.tags.splice(tagIndex, 1);
-                    recordActivity(lead.id, {
+                    const nextTags = lead.tags.filter((tag) => tag !== automation.config['tag']);
+                    await updateLead(lead.id, { tags: nextTags });
+                    await recordActivity(lead.id, {
                         type: 'tag_removed',
                         description: `Tag removed: ${automation.config['tag']}`,
                         data: { tag: automation.config['tag'] },
@@ -311,7 +566,7 @@ function executeStageAutomations(
             }
 
             case 'assign_user':
-                lead.assignedTo = automation.config['userId'] as string;
+                await updateLead(lead.id, { assignedTo: automation.config['userId'] as string });
                 break;
         }
     }
@@ -320,7 +575,7 @@ function executeStageAutomations(
 /**
  * Records an activity for a lead
  */
-export function recordActivity(
+export async function recordActivity(
     leadId: string,
     params: {
         type: ActivityType;
@@ -328,15 +583,16 @@ export function recordActivity(
         data: Record<string, unknown>;
         userId: string | null;
     }
-): LeadActivity {
-    const lead = leads.get(leadId);
-    if (!lead) {
+): Promise<LeadActivity> {
+    const db = requireDb();
+    const leadResult = await db.query('SELECT tenant_id FROM sales_leads WHERE id = $1', [leadId]);
+    if (leadResult.rows.length === 0) {
         throw new Error(`Lead not found: ${leadId}`);
     }
 
     const activity: LeadActivity = {
         id: generateId('activity'),
-        tenantId: lead.tenantId,
+        tenantId: leadResult.rows[0].tenant_id as string,
         leadId,
         type: params.type,
         description: params.description,
@@ -345,49 +601,60 @@ export function recordActivity(
         createdAt: new Date(),
     };
 
-    const leadActivities = activities.get(leadId) || [];
-    leadActivities.push(activity);
-    activities.set(leadId, leadActivities);
+    const insertResult = await db.query(
+        `INSERT INTO sales_lead_activities (
+            id, lead_id, tenant_id, type, description, data, user_id, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        RETURNING *`,
+        [
+            activity.id,
+            activity.leadId,
+            activity.tenantId,
+            activity.type,
+            activity.description,
+            JSON.stringify(activity.data || {}),
+            activity.userId,
+        ]
+    );
 
     logger.debug('Recorded activity', { leadId, type: params.type });
-
-    return activity;
+    return mapActivityRow(insertResult.rows[0]);
 }
 
 /**
  * Gets activities for a lead
  */
-export function getLeadActivities(
+export async function getLeadActivities(
     leadId: string,
     options?: {
         limit?: number;
         types?: ActivityType[];
     }
-): LeadActivity[] {
-    let leadActivities = activities.get(leadId) || [];
+): Promise<LeadActivity[]> {
+    const db = requireDb();
+    const values: unknown[] = [leadId];
+    const where: string[] = ['lead_id = $1'];
+    let index = 2;
 
-    if (options?.types) {
-        leadActivities = leadActivities.filter((a) =>
-            options.types!.includes(a.type)
-        );
+    if (options?.types?.length) {
+        values.push(options.types);
+        where.push(`type = ANY($${index++})`);
     }
 
-    // Sort by date descending
-    leadActivities.sort(
-        (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+    const limitClause = options?.limit ? `LIMIT ${options.limit}` : '';
+
+    const result = await db.query(
+        `SELECT * FROM sales_lead_activities WHERE ${where.join(' AND ')} ORDER BY created_at DESC ${limitClause}`,
+        values
     );
 
-    if (options?.limit) {
-        leadActivities = leadActivities.slice(0, options.limit);
-    }
-
-    return leadActivities;
+    return result.rows.map(mapActivityRow);
 }
 
 /**
  * Creates a task for a lead
  */
-export function createTask(
+export async function createTask(
     leadId: string,
     tenantId: string,
     params: {
@@ -399,7 +666,8 @@ export function createTask(
         assignedTo: string | null;
         createdBy?: string;
     }
-): LeadTask {
+): Promise<LeadTask> {
+    const db = requireDb();
     const task: LeadTask = {
         id: generateId('task'),
         tenantId,
@@ -418,12 +686,30 @@ export function createTask(
         updatedAt: new Date(),
     };
 
-    const leadTasks = tasks.get(leadId) || [];
-    leadTasks.push(task);
-    tasks.set(leadId, leadTasks);
+    const insertResult = await db.query(
+        `INSERT INTO sales_lead_tasks (
+            id, lead_id, tenant_id, type, priority, status, title, description, due_at,
+            assigned_to, completed_by, created_by, completed_at, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+        RETURNING *`,
+        [
+            task.id,
+            task.leadId,
+            task.tenantId,
+            task.type,
+            task.priority,
+            task.status,
+            task.title,
+            task.description,
+            task.dueAt,
+            task.assignedTo,
+            task.completedBy,
+            task.createdBy,
+            task.completedAt,
+        ]
+    );
 
-    // Record activity
-    recordActivity(leadId, {
+    await recordActivity(leadId, {
         type: 'task_created',
         description: `Task created: ${params.title}`,
         data: { taskId: task.id, type: params.type },
@@ -432,188 +718,212 @@ export function createTask(
 
     logger.info('Created task', { leadId, taskId: task.id, type: params.type });
 
-    return task;
+    return mapTaskRow(insertResult.rows[0]);
 }
 
 /**
  * Updates a task
  */
-export function updateTask(
+export async function updateTask(
     taskId: string,
     updates: Partial<Pick<LeadTask, 'title' | 'description' | 'priority' | 'dueAt' | 'assignedTo'>>
-): LeadTask | null {
-    for (const leadTasks of tasks.values()) {
-        const task = leadTasks.find((t) => t.id === taskId);
-        if (task) {
-            Object.assign(task, updates, { updatedAt: new Date() });
-            return task;
-        }
+): Promise<LeadTask | null> {
+    const db = requireDb();
+    const fields: string[] = [];
+    const values: unknown[] = [taskId];
+    let index = 2;
+
+    const setField = (name: string, value: unknown) => {
+        fields.push(`${name} = $${index++}`);
+        values.push(value);
+    };
+
+    if (updates.title !== undefined) setField('title', updates.title);
+    if (updates.description !== undefined) setField('description', updates.description);
+    if (updates.priority !== undefined) setField('priority', updates.priority);
+    if (updates.dueAt !== undefined) setField('due_at', updates.dueAt);
+    if (updates.assignedTo !== undefined) setField('assigned_to', updates.assignedTo);
+
+    if (fields.length === 0) {
+        const existing = await db.query('SELECT * FROM sales_lead_tasks WHERE id = $1', [taskId]);
+        return existing.rows[0] ? mapTaskRow(existing.rows[0]) : null;
     }
-    return null;
+
+    const result = await db.query(
+        `UPDATE sales_lead_tasks SET ${fields.join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING *`,
+        values
+    );
+    return result.rows[0] ? mapTaskRow(result.rows[0]) : null;
 }
 
 /**
  * Completes a task
  */
-export function completeTask(
+export async function completeTask(
     taskId: string,
     completedBy: string
-): LeadTask | null {
-    for (const leadTasks of tasks.values()) {
-        const task = leadTasks.find((t) => t.id === taskId);
-        if (task) {
-            task.status = 'completed';
-            task.completedAt = new Date();
-            task.completedBy = completedBy;
-            task.updatedAt = new Date();
+): Promise<LeadTask | null> {
+    const db = requireDb();
+    const result = await db.query(
+        `UPDATE sales_lead_tasks
+        SET status = 'completed', completed_at = NOW(), completed_by = $2, updated_at = NOW()
+        WHERE id = $1
+        RETURNING *`,
+        [taskId, completedBy]
+    );
 
-            recordActivity(task.leadId, {
-                type: 'task_completed',
-                description: `Task completed: ${task.title}`,
-                data: { taskId: task.id },
-                userId: completedBy,
-            });
+    if (!result.rows[0]) return null;
 
-            return task;
-        }
-    }
-    return null;
+    const task = mapTaskRow(result.rows[0]);
+    await recordActivity(task.leadId, {
+        type: 'task_completed',
+        description: `Task completed: ${task.title}`,
+        data: { taskId: task.id },
+        userId: completedBy,
+    });
+
+    return task;
 }
 
 /**
  * Gets tasks for a lead
  */
-export function getLeadTasks(
+export async function getLeadTasks(
     leadId: string,
     options?: {
         status?: TaskStatus[];
         type?: TaskType[];
     }
-): LeadTask[] {
-    let leadTasks = tasks.get(leadId) || [];
+): Promise<LeadTask[]> {
+    const db = requireDb();
+    const values: unknown[] = [leadId];
+    const where: string[] = ['lead_id = $1'];
+    let index = 2;
 
-    if (options?.status) {
-        leadTasks = leadTasks.filter((t) => options.status!.includes(t.status));
+    if (options?.status?.length) {
+        values.push(options.status);
+        where.push(`status = ANY($${index++})`);
     }
 
-    if (options?.type) {
-        leadTasks = leadTasks.filter((t) => options.type!.includes(t.type));
+    if (options?.type?.length) {
+        values.push(options.type);
+        where.push(`type = ANY($${index++})`);
     }
 
-    // Sort by due date, then priority
-    const priorityOrder = { urgent: 0, high: 1, medium: 2, low: 3 };
-    leadTasks.sort((a, b) => {
-        if (a.dueAt && b.dueAt) {
-            return a.dueAt.getTime() - b.dueAt.getTime();
-        }
-        if (a.dueAt) return -1;
-        if (b.dueAt) return 1;
-        return priorityOrder[a.priority] - priorityOrder[b.priority];
-    });
+    const result = await db.query(
+        `SELECT * FROM sales_lead_tasks WHERE ${where.join(' AND ')}
+        ORDER BY due_at NULLS LAST, priority DESC, created_at DESC`,
+        values
+    );
 
-    return leadTasks;
+    return result.rows.map(mapTaskRow);
 }
 
 /**
  * Gets overdue tasks across all leads
  */
-export function getOverdueTasks(tenantId?: string): LeadTask[] {
-    const now = new Date();
-    const overdue: LeadTask[] = [];
+export async function getOverdueTasks(tenantId?: string): Promise<LeadTask[]> {
+    const db = requireDb();
+    const values: unknown[] = [];
+    const where: string[] = ["status = 'pending'", 'due_at IS NOT NULL', 'due_at < NOW()'];
 
-    for (const leadTasks of tasks.values()) {
-        for (const task of leadTasks) {
-            if (
-                task.status === 'pending' &&
-                task.dueAt &&
-                task.dueAt < now &&
-                (!tenantId || task.tenantId === tenantId)
-            ) {
-                overdue.push(task);
-            }
-        }
+    if (tenantId) {
+        values.push(tenantId);
+        where.push(`tenant_id = $${values.length}`);
     }
 
-    return overdue;
+    const result = await db.query(
+        `SELECT * FROM sales_lead_tasks WHERE ${where.join(' AND ')} ORDER BY due_at ASC`,
+        values
+    );
+
+    return result.rows.map(mapTaskRow);
 }
 
 /**
  * Filters leads based on criteria
  */
-export function filterLeads(
+export async function filterLeads(
     tenantId: string,
     filters: LeadFilters
-): Lead[] {
-    let results = Array.from(leads.values()).filter(
-        (l) => l.tenantId === tenantId
-    );
+): Promise<Lead[]> {
+    const db = requireDb();
+    const values: unknown[] = [tenantId];
+    const where: string[] = ['tenant_id = $1'];
+    let index = 2;
 
     if (filters.status?.length) {
-        results = results.filter((l) => filters.status!.includes(l.status));
+        values.push(filters.status);
+        where.push(`status = ANY($${index++})`);
     }
 
     if (filters.stage?.length) {
-        results = results.filter((l) => filters.stage!.includes(l.stage));
+        values.push(filters.stage);
+        where.push(`stage = ANY($${index++})`);
     }
 
     if (filters.source?.length) {
-        results = results.filter((l) => filters.source!.includes(l.source));
+        values.push(filters.source);
+        where.push(`source = ANY($${index++})`);
     }
 
     if (filters.tags?.length) {
-        results = results.filter((l) =>
-            filters.tags!.some((tag) => l.tags.includes(tag))
-        );
+        values.push(filters.tags);
+        where.push(`tags_json ?| $${index++}`);
     }
 
     if (filters.assignedTo?.length) {
-        results = results.filter(
-            (l) => l.assignedTo && filters.assignedTo!.includes(l.assignedTo)
-        );
+        values.push(filters.assignedTo);
+        where.push(`assigned_to = ANY($${index++})`);
     }
 
     if (filters.createdAfter) {
-        results = results.filter((l) => l.createdAt >= filters.createdAfter!);
+        values.push(filters.createdAfter);
+        where.push(`created_at >= $${index++}`);
     }
 
     if (filters.createdBefore) {
-        results = results.filter((l) => l.createdAt <= filters.createdBefore!);
+        values.push(filters.createdBefore);
+        where.push(`created_at <= $${index++}`);
     }
 
     if (filters.scoreMin !== undefined) {
-        results = results.filter((l) => l.score >= filters.scoreMin!);
+        values.push(filters.scoreMin);
+        where.push(`score >= $${index++}`);
     }
 
     if (filters.scoreMax !== undefined) {
-        results = results.filter((l) => l.score <= filters.scoreMax!);
+        values.push(filters.scoreMax);
+        where.push(`score <= $${index++}`);
     }
 
     if (filters.search) {
-        const searchLower = filters.search.toLowerCase();
-        results = results.filter(
-            (l) =>
-                l.companyName.toLowerCase().includes(searchLower) ||
-                l.domain.toLowerCase().includes(searchLower) ||
-                l.email?.toLowerCase().includes(searchLower)
-        );
+        values.push(`%${filters.search}%`);
+        where.push(`(company_name ILIKE $${index} OR domain ILIKE $${index} OR email ILIKE $${index})`);
+        index += 1;
     }
 
-    return results;
+    const result = await db.query(
+        `SELECT * FROM sales_leads WHERE ${where.join(' AND ')} ORDER BY created_at DESC`,
+        values
+    );
+
+    return result.rows.map(mapLeadRow);
 }
 
 /**
  * Gets pipeline statistics
  */
-export function getPipelineStats(tenantId: string): {
+export async function getPipelineStats(tenantId: string): Promise<{
     byStage: Record<string, { count: number; value: number }>;
     totalLeads: number;
     totalValue: number;
     averageScore: number;
     conversionRate: number;
-} {
-    const tenantLeads = Array.from(leads.values()).filter(
-        (l) => l.tenantId === tenantId
-    );
+}> {
+    const db = requireDb();
+    const result = await db.query('SELECT * FROM sales_leads WHERE tenant_id = $1', [tenantId]);
+    const tenantLeads = result.rows.map(mapLeadRow);
 
     const byStage: Record<string, { count: number; value: number }> = {};
     const totalValue = 0;
@@ -652,34 +962,38 @@ export function getPipelineStats(tenantId: string): {
 /**
  * Gets leads needing follow-up (no contact in X days)
  */
-export function getLeadsNeedingFollowUp(
+export async function getLeadsNeedingFollowUp(
     tenantId: string,
     daysSinceContact: number = 7
-): Lead[] {
+): Promise<Lead[]> {
     const cutoff = new Date(Date.now() - daysSinceContact * 24 * 60 * 60 * 1000);
 
-    return Array.from(leads.values()).filter(
-        (l) =>
-            l.tenantId === tenantId &&
-            l.status !== 'converted' &&
-            l.status !== 'lost' &&
-            l.status !== 'unqualified' &&
-            (!l.lastContactedAt || l.lastContactedAt < cutoff)
+    const db = requireDb();
+    const result = await db.query(
+        `SELECT * FROM sales_leads
+        WHERE tenant_id = $1
+        AND status NOT IN ('converted', 'lost', 'unqualified')
+        AND (last_contacted_at IS NULL OR last_contacted_at < $2)`,
+        [tenantId, cutoff]
     );
+
+    return result.rows.map(mapLeadRow);
 }
 
 /**
  * Gets "rotten" leads (in same stage too long)
  */
-export function getRottenLeads(tenantId: string): Lead[] {
-    const pipeline = getPipeline(tenantId);
+export async function getRottenLeads(tenantId: string): Promise<Lead[]> {
+    const pipeline = await getPipeline(tenantId);
     if (!pipeline) return [];
+
+    const db = requireDb();
+    const leadsResult = await db.query('SELECT * FROM sales_leads WHERE tenant_id = $1', [tenantId]);
+    const leads = leadsResult.rows.map(mapLeadRow);
 
     const rotten: Lead[] = [];
 
-    for (const lead of leads.values()) {
-        if (lead.tenantId !== tenantId) continue;
-
+    for (const lead of leads) {
         const stageConfig = pipeline.stages.find(
             (s) => s.name.toLowerCase().replace(/\s+/g, '_') === lead.stage
         );

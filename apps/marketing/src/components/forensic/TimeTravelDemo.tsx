@@ -97,7 +97,7 @@ export function TimeTravelDemo() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.3 }}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl overflow-hidden"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
         >
           {/* Preview Area */}
           <div className="grid lg:grid-cols-3 gap-0">
@@ -114,12 +114,12 @@ export function TimeTravelDemo() {
                 key={currentSnapshot.id}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="bg-white border border-surface-200 rounded-xl p-8 min-h-[400px] shadow-sm"
+                className="bg-white border border-surface-200 rounded-lg p-8 min-h-[400px] shadow-sm"
               >
                 {/* Mock Email Preview */}
                 <div className="max-w-md mx-auto">
                   <div className="text-center mb-8">
-                    <div className="w-16 h-16 bg-primary-600 rounded-xl mx-auto mb-4 flex items-center justify-center shadow-md">
+                    <div className="w-16 h-16 bg-primary-600 rounded-lg mx-auto mb-4 flex items-center justify-center shadow-md">
                       <span className="text-white text-2xl font-bold">A</span>
                     </div>
                     <h3 className="text-2xl font-semibold text-surface-900 tracking-tight">Welcome to ApexMail!</h3>
@@ -135,7 +135,7 @@ export function TimeTravelDemo() {
                       </li>
                     ))}
                   </ul>
-                  <button className="w-full btn-primary py-3 rounded-lg font-medium text-sm shadow-sm hover:shadow transition-all">
+                  <button className="w-full btn-primary py-3 rounded-md font-medium text-sm shadow-sm hover:shadow transition-all">
                     Get Started
                   </button>
                 </div>
@@ -144,7 +144,7 @@ export function TimeTravelDemo() {
 
             {/* Changes Panel */}
             <div className="p-8 border-l border-surface-200 bg-white">
-              <div className="text-xs font-medium text-surface-500 mb-6 uppercase tracking-wider">Render Changes</div>
+              <div className="text-xs font-medium text-surface-500 mb-6">Render Changes</div>
               <div className="space-y-4">
                 {currentSnapshot.changes.map((change, i) => (
                   <motion.div
@@ -163,7 +163,7 @@ export function TimeTravelDemo() {
               </div>
 
               <div className="mt-8 pt-8 border-t border-surface-100">
-                <div className="text-xs font-medium text-surface-500 mb-2 uppercase tracking-wider">Timestamp</div>
+                <div className="text-xs font-medium text-surface-500 mb-2">Timestamp</div>
                 <div className="text-surface-900 font-mono font-medium text-xs bg-surface-50 p-2 rounded-md border border-surface-200">
                   {new Date(currentSnapshot.timestamp).toLocaleString()}
                 </div>
@@ -184,7 +184,7 @@ export function TimeTravelDemo() {
                 </button>
                 <button
                   onClick={() => setIsPlaying(!isPlaying)}
-                  className="p-3 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-all shadow-sm active:scale-95"
+                  className="p-3 bg-primary-600 text-white rounded-md hover:bg-primary-700 transition-all shadow-sm active:scale-95"
                 >
                   {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
                 </button>

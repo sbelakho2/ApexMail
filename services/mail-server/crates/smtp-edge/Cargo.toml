@@ -27,6 +27,7 @@ uuid.workspace = true
 clap.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
+rustls-pemfile = "2"
 trust-dns-resolver.workspace = true
 mail-parser.workspace = true
 mail-auth.workspace = true

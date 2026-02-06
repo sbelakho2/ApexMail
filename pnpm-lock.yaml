@@ -1172,9 +1172,6 @@ importers:
 
   apps/web:
     dependencies:
-      '@hookform/resolvers':
-        specifier: ^3.3.4
-        version: 3.10.0(react-hook-form@7.71.1)
       '@radix-ui/react-accordion':
         specifier: ^1.1.2
         version: 1.2.12(@types/react-dom@18.3.7)(@types/react@18.3.27)(react-dom@18.2.0)(react@18.2.0)
@@ -1262,6 +1259,9 @@ importers:
       framer-motion:
         specifier: ^11.0.5
         version: 11.18.2(react-dom@18.2.0)(react@18.2.0)
+      immer:
+        specifier: ^11.1.3
+        version: 11.1.3
       input-otp:
         specifier: ^1.2.2
         version: 1.4.2(react-dom@18.2.0)(react@18.2.0)
@@ -1280,9 +1280,6 @@ importers:
       react-dom:
         specifier: ^18.2.0
         version: 18.2.0(react@18.2.0)
-      react-hook-form:
-        specifier: ^7.50.1
-        version: 7.71.1(react@18.2.0)
       react-resizable-panels:
         specifier: ^2.0.9
         version: 2.1.9(react-dom@18.2.0)(react@18.2.0)
@@ -1306,7 +1303,7 @@ importers:
         version: 3.25.76
       zustand:
         specifier: ^4.5.0
-        version: 4.5.7(@types/react@18.3.27)(react@18.2.0)
+        version: 4.5.7(@types/react@18.3.27)(immer@11.1.3)(react@18.2.0)
     devDependencies:
       '@types/node':
         specifier: ^20.11.16
@@ -1403,6 +1400,12 @@ importers:
 
   packages/lib:
     dependencies:
+      '@grpc/grpc-js':
+        specifier: ^1.14.3
+        version: 1.14.3
+      '@grpc/proto-loader':
+        specifier: ^0.7.15
+        version: 0.7.15
       handlebars:
         specifier: ^4.7.8
         version: 4.7.8
@@ -2418,6 +2421,17 @@ packages:
       '@js-sdsl/ordered-map': 4.4.2
     dev: false
 
+  /@grpc/proto-loader@0.7.15:
+    resolution: {integrity: sha512-tMXdRCfYVixjuFK+Hk0Q1s38gV9zDiDJfWL3h1rv4Qc39oILCu1TRTDt7+fGUI8K4G1Fj125Hx/ru3azECWTyQ==}
+    engines: {node: '>=6'}
+    hasBin: true
+    dependencies:
+      lodash.camelcase: 4.3.0
+      long: 5.3.2
+      protobufjs: 7.5.4
+      yargs: 17.7.2
+    dev: false
+
   /@grpc/proto-loader@0.8.0:
     resolution: {integrity: sha512-rc1hOQtjIWGxcxpb9aHAfLpIctjEnsDehj0DAiVfBlmT84uvR0uUtN2hEi/ecvWVjXUGf5qPF4qEgiLOx1YIMQ==}
     engines: {node: '>=6'}
@@ -2570,14 +2584,6 @@ packages:
     dependencies:
       hono: 4.11.7
       zod: 3.25.76
-    dev: false
-
-  /@hookform/resolvers@3.10.0(react-hook-form@7.71.1):
-    resolution: {integrity: sha512-79Dv+3mDF7i+2ajj7SkypSKHhl1cbln1OGavqrsF7p6mbUv11xpqpacPsGDCTRvCSjEEIez2ef1NveSVL3b0Ag==}
-    peerDependencies:
-      react-hook-form: ^7.0.0
-    dependencies:
-      react-hook-form: 7.71.1(react@18.2.0)
     dev: false
 
   /@huggingface/jinja@0.5.4:
@@ -12884,6 +12890,7 @@ packages:
 
   /glob@10.5.0:
     resolution: {integrity: sha512-DfXN8DfhJ7NH3Oe7cFmu3NCu1wKbkReJ8TorzSAFbSKrlNaQSKfIzqYqVY8zlbs2NLBbWpRiU52GX2PbaBVNkg==}
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
     hasBin: true
     requiresBuild: true
     dependencies:
@@ -13434,6 +13441,10 @@ packages:
 
   /immediate@3.0.6:
     resolution: {integrity: sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==}
+    dev: false
+
+  /immer@11.1.3:
+    resolution: {integrity: sha512-6jQTc5z0KJFtr1UgFpIL3N9XSC3saRaI9PwWtzM2pSqkNGtiNkYY2OSwkOGDK2XcTRcLb1pi/aNkKZz0nxVH4Q==}
     dev: false
 
   /import-fresh@3.3.1:
@@ -17160,15 +17171,6 @@ packages:
       scheduler: 0.23.2
     dev: false
 
-  /react-hook-form@7.71.1(react@18.2.0):
-    resolution: {integrity: sha512-9SUJKCGKo8HUSsCO+y0CtqkqI5nNuaDqTxyqPsZPqIwudpj4rCrAz/jZV+jn57bx5gtZKOh3neQu94DXMc+w5w==}
-    engines: {node: '>=18.0.0'}
-    peerDependencies:
-      react: ^16.8.0 || ^17 || ^18 || ^19
-    dependencies:
-      react: 18.2.0
-    dev: false
-
   /react-intersection-observer@9.8.0(react-dom@18.2.0)(react@18.2.0):
     resolution: {integrity: sha512-wXHvMQUsTagh3X0Z6jDtGkIXc3VVCd2tjDRYR9kII3GKrZr0XF0xtpfdamo2n8BSF+zzfeeBVOTjxZWpBp9X0g==}
     peerDependencies:
@@ -20654,7 +20656,7 @@ packages:
       react: 18.2.0
     dev: false
 
-  /zustand@4.5.7(@types/react@18.3.27)(react@18.2.0):
+  /zustand@4.5.7(@types/react@18.3.27)(immer@11.1.3)(react@18.2.0):
     resolution: {integrity: sha512-CHOUy7mu3lbD6o6LJLfllpjkzhHXSBlX8B9+qPddUsIfeF5S/UZ5q0kmCsnRqT1UHFQZchNFDDzMbQsuesHWlw==}
     engines: {node: '>=12.7.0'}
     peerDependencies:
@@ -20670,6 +20672,7 @@ packages:
         optional: true
     dependencies:
       '@types/react': 18.3.27
+      immer: 11.1.3
       react: 18.2.0
       use-sync-external-store: 1.6.0(react@18.2.0)
     dev: false

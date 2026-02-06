@@ -529,11 +529,18 @@ export class EmailValidator {
     private options: EmailValidationOptions;
     private cache: Map<string, { result: EmailValidationResult; timestamp: number }>;
     private cacheMaxAge: number;
+    private maxCacheSize: number;
+    private cleanupTimer: ReturnType<typeof setInterval> | null = null;
     
-    constructor(options: EmailValidationOptions = {}, cacheMaxAgeMs = 3600000) {
+    constructor(options: EmailValidationOptions = {}, cacheMaxAgeMs = 3600000, maxCacheSize = 10000) {
         this.options = options;
         this.cache = new Map();
         this.cacheMaxAge = cacheMaxAgeMs;
+        this.maxCacheSize = maxCacheSize;
+
+        // FIX-064: Periodic cleanup of expired entries (every 5 minutes)
+        this.cleanupTimer = setInterval(() => this.evictExpired(), 5 * 60 * 1000);
+        if (this.cleanupTimer.unref) this.cleanupTimer.unref();
     }
     
     async validate(email: string): Promise<EmailValidationResult> {
@@ -542,11 +549,25 @@ export class EmailValidator {
         // Check cache
         const cached = this.cache.get(normalizedEmail);
         if (cached && Date.now() - cached.timestamp < this.cacheMaxAge) {
+            // Move to end for LRU ordering (Map preserves insertion order)
+            this.cache.delete(normalizedEmail);
+            this.cache.set(normalizedEmail, cached);
             return cached.result;
+        }
+        
+        // Remove stale entry if it existed
+        if (cached) {
+            this.cache.delete(normalizedEmail);
         }
         
         // Validate
         const result = await validateEmail(email, this.options);
+        
+        // Evict oldest entry if at capacity (LRU)
+        if (this.cache.size >= this.maxCacheSize) {
+            const oldestKey = this.cache.keys().next().value;
+            if (oldestKey !== undefined) this.cache.delete(oldestKey);
+        }
         
         // Cache result
         this.cache.set(normalizedEmail, { result, timestamp: Date.now() });
@@ -564,6 +585,25 @@ export class EmailValidator {
     
     getCacheSize(): number {
         return this.cache.size;
+    }
+
+    /** Remove all entries older than cacheMaxAge */
+    private evictExpired(): void {
+        const now = Date.now();
+        for (const [key, entry] of this.cache) {
+            if (now - entry.timestamp >= this.cacheMaxAge) {
+                this.cache.delete(key);
+            }
+        }
+    }
+
+    /** Stop periodic cleanup (for graceful shutdown / tests) */
+    destroy(): void {
+        if (this.cleanupTimer) {
+            clearInterval(this.cleanupTimer);
+            this.cleanupTimer = null;
+        }
+        this.cache.clear();
     }
 }
 

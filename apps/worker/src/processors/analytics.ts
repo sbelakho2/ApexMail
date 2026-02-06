@@ -6,10 +6,12 @@ import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
+import type { QueueNotifier } from '../queue-notifier.js';
 
 interface AnalyticsProcessorConfig {
   db: Pool;
   redis: Redis;
+  notifier?: QueueNotifier;
   config: {
     name: string;
     concurrency: number;
@@ -53,6 +55,7 @@ export class AnalyticsProcessor {
   private readonly redis: Redis;
   private readonly config: AnalyticsProcessorConfig['config'];
   private readonly logger: Logger;
+  private readonly notifier: QueueNotifier | undefined;
   
   private isRunning = false;
   private activeJobs = 0;
@@ -67,6 +70,7 @@ export class AnalyticsProcessor {
     this.redis = options.redis;
     this.config = options.config;
     this.logger = options.logger;
+    this.notifier = options.notifier;
   }
 
   async start(): Promise<void> {
@@ -127,7 +131,12 @@ export class AnalyticsProcessor {
         const events = await this.fetchEvents(this.config.batchSize);
         
         if (events.length === 0) {
-          await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+          // LISTEN/NOTIFY wakeup: sleep until notified or fallback timeout
+          if (this.notifier) {
+            await this.notifier.waitForNotification('queue_analytics_queue', 30_000);
+          } else {
+            await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+          }
           continue;
         }
 
@@ -141,16 +150,22 @@ export class AnalyticsProcessor {
 
   private async fetchEvents(limit: number): Promise<AnalyticsEvent[]> {
     const result = await this.db.query<AnalyticsEvent>(`
-      SELECT 
+      WITH claimed AS (
+        SELECT id
+        FROM analytics_queue
+        WHERE processed = false
+        ORDER BY timestamp ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE analytics_queue
+      SET processed = true, processed_at = NOW()
+      WHERE id IN (SELECT id FROM claimed)
+      RETURNING
         id, tenant_id as "tenantId", event_type as "eventType",
         message_id as "messageId", domain_id as "domainId",
         campaign_id as "campaignId", recipient_email as "recipientEmail",
         metadata, timestamp
-      FROM analytics_queue
-      WHERE processed = false
-      ORDER BY timestamp ASC
-      LIMIT $1
-      FOR UPDATE SKIP LOCKED
     `, [limit]);
 
     return result.rows;
@@ -167,14 +182,6 @@ export class AnalyticsProcessor {
       for (const event of events) {
         this.updateAggregation(event);
       }
-
-      // Mark events as processed
-      const ids = events.map(e => e.id);
-      await this.db.query(`
-        UPDATE analytics_queue
-        SET processed = true, processed_at = NOW()
-        WHERE id = ANY($1)
-      `, [ids]);
 
       // Check if buffer should be flushed
       if (this.eventBuffer.length >= this.config.batchSize) {
@@ -196,27 +203,27 @@ export class AnalyticsProcessor {
     // Create aggregation keys for different dimensions
     const keys = [
       // Tenant level
-      `${event.tenantId}:${periodStart.toISOString()}`,
+      `${event.tenantId}|${periodStart.toISOString()}`,
     ];
 
     if (event.domainId) {
-      keys.push(`${event.tenantId}:${event.domainId}:${periodStart.toISOString()}`);
+      keys.push(`${event.tenantId}|${event.domainId}|${periodStart.toISOString()}`);
     }
 
     if (event.campaignId) {
-      keys.push(`${event.tenantId}::${event.campaignId}:${periodStart.toISOString()}`);
+      keys.push(`${event.tenantId}||${event.campaignId}|${periodStart.toISOString()}`);
     }
 
     if (event.domainId && event.campaignId) {
-      keys.push(`${event.tenantId}:${event.domainId}:${event.campaignId}:${periodStart.toISOString()}`);
+      keys.push(`${event.tenantId}|${event.domainId}|${event.campaignId}|${periodStart.toISOString()}`);
     }
 
     for (const key of keys) {
       let stats = this.aggregationBuffer.get(key);
       
       if (!stats) {
-        // Parse key: tenantId:domainOrCampaign:campaignOrTime:timestamp
-        const [tenantId, domainOrCampaign, campaignOrTime] = key.split(':');
+        // Parse key: tenantId|domainOrCampaign|campaignOrTime|timestamp
+        const [tenantId, domainOrCampaign, campaignOrTime] = key.split('|');
         
         stats = {
           tenantId: tenantId ?? '',  // Ensure tenantId is always a string
@@ -290,7 +297,7 @@ export class AnalyticsProcessor {
     const aggregations = new Map(this.aggregationBuffer);
     
     // Create sets to track which items we took for flushing
-    const eventIds = new Set(events.map((_, i) => i));
+    const eventIds = new Set(events.map((event) => event.id));
     const aggregationKeys = new Set(aggregations.keys());
 
     try {
@@ -302,7 +309,7 @@ export class AnalyticsProcessor {
 
       // SUCCESS: Now safe to remove flushed items from buffers
       // Only remove the specific events we flushed (keep any new arrivals)
-      this.eventBuffer = this.eventBuffer.filter((_, i) => !eventIds.has(i));
+      this.eventBuffer = this.eventBuffer.filter((event) => !eventIds.has(event.id));
       
       // Remove only the aggregation keys we successfully flushed
       for (const key of aggregationKeys) {

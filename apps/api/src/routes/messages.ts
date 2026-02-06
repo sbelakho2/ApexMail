@@ -21,6 +21,7 @@ import { requireScopes } from '../middleware/auth.js';
  * RFC 5322 headers must not contain CR, LF, or NUL characters
  */
 const stripHeaderChars = (str: string): string => 
+  // eslint-disable-next-line no-control-regex -- intentional: strip NUL, CR, LF for header injection prevention
   str.replace(/[\r\n\x00]/g, '').trim();
 
 const recipientSchema = z.object({
@@ -331,13 +332,15 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('id');
 
-    const result = await messagesRepo.findById(messageId);
+    // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
+    // Previously used fetch-then-check pattern which could leak timing information
+    const result = await messagesRepo.findById(messageId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch message');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Message');
     }
 
@@ -452,13 +455,14 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const messageId = c.req.param('id');
     const logger = c.get('logger');
 
-    const result = await messagesRepo.findById(messageId);
+    // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
+    const result = await messagesRepo.findById(messageId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch message');
     }
 
-    if (!result.value || result.value.tenantId !== tenantId) {
+    if (!result.value) {
       throw ApiError.notFound('Message');
     }
 

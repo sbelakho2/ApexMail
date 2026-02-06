@@ -294,7 +294,7 @@ export function FeatureGrid() {
                     initial={{ opacity: 0, y: 10 }}
                     animate={inView ? { opacity: 1, y: 0 } : {}}
                     transition={{ delay: categoryIndex * 0.1 + featureIndex * 0.05 }}
-                    className="p-6 rounded-xl border border-surface-200 hover:border-surface-300 hover:shadow-sm transition-all bg-white"
+                    className="p-6 rounded-lg border border-surface-200 hover:border-surface-300 hover:shadow-sm transition-all bg-white"
                   >
                     <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center mb-4', category.bgColor)}>
                       <feature.icon className={cn('w-4 h-4', category.color)} />

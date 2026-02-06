@@ -72,7 +72,7 @@ ApexMail is a monorepo containing multiple services that work together to provid
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/apexmail.git
+git clone https://github.com/apexmail/apexmail.git
 cd apexmail
 
 # Install dependencies
@@ -166,10 +166,14 @@ apexmail/
 
 ### Authentication
 
-All API requests require authentication via API key:
+All API requests require authentication via API key. Both header formats are supported:
 
 ```bash
-curl -H "X-API-Key: ak_your_api_key" https://api.yourdomain.com/v1/messages
+# Using Authorization header (recommended)
+curl -H "Authorization: Bearer am_live_your_api_key" https://api.yourdomain.com/v1/messages
+
+# Using X-API-Key header
+curl -H "X-API-Key: am_live_your_api_key" https://api.yourdomain.com/v1/messages
 ```
 
 ### Endpoints
@@ -280,7 +284,7 @@ docker compose up -d
 
 ### Kubernetes
 
-Kubernetes manifests are available in the `deploy/k8s/` directory.
+Kubernetes deployment documentation is planned for a future release. For now, use Docker Compose for production deployments.
 
 ## Security
 
@@ -294,6 +298,14 @@ Kubernetes manifests are available in the `deploy/k8s/` directory.
 ## License
 
 Proprietary - Bel Consulting OÜ
+
+ApexMail is a brand of Bel Consulting OÜ, Estonia.
+
+**Company Details:**
+- Bel Consulting OÜ
+- Sakala 7-2, 10141 Tallinn, Estonia
+- Registry Code: 16192499
+- VAT: EE102951727
 
 ## Support
 

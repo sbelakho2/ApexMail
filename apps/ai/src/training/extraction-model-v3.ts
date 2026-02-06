@@ -116,20 +116,20 @@ const TECH_FINGERPRINTS: Array<{
     exclusions?: RegExp[]; // Patterns that indicate false positive
 }> = [
     // Frontend Frameworks
-    { name: 'React', category: 'frontend', patterns: [/react[\.\-]dom|__REACT|data-reactroot|_reactFragment|react\.production/i], confidence: 0.95 },
-    { name: 'Vue.js', category: 'frontend', patterns: [/vue[\.\-]?[23]?\.(?:min\.)?js|__VUE__|data-v-[a-f0-9]+|v-bind:|v-on:|nuxt/i], confidence: 0.95 },
-    { name: 'Angular', category: 'frontend', patterns: [/angular[\.\-]?(?:core|common)?\.(?:min\.)?js|ng-app=|ng-controller=|\[@angular\//i], confidence: 0.92 },
+    { name: 'React', category: 'frontend', patterns: [/react[.-]dom|__REACT|data-reactroot|_reactFragment|react\.production/i], confidence: 0.95 },
+    { name: 'Vue.js', category: 'frontend', patterns: [/vue[.-]?[23]?\.(?:min\.)?js|__VUE__|data-v-[a-f0-9]+|v-bind:|v-on:|nuxt/i], confidence: 0.95 },
+    { name: 'Angular', category: 'frontend', patterns: [/angular[.-]?(?:core|common)?\.(?:min\.)?js|ng-app=|ng-controller=|\[@angular\//i], confidence: 0.92 },
     { name: 'Next.js', category: 'frontend', patterns: [/__NEXT_DATA__|_next\/static|next\/dist|nextjs/i], confidence: 0.98, exclusions: [/gatsby/i] },
-    { name: 'Svelte', category: 'frontend', patterns: [/svelte[\.\-]|__svelte/i], confidence: 0.95 },
-    { name: 'jQuery', category: 'frontend', patterns: [/jquery[\.\-]?[0-9\.]*(?:\.min)?\.js|\$\(document\)|jQuery\(/i], confidence: 0.90 },
+    { name: 'Svelte', category: 'frontend', patterns: [/svelte[.-]|__svelte/i], confidence: 0.95 },
+    { name: 'jQuery', category: 'frontend', patterns: [/jquery[.-]?[0-9.]*(?:\.min)?\.js|\$\(document\)|jQuery\(/i], confidence: 0.90 },
     
     // Analytics
     { name: 'Google Analytics', category: 'analytics', patterns: [/google-analytics\.com\/(?:analytics|ga)\.js|googletagmanager\.com\/gtag|UA-\d{6,}-\d|G-[A-Z0-9]{10,}/i], confidence: 0.98 },
     { name: 'Segment', category: 'analytics', patterns: [/cdn\.segment\.(?:com|io)\/analytics|analytics\.min\.js.*segment/i], confidence: 0.95 },
-    { name: 'Mixpanel', category: 'analytics', patterns: [/cdn\.mxpnl\.com|mixpanel[\.\-].*\.js|mixpanel\.init\(/i], confidence: 0.95 },
-    { name: 'Amplitude', category: 'analytics', patterns: [/cdn\.amplitude\.com|amplitude[\.\-].*\.js|amplitude\.getInstance\(/i], confidence: 0.95 },
+    { name: 'Mixpanel', category: 'analytics', patterns: [/cdn\.mxpnl\.com|mixpanel[.-].*\.js|mixpanel\.init\(/i], confidence: 0.95 },
+    { name: 'Amplitude', category: 'analytics', patterns: [/cdn\.amplitude\.com|amplitude[.-].*\.js|amplitude\.getInstance\(/i], confidence: 0.95 },
     { name: 'Hotjar', category: 'analytics', patterns: [/static\.hotjar\.com|hj\(['"]identify|hjSiteSettings/i], confidence: 0.96 },
-    { name: 'Heap', category: 'analytics', patterns: [/cdn\.heapanalytics\.com|heap[\.\-].*\.js/i], confidence: 0.94 },
+    { name: 'Heap', category: 'analytics', patterns: [/cdn\.heapanalytics\.com|heap[.-].*\.js/i], confidence: 0.94 },
     { name: 'FullStory', category: 'analytics', patterns: [/fullstory\.com\/s\/fs\.js|FS\.identify\(/i], confidence: 0.95 },
     
     // Marketing/CRM
@@ -155,7 +155,7 @@ const TECH_FINGERPRINTS: Array<{
     
     // Infrastructure
     { name: 'Cloudflare', category: 'infrastructure', patterns: [/cloudflare\.com|cdnjs\.cloudflare\.com|__cf_bm/i], confidence: 0.95 },
-    { name: 'AWS', category: 'infrastructure', patterns: [/amazonaws\.com|aws\.amazon\.com|s3[\.\-].*\.amazonaws/i], confidence: 0.90 },
+    { name: 'AWS', category: 'infrastructure', patterns: [/amazonaws\.com|aws\.amazon\.com|s3[.-].*\.amazonaws/i], confidence: 0.90 },
     { name: 'Vercel', category: 'infrastructure', patterns: [/vercel\.app|\.vercel\.com|__vercel/i], confidence: 0.96 },
     { name: 'Netlify', category: 'infrastructure', patterns: [/netlify\.app|netlify\.com|netlify-identity/i], confidence: 0.95 },
 ];
@@ -426,10 +426,10 @@ class XGBoostRegressor {
         const numFeatures = X[0]?.length || 0;
         
         this.basePrediction = y.reduce((a, b) => a + b, 0) / n;
-        let predictions = new Array(n).fill(this.basePrediction);
+        const predictions = new Array(n).fill(this.basePrediction);
         
         let bestValLoss = Infinity;
-        let patience = 25;
+        const patience = 25;
         let noImprove = 0;
         
         for (let iter = 0; iter < this.nEstimators; iter++) {

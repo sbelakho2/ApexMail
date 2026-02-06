@@ -93,7 +93,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `INSERT INTO contracts (
+      `INSERT INTO enterprise_contracts (
         id, tenant_id, name, status, start_date, end_date, auto_renew,
         base_price, committed_volume, overage_rate, annual_prepay_discount,
         additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
@@ -162,7 +162,7 @@ export class EnterpriseContractService {
       updated_at: Date;
     }>(
       `WITH activate_contract AS (
-        UPDATE contracts
+        UPDATE enterprise_contracts
         SET status = 'active',
             signed_at = NOW(),
             signed_by = $2,
@@ -303,7 +303,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM contracts WHERE id = $1`,
+      `SELECT * FROM enterprise_contracts WHERE id = $1`,
       [contractId]
     );
 
@@ -341,7 +341,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM contracts 
+      `SELECT * FROM enterprise_contracts 
        WHERE tenant_id = $1 AND status = 'active'
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -369,7 +369,7 @@ export class EnterpriseContractService {
     // Find contracts expiring in 30 days and queue notifications atomically
     const expiringResult = await this.db.query<{ id: string; tenant_id: string }>(
       `WITH expiring_contracts AS (
-        SELECT id, tenant_id FROM contracts
+        SELECT id, tenant_id FROM enterprise_contracts
         WHERE status = 'active'
           AND end_date <= $1
           AND end_date > $2
@@ -397,17 +397,17 @@ export class EnterpriseContractService {
       action: string;
     }>(
       `WITH expired_contracts AS (
-        SELECT id, tenant_id, auto_renew FROM contracts
+        SELECT id, tenant_id, auto_renew FROM enterprise_contracts
         WHERE status = 'active' AND end_date <= $1
       ),
       auto_renew_contracts AS (
-        UPDATE contracts 
+        UPDATE enterprise_contracts 
         SET end_date = end_date + INTERVAL '1 year', updated_at = NOW()
         WHERE id IN (SELECT id FROM expired_contracts WHERE auto_renew = true)
         RETURNING id, 'renewed' as action
       ),
       expire_contracts AS (
-        UPDATE contracts 
+        UPDATE enterprise_contracts 
         SET status = 'expired', updated_at = NOW()
         WHERE id IN (SELECT id FROM expired_contracts WHERE auto_renew = false)
         RETURNING id, tenant_id, 'expired' as action
@@ -478,10 +478,10 @@ export class EnterpriseContractService {
   <div class="parties">
     <div class="party">
       <strong>Service Provider:</strong><br>
-      ApexMail OÜ<br>
-      Tartu mnt 67/1-13b, 10115 Tallinn, Estonia<br>
-      Registry Code: 16123456<br>
-      VAT: EE102345678
+      Bel Consulting OÜ (trading as ApexMail)<br>
+      Sakala 7-2, 10141 Tallinn, Estonia<br>
+      Registry Code: 16192499<br>
+      VAT: EE102951727
     </div>
     <div class="party">
       <strong>Client:</strong><br>
@@ -564,7 +564,7 @@ export class EnterpriseContractService {
   <div class="signature-block">
     <div class="signature-line">
       <hr>
-      <p>For ApexMail OÜ</p>
+      <p>For Bel Consulting OÜ (ApexMail)</p>
       <p>Name: _________________</p>
       <p>Title: _________________</p>
       <p>Date: _________________</p>
@@ -580,7 +580,8 @@ export class EnterpriseContractService {
 
   <div class="footer">
     <p>This agreement is governed by the laws of the Republic of Estonia.</p>
-    <p>ApexMail OÜ • Tartu mnt 67/1-13b • 10115 Tallinn • Estonia • info@apexmail.ee</p>
+    <p>Bel Consulting OÜ (trading as ApexMail) • Sakala 7-2 • 10141 Tallinn • Estonia • info@apexmail.ee</p>
+    <p>Reg. 16192499 • VAT: EE102951727</p>
   </div>
 </body>
 </html>`;
@@ -670,7 +671,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM contracts WHERE tenant_id = $1 ORDER BY created_at DESC`,
+      `SELECT * FROM enterprise_contracts WHERE tenant_id = $1 ORDER BY created_at DESC`,
       [tenantId]
     );
 
@@ -783,7 +784,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE contracts SET status = 'pending_signature', updated_at = NOW() 
+      `UPDATE enterprise_contracts SET status = 'pending_signature', updated_at = NOW() 
        WHERE id = $1 RETURNING *`,
       [contractId]
     );
@@ -825,7 +826,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE contracts SET 
+      `UPDATE enterprise_contracts SET 
         status = 'active', 
         signed_at = $2, 
         signed_by = $3,
@@ -908,7 +909,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE contracts SET 
+      `UPDATE enterprise_contracts SET 
         status = 'terminated', 
         end_date = $2,
         updated_at = NOW() 
@@ -1021,7 +1022,7 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE contracts SET 
+      `UPDATE enterprise_contracts SET 
         purchase_order_number = $2,
         updated_at = NOW() 
        WHERE id = $1 RETURNING *`,

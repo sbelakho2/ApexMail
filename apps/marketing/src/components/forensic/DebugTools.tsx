@@ -73,7 +73,7 @@ export function DebugTools() {
               initial={{ opacity: 0, y: 20 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: 0.1 * index }}
-              className="bg-white border border-surface-200 shadow-sm rounded-xl p-8 hover:border-surface-300 transition-all"
+              className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 hover:border-surface-300 transition-all"
             >
               <div className="flex items-start gap-6">
                 <div className="w-12 h-12 rounded-lg bg-surface-100/50 flex items-center justify-center flex-shrink-0 border border-surface-200">
@@ -103,7 +103,7 @@ export function DebugTools() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.5 }}
-          className="bg-surface-900 rounded-xl overflow-hidden shadow-lg border border-surface-800"
+          className="bg-surface-900 rounded-lg overflow-hidden shadow-lg border border-surface-800"
         >
           <div className="flex items-center gap-2 px-6 py-4 bg-surface-800/50 border-b border-surface-700/50">
             <div className="flex gap-1.5">

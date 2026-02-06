@@ -213,14 +213,14 @@ export function EndpointExplorer() {
                 >
                   <cat.icon className="w-4 h-4" />
                   <span>{cat.name}</span>
-                  <ChevronRight className="w-3 h-3 ml-auto opacity-50" />
+                  <ChevronRight className="w-4 h-4 ml-auto opacity-50" />
                 </button>
               ))}
             </div>
 
             {/* Endpoints List */}
             <div className="lg:col-span-3">
-              <div className="bg-white border border-surface-200 shadow-sm rounded-xl overflow-hidden">
+              <div className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden">
                 <div className="divide-y divide-surface-100">
                   {category.endpoints.map((endpoint) => (
                     <div
@@ -238,7 +238,7 @@ export function EndpointExplorer() {
                       <div className="flex items-center gap-3 mb-2">
                         <span
                           className={cn(
-                            'px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-tight rounded-md',
+                            'px-2.5 py-0.5 text-xs font-medium tracking-tight rounded-md',
                             endpoint.method === 'GET'
                               ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
                               : endpoint.method === 'POST'
@@ -260,7 +260,7 @@ export function EndpointExplorer() {
                           animate={{ opacity: 1, height: 'auto' }}
                           className="mt-6 pt-6 border-t border-surface-200"
                         >
-                          <div className="text-xs font-semibold text-surface-500 uppercase tracking-wide mb-3">Example Request/Response</div>
+                          <div className="text-xs font-semibold text-surface-500 mb-3">Example Request/Response</div>
                           <pre className="text-xs text-surface-300 font-mono bg-surface-900 p-4 rounded-lg overflow-auto shadow-inner border border-surface-800">
                             {endpoint.example}
                           </pre>

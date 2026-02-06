@@ -206,7 +206,7 @@ interface TokenResult {
 
 async function verifyToken(ctx: BillingContext, token: string): Promise<TokenResult> {
   // Check if it's an API key
-  if (token.startsWith('apx_')) {
+  if (token.startsWith('am_')) {
     const result = await ctx.db.query<{
       id: string;
       tenant_id: string;

@@ -153,7 +153,7 @@ export function CaseStudyList() {
               initial={{ opacity: 0, y: 20 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: index * 0.1 }}
-              className="bg-white rounded-xl border border-surface-200 shadow-sm overflow-hidden"
+              className="bg-white rounded-lg border border-surface-200 shadow-sm overflow-hidden"
             >
               {/* Header */}
               <div className="border-b border-surface-100 flex flex-col md:flex-row md:items-center justify-between p-6 bg-white">
@@ -221,7 +221,7 @@ export function CaseStudyList() {
                   </div>
 
                   {/* Quote */}
-                  <div className={cn("p-6 rounded-xl border border-surface-100", study.bgLight)}>
+                  <div className={cn("p-6 rounded-lg border border-surface-100", study.bgLight)}>
                      <p className="text-lg text-surface-800 italic mb-4 leading-relaxed">&ldquo;{study.quote.text}&rdquo;</p>
                       <footer className="text-sm flex items-center gap-2">
                         <span className="font-semibold text-surface-900">{study.quote.author}</span>

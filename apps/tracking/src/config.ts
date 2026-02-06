@@ -18,7 +18,7 @@ const configSchema = z.object({
     database: z.string().default('apexmail'),
     user: z.string().default('apexmail'),
     password: z.string().default(''),
-    maxConnections: z.coerce.number().default(10),
+    maxConnections: z.coerce.number().default(25),
     idleTimeout: z.coerce.number().default(10000),
     connectionTimeout: z.coerce.number().default(5000),
   }),

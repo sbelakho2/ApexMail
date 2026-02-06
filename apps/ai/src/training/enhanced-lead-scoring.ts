@@ -13,7 +13,6 @@ import {
     TRAIN_COMPANIES,
     VALIDATION_COMPANIES,
     TEST_COMPANIES,
-    LARGE_COMPANY_DATASET,
     type CompanyProfile
 } from './large-company-dataset.js';
 
@@ -352,8 +351,8 @@ class GradientBoostingClassifier {
         this.baseScore = Math.log(posCount / negCount);
         
         // Initialize predictions
-        let predictions = new Array(n).fill(this.baseScore);
-        let valPredictions = valX ? new Array(valX.length).fill(this.baseScore) : [];
+        const predictions = new Array(n).fill(this.baseScore);
+        const valPredictions = valX ? new Array(valX.length).fill(this.baseScore) : [];
         
         // Feature importances
         this.featureImportances = new Array(featureNames.length).fill(0);

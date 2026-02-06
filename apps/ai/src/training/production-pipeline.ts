@@ -172,9 +172,9 @@ class GradientBoostingRegressor {
         const n = X.length;
         this.basePrediction = y.reduce((a, b) => a + b, 0) / n;
         
-        let predictions = new Array(n).fill(this.basePrediction);
+        const predictions = new Array(n).fill(this.basePrediction);
         let bestValMse = Infinity;
-        let patience = 15;
+        const patience = 15;
         let noImprove = 0;
         
         for (let i = 0; i < this.nEstimators; i++) {
@@ -257,9 +257,9 @@ class GradientBoostingClassifier {
         const posCount = y.filter(yi => yi === 1).length;
         this.basePrediction = Math.log(posCount / (n - posCount));
         
-        let logOdds = new Array(n).fill(this.basePrediction);
+        const logOdds = new Array(n).fill(this.basePrediction);
         let bestValAuc = 0;
-        let patience = 15;
+        const patience = 15;
         let noImprove = 0;
         
         for (let i = 0; i < this.nEstimators; i++) {

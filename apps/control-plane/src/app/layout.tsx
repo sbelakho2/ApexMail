@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
 import { ControlPlaneShell } from '../components/layout/control-plane-shell';
+import { Providers } from '../components/layout/providers';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -34,7 +35,9 @@ export default function RootLayout({
     return (
         <html lang="en">
             <body className={inter.className}>
-                <ControlPlaneShell>{children}</ControlPlaneShell>
+                <Providers>
+                    <ControlPlaneShell>{children}</ControlPlaneShell>
+                </Providers>
             </body>
         </html>
     );

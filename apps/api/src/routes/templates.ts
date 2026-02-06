@@ -241,7 +241,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const logger = c.get('logger');
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -249,13 +249,8 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const input = updateTemplateSchema.parse(body);
 
-    // Check for duplicate slug if changing
-    if (input.slug && input.slug !== existing.value.slug) {
-      const slugExists = await templatesRepo.findBySlug(input.slug, tenantId);
-      if (slugExists.ok && slugExists.value) {
-        throw ApiError.conflict(`Template with slug '${input.slug}' already exists`, 'SLUG_EXISTS');
-      }
-    }
+    // FIX-091: Removed pre-check for duplicate slug on update — rely on database
+    // UNIQUE constraint to prevent TOCTOU race condition.
 
     const result = await templatesRepo.update(templateId, {
       name: input.name,
@@ -274,6 +269,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     });
 
     if (!result.ok) {
+      // Handle unique constraint violation (duplicate slug)
+      const errMsg = result.error?.message ?? '';
+      if (errMsg.includes('unique') || errMsg.includes('duplicate') || errMsg.includes('23505')) {
+        throw ApiError.conflict(`Template with slug '${input.slug || input.name}' already exists`, 'SLUG_EXISTS');
+      }
       throw ApiError.internal('Failed to update template');
     }
 
@@ -313,7 +313,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const logger = c.get('logger');
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -353,7 +353,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const templateId = c.req.param('id');
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -387,7 +387,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -431,7 +431,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -471,7 +471,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const templateId = c.req.param('id');
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -508,7 +508,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const logger = c.get('logger');
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -554,7 +554,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const logger = c.get('logger');
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId);
+    const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }

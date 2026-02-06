@@ -18,18 +18,12 @@
 import {
     ALL_EMAIL_SAMPLES,
     SUBJECT_LINE_TRAINING_DATA,
-    EMAIL_BODY_SAMPLES,
     type EmailSample,
-    type SubjectLineSample,
-    type EmailBodySample,
     type EmailCategory
 } from './huggingface-datasets.js';
 
 import {
     EmailQualityEvaluator,
-    fleschKincaidReadingEase,
-    calculateSpamScore,
-    predictEngagement,
     type QualityEvaluation
 } from './email-quality-evaluator.js';
 
@@ -696,7 +690,7 @@ export class EmailWritingModel {
         const template = templates[Math.floor(Math.random() * templates.length)] || this.getDefaultTemplate(params.category);
         
         // Fill in personalization
-        let body = template
+        const body = template
             .replace(/\{\{firstName\}\}/g, params.recipientName || '{{firstName}}')
             .replace(/\{\{company\}\}/g, params.companyName || '{{company}}')
             .replace(/\{\{senderName\}\}/g, params.senderName || '{{senderName}}')

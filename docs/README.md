@@ -117,6 +117,19 @@ docs/
 
 ## Version
 
-- Documentation Version: 2.1.0
-- ApexMail Version: 2.1.0
-- Last Updated: 2025-02-02
+- Documentation Version: 1.0.0
+- ApexMail Version: 1.0.0
+- Last Updated: 2026-02-06
+
+---
+
+## Company Information
+
+ApexMail is a brand of **Bel Consulting OÜ**, Estonia.
+
+- **Company**: Bel Consulting OÜ
+- **Address**: Sakala 7-2, 10141 Tallinn, Estonia
+- **Registry Code**: 16192499
+- **VAT Number**: EE102951727
+- **Email**: contact@apexmail.ee
+- **Website**: https://apexmail.ee

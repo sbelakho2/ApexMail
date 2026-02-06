@@ -24,3 +24,4 @@ export * from './mail-server-client.js';
 export * from './templates/index.js';
 export * from './attachments/index.js';
 export * from './validation/index.js';
+export * from './company.js';

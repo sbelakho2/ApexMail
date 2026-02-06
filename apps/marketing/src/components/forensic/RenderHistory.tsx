@@ -107,7 +107,7 @@ export function RenderHistory() {
               initial={{ opacity: 0, y: 20 }}
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: 0.1 * index }}
-              className="bg-white border border-surface-200 shadow-sm rounded-xl p-10"
+              className="bg-white border border-surface-200 shadow-sm rounded-lg p-10"
             >
               <div className="grid lg:grid-cols-2 gap-12 items-start">
                 {/* Info */}
@@ -121,7 +121,7 @@ export function RenderHistory() {
 
                 {/* Code */}
                 <div className={index % 2 === 1 ? 'lg:order-1' : ''}>
-                  <div className="bg-surface-900 rounded-xl p-6 shadow-inner overflow-x-auto border border-surface-800">
+                  <div className="bg-surface-900 rounded-lg p-6 shadow-inner overflow-x-auto border border-surface-800">
                     <pre className="text-xs text-surface-300 font-mono whitespace-pre leading-relaxed">
                       {feature.code}
                     </pre>

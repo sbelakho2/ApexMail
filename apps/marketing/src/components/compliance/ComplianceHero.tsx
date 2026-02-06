@@ -26,7 +26,7 @@ export function ComplianceHero() {
  {/* Badge */}
  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white border border-surface-200 text-xs font-medium text-surface-600 mb-8 p-1 pr-3">
           <span className="w-6 h-6 rounded-full bg-surface-100 flex items-center justify-center">
-            <Shield className="w-3.5 h-3.5" />
+            <Shield className="w-4 h-4" />
           </span>
           Compliance-as-Code
         </div>
@@ -59,11 +59,11 @@ export function ComplianceHero() {
 
  {/* CTA */}
  <div className="flex flex-wrap gap-4">
- <Link href="https://app.apexmail.ee/signup" className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors">
+ <Link href="https://app.apexmail.ee/signup" className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors">
  Start Free Trial
  <ArrowRight className="w-4 h-4 ml-2" />
  </Link>
- <Link href="/contact" className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors">
+ <Link href="/contact" className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors">
  Compliance Review
  </Link>
  </div>
@@ -76,8 +76,8 @@ export function ComplianceHero() {
  transition={{ duration: 0.5, delay: 0.2 }}
  className="relative"
  >
- <div className="p-8 bg-white rounded-xl border border-surface-200">
- <h3 className="text-xs font-semibold text-surface-500 uppercase tracking-wide mb-8 text-center">
+ <div className="p-8 bg-white rounded-lg border border-surface-200">
+ <h3 className="text-xs font-semibold text-surface-500 mb-8 text-center">
  Compliance Certifications
  </h3>
  <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
@@ -92,12 +92,12 @@ export function ComplianceHero() {
  <div className="w-10 h-10 rounded-lg bg-white flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
  <Shield className="w-5 h-5" strokeWidth={1.5} />
  </div>
- <span className="text-[10px] font-semibold text-surface-900 uppercase tracking-wide">{badge.name}</span>
+ <span className="text-xs font-semibold text-surface-900">{badge.name}</span>
  </motion.div>
  ))}
  </div>
  <div className="mt-10 p-4 rounded-lg bg-emerald-50 border border-emerald-100 ">
- <div className="flex items-center gap-3 text-emerald-700 text-[10px] font-bold uppercase tracking-widest">
+ <div className="flex items-center gap-3 text-emerald-700 text-xs font-bold">
  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
  Verified and Current
  </div>

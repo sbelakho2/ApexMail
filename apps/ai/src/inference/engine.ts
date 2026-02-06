@@ -201,8 +201,12 @@ export class InferenceEngine extends EventEmitter {
             // };
 
             // Load the model
-            // Note: In production, you would load the actual ONNX model file
-            // For now, we'll create a mock session for demonstration
+            // FIX-055: WARN clearly that inference is mock/simulated in non-production
+            console.warn(
+                '⚠️  [AI] MOCK MODE: No real ONNX model loaded. ' +
+                'Inference will return synthetic/random outputs. ' +
+                'To use a real model, provide model files and uncomment ort.InferenceSession.create().'
+            );
             console.log(`Loading model from ${path}...`);
             
             // Simulated model loading - in production:

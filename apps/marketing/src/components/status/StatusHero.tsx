@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { CheckCircle2, AlertTriangle, XCircle, Activity } from 'lucide-react';
 
@@ -45,6 +46,16 @@ const statusConfig = {
 export function StatusHero() {
   const config = statusConfig[overallStatus];
   const Icon = config.icon;
+  const [lastUpdated, setLastUpdated] = useState<string>('');
+
+  useEffect(() => {
+    setLastUpdated(new Date().toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }));
+  }, []);
 
   return (
     <section className="py-16 md:py-24 bg-white border-b border-surface-100">
@@ -79,12 +90,7 @@ export function StatusHero() {
           <div className="flex items-center justify-center gap-6 text-sm">
              <div className="text-surface-400">
                 Last updated: <span className="font-medium text-surface-600">
-                  {new Date().toLocaleString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
+                  {lastUpdated}
                 </span>
              </div>
 

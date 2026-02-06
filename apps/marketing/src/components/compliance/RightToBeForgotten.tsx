@@ -75,7 +75,7 @@ export function RightToBeForgotten() {
  animate={inView ? { opacity: 1, y: 0 } : {}}
  className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-50 text-red-700 border border-red-100 text-xs font-medium mb-6"
  >
- <Trash2 className="w-3.5 h-3.5" />
+ <Trash2 className="w-4 h-4" />
  Right to Be Forgotten
  </motion.div>
  <motion.h2
@@ -113,7 +113,7 @@ export function RightToBeForgotten() {
  onClick={startDemo}
  disabled={isAnimating}
  className={cn(
- 'px-5 py-2.5 rounded-lg font-semibold text-sm transition-all shadow-sm',
+ 'px-5 py-2.5 rounded-md font-semibold text-sm transition-all shadow-sm',
  isAnimating
  ? 'bg-surface-100 text-surface-400 cursor-not-allowed'
  : 'bg-red-600 text-white hover:bg-red-700'
@@ -136,7 +136,7 @@ export function RightToBeForgotten() {
  animate={{ opacity: 1, x: 0 }}
  transition={{ delay: index * 0.1 }}
  className={cn(
- 'flex items-center gap-4 p-4 rounded-xl border transition-all',
+ 'flex items-center gap-4 p-4 rounded-lg border transition-all',
  status === 'active'
  ? 'bg-red-50/50 border-red-200'
  : status === 'complete'
@@ -175,7 +175,7 @@ export function RightToBeForgotten() {
  <span
  key={system}
  className={cn(
- 'text-[10px] px-2 py-0.5 rounded font-medium',
+ 'text-xs px-2 py-0.5 rounded font-medium',
  status === 'complete'
  ? 'bg-emerald-100/50 text-emerald-700'
  : 'bg-surface-100 text-surface-600'
@@ -209,10 +209,10 @@ export function RightToBeForgotten() {
  <motion.div
  initial={{ opacity: 0, scale: 0.9 }}
  animate={{ opacity: 1, scale: 1 }}
- className="mt-8 p-6 bg-emerald-50 border border-emerald-200 rounded-xl text-center "
+ className="mt-8 p-6 bg-emerald-50 border border-emerald-200 rounded-lg text-center "
  >
  <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto mb-3" strokeWidth={3} />
- <div className="text-emerald-800 font-bold uppercase tracking-widest text-xs mb-1">Erasure Complete</div>
+ <div className="text-emerald-800 font-bold text-xs mb-1">Erasure Complete</div>
  <div className="text-sm text-emerald-700 font-medium">
  Certificate of deletion generated and logged to immutable audit trail
  </div>
@@ -234,7 +234,7 @@ export function RightToBeForgotten() {
  ].map((stat) => (
  <div key={stat.label} className="text-center">
  <div className="text-2xl lg:text-4xl font-bold text-surface-900 tabular-nums mb-1">{stat.value}</div>
- <div className="text-[10px] font-bold text-surface-600 uppercase tracking-widest">{stat.label}</div>
+ <div className="text-xs font-bold text-surface-600">{stat.label}</div>
  </div>
  ))}
  </motion.div>

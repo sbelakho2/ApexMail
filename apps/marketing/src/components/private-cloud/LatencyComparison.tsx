@@ -93,7 +93,7 @@ export function LatencyComparison() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.3 }}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl p-8"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8"
         >
           {/* Latency Chart */}
           <div className="space-y-8">
@@ -161,7 +161,7 @@ export function LatencyComparison() {
               description: 'Consistent performance for critical paths',
             },
           ].map((item) => (
-            <div key={item.title} className="bg-white border border-surface-200 shadow-sm rounded-xl p-8 text-center">
+            <div key={item.title} className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 text-center">
               <div className="w-10 h-10 rounded-full bg-surface-100/50 flex items-center justify-center mx-auto mb-4 border border-surface-200">
                 <item.icon className="w-5 h-5 text-surface-900" />
               </div>

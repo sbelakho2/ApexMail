@@ -67,9 +67,10 @@ redis.on('connect', () => {
 // TRACKING CODEC
 // =============================================================================
 
-const secretKey = process.env.TRACKING_SECRET_KEY ?? 'development-secret-key-change-in-production';
-if (secretKey === 'development-secret-key-change-in-production' && config.env === 'production') {
-  logger.error('TRACKING_SECRET_KEY must be set in production');
+const defaultDevSecret = 'development-secret-key-change-in-production';
+const secretKey = process.env.TRACKING_SECRET_KEY ?? (config.env === 'development' ? defaultDevSecret : undefined);
+if (!secretKey || (secretKey === defaultDevSecret && config.env !== 'development')) {
+  logger.error('TRACKING_SECRET_KEY must be set for non-development environments');
   process.exit(1);
 }
 
@@ -147,6 +148,7 @@ if (config.metrics.enabled) {
 // =============================================================================
 
 let isShuttingDown = false;
+let httpServer: ReturnType<typeof serve> | null = null;
 
 async function shutdown(signal: string): Promise<void> {
   if (isShuttingDown) return;
@@ -154,7 +156,20 @@ async function shutdown(signal: string): Promise<void> {
   
   logger.info('Shutdown initiated', { signal });
 
-  // Stop accepting new connections
+  // Set a hard timeout to force exit if shutdown hangs
+  const forceTimeout = setTimeout(() => {
+    logger.error('Shutdown timeout exceeded, forcing exit');
+    process.exit(1);
+  }, 15000);
+  forceTimeout.unref();
+
+  // Stop accepting new HTTP connections
+  if (httpServer) {
+    httpServer.close();
+    logger.info('HTTP server closed');
+  }
+
+  // Stop metrics server
   if (metricsServer) {
     metricsServer.close();
   }
@@ -202,7 +217,7 @@ async function main(): Promise<void> {
     processor.start();
 
     // Start HTTP server
-    serve({
+    httpServer = serve({
       fetch: app.fetch,
       port: config.server.port,
       hostname: config.server.host,

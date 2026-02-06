@@ -66,6 +66,10 @@
         --cp-accent-500: 245 158 11;
         --cp-accent-600: 217 119 6;
 
+        /* Semantic Design Tokens */
+        --control-plane: 245 158 11; /* Matches cp-accent-500 */
+        --control-plane-foreground: 255 255 255;
+
         /* Design System Variables */
         --background: 248 250 252;
         --foreground: 15 23 42;
@@ -86,7 +90,13 @@
         --border: 226 232 240;
         --input: 226 232 240;
         --ring: 59 130 246;
-        --radius: 0.5rem;
+        --radius: 0.75rem;
+
+        /* Radius tokens matching style guide */
+        --radius-sm: 10px;
+        --radius-md: 12px;
+        --radius-lg: 18px;
+        --radius-xl: 24px;
 
         /* Chart Colors */
         --chart-1: 59 130 246;
@@ -133,22 +143,36 @@
         -moz-osx-font-smoothing: grayscale;
     }
 
+    /* Reduced motion for accessibility */
+    @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+        }
+    }
+
     body {
-        @apply bg-slate-50 text-slate-900;
+        @apply bg-background text-foreground;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        font-size: 14px;
-        line-height: 1.5;
+        font-size: 16px;
+        line-height: 1.6;
+        font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
     }
 }
 
 @layer components {
     /* Card Component */
     .card {
-        @apply bg-white rounded-xl border border-slate-200 shadow-sm;
+        @apply bg-card rounded-[18px] border border-border;
+        box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06);
     }
 
     .card-header {
-        @apply px-6 py-4 border-b border-slate-100;
+        @apply px-6 py-4 border-b border-border;
     }
 
     .card-body {
@@ -157,37 +181,37 @@
 
     /* Button Variants */
     .btn {
-        @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all duration-150;
-        @apply focus:outline-none focus:ring-2 focus:ring-offset-2;
+        @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-md font-medium text-sm transition-all duration-150 ease-out min-h-[44px];
+        @apply focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2;
         @apply disabled:opacity-50 disabled:cursor-not-allowed;
     }
 
     .btn-primary {
-        @apply btn bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500;
+        @apply btn bg-primary text-primary-foreground hover:bg-primary/90;
     }
 
     .btn-secondary {
-        @apply btn bg-slate-100 text-slate-700 hover:bg-slate-200 focus:ring-slate-500;
+        @apply btn bg-secondary text-secondary-foreground hover:bg-secondary/80;
     }
 
     .btn-ghost {
-        @apply btn bg-transparent text-slate-600 hover:bg-slate-100 focus:ring-slate-500;
+        @apply btn bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground;
     }
 
     .btn-danger {
-        @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+        @apply btn bg-destructive text-destructive-foreground hover:bg-destructive/90;
     }
 
     /* Badge Styles */
     .badge {
-        @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+        @apply inline-flex items-center px-2.5 py-1 rounded-sm text-xs font-medium;
     }
 
-    .badge-primary { @apply badge bg-blue-50 text-blue-700; }
-    .badge-success { @apply badge bg-emerald-50 text-emerald-700; }
-    .badge-warning { @apply badge bg-amber-50 text-amber-700; }
-    .badge-danger { @apply badge bg-red-50 text-red-700; }
-    .badge-neutral { @apply badge bg-slate-50 text-slate-600; }
+    .badge-primary { @apply badge bg-primary/10 text-primary; }
+    .badge-success { @apply badge bg-success/10 text-success; }
+    .badge-warning { @apply badge bg-warning/10 text-warning; }
+    .badge-danger { @apply badge bg-destructive/10 text-destructive; }
+    .badge-neutral { @apply badge bg-muted text-muted-foreground; }
 
     /* Data Table */
     .data-table {
@@ -195,26 +219,26 @@
     }
 
     .data-table thead {
-        @apply bg-slate-50 border-b border-slate-200;
+        @apply bg-muted/50 border-b border-border;
     }
 
     .data-table th {
-        @apply px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider;
+        @apply px-4 py-3 text-left text-xs font-semibold text-muted-foreground;
     }
 
     .data-table td {
-        @apply px-4 py-3 text-sm text-slate-700;
+        @apply px-4 py-3 text-sm text-foreground;
     }
 
     .data-table tbody tr {
-        @apply border-b border-slate-100 hover:bg-slate-50/50 transition-colors;
+        @apply border-b border-border hover:bg-muted/50 transition-colors;
     }
 
     /* Input Styles */
     .input {
-        @apply w-full px-3 py-2 border border-slate-200 rounded-lg text-sm;
-        @apply focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent;
-        @apply placeholder:text-slate-400;
+        @apply w-full px-3 py-2.5 border border-input rounded-sm text-sm bg-background min-h-[44px];
+        @apply focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent;
+        @apply placeholder:text-muted-foreground;
     }
 }
 

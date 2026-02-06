@@ -37,7 +37,7 @@ const nextConfig = {
                     },
                     {
                         key: 'Strict-Transport-Security',
-                        value: 'max-age=63072000; includeSubDomains; preload',
+                        value: 'max-age=31536000; includeSubDomains; preload',
                     },
                     {
                         key: 'X-Content-Type-Options',
@@ -49,11 +49,15 @@ const nextConfig = {
                     },
                     {
                         key: 'X-XSS-Protection',
-                        value: '1; mode=block',
+                        value: '0',
                     },
                     {
                         key: 'Referrer-Policy',
                         value: 'strict-origin-when-cross-origin',
+                    },
+                    {
+                        key: 'Permissions-Policy',
+                        value: 'camera=(), microphone=(), geolocation=()',
                     },
                 ],
             },

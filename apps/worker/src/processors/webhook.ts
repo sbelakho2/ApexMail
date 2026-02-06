@@ -8,10 +8,14 @@ import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
 import { hmacSign } from '@apexmail/lib/crypto';
 import { CircuitBreakerFactory } from '../circuit-breaker.js';
+import type { QueueNotifier } from '../queue-notifier.js';
+import * as dns from 'dns/promises';
+import * as net from 'net';
 
 interface WebhookProcessorConfig {
   db: Pool;
   redis: Redis;
+  notifier?: QueueNotifier;
   config: {
     name: string;
     concurrency: number;
@@ -51,6 +55,7 @@ export class WebhookProcessor {
   private readonly config: WebhookProcessorConfig['config'];
   private readonly logger: Logger;
   private readonly circuitBreakers: CircuitBreakerFactory;
+  private readonly notifier: QueueNotifier | undefined;
   
   private isRunning = false;
   private activeJobs = 0;
@@ -59,6 +64,7 @@ export class WebhookProcessor {
     this.db = options.db;
     this.config = options.config;
     this.logger = options.logger;
+    this.notifier = options.notifier;
     
     // Initialize circuit breaker factory for per-endpoint circuit breakers
     this.circuitBreakers = new CircuitBreakerFactory(options.redis, {
@@ -110,7 +116,12 @@ export class WebhookProcessor {
         const jobs = await this.fetchJobs(availableSlots);
         
         if (jobs.length === 0) {
-          await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+          // LISTEN/NOTIFY wakeup: sleep until notified or fallback timeout
+          if (this.notifier) {
+            await this.notifier.waitForNotification('queue_webhook_queue', 30_000);
+          } else {
+            await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+          }
           continue;
         }
 
@@ -237,6 +248,18 @@ export class WebhookProcessor {
   }
 
   private async deliverWebhook(job: WebhookJob): Promise<WebhookDeliveryResult> {
+    // SECURITY FIX (FIX-032): Re-validate URL at delivery time to prevent DNS rebinding
+    // DNS may have changed since registration to point to internal/private IPs
+    try {
+      await this.validateDeliveryUrl(job.url);
+    } catch (error) {
+      return {
+        success: false,
+        responseTime: 0,
+        error: `SSRF protection: ${error instanceof Error ? error.message : 'URL validation failed'}`,
+      };
+    }
+
     const timestamp = Date.now();
     const deliveryId = generateId('dlv');
     
@@ -315,6 +338,48 @@ export class WebhookProcessor {
   private isRetryableStatusCode(statusCode: number): boolean {
     // Retry on server errors and some client errors
     return statusCode >= 500 || statusCode === 408 || statusCode === 429;
+  }
+
+  /**
+   * SECURITY (FIX-032): Validate URL at delivery time to prevent DNS rebinding.
+   * Even though URLs are validated at registration, DNS records can change.
+   */
+  private async validateDeliveryUrl(urlString: string): Promise<void> {
+    const url = new URL(urlString);
+    const hostname = url.hostname;
+
+    // Block known internal hostnames
+    const blocked = [
+      'localhost', '127.0.0.1', '::1', '0.0.0.0', '[::1]',
+      'metadata.google.internal', 'instance-data',
+      'kubernetes.default', 'kubernetes.default.svc',
+    ];
+    if (blocked.some(h => hostname.toLowerCase() === h || hostname.toLowerCase().endsWith('.' + h))) {
+      throw new Error('URL points to internal/localhost address');
+    }
+
+    // If hostname is an IP, check directly
+    if (net.isIP(hostname)) {
+      if (isPrivateIP(hostname)) {
+        throw new Error(`URL resolves to private IP: ${hostname}`);
+      }
+      return;
+    }
+
+    // Resolve DNS and check ALL IPs
+    const addresses4 = await dns.resolve4(hostname).catch(() => [] as string[]);
+    const addresses6 = await dns.resolve6(hostname).catch(() => [] as string[]);
+    const allAddresses = [...addresses4, ...addresses6];
+
+    if (allAddresses.length === 0) {
+      throw new Error('URL hostname could not be resolved');
+    }
+
+    for (const ip of allAddresses) {
+      if (isPrivateIP(ip)) {
+        throw new Error(`URL resolves to private IP: ${ip}`);
+      }
+    }
   }
 
   private async handleSuccess(job: WebhookJob, result: WebhookDeliveryResult): Promise<void> {
@@ -580,4 +645,36 @@ export async function dispatchWebhookEvent(
       ) VALUES ${values}
     `, params);
   }
+}
+
+/**
+ * SECURITY (FIX-032): Check if an IP address is internal/private.
+ * Prevents SSRF via DNS rebinding at webhook delivery time.
+ */
+function isPrivateIP(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map(Number);
+    const [a, b] = parts;
+    if (a === undefined || b === undefined) return false;
+    if (a === 127) return true;                           // Loopback
+    if (a === 10) return true;                            // Class A private
+    if (a === 172 && b >= 16 && b <= 31) return true;     // Class B private
+    if (a === 192 && b === 168) return true;              // Class C private
+    if (a === 169 && b === 254) return true;              // Link-local / metadata
+    if (a >= 224 && a <= 239) return true;                // Multicast
+    if (a === 0 || a === 255) return true;                // Reserved
+    return false;
+  }
+  if (net.isIPv6(ip)) {
+    const n = ip.toLowerCase();
+    if (n === '::1' || n === '::') return true;
+    if (n.startsWith('fe80:') || n.startsWith('fc') || n.startsWith('fd')) return true;
+    if (n.startsWith('ff')) return true;
+    if (n.startsWith('::ffff:')) {
+      const v4 = n.slice(7);
+      if (net.isIPv4(v4)) return isPrivateIP(v4);
+    }
+    return false;
+  }
+  return true; // Unknown format — deny by default
 }

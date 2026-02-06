@@ -498,9 +498,9 @@ export class CostCircuitService {
       await this.redis.setex(`rate:limit:${tenantId}:throttled`, 24 * 60 * 60, newLimit.toString());
     } catch (error) {
       // Log throttling failure but don't throw - degraded operation is acceptable
+      // Throttling is a best-effort cost-protection measure; failure should not
+      // block billing processing for the tenant.
       console.error(`[CostCircuit] Failed to apply throttling for tenant ${tenantId}:`, error);
-      // Re-throw if throttling is critical for cost protection
-      throw new Error(`Throttling failed for tenant ${tenantId}: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }

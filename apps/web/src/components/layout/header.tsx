@@ -8,6 +8,7 @@ import {
  User,
  Moon,
  Sun,
+ Monitor,
  Plus,
  Menu,
 } from 'lucide-react';
@@ -26,6 +27,14 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { SimpleTooltip } from '@/components/ui/tooltip';
+import { useUIStore } from '@/stores';
+
+/** Resolve the effective theme ('light' | 'dark') from the store value */
+function resolveTheme(theme: 'light' | 'dark' | 'system'): 'light' | 'dark' {
+  if (theme !== 'system') return theme;
+  if (typeof window === 'undefined') return 'light';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
 
 interface HeaderProps {
  className?: string;
@@ -33,13 +42,32 @@ interface HeaderProps {
 }
 
 export function Header({ className, onMenuClick }: HeaderProps) {
- const [theme, setTheme] = React.useState<'light' | 'dark'>('light');
+ // FIX-095: Use zustand UIStore for persisted theme preference
+ const storeTheme = useUIStore((s) => s.theme);
+ const setStoreTheme = useUIStore((s) => s.setTheme);
  const [searchOpen, setSearchOpen] = React.useState(false);
 
- const toggleTheme = () => {
- const newTheme = theme === 'light' ? 'dark' : 'light';
- setTheme(newTheme);
- document.documentElement.classList.toggle('dark', newTheme === 'dark');
+ // Apply theme class to <html> whenever storeTheme changes or system pref changes
+ React.useEffect(() => {
+   const apply = () => {
+     const effective = resolveTheme(storeTheme);
+     document.documentElement.classList.toggle('dark', effective === 'dark');
+   };
+   apply();
+
+   // Listen for OS-level preference changes when set to 'system'
+   const mq = window.matchMedia('(prefers-color-scheme: dark)');
+   mq.addEventListener('change', apply);
+   return () => mq.removeEventListener('change', apply);
+ }, [storeTheme]);
+
+ const effectiveTheme = resolveTheme(storeTheme);
+
+ // Cycle: light → dark → system → light
+ const cycleTheme = () => {
+   const order: Array<'light' | 'dark' | 'system'> = ['light', 'dark', 'system'];
+   const idx = order.indexOf(storeTheme);
+   setStoreTheme(order[(idx + 1) % order.length]!);
  };
 
  return (
@@ -102,10 +130,12 @@ export function Header({ className, onMenuClick }: HeaderProps) {
         </SimpleTooltip>
 
         {/* Theme toggle */}
-        <SimpleTooltip content={theme === 'light' ? 'Dark mode' : 'Light mode'}>
-          <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
-            {theme === 'light' ? (
+        <SimpleTooltip content={storeTheme === 'light' ? 'Dark mode' : storeTheme === 'dark' ? 'System theme' : 'Light mode'}>
+          <Button variant="ghost" size="icon" onClick={cycleTheme} aria-label="Toggle theme">
+            {effectiveTheme === 'light' ? (
               <Moon className="h-5 w-5" />
+            ) : storeTheme === 'system' ? (
+              <Monitor className="h-5 w-5" />
             ) : (
               <Sun className="h-5 w-5" />
             )}

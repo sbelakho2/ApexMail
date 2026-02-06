@@ -98,7 +98,7 @@ export function DeploymentOptions() {
             animate={inView ? { opacity: 1, y: 0 } : {}}
             className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6"
           >
-            <Server className="w-3.5 h-3.5" />
+            <Server className="w-4 h-4" />
             Deployment Options
           </motion.div>
  <motion.h2
@@ -187,7 +187,7 @@ export function DeploymentOptions() {
  {/* Architecture Preview */}
  <div className="mt-12 pt-12 border-t border-surface-200">
  <div className="text-xs font-semibold text-surface-500 mb-6 text-center">Reference Architecture</div>
- <div className="bg-surface-950 rounded-xl p-8 font-mono text-[13px] text-surface-300 shadow-sm overflow-x-auto border border-surface-900">
+ <div className="bg-surface-950 rounded-lg p-8 font-mono text-[13px] text-surface-300 shadow-sm overflow-x-auto border border-surface-900">
  <pre className="whitespace-pre">
 {`┌─────────────────────────────────────────────────────────────┐
 │ Your ${selected.name} Environment │

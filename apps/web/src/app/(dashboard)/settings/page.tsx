@@ -42,9 +42,119 @@ const settingsSections = [
     { id: 'billing', label: 'Billing', icon: CreditCard },
 ];
 
+interface UserProfile {
+    firstName: string;
+    lastName: string;
+    email: string;
+    bio: string;
+    orgName: string;
+    fromName: string;
+    fromEmail: string;
+    replyTo: string;
+    address: string;
+    timezone: string;
+    language: string;
+}
+
+const DEFAULT_PROFILE: UserProfile = {
+    firstName: '', lastName: '', email: '', bio: '',
+    orgName: '', fromName: '', fromEmail: '', replyTo: '', address: '',
+    timezone: 'utc', language: 'en',
+};
+
+interface WebhookEntry {
+    id: string;
+    url: string;
+    events: string[];
+    status: string;
+    createdAt: string;
+}
+
 export default function SettingsPage() {
     const [activeSection, setActiveSection] = React.useState('profile');
     const [currentPlan, setCurrentPlan] = React.useState('pro');
+    const [saveStatus, setSaveStatus] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [profile, setProfile] = React.useState<UserProfile>(DEFAULT_PROFILE);
+    const [webhooks, setWebhooks] = React.useState<WebhookEntry[]>([]);
+    const [profileLoaded, setProfileLoaded] = React.useState(false);
+    const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const resetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // Load profile from API on mount
+    React.useEffect(() => {
+        Promise.allSettled([
+            fetch('/api/v1/auth/me'),
+            fetch('/api/v1/webhooks'),
+        ]).then(async ([profileRes, whRes]) => {
+            if (profileRes.status === 'fulfilled' && profileRes.value.ok) {
+                const json = await profileRes.value.json();
+                const user = json.user ?? json;
+                setProfile(prev => ({
+                    ...prev,
+                    firstName: user.firstName ?? user.name?.split(' ')[0] ?? '',
+                    lastName: user.lastName ?? user.name?.split(' ').slice(1).join(' ') ?? '',
+                    email: user.email ?? '',
+                    orgName: user.organization ?? user.orgName ?? '',
+                }));
+            } else {
+                // Fallback to localStorage if API not available
+                try {
+                    const stored = localStorage.getItem('apexmail-user-settings');
+                    if (stored) setProfile(prev => ({ ...prev, ...JSON.parse(stored) }));
+                } catch { /* ignore */ }
+            }
+            if (whRes.status === 'fulfilled' && whRes.value.ok) {
+                const json = await whRes.value.json();
+                setWebhooks(json.webhooks ?? json.data ?? []);
+            }
+        }).finally(() => setProfileLoaded(true));
+
+        return () => {
+            if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+            if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+        };
+    }, []);
+
+    function updateProfile(field: keyof UserProfile, value: string) {
+        setProfile(prev => ({ ...prev, [field]: value }));
+    }
+
+    async function handleSave() {
+        setSaveStatus('saving');
+        try {
+            // Persist to localStorage as fallback
+            localStorage.setItem('apexmail-user-settings', JSON.stringify(profile));
+
+            // Attempt real API save — fire and forget if endpoint doesn't exist yet
+            const res = await fetch('/api/v1/auth/profile', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    firstName: profile.firstName,
+                    lastName: profile.lastName,
+                    email: profile.email,
+                    bio: profile.bio,
+                    orgName: profile.orgName,
+                    fromName: profile.fromName,
+                    fromEmail: profile.fromEmail,
+                    replyTo: profile.replyTo,
+                    address: profile.address,
+                    timezone: profile.timezone,
+                    language: profile.language,
+                }),
+            });
+
+            if (!res.ok && res.status !== 404) throw new Error('Save failed');
+
+            saveTimerRef.current = setTimeout(() => {
+                setSaveStatus('saved');
+                resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
+            }, 300);
+        } catch {
+            setSaveStatus('error');
+            resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 3000);
+        }
+    }
 
     const activePlanData = PLANS.find(p => p.name === currentPlan);
 
@@ -112,30 +222,26 @@ export default function SettingsPage() {
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <div className="grid gap-2">
                                         <Label htmlFor="firstName">First Name</Label>
-                                        <Input id="firstName" defaultValue="John" />
+                                        <Input id="firstName" value={profile.firstName} onChange={e => updateProfile('firstName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="lastName">Last Name</Label>
-                                        <Input id="lastName" defaultValue="Doe" />
+                                        <Input id="lastName" value={profile.lastName} onChange={e => updateProfile('lastName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2 sm:col-span-2">
                                         <Label htmlFor="email">Email Address</Label>
-                                        <Input id="email" type="email" defaultValue="john@example.com" />
+                                        <Input id="email" type="email" value={profile.email} onChange={e => updateProfile('email', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2 sm:col-span-2">
                                         <Label htmlFor="bio">Bio</Label>
-                                        <Textarea
-                                            id="bio"
-                                            placeholder="Tell us about yourself..."
-                                            rows={3}
-                                        />
+                                        <Textarea id="bio" placeholder="Tell us about yourself..." rows={3} value={profile.bio} onChange={e => updateProfile('bio', e.target.value)} />
                                     </div>
                                 </div>
 
                                 <div className="flex justify-end">
-                                    <Button>
+                                    <Button onClick={handleSave} disabled={saveStatus === 'saving'}>
                                         <Save className="mr-2 h-4 w-4" />
-                                        Save Changes
+                                        {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved!' : 'Save Changes'}
                                     </Button>
                                 </div>
                             </CardContent>
@@ -155,11 +261,11 @@ export default function SettingsPage() {
                                 <div className="grid gap-4">
                                     <div className="grid gap-2">
                                         <Label htmlFor="orgName">Organization Name</Label>
-                                        <Input id="orgName" defaultValue="Acme Inc" />
+                                        <Input id="orgName" value={profile.orgName} onChange={e => updateProfile('orgName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="timezone">Timezone</Label>
-                                        <Select defaultValue="utc-8">
+                                        <Select value={profile.timezone} onValueChange={v => updateProfile('timezone', v)}>
                                             <SelectTrigger>
                                                 <SelectValue placeholder="Select timezone" />
                                             </SelectTrigger>
@@ -181,7 +287,7 @@ export default function SettingsPage() {
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="language">Language</Label>
-                                        <Select defaultValue="en">
+                                        <Select value={profile.language} onValueChange={v => updateProfile('language', v)}>
                                             <SelectTrigger>
                                                 <SelectValue placeholder="Select language" />
                                             </SelectTrigger>
@@ -202,7 +308,7 @@ export default function SettingsPage() {
                                     <p className="mt-1 text-sm text-muted-foreground">
                                         Permanently delete your account and all associated data.
                                     </p>
-                                    <Button variant="destructive" size="sm" className="mt-4">
+                                    <Button variant="destructive" size="sm" className="mt-4 min-h-[44px]">
                                         Delete Account
                                     </Button>
                                 </div>
@@ -288,23 +394,15 @@ export default function SettingsPage() {
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <div className="grid gap-2">
                                         <Label htmlFor="fromName">Default From Name</Label>
-                                        <Input id="fromName" defaultValue="Acme Inc" />
+                                        <Input id="fromName" value={profile.fromName} onChange={e => updateProfile('fromName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="fromEmail">Default From Email</Label>
-                                        <Input
-                                            id="fromEmail"
-                                            type="email"
-                                            defaultValue="hello@acme.com"
-                                        />
+                                        <Input id="fromEmail" type="email" value={profile.fromEmail} onChange={e => updateProfile('fromEmail', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2 sm:col-span-2">
                                         <Label htmlFor="replyTo">Default Reply-To Email</Label>
-                                        <Input
-                                            id="replyTo"
-                                            type="email"
-                                            defaultValue="support@acme.com"
-                                        />
+                                        <Input id="replyTo" type="email" value={profile.replyTo} onChange={e => updateProfile('replyTo', e.target.value)} />
                                     </div>
                                 </div>
 
@@ -318,6 +416,8 @@ export default function SettingsPage() {
                                             id="address"
                                             placeholder="123 Main St, City, State 12345"
                                             rows={2}
+                                            value={profile.address}
+                                            onChange={e => updateProfile('address', e.target.value)}
                                         />
                                         <p className="text-xs text-muted-foreground">
                                             Required by CAN-SPAM act for commercial emails
@@ -326,9 +426,9 @@ export default function SettingsPage() {
                                 </div>
 
                                 <div className="flex justify-end">
-                                    <Button>
+                                    <Button onClick={handleSave} disabled={saveStatus === 'saving'}>
                                         <Save className="mr-2 h-4 w-4" />
-                                        Save Changes
+                                        {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved!' : 'Save Changes'}
                                     </Button>
                                 </div>
                             </CardContent>
@@ -459,9 +559,25 @@ export default function SettingsPage() {
 
                                 <div className="space-y-4">
                                     <h3 className="font-medium">Webhooks</h3>
-                                    <p className="text-sm text-muted-foreground">
-                                        Configure endpoints to receive real-time notifications.
-                                    </p>
+                                    {webhooks.length === 0 ? (
+                                        <p className="text-sm text-muted-foreground">
+                                            No webhook endpoints configured. Add one to receive real-time event notifications.
+                                        </p>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {webhooks.map(wh => (
+                                                <div key={wh.id} className="flex items-center justify-between rounded-lg border p-4">
+                                                    <div>
+                                                        <p className="font-mono text-sm">{wh.url}</p>
+                                                        <p className="text-xs text-muted-foreground mt-1">
+                                                            {wh.events.join(', ')} • <Badge variant={wh.status === 'active' ? 'success' : 'secondary'} className="text-xs">{wh.status}</Badge>
+                                                        </p>
+                                                    </div>
+                                                    <Button variant="ghost" size="sm" className="text-destructive">Remove</Button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
                                     <Button variant="outline">
                                         <Webhook className="mr-2 h-4 w-4" />
                                         Add Webhook
@@ -481,7 +597,7 @@ export default function SettingsPage() {
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-6">
-                                <div className="rounded-xl border p-6 bg-card">
+                                <div className="rounded-lg border p-6 bg-card">
                                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                         <div>
                                             <p className="text-sm font-medium text-muted-foreground mb-1">
@@ -500,7 +616,7 @@ export default function SettingsPage() {
                                             <p className="text-sm text-muted-foreground mt-1">
                                                 {currentPlan === 'payg' 
                                                     ? 'Usage-based billing' 
-                                                    : `$${(activePlanData?.priceMonthly || 0) / 100}/month • Renews on ${new Date().toLocaleDateString()}`
+                                                    : `$${(activePlanData?.priceMonthly || 0) / 100}/month • Renews on ${new Date('2026-02-15T00:00:00Z').toLocaleDateString()}`
                                                 }
                                             </p>
                                         </div>
@@ -518,8 +634,8 @@ export default function SettingsPage() {
                                         <PaygUsageDashboard 
                                             initialData={{
                                                 period: {
-                                                    start: new Date(new Date().setDate(1)).toISOString(),
-                                                    end: new Date().toISOString()
+                                                    start: '2026-01-01T00:00:00Z',
+                                                    end: '2026-01-15T10:00:00Z'
                                                 },
                                                 usage: {
                                                     emailsSent: 45231,
@@ -535,7 +651,7 @@ export default function SettingsPage() {
                                     ) : (
                                         <div className="grid gap-6 sm:grid-cols-3">
                                             <div>
-                                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                                                <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     Emails Sent
                                                 </p>
                                                 <p className="text-xl font-semibold tabular-nums">
@@ -546,7 +662,7 @@ export default function SettingsPage() {
                                                 </div>
                                             </div>
                                             <div>
-                                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                                                <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     API Calls
                                                 </p>
                                                 <p className="text-xl font-semibold tabular-nums">
@@ -557,7 +673,7 @@ export default function SettingsPage() {
                                                 </div>
                                             </div>
                                             <div>
-                                                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                                                <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     Team Members
                                                 </p>
                                                 <p className="text-xl font-semibold tabular-nums">3 <span className="text-sm text-muted-foreground font-normal">/ 5</span></p>
@@ -580,7 +696,7 @@ export default function SettingsPage() {
                                                 </p>
                                             </div>
                                         </div>
-                                        <Button variant="ghost" size="sm" className="h-8">
+                                        <Button variant="ghost" size="sm" className="min-h-[44px]">
                                             Update
                                         </Button>
                                     </div>
@@ -600,7 +716,7 @@ export default function SettingsPage() {
                                             >
                                                 <p className="text-sm">{invoice.date}</p>
                                                 <div className="flex items-center gap-4">
-                                                    <p className="font-medium">{invoice.amount}</p>
+                                                    <p className="font-medium tabular-nums">{invoice.amount}</p>
                                                     <Button variant="ghost" size="sm">
                                                         Download
                                                     </Button>

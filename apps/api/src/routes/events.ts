@@ -96,7 +96,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get events for a specific message
-  router.get('/message/:messageId', async (c) => {
+  router.get('/message/:messageId', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
 
@@ -173,7 +173,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get event statistics
-  router.get('/stats/summary', async (c) => {
+  router.get('/stats/summary', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const campaignId = c.req.query('campaignId');
     const since = c.req.query('since');
@@ -220,7 +220,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get time series statistics
-  router.get('/stats/timeseries', async (c) => {
+  router.get('/stats/timeseries', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const campaignId = c.req.query('campaignId');
     const interval = c.req.query('interval') ?? 'hour';
@@ -253,7 +253,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get bounce breakdown
-  router.get('/stats/bounces', async (c) => {
+  router.get('/stats/bounces', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.query('domainId');
     const since = c.req.query('since');
@@ -279,7 +279,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get engagement statistics by domain
-  router.get('/stats/domains', async (c) => {
+  router.get('/stats/domains', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -319,7 +319,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get engagement statistics by campaign
-  router.get('/stats/campaigns', async (c) => {
+  router.get('/stats/campaigns', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -364,7 +364,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Batch create events (for internal use / webhooks)
-  router.post('/batch', async (c) => {
+  router.post('/batch', requireScopes('events:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const logger = c.get('logger');
 
@@ -402,7 +402,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get recipient engagement history
-  router.get('/recipient/:email', async (c) => {
+  router.get('/recipient/:email', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const email = decodeURIComponent(c.req.param('email'));
     const limit = parseInt(c.req.query('limit') ?? '50', 10);
@@ -460,7 +460,7 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get click tracking details by message ID
-  router.get('/clicks/:messageId', async (c) => {
+  router.get('/clicks/:messageId', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
 

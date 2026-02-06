@@ -94,7 +94,7 @@ export function TestimonialsSection() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
- className="p-8 lg:p-12 mb-10 bg-white rounded-xl border border-surface-200"
+ className="p-8 lg:p-12 mb-10 bg-white rounded-lg border border-surface-200"
  >
  <AnimatePresence mode="wait">
  <motion.div
@@ -127,14 +127,14 @@ export function TestimonialsSection() {
  {/* Stats Card */}
  <div className="lg:w-64 flex-shrink-0">
  <div className="bg-surface-50 rounded-lg p-6 border border-surface-200">
- <div className="text-xs font-semibold text-surface-500 mb-4 uppercase tracking-wide">{activeTestimonial.stats.metric}</div>
+ <div className="text-xs font-semibold text-surface-500 mb-4">{activeTestimonial.stats.metric}</div>
  <div className="space-y-4">
  <div>
- <div className="text-[10px] text-surface-400 mb-1 uppercase font-medium">Before</div>
+ <div className="text-xs text-surface-400 mb-1 font-medium">Before</div>
  <div className="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">{activeTestimonial.stats.before}</div>
  </div>
  <div>
- <div className="text-[10px] text-surface-400 mb-1 uppercase font-medium">After</div>
+ <div className="text-xs text-surface-400 mb-1 font-medium">After</div>
  <div className="text-2xl font-mono text-primary-600 font-bold tabular-nums">{activeTestimonial.stats.after}</div>
  </div>
  </div>
@@ -157,13 +157,17 @@ export function TestimonialsSection() {
  key={index}
  onClick={() => setActiveIndex(index)}
  className={cn(
- 'h-1.5 rounded-full transition-all duration-300',
+ 'rounded-full transition-all duration-300 p-[21px] -m-[21px] relative',
+ )}
+ aria-label={`Go to testimonial ${index + 1}`}
+ >
+ <span className={cn(
+ 'block h-1.5 rounded-full transition-all duration-300',
  index === activeIndex
  ? 'w-6 bg-surface-900'
  : 'w-1.5 bg-surface-200 hover:bg-surface-300'
- )}
- aria-label={`Go to testimonial ${index + 1}`}
- />
+ )} />
+ </button>
  ))}
  </div>
 
@@ -171,14 +175,14 @@ export function TestimonialsSection() {
  <div className="flex items-center gap-2">
  <button
  onClick={prevTestimonial}
- className="w-9 h-9 rounded-lg border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
+ className="w-11 h-11 rounded-lg border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
  aria-label="Previous testimonial"
  >
  <ChevronLeft className="w-5 h-5" />
  </button>
  <button
  onClick={nextTestimonial}
- className="w-9 h-9 rounded-lg border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
+ className="w-11 h-11 rounded-lg border border-surface-200 bg-white flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
  aria-label="Next testimonial"
  >
  <ChevronRight className="w-5 h-5" />
@@ -193,7 +197,7 @@ export function TestimonialsSection() {
  transition={{ delay: 0.4 }}
  className="mt-16 pt-12 border-t border-surface-200"
  >
- <p className="text-center text-xs font-bold text-surface-600 uppercase tracking-widest mb-8">
+ <p className="text-center text-xs font-bold text-surface-600 mb-8">
  Powering email for innovative companies worldwide
  </p>
  <div className="flex items-center justify-center gap-12 flex-wrap opacity-40 grayscale">

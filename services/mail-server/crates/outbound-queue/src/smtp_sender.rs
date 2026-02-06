@@ -248,13 +248,15 @@ impl SmtpSender {
         let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
         writer.write_all(ehlo_cmd.as_bytes()).await?;
         
-        // Read EHLO response (may be multi-line)
+        // Read EHLO response (may be multi-line), collect capabilities
+        let mut ehlo_lines = Vec::new();
         loop {
             response.clear();
             reader.read_line(&mut response).await?;
             if response.len() < 4 {
                 return Err(anyhow!("Invalid EHLO response"));
             }
+            ehlo_lines.push(response.clone());
             if response.chars().nth(3) == Some(' ') {
                 break;
             }
@@ -263,7 +265,103 @@ impl SmtpSender {
             return Err(anyhow!("EHLO failed: {}", response.trim()));
         }
         
-        // MAIL FROM
+        // Check if remote server advertises STARTTLS
+        let supports_starttls = ehlo_lines.iter().any(|l| {
+            l.len() >= 4 && l[4..].trim().eq_ignore_ascii_case("STARTTLS")
+        });
+        
+        // Attempt STARTTLS upgrade if supported
+        if supports_starttls {
+            debug!(mx = %mx_host, "Server supports STARTTLS, upgrading connection");
+            
+            writer.write_all(b"STARTTLS\r\n").await?;
+            response.clear();
+            reader.read_line(&mut response).await?;
+            if !response.starts_with("220") {
+                warn!(mx = %mx_host, response = %response.trim(), "STARTTLS rejected, continuing in plaintext");
+            } else {
+                // Reunite reader/writer back into the TcpStream
+                let tcp_stream = reader.into_inner().reunite(writer)?;
+                
+                // Build TLS config with system root certificates
+                let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                
+                let tls_config = tokio_rustls::rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+                let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
+                
+                let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(mx_host.to_string())
+                    .map_err(|e| anyhow!("Invalid server name for TLS: {}", e))?;
+                
+                let tls_stream = connector.connect(server_name, tcp_stream).await
+                    .map_err(|e| anyhow!("TLS handshake failed with {}: {}", mx_host, e))?;
+                
+                info!(mx = %mx_host, "STARTTLS upgrade successful");
+                
+                // Continue the SMTP conversation over TLS
+                return self.smtp_conversation_over_tls(tls_stream, mx_host, from, recipients, message).await;
+            }
+        } else {
+            debug!(mx = %mx_host, "Server does not support STARTTLS, sending in plaintext");
+        }
+        
+        // Continue plaintext SMTP conversation (no STARTTLS or STARTTLS rejected)
+        self.smtp_mail_transaction(&mut reader, &mut writer, from, recipients, message, mx_host).await
+    }
+    
+    /// Continue SMTP conversation over a TLS stream
+    async fn smtp_conversation_over_tls(
+        &self,
+        tls_stream: tokio_rustls::client::TlsStream<TcpStream>,
+        mx_host: &str,
+        from: &str,
+        recipients: &[String],
+        message: &[u8],
+    ) -> Result<SmtpSendResult> {
+        let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
+        let mut reader = BufReader::new(tls_reader);
+        let mut writer = tls_writer;
+        let mut response = String::new();
+        
+        // Re-EHLO after TLS upgrade (RFC 3207 §4.2)
+        let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
+        writer.write_all(ehlo_cmd.as_bytes()).await?;
+        
+        loop {
+            response.clear();
+            reader.read_line(&mut response).await?;
+            if response.len() < 4 {
+                return Err(anyhow!("Invalid EHLO response after STARTTLS"));
+            }
+            if response.chars().nth(3) == Some(' ') {
+                break;
+            }
+        }
+        if !response.starts_with("250") {
+            return Err(anyhow!("EHLO after STARTTLS failed: {}", response.trim()));
+        }
+        
+        // Proceed with MAIL FROM / RCPT TO / DATA over TLS
+        self.smtp_mail_transaction(&mut reader, &mut writer, from, recipients, message, mx_host).await
+    }
+    
+    /// Execute the MAIL FROM → RCPT TO → DATA → message sequence
+    async fn smtp_mail_transaction<R, W>(
+        &self,
+        reader: &mut BufReader<R>,
+        writer: &mut W,
+        from: &str,
+        recipients: &[String],
+        message: &[u8],
+        mx_host: &str,
+    ) -> Result<SmtpSendResult>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut response = String::new();
         let mail_from = format!("MAIL FROM:<{}>\r\n", from);
         writer.write_all(mail_from.as_bytes()).await?;
         response.clear();

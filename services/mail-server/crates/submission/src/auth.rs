@@ -4,6 +4,9 @@
 
 use anyhow::{anyhow, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::password_hash::{PasswordHasher, SaltString};
+use rand::rngs::OsRng;
 use sqlx::PgPool;
 use tracing::{debug, warn};
 
@@ -123,22 +126,27 @@ async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Re
 /// Verify password against hash
 /// Supports bcrypt ($2a$, $2b$, $2y$) and argon2 ($argon2id$)
 fn verify_password_hash(password: &str, hash: &str) -> bool {
-    // For development: allow plaintext comparison if hash doesn't look like a hash
-    if !hash.starts_with('$') {
-        return password == hash;
+    if !hash.starts_with("$argon2") {
+        return false;
     }
-    
-    // Bcrypt verification would go here
-    // argon2 verification would go here
-    
-    // Placeholder - in production, use proper password verification
-    // bcrypt::verify(password, hash).unwrap_or(false)
-    password == hash
+
+    let parsed = match PasswordHash::new(hash) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
 }
 
 /// Generate a password hash
 pub fn hash_password(password: &str) -> Result<String> {
-    // In production, use bcrypt or argon2
-    // For now, return plaintext (NOT FOR PRODUCTION)
-    Ok(password.to_string())
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow!("Failed to hash password: {}", e))?
+        .to_string();
+
+    Ok(hash)
 }

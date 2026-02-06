@@ -599,7 +599,7 @@ function generateSubjectLineSample(id: number): SubjectLineSample {
         hasNumber: /\d+/.test(subject),
         hasEmoji: /[\u{1F300}-\u{1F9FF}]/u.test(subject),
         hasUrgency: /urgent|last|final|limited|expires|ending|today only|don't miss/i.test(subject),
-        hasBracket: /[\[\]]/.test(subject),
+        hasBracket: /[[\]]/.test(subject),
         startsWithVerb: /^(get|see|try|learn|discover|join|save|boost|grow|check|read|watch|start|stop)/i.test(subject),
         hasAllCaps: words.some(w => w.length > 2 && w === w.toUpperCase()),
         sentimentScore: calculateSentiment(subject),

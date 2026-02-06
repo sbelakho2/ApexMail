@@ -17,7 +17,7 @@ export function PrivateCloudCTA() {
  className="bg-surface-50/50 rounded-2xl border border-surface-200 p-8 md:p-12 text-center"
  >
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-surface-200 text-xs font-medium text-surface-900 mb-6 shadow-sm">
-            <Cloud className="w-3.5 h-3.5" />
+            <Cloud className="w-4 h-4" />
             Enterprise Ready
           </div>
 
@@ -32,14 +32,14 @@ export function PrivateCloudCTA() {
  <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
  <Link
  href="/contact/enterprise"
- className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors"
  >
  Talk to Sales
  <ArrowRight className="w-4 h-4 ml-2" />
  </Link>
  <Link
  href="/docs/private-cloud/architecture"
- className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
  >
  <Calendar className="w-4 h-4 mr-2" />
  Architecture Review
@@ -70,7 +70,7 @@ export function PrivateCloudCTA() {
  transition={{ delay: 0.2 }}
  className="grid md:grid-cols-2 gap-6 mt-8"
  >
- <div className="bg-white rounded-xl border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
+ <div className="bg-white rounded-lg border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
  <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center flex-shrink-0 border border-surface-200">
  <Phone className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
  </div>
@@ -81,7 +81,7 @@ export function PrivateCloudCTA() {
  </div>
  </div>
  </div>
- <div className="bg-white rounded-xl border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
+ <div className="bg-white rounded-lg border border-surface-200 p-6 flex items-center gap-4 hover:border-surface-300 transition-colors cursor-pointer">
  <div className="w-12 h-12 rounded-md bg-primary-50 flex items-center justify-center flex-shrink-0 border border-primary-100">
  <Calendar className="w-6 h-6 text-primary-600" />
  </div>
@@ -101,7 +101,7 @@ export function PrivateCloudCTA() {
  transition={{ delay: 0.4 }}
  className="text-center mt-12"
  >
- <p className="text-[10px] font-bold text-surface-600 uppercase tracking-widest mb-6">
+ <p className="text-xs font-bold text-surface-600 mb-6">
  Trusted by security-conscious enterprises
  </p>
  <div className="flex flex-wrap justify-center gap-12 opacity-40 grayscale">

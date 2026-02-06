@@ -170,4 +170,6 @@ console.log(`Pending: ${stats.pendingCount}, Sent today: ${stats.sentToday}`);
 
 ## License
 
-MIT License - ApexMail 2026
+MIT License - Bel Consulting OÜ 2026
+
+ApexMail is a brand of Bel Consulting OÜ, Estonia.

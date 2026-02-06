@@ -5,12 +5,17 @@
 mod session;
 mod parser;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use std::sync::Arc;
+use std::fs::File;
+use std::io::BufReader as StdBufReader;
 use tokio::net::TcpListener;
 use tracing::{info, warn, error};
 use tracing_subscriber::EnvFilter;
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::{self, pki_types::PrivateKeyDer};
+use rustls_pemfile::{certs, private_key};
 
 #[derive(Parser)]
 #[command(name = "smtp-edge")]
@@ -41,6 +46,32 @@ struct Cli {
     log_level: String,
 }
 
+fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
+    let cert_file = File::open(cert_path)
+        .map_err(|e| anyhow!("Failed to open TLS cert file: {}", e))?;
+    let mut cert_reader = StdBufReader::new(cert_file);
+    let certs = certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("Failed to read TLS certs: {}", e))?;
+    if certs.is_empty() {
+        return Err(anyhow!("No TLS certificates found"));
+    }
+
+    let key_file = File::open(key_path)
+        .map_err(|e| anyhow!("Failed to open TLS key file: {}", e))?;
+    let mut key_reader = StdBufReader::new(key_file);
+    let key: PrivateKeyDer<'static> = private_key(&mut key_reader)
+        .map_err(|e| anyhow!("Failed to read TLS private key: {}", e))?
+        .ok_or_else(|| anyhow!("No TLS private key found"))?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow!("Invalid TLS config: {}", e))?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -56,11 +87,22 @@ async fn main() -> Result<()> {
     
     info!("Starting SMTP Edge on {}", cli.listen);
     
+    let enable_starttls = cli.cert.is_some() || cli.key.is_some();
+    let tls_acceptor = if enable_starttls {
+        let cert_path = cli.cert.clone().ok_or_else(|| anyhow!("--cert is required when STARTTLS is enabled"))?;
+        let key_path = cli.key.clone().ok_or_else(|| anyhow!("--key is required when STARTTLS is enabled"))?;
+        Some(load_tls_acceptor(&cert_path, &key_path)?)
+    } else {
+        None
+    };
+
     let config = Arc::new(session::SmtpConfig {
         hostname: cli.hostname,
         mailstore_addr: cli.mailstore_addr,
         max_message_size: 25 * 1024 * 1024, // 25MB
         max_recipients: 100,
+        enable_starttls,
+        tls_acceptor,
     });
     
     let listener = TcpListener::bind(&cli.listen).await?;

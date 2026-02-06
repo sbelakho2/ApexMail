@@ -43,7 +43,7 @@ async function initializeServices(): Promise<void> {
     database: config.database.database,
     user: config.database.user,
     password: config.database.password,
-    ssl: (config.database as { ssl?: boolean }).ssl ? { rejectUnauthorized: false } : false,
+    ssl: (config.database as { ssl?: boolean }).ssl ? { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' } : false,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,

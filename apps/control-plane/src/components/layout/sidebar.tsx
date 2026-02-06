@@ -77,21 +77,21 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
     };
 
     return (
-        <aside className={cn("w-64 border-r border-surface-200 bg-white min-h-screen overflow-y-auto print:hidden", className)}>
-            {/* Control Plane Header */}
-            <div className="bg-gradient-to-r from-amber-500 to-orange-500 text-white text-xs font-medium py-1.5 px-4 text-center">
+        <aside className={cn("w-64 border-r border-border bg-card min-h-screen overflow-y-auto print:hidden", className)}>
+            {/* Control Plane Header - Uses semantic accent token */}
+            <div className="bg-control-plane text-control-plane-foreground text-xs font-medium py-1.5 px-4 text-center">
                 🔐 Control Plane
             </div>
             
             <div className="p-4 md:p-6">
                 {/* Logo */}
                 <Link href="/" className="flex items-center gap-3 mb-6 md:mb-8" onClick={handleLinkClick}>
-                    <div className="flex h-9 w-9 md:h-10 md:w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 text-white font-bold text-base md:text-lg shadow-md">
+                    <div className="flex h-9 w-9 md:h-10 md:w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground font-bold text-base md:text-lg shadow-md">
                         A
                     </div>
                     <div>
-                        <span className="text-base md:text-lg font-bold text-surface-900">ApexMail</span>
-                        <div className="text-xs text-surface-500">Platform Admin</div>
+                        <span className="text-base md:text-lg font-bold text-foreground">ApexMail</span>
+                        <div className="text-xs text-muted-foreground">Platform Admin</div>
                     </div>
                 </Link>
 

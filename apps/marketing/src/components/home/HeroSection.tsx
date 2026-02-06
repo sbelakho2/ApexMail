@@ -80,7 +80,7 @@ export function HeroSection() {
         <div className="flex flex-wrap gap-4">
           <Link 
             href="https://app.apexmail.ee/signup" 
-            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
+            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors"
             aria-label="Get API Keys - Sign up for free"
           >
             Get API Keys
@@ -88,7 +88,7 @@ export function HeroSection() {
           </Link>
           <Link 
             href="#demo" 
-            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
             aria-label="Watch product demo video"
           >
             <Play className="w-4 h-4 mr-2" aria-hidden="true" />
@@ -98,7 +98,7 @@ export function HeroSection() {
 
         {/* Trust Signals */}
         <div className="mt-12 pt-8 border-t border-surface-200">
-          <p className="text-[13px] font-semibold uppercase tracking-widest text-surface-400 mb-6">Trusted by developers at</p>
+          <p className="text-[13px] font-semibold text-surface-400 mb-6">Trusted by developers at</p>
           <div className="flex flex-wrap items-center gap-x-10 gap-y-6 opacity-40 grayscale contrast-125 hover:grayscale-0 hover:opacity-100 transition-all duration-500">
             {['TechCorp', 'StartupX', 'ScaleUp', 'DevHub', 'GlobalNet'].map((company) => (
               <span key={company} className="text-surface-900 font-bold text-lg tracking-tight">{company}</span>
@@ -133,7 +133,7 @@ export function HeroSection() {
  <span className="text-primary-600 text-xl font-bold">✓</span>
  </div>
  <div>
- <div className="text-xs font-bold uppercase tracking-wider text-surface-500 mb-0.5">Average delivery</div>
+ <div className="text-xs font-bold text-surface-500 mb-0.5">Average delivery</div>
  <div className="text-2xl font-bold text-surface-900 tabular-nums">1.2s</div>
  </div>
  </div>

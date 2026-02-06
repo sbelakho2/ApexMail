@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { formatNumber, cn, timeAgo } from '../../lib/utils';
+import { useDialog } from '../../components/ui/confirm-dialog';
 
 /**
  * System Health Dashboard - Infrastructure monitoring
@@ -59,41 +60,7 @@ interface SystemAlert {
     acknowledged: boolean;
 }
 
-const DEMO_QUEUES: QueueMetric[] = [
-    { name: 'email:send', description: 'Outbound email queue', depth: 1247, processing: 50, throughput: 850, avgLatency: 45, status: 'healthy' },
-    { name: 'email:priority', description: 'Priority/transactional emails', depth: 23, processing: 10, throughput: 120, avgLatency: 12, status: 'healthy' },
-    { name: 'webhook:delivery', description: 'Webhook event delivery', depth: 892, processing: 25, throughput: 340, avgLatency: 180, status: 'warning' },
-    { name: 'analytics:events', description: 'Analytics event processing', depth: 45023, processing: 100, throughput: 2500, avgLatency: 320, status: 'healthy' },
-    { name: 'bounce:process', description: 'Bounce/complaint handling', depth: 156, processing: 15, throughput: 45, avgLatency: 85, status: 'healthy' },
-    { name: 'warmup:schedule', description: 'IP warmup scheduling', depth: 12, processing: 2, throughput: 8, avgLatency: 250, status: 'healthy' },
-];
 
-const DEMO_WORKERS: WorkerStatus[] = [
-    { id: 'w1', name: 'email-sender-1', type: 'email_sender', status: 'running', host: 'worker-01.us-east-1', cpu: 45, memory: 62, jobsProcessed: 124532, lastHeartbeat: new Date(Date.now() - 5000).toISOString(), uptime: 864000 },
-    { id: 'w2', name: 'email-sender-2', type: 'email_sender', status: 'running', host: 'worker-02.us-east-1', cpu: 52, memory: 58, jobsProcessed: 118945, lastHeartbeat: new Date(Date.now() - 3000).toISOString(), uptime: 864000 },
-    { id: 'w3', name: 'email-sender-3', type: 'email_sender', status: 'running', host: 'worker-03.eu-west-1', cpu: 38, memory: 55, jobsProcessed: 98234, lastHeartbeat: new Date(Date.now() - 8000).toISOString(), uptime: 432000 },
-    { id: 'w4', name: 'webhook-processor-1', type: 'webhook_processor', status: 'running', host: 'worker-04.us-east-1', cpu: 28, memory: 42, jobsProcessed: 45678, lastHeartbeat: new Date(Date.now() - 2000).toISOString(), uptime: 864000 },
-    { id: 'w5', name: 'analytics-worker-1', type: 'analytics_worker', status: 'running', host: 'worker-05.us-east-1', cpu: 72, memory: 78, jobsProcessed: 892341, lastHeartbeat: new Date(Date.now() - 4000).toISOString(), uptime: 604800 },
-    { id: 'w6', name: 'bounce-handler-1', type: 'bounce_handler', status: 'idle', host: 'worker-06.us-east-1', cpu: 5, memory: 35, jobsProcessed: 12456, lastHeartbeat: new Date(Date.now() - 1000).toISOString(), uptime: 864000 },
-    { id: 'w7', name: 'warmup-scheduler-1', type: 'warmup_scheduler', status: 'running', host: 'worker-07.us-east-1', cpu: 12, memory: 28, jobsProcessed: 3456, lastHeartbeat: new Date(Date.now() - 6000).toISOString(), uptime: 864000 },
-    { id: 'w8', name: 'email-sender-4', type: 'email_sender', status: 'error', host: 'worker-08.ap-south-1', cpu: 0, memory: 0, jobsProcessed: 45678, lastHeartbeat: new Date(Date.now() - 300000).toISOString(), uptime: 0 },
-];
-
-const DEMO_MTA_NODES: MTANode[] = [
-    { id: 'mta1', hostname: 'mta-01.us-east-1', ipAddress: '198.51.100.1', region: 'us-east-1', status: 'healthy', emailsSentToday: 245000, bounceRate: 0.8, avgLatency: 42, blacklisted: false, lastCheck: new Date(Date.now() - 60000).toISOString() },
-    { id: 'mta2', hostname: 'mta-02.us-east-1', ipAddress: '198.51.100.2', region: 'us-east-1', status: 'healthy', emailsSentToday: 238000, bounceRate: 0.9, avgLatency: 45, blacklisted: false, lastCheck: new Date(Date.now() - 60000).toISOString() },
-    { id: 'mta3', hostname: 'mta-03.eu-west-1', ipAddress: '203.0.113.1', region: 'eu-west-1', status: 'healthy', emailsSentToday: 156000, bounceRate: 0.7, avgLatency: 38, blacklisted: false, lastCheck: new Date(Date.now() - 60000).toISOString() },
-    { id: 'mta4', hostname: 'mta-04.eu-west-1', ipAddress: '203.0.113.2', region: 'eu-west-1', status: 'degraded', emailsSentToday: 89000, bounceRate: 2.1, avgLatency: 125, blacklisted: false, lastCheck: new Date(Date.now() - 60000).toISOString() },
-    { id: 'mta5', hostname: 'mta-05.ap-south-1', ipAddress: '192.0.2.1', region: 'ap-south-1', status: 'healthy', emailsSentToday: 78000, bounceRate: 0.6, avgLatency: 52, blacklisted: false, lastCheck: new Date(Date.now() - 60000).toISOString() },
-    { id: 'mta6', hostname: 'mta-06.ap-south-1', ipAddress: '192.0.2.2', region: 'ap-south-1', status: 'maintenance', emailsSentToday: 0, bounceRate: 0, avgLatency: 0, blacklisted: false, lastCheck: new Date(Date.now() - 60000).toISOString() },
-];
-
-const DEMO_ALERTS: SystemAlert[] = [
-    { id: 'a1', severity: 'critical', component: 'worker', message: 'Worker email-sender-4 has not sent heartbeat in 5 minutes', timestamp: new Date(Date.now() - 300000).toISOString(), acknowledged: false },
-    { id: 'a2', severity: 'warning', component: 'queue', message: 'Webhook delivery queue depth exceeds threshold (892 > 500)', timestamp: new Date(Date.now() - 600000).toISOString(), acknowledged: false },
-    { id: 'a3', severity: 'warning', component: 'mta', message: 'MTA mta-04.eu-west-1 showing elevated latency (125ms)', timestamp: new Date(Date.now() - 900000).toISOString(), acknowledged: true },
-    { id: 'a4', severity: 'info', component: 'mta', message: 'MTA mta-06.ap-south-1 entered maintenance mode', timestamp: new Date(Date.now() - 3600000).toISOString(), acknowledged: true },
-];
 
 const WORKER_TYPE_LABELS: Record<string, string> = {
     email_sender: 'Email Sender',
@@ -104,16 +71,16 @@ const WORKER_TYPE_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
-    healthy: { bg: 'bg-emerald-100', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-    running: { bg: 'bg-emerald-100', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-    warning: { bg: 'bg-amber-100', text: 'text-amber-700', dot: 'bg-amber-500' },
-    degraded: { bg: 'bg-amber-100', text: 'text-amber-700', dot: 'bg-amber-500' },
-    idle: { bg: 'bg-blue-100', text: 'text-blue-700', dot: 'bg-blue-500' },
-    critical: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500' },
-    error: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500' },
-    stopped: { bg: 'bg-surface-100', text: 'text-surface-600', dot: 'bg-surface-400' },
-    down: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500' },
-    maintenance: { bg: 'bg-violet-100', text: 'text-violet-700', dot: 'bg-violet-500' },
+    healthy: { bg: 'bg-success/10', text: 'text-success', dot: 'bg-success' },
+    running: { bg: 'bg-success/10', text: 'text-success', dot: 'bg-success' },
+    warning: { bg: 'bg-warning/10', text: 'text-warning', dot: 'bg-warning' },
+    degraded: { bg: 'bg-warning/10', text: 'text-warning', dot: 'bg-warning' },
+    idle: { bg: 'bg-blue-500/10', text: 'text-blue-500', dot: 'bg-blue-500' },
+    critical: { bg: 'bg-destructive/10', text: 'text-destructive', dot: 'bg-destructive' },
+    error: { bg: 'bg-destructive/10', text: 'text-destructive', dot: 'bg-destructive' },
+    stopped: { bg: 'bg-muted', text: 'text-muted-foreground', dot: 'bg-muted-foreground' },
+    down: { bg: 'bg-destructive/10', text: 'text-destructive', dot: 'bg-destructive' },
+    maintenance: { bg: 'bg-violet-500/10', text: 'text-violet-500', dot: 'bg-violet-500' },
 };
 
 function formatUptime(seconds: number): string {
@@ -125,6 +92,7 @@ function formatUptime(seconds: number): string {
 }
 
 export default function SystemHealthPage() {
+    const dialog = useDialog();
     const [queues, setQueues] = useState<QueueMetric[]>([]);
     const [workers, setWorkers] = useState<WorkerStatus[]>([]);
     const [mtaNodes, setMtaNodes] = useState<MTANode[]>([]);
@@ -132,16 +100,20 @@ export default function SystemHealthPage() {
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState<'overview' | 'queues' | 'workers' | 'mta'>('overview');
     const [autoRefresh, setAutoRefresh] = useState(true);
-    const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+    const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
     const loadData = useCallback(async () => {
         try {
-            // In production: fetch from Ops API
-            setQueues(DEMO_QUEUES);
-            setWorkers(DEMO_WORKERS);
-            setMtaNodes(DEMO_MTA_NODES);
-            setAlerts(DEMO_ALERTS);
+            const response = await fetch('/api/system/health', { credentials: 'include' });
+            if (!response.ok) throw new Error(`Failed to fetch system health: ${response.status}`);
+            const data = await response.json();
+            setQueues(data.queues);
+            setWorkers(data.workers);
+            setMtaNodes(data.mtaNodes);
+            setAlerts(data.alerts);
             setLastRefresh(new Date());
+        } catch (err) {
+            console.error('Failed to load system health:', err);
         } finally {
             setLoading(false);
         }
@@ -165,7 +137,7 @@ export default function SystemHealthPage() {
 
     function restartWorker(workerId: string) {
         // In production: POST to Ops API
-        alert(`Restart command sent to worker ${workerId}`);
+        dialog.alert({ title: 'Worker Restart', message: `Restart command sent to worker ${workerId}` });
     }
 
     const activeAlerts = alerts.filter(a => !a.acknowledged);
@@ -177,7 +149,7 @@ export default function SystemHealthPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
             </div>
         );
     }
@@ -187,24 +159,24 @@ export default function SystemHealthPage() {
             {/* Header */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-surface-900">System Health</h1>
-                    <p className="text-surface-600 mt-1">
-                        Infrastructure monitoring • Last updated {timeAgo(lastRefresh.toISOString())}
+                    <h1 className="text-2xl font-bold text-foreground">System Health</h1>
+                    <p className="text-muted-foreground mt-1">
+                        Infrastructure monitoring • Last updated {lastRefresh ? timeAgo(lastRefresh.toISOString()) : '...'}
                     </p>
                 </div>
                 <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-2 text-sm text-surface-600">
+                    <label className="flex items-center gap-2 text-sm text-muted-foreground">
                         <input
                             type="checkbox"
                             checked={autoRefresh}
                             onChange={(e) => setAutoRefresh(e.target.checked)}
-                            className="rounded border-surface-300 text-blue-600 focus:ring-blue-500"
+                            className="rounded border-input text-primary focus:ring-primary"
                         />
                         Auto-refresh (30s)
                     </label>
                     <button
                         onClick={loadData}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors"
+                        className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors"
                     >
                         🔄 Refresh Now
                     </button>
@@ -213,17 +185,17 @@ export default function SystemHealthPage() {
 
             {/* Critical Alerts Banner */}
             {criticalAlerts.length > 0 && (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
-                    <div className="flex items-center gap-2 text-red-700 font-medium mb-2">
+                <div className="bg-destructive/10 border border-destructive/20 rounded-xl p-4 mb-6">
+                    <div className="flex items-center gap-2 text-destructive font-medium mb-2">
                         🚨 {criticalAlerts.length} Critical Alert{criticalAlerts.length > 1 ? 's' : ''}
                     </div>
                     <div className="space-y-2">
                         {criticalAlerts.map(alert => (
                             <div key={alert.id} className="flex items-center justify-between text-sm">
-                                <span className="text-red-700">{alert.message}</span>
+                                <span className="text-destructive">{alert.message}</span>
                                 <button
                                     onClick={() => acknowledgeAlert(alert.id)}
-                                    className="px-2.5 py-1 bg-red-100 text-red-700 rounded text-xs font-medium hover:bg-red-200"
+                                    className="px-2.5 py-1 bg-destructive/10 text-destructive rounded text-xs font-medium hover:bg-destructive/20"
                                 >
                                     Acknowledge
                                 </button>
@@ -235,43 +207,43 @@ export default function SystemHealthPage() {
 
             {/* Overview Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">System Status</div>
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">System Status</div>
                     <div className={cn(
                         'text-2xl font-bold mt-1',
-                        criticalAlerts.length > 0 ? 'text-red-600' : 
-                        activeAlerts.length > 0 ? 'text-amber-600' : 'text-emerald-600'
+                        criticalAlerts.length > 0 ? 'text-destructive' : 
+                        activeAlerts.length > 0 ? 'text-warning' : 'text-success'
                     )}>
                         {criticalAlerts.length > 0 ? 'Critical' : 
                          activeAlerts.length > 0 ? 'Degraded' : 'Healthy'}
                     </div>
-                    <div className="text-xs text-surface-400 mt-1">{activeAlerts.length} active alerts</div>
+                    <div className="text-xs text-muted-foreground mt-1">{activeAlerts.length} active alerts</div>
                 </div>
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">Workers</div>
-                    <div className="text-2xl font-bold text-surface-900 mt-1">
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">Workers</div>
+                    <div className="text-2xl font-bold text-foreground mt-1">
                         {healthyWorkers}/{workers.length}
                     </div>
-                    <div className="text-xs text-surface-400 mt-1">Running</div>
+                    <div className="text-xs text-muted-foreground mt-1">Running</div>
                 </div>
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">MTA Nodes</div>
-                    <div className="text-2xl font-bold text-surface-900 mt-1">
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">MTA Nodes</div>
+                    <div className="text-2xl font-bold text-foreground mt-1">
                         {healthyMTA}/{mtaNodes.length}
                     </div>
-                    <div className="text-xs text-surface-400 mt-1">Healthy</div>
+                    <div className="text-xs text-muted-foreground mt-1">Healthy</div>
                 </div>
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">Queue Depth</div>
-                    <div className="text-2xl font-bold text-surface-900 mt-1">
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">Queue Depth</div>
+                    <div className="text-2xl font-bold text-foreground mt-1">
                         {formatNumber(totalQueueDepth)}
                     </div>
-                    <div className="text-xs text-surface-400 mt-1">Total jobs pending</div>
+                    <div className="text-xs text-muted-foreground mt-1">Total jobs pending</div>
                 </div>
             </div>
 
             {/* Tabs */}
-            <div className="border-b border-surface-200 mb-6 overflow-x-auto">
+            <div className="border-b border-border mb-6 overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
                         { key: 'overview', label: 'Overview', icon: '📊' },
@@ -285,8 +257,8 @@ export default function SystemHealthPage() {
                             className={cn(
                                 'flex items-center gap-2 pb-3 text-sm font-medium transition-colors border-b-2 -mb-px',
                                 activeTab === tab.key
-                                    ? 'border-blue-600 text-blue-600'
-                                    : 'border-transparent text-surface-500 hover:text-surface-700'
+                                    ? 'border-primary text-primary'
+                                    : 'border-transparent text-muted-foreground hover:text-foreground'
                             )}
                         >
                             <span>{tab.icon}</span>
@@ -300,13 +272,13 @@ export default function SystemHealthPage() {
             {activeTab === 'overview' && (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     {/* Alerts */}
-                    <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
-                        <div className="p-4 border-b border-surface-200 bg-surface-50">
-                            <h3 className="font-semibold text-surface-900">Recent Alerts</h3>
+                    <div className="bg-card rounded-xl border border-border overflow-hidden shadow-sm">
+                        <div className="p-4 border-b border-border bg-muted/50">
+                            <h3 className="font-semibold text-foreground">Recent Alerts</h3>
                         </div>
-                        <div className="divide-y divide-surface-100 max-h-[300px] overflow-y-auto">
+                        <div className="divide-y divide-border max-h-[300px] overflow-y-auto">
                             {alerts.length === 0 ? (
-                                <div className="p-8 text-center text-surface-500">No alerts</div>
+                                <div className="p-8 text-center text-muted-foreground">No alerts</div>
                             ) : (
                                 alerts.map(alert => (
                                     <div key={alert.id} className={cn(
@@ -315,19 +287,19 @@ export default function SystemHealthPage() {
                                     )}>
                                         <span className={cn(
                                             'w-2 h-2 rounded-full mt-2 flex-shrink-0',
-                                            alert.severity === 'critical' ? 'bg-red-500' :
-                                            alert.severity === 'warning' ? 'bg-amber-500' : 'bg-blue-500'
+                                            alert.severity === 'critical' ? 'bg-destructive' :
+                                            alert.severity === 'warning' ? 'bg-warning' : 'bg-blue-500'
                                         )} />
                                         <div className="flex-1 min-w-0">
-                                            <p className="text-sm text-surface-700">{alert.message}</p>
-                                            <p className="text-xs text-surface-400 mt-1">
+                                            <p className="text-sm text-foreground">{alert.message}</p>
+                                            <p className="text-xs text-muted-foreground mt-1">
                                                 {alert.component} • {timeAgo(alert.timestamp)}
                                             </p>
                                         </div>
                                         {!alert.acknowledged && (
                                             <button
                                                 onClick={() => acknowledgeAlert(alert.id)}
-                                                className="px-2.5 py-1 text-xs font-medium text-surface-600 hover:text-surface-900"
+                                                className="px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
                                             >
                                                 Ack
                                             </button>
@@ -339,23 +311,23 @@ export default function SystemHealthPage() {
                     </div>
 
                     {/* Queue Summary */}
-                    <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
-                        <div className="p-4 border-b border-surface-200 bg-surface-50">
-                            <h3 className="font-semibold text-surface-900">Queue Health</h3>
+                    <div className="bg-card rounded-xl border border-border overflow-hidden shadow-sm">
+                        <div className="p-4 border-b border-border bg-muted/50">
+                            <h3 className="font-semibold text-foreground">Queue Health</h3>
                         </div>
-                        <div className="divide-y divide-surface-100">
+                        <div className="divide-y divide-border">
                             {queues.map(queue => {
                                 const statusColors = STATUS_COLORS[queue.status];
                                 return (
                                     <div key={queue.name} className="p-4 flex items-center justify-between">
                                         <div>
-                                            <div className="font-mono text-sm text-surface-900">{queue.name}</div>
-                                            <div className="text-xs text-surface-400">{queue.description}</div>
+                                            <div className="font-mono text-sm text-foreground">{queue.name}</div>
+                                            <div className="text-xs text-muted-foreground">{queue.description}</div>
                                         </div>
                                         <div className="flex items-center gap-4">
                                             <div className="text-right">
-                                                <div className="text-sm font-medium text-surface-900">{formatNumber(queue.depth)}</div>
-                                                <div className="text-xs text-surface-400">depth</div>
+                                                <div className="text-sm font-medium text-foreground">{formatNumber(queue.depth)}</div>
+                                                <div className="text-xs text-muted-foreground">depth</div>
                                             </div>
                                             <span className={cn(
                                                 'w-3 h-3 rounded-full',
@@ -372,27 +344,27 @@ export default function SystemHealthPage() {
 
             {/* Queues Tab */}
             {activeTab === 'queues' && (
-                <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
+                <div className="bg-card rounded-xl border border-border overflow-hidden shadow-sm">
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[800px]">
-                            <thead className="bg-surface-50 border-b border-surface-200">
+                            <thead className="bg-muted/50 border-b border-border">
                                 <tr>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Queue</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Status</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Depth</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Processing</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Throughput</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Avg Latency</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Queue</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Depth</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Processing</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Throughput</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Avg Latency</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-surface-100">
+                            <tbody className="divide-y divide-border">
                                 {queues.map(queue => {
                                     const statusColors = STATUS_COLORS[queue.status];
                                     return (
-                                        <tr key={queue.name} className="hover:bg-surface-50/50">
+                                        <tr key={queue.name} className="hover:bg-muted/50">
                                             <td className="px-4 py-4">
-                                                <div className="font-mono text-sm text-surface-900">{queue.name}</div>
-                                                <div className="text-xs text-surface-400">{queue.description}</div>
+                                                <div className="font-mono text-sm text-foreground">{queue.name}</div>
+                                                <div className="text-xs text-muted-foreground">{queue.description}</div>
                                             </td>
                                             <td className="px-4 py-4">
                                                 <span className={cn(
@@ -403,16 +375,16 @@ export default function SystemHealthPage() {
                                                     {queue.status}
                                                 </span>
                                             </td>
-                                            <td className="px-4 py-4 text-right font-medium text-surface-900">
+                                            <td className="px-4 py-4 text-right font-medium text-foreground">
                                                 {formatNumber(queue.depth)}
                                             </td>
-                                            <td className="px-4 py-4 text-right text-surface-600">
+                                            <td className="px-4 py-4 text-right text-muted-foreground">
                                                 {queue.processing}
                                             </td>
-                                            <td className="px-4 py-4 text-right text-surface-600">
+                                            <td className="px-4 py-4 text-right text-muted-foreground">
                                                 {formatNumber(queue.throughput)}/min
                                             </td>
-                                            <td className="px-4 py-4 text-right text-surface-600">
+                                            <td className="px-4 py-4 text-right text-muted-foreground">
                                                 {queue.avgLatency}ms
                                             </td>
                                         </tr>
@@ -426,31 +398,31 @@ export default function SystemHealthPage() {
 
             {/* Workers Tab */}
             {activeTab === 'workers' && (
-                <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
+                <div className="bg-card rounded-xl border border-border overflow-hidden shadow-sm">
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[900px]">
-                            <thead className="bg-surface-50 border-b border-surface-200">
+                            <thead className="bg-muted/50 border-b border-border">
                                 <tr>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Worker</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Type</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Status</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Host</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">CPU</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Memory</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Jobs</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Uptime</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Actions</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Worker</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Type</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Host</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">CPU</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Memory</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Jobs</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Uptime</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-surface-100">
+                            <tbody className="divide-y divide-border">
                                 {workers.map(worker => {
                                     const statusColors = STATUS_COLORS[worker.status];
                                     return (
-                                        <tr key={worker.id} className="hover:bg-surface-50/50">
+                                        <tr key={worker.id} className="hover:bg-muted/50">
                                             <td className="px-4 py-4">
-                                                <div className="font-mono text-sm text-surface-900">{worker.name}</div>
+                                                <div className="font-mono text-sm text-foreground">{worker.name}</div>
                                             </td>
-                                            <td className="px-4 py-4 text-sm text-surface-600">
+                                            <td className="px-4 py-4 text-sm text-muted-foreground">
                                                 {WORKER_TYPE_LABELS[worker.type]}
                                             </td>
                                             <td className="px-4 py-4">
@@ -462,49 +434,49 @@ export default function SystemHealthPage() {
                                                     {worker.status}
                                                 </span>
                                             </td>
-                                            <td className="px-4 py-4 text-sm text-surface-600 font-mono">
+                                            <td className="px-4 py-4 text-sm text-muted-foreground font-mono">
                                                 {worker.host}
                                             </td>
                                             <td className="px-4 py-4 text-right">
                                                 <div className="flex items-center justify-end gap-2">
-                                                    <div className="w-16 h-2 bg-surface-100 rounded-full overflow-hidden">
+                                                    <div className="w-16 h-2 bg-muted rounded-full overflow-hidden">
                                                         <div 
                                                             className={cn(
                                                                 'h-full rounded-full',
-                                                                worker.cpu > 80 ? 'bg-red-500' :
-                                                                worker.cpu > 60 ? 'bg-amber-500' : 'bg-emerald-500'
+                                                                worker.cpu > 80 ? 'bg-destructive' :
+                                                                worker.cpu > 60 ? 'bg-warning' : 'bg-success'
                                                             )}
                                                             style={{ width: `${worker.cpu}%` }}
                                                         />
                                                     </div>
-                                                    <span className="text-sm text-surface-600 w-10 text-right">{worker.cpu}%</span>
+                                                    <span className="text-sm text-muted-foreground w-10 text-right">{worker.cpu}%</span>
                                                 </div>
                                             </td>
                                             <td className="px-4 py-4 text-right">
                                                 <div className="flex items-center justify-end gap-2">
-                                                    <div className="w-16 h-2 bg-surface-100 rounded-full overflow-hidden">
+                                                    <div className="w-16 h-2 bg-muted rounded-full overflow-hidden">
                                                         <div 
                                                             className={cn(
                                                                 'h-full rounded-full',
-                                                                worker.memory > 80 ? 'bg-red-500' :
-                                                                worker.memory > 60 ? 'bg-amber-500' : 'bg-emerald-500'
+                                                                worker.memory > 80 ? 'bg-destructive' :
+                                                                worker.memory > 60 ? 'bg-warning' : 'bg-success'
                                                             )}
                                                             style={{ width: `${worker.memory}%` }}
                                                         />
                                                     </div>
-                                                    <span className="text-sm text-surface-600 w-10 text-right">{worker.memory}%</span>
+                                                    <span className="text-sm text-muted-foreground w-10 text-right">{worker.memory}%</span>
                                                 </div>
                                             </td>
-                                            <td className="px-4 py-4 text-right text-sm text-surface-600">
+                                            <td className="px-4 py-4 text-right text-sm text-muted-foreground">
                                                 {formatNumber(worker.jobsProcessed)}
                                             </td>
-                                            <td className="px-4 py-4 text-right text-sm text-surface-600">
+                                            <td className="px-4 py-4 text-right text-sm text-muted-foreground">
                                                 {worker.uptime > 0 ? formatUptime(worker.uptime) : '—'}
                                             </td>
                                             <td className="px-4 py-4 text-right">
                                                 <button
                                                     onClick={() => restartWorker(worker.id)}
-                                                    className="px-2.5 py-1 text-xs font-medium text-surface-600 bg-surface-100 hover:bg-surface-200 rounded transition-colors"
+                                                    className="px-2.5 py-1 text-xs font-medium text-muted-foreground bg-muted hover:bg-muted/80 rounded transition-colors"
                                                 >
                                                     Restart
                                                 </button>
@@ -520,33 +492,33 @@ export default function SystemHealthPage() {
 
             {/* MTA Tab */}
             {activeTab === 'mta' && (
-                <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
+                <div className="bg-card rounded-xl border border-border overflow-hidden shadow-sm">
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[900px]">
-                            <thead className="bg-surface-50 border-b border-surface-200">
+                            <thead className="bg-muted/50 border-b border-border">
                                 <tr>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Node</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">IP</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Region</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Status</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Sent Today</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Bounce Rate</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Latency</th>
-                                    <th className="px-4 py-3 text-center text-xs font-semibold text-surface-600 uppercase tracking-wider">Blacklist</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Node</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">IP</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Region</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Sent Today</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Bounce Rate</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Latency</th>
+                                    <th className="px-4 py-3 text-center text-xs font-semibold text-muted-foreground uppercase tracking-wider">Blacklist</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-surface-100">
+                            <tbody className="divide-y divide-border">
                                 {mtaNodes.map(node => {
                                     const statusColors = STATUS_COLORS[node.status];
                                     return (
-                                        <tr key={node.id} className="hover:bg-surface-50/50">
+                                        <tr key={node.id} className="hover:bg-muted/50">
                                             <td className="px-4 py-4">
-                                                <div className="font-mono text-sm text-surface-900">{node.hostname}</div>
+                                                <div className="font-mono text-sm text-foreground">{node.hostname}</div>
                                             </td>
-                                            <td className="px-4 py-4 font-mono text-sm text-surface-600">
+                                            <td className="px-4 py-4 font-mono text-sm text-muted-foreground">
                                                 {node.ipAddress}
                                             </td>
-                                            <td className="px-4 py-4 text-sm text-surface-600">
+                                            <td className="px-4 py-4 text-sm text-muted-foreground">
                                                 {node.region}
                                             </td>
                                             <td className="px-4 py-4">
@@ -558,26 +530,26 @@ export default function SystemHealthPage() {
                                                     {node.status}
                                                 </span>
                                             </td>
-                                            <td className="px-4 py-4 text-right text-sm text-surface-900 font-medium">
+                                            <td className="px-4 py-4 text-right text-sm text-foreground font-medium">
                                                 {formatNumber(node.emailsSentToday)}
                                             </td>
                                             <td className="px-4 py-4 text-right">
                                                 <span className={cn(
                                                     'text-sm font-medium',
-                                                    node.bounceRate > 2 ? 'text-red-600' :
-                                                    node.bounceRate > 1 ? 'text-amber-600' : 'text-surface-600'
+                                                    node.bounceRate > 2 ? 'text-destructive' :
+                                                    node.bounceRate > 1 ? 'text-warning' : 'text-muted-foreground'
                                                 )}>
                                                     {node.bounceRate.toFixed(1)}%
                                                 </span>
                                             </td>
-                                            <td className="px-4 py-4 text-right text-sm text-surface-600">
+                                            <td className="px-4 py-4 text-right text-sm text-muted-foreground">
                                                 {node.avgLatency > 0 ? `${node.avgLatency}ms` : '—'}
                                             </td>
                                             <td className="px-4 py-4 text-center">
                                                 {node.blacklisted ? (
-                                                    <span className="px-2.5 py-0.5 bg-red-100 text-red-700 rounded text-xs font-medium">Listed</span>
+                                                    <span className="px-2.5 py-0.5 bg-destructive/10 text-destructive rounded text-xs font-medium">Listed</span>
                                                 ) : (
-                                                    <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-700 rounded text-xs font-medium">Clean</span>
+                                                    <span className="px-2.5 py-0.5 bg-success/10 text-success rounded text-xs font-medium">Clean</span>
                                                 )}
                                             </td>
                                         </tr>

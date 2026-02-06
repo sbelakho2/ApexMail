@@ -65,7 +65,9 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
     const cacheKey = `idempotency:${tenantId}:${c.req.path}:${idempotencyKey}`;
     
     // Create request fingerprint (hash of request body)
-    const bodyText = await c.req.text();
+    // Clone the raw request so downstream handlers can still read the body
+    const clonedReq = c.req.raw.clone();
+    const bodyText = await clonedReq.text();
     const fingerprint = sha256(bodyText);
 
     // Check for existing response
@@ -114,9 +116,7 @@ export function idempotencyMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv
     }
 
     try {
-      // Reconstruct request body for downstream handlers
-      // Store body in context for handlers to access
-      (c.req as { _body?: string })._body = bodyText;
+      // Body is still available via the original request (we read from a clone above)
 
       // Process the request
       await next();

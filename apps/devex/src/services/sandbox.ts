@@ -725,7 +725,7 @@ export class SandboxService {
     try {
       const keyId = generateUUID().replace(/-/g, '').slice(0, 16);
       const secret = generateUUID().replace(/-/g, '') + generateUUID().replace(/-/g, '');
-      const apiKey = `apx_test_${keyId}${secret}`;
+      const apiKey = `am_test_${keyId}${secret}`;
       const prefix = apiKey.slice(0, 16);
 
       await this.db.query(`
@@ -750,7 +750,7 @@ export class SandboxService {
    */
   async validateSandboxApiKey(apiKey: string): Promise<Result<{ sandboxId: string; tenantId: string } | null>> {
     try {
-      if (!apiKey.startsWith('apx_test_')) {
+      if (!apiKey.startsWith('am_test_')) {
         return { ok: true, value: null };
       }
 

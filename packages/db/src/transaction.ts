@@ -125,12 +125,18 @@ export async function withTransaction<T>(
         startCommand = `BEGIN ${modifiers.join(' ')}`;
       }
 
-      // Set statement timeout if specified
-      if (opts.timeout) {
-        await client.query(`SET LOCAL statement_timeout = ${opts.timeout}`);
-      }
+      // Set statement timeout if specified — MUST be after BEGIN
+      // so SET LOCAL applies to this transaction only, not the session
 
       await client.query(startCommand);
+
+      if (opts.timeout) {
+        const timeoutMs = Number(opts.timeout);
+        if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 300000) {
+          throw new Error(`Invalid statement_timeout value: ${opts.timeout}. Must be a positive integer up to 300000ms.`);
+        }
+        await client.query('SET LOCAL statement_timeout = $1', [Math.floor(timeoutMs).toString()]);
+      }
 
       // Create transaction context
       const ctx: TransactionContext = {

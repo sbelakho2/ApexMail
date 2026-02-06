@@ -180,16 +180,16 @@ const PATTERNS = {
 // Return date extraction patterns
 const RETURN_DATE_PATTERNS = [
     /(?:back|return(?:ing)?|available|in the office)(?: on)? (\w+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?)/i,
-    /(?:back|return(?:ing)?|available|in the office)(?: on)? (\d{1,2}[\/\-\.]\d{1,2}(?:[\/\-\.]\d{2,4})?)/i,
+    /(?:back|return(?:ing)?|available|in the office)(?: on)? (\d{1,2}[/\-.](\d{1,2})[/\-.](?:\d{2,4})?)/i,
     /(?:back|return(?:ing)?|available)(?: on)? (monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i,
     /until (\w+ \d{1,2}(?:st|nd|rd|th)?(?:,? \d{4})?)/i,
 ];
 
 // Referral extraction patterns
 const REFERRAL_PATTERNS = [
-    /(?:contact|reach|try|email|speak (?:with|to)) (\w+(?:\.\w+)?@[\w\.-]+\.\w+)/i,
-    /(?:cc|copied|adding) (\w+(?:\.\w+)?@[\w\.-]+\.\w+)/i,
-    /forward(?:ed|ing)? (?:this )?to (\w+(?:\.\w+)?@[\w\.-]+\.\w+)/i,
+    /(?:contact|reach|try|email|speak (?:with|to)) (\w+(?:\.\w+)?@[\w.-]+\.\w+)/i,
+    /(?:cc|copied|adding) (\w+(?:\.\w+)?@[\w.-]+\.\w+)/i,
+    /forward(?:ed|ing)? (?:this )?to (\w+(?:\.\w+)?@[\w.-]+\.\w+)/i,
 ];
 
 export class ReplyHandler {
@@ -332,7 +332,7 @@ export class ReplyHandler {
         extractedData: ClassificationResult['extractedData']
     ): SuggestedAction {
         switch (classification) {
-            case 'out_of_office':
+            case 'out_of_office': {
                 const snoozeUntil = extractedData.returnDate || 
                     new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
                 return {
@@ -341,6 +341,7 @@ export class ReplyHandler {
                     autoExecute: true,
                     priority: 'low',
                 };
+            }
 
             case 'not_interested':
                 return {
@@ -472,11 +473,12 @@ export class ReplyHandler {
                                confidence >= 0.5 ? 'Medium confidence' : 'Low confidence';
         
         switch (classification) {
-            case 'out_of_office':
+            case 'out_of_office': {
                 const returnText = extractedData.returnDate 
                     ? `. Expected return: ${extractedData.returnDate.toLocaleDateString()}`
                     : '';
                 return `${confidenceText} OOO auto-reply detected${returnText}. Lead will be snoozed.`;
+            }
             
             case 'not_interested':
                 return `${confidenceText} negative response. Lead marked as lost and added to suppression list.`;
@@ -488,11 +490,12 @@ export class ReplyHandler {
             case 'meeting_request':
                 return `${confidenceText} meeting request! Requires immediate attention to schedule call.`;
             
-            case 'wrong_person':
+            case 'wrong_person': {
                 const referralText = extractedData.referredContact 
                     ? `. Referred to: ${extractedData.referredContact}`
                     : '';
                 return `${confidenceText} wrong contact identified${referralText}. Update lead record.`;
+            }
             
             case 'unsubscribe':
                 return `${confidenceText} unsubscribe request. Processing immediately per compliance requirements.`;
@@ -594,7 +597,7 @@ export class ReplyHandler {
         }
         
         // Try to find any email address in the text
-        const emailMatch = text.match(/[\w\.-]+@[\w\.-]+\.\w+/);
+        const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/);
         return emailMatch?.[0]?.toLowerCase();
     }
 
@@ -737,7 +740,7 @@ export class ReplyHandler {
         // Update inbound message with classification
         await this.db.query(`
             UPDATE inbound_messages
-            SET classification = $1, action_taken = $2, processed_at = $3
+            SET classification = $1, action_taken = $2, processed_at = $3, processing_at = NULL
             WHERE id = $4
         `, [
             JSON.stringify(classification),
@@ -828,7 +831,7 @@ export class ReplyHandler {
 
         const result = await this.db.query<{ count: string }>(`
             SELECT COUNT(*) as count FROM inbound_messages
-            WHERE processed_at IS NULL ${tenantFilter}
+            WHERE processed_at IS NULL AND processing_at IS NULL ${tenantFilter}
         `, params);
 
         return parseInt(result.rows[0]?.count || '0', 10);
@@ -839,10 +842,16 @@ export class ReplyHandler {
      */
     async processAllPending(limit = 100): Promise<ProcessedReply[]> {
         const result = await this.db.query<{ id: string }>(`
-            SELECT id FROM inbound_messages
-            WHERE processed_at IS NULL
-            ORDER BY received_at ASC
-            LIMIT $1
+            UPDATE inbound_messages
+            SET processing_at = NOW()
+            WHERE id IN (
+                SELECT id FROM inbound_messages
+                WHERE processed_at IS NULL AND processing_at IS NULL
+                ORDER BY received_at ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id
         `, [limit]);
 
         const processed: ProcessedReply[] = [];
@@ -855,6 +864,10 @@ export class ReplyHandler {
                 }
             } catch (error) {
                 this.logger.error('Failed to process inbound message', { id, error });
+                await this.db.query(
+                    'UPDATE inbound_messages SET processing_at = NULL WHERE id = $1',
+                    [id]
+                );
             }
         }
 

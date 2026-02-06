@@ -234,7 +234,7 @@ function extractFeatures(subject: string): SubjectLineData['features'] {
         hasNumber: /\d+/.test(subject),
         hasEmoji: /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[🎉🚀📈💡🎁⏰📊✨🔥👀]/u.test(subject),
         hasUrgency: /urgent|last|final|limited|expires|ending|today only|don't miss|act now|24 hours/i.test(subject),
-        hasBracket: /[\[\]]/.test(subject),
+        hasBracket: /[[.\]]/.test(subject),
         startsWithVerb: verbs.some(v => subject.toLowerCase().startsWith(v)),
         allCaps: subject === subject.toUpperCase() && subject.length > 3,
     };

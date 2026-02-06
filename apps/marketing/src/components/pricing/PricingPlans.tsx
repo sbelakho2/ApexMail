@@ -116,7 +116,7 @@ export function PricingPlans() {
               animate={inView ? { opacity: 1, y: 0 } : {}}
               transition={{ delay: index * 0.08, duration: 0.4 }}
               className={cn(
-                'relative flex flex-col p-6 bg-white rounded-xl border transition-all duration-200',
+                'relative flex flex-col p-6 bg-white rounded-lg border transition-all duration-200',
                 plan.popular 
                   ? 'border-primary-600 ring-1 ring-primary-600' 
                   : 'border-surface-200 hover:border-surface-300'
@@ -124,7 +124,7 @@ export function PricingPlans() {
             >
               {plan.popular && (
                 <div className="mb-4">
-                  <span className="inline-block px-2 py-0.5 bg-primary-50 text-primary-700 text-[11px] font-medium uppercase tracking-wide rounded border border-primary-100">
+                  <span className="inline-block px-2 py-0.5 bg-primary-50 text-primary-700 text-xs font-medium rounded border border-primary-100">
                     Most Popular
                   </span>
                 </div>
@@ -152,7 +152,7 @@ export function PricingPlans() {
                 href={plan.ctaLink}
                 aria-label={`${plan.cta} - ${plan.name} plan at ${plan.price}${plan.period}`}
                 className={cn(
-                  'block w-full py-2.5 rounded-lg text-sm font-medium text-center transition-colors',
+                  'block w-full py-2.5 rounded-md text-sm font-medium text-center transition-colors',
                   plan.popular
                     ? 'bg-primary-600 text-white hover:bg-primary-700'
                     : 'bg-surface-100 text-surface-900 hover:bg-surface-200'
@@ -169,13 +169,13 @@ export function PricingPlans() {
           initial={{ opacity: 0, y: 16 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.5, duration: 0.4 }}
-          className="mt-10 rounded-xl border border-amber-200 bg-amber-50/50 overflow-hidden"
+          className="mt-10 rounded-lg border border-amber-200 bg-amber-50/50 overflow-hidden"
         >
           <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
             <div className="flex-1">
               <div className="inline-flex items-center gap-1.5 text-amber-700 mb-3">
                 <Zap className="w-4 h-4" />
-                <span className="text-xs font-semibold uppercase tracking-wide">Pay As You Go</span>
+                <span className="text-xs font-semibold">Pay As You Go</span>
               </div>
               <p className="text-surface-600 text-sm mb-4 max-w-lg">
                 No monthly commitment. Volume discounts from $0.001 to $0.0003 per email.
@@ -196,7 +196,7 @@ export function PricingPlans() {
             </div>
             <Link
               href="/signup?plan=payg"
-              className="shrink-0 px-5 py-2.5 text-sm font-medium bg-amber-500 text-white rounded-lg hover:bg-amber-600 transition-colors"
+              className="shrink-0 px-5 py-2.5 text-sm font-medium bg-amber-500 text-white rounded-md hover:bg-amber-600 transition-colors"
             >
               Get Started
             </Link>
@@ -208,7 +208,7 @@ export function PricingPlans() {
           initial={{ opacity: 0, y: 16 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.6, duration: 0.4 }}
-          className="mt-10 rounded-xl bg-surface-900 overflow-hidden"
+          className="mt-10 rounded-lg bg-surface-900 overflow-hidden"
         >
           <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
             <div className="flex-1">
@@ -219,7 +219,7 @@ export function PricingPlans() {
               <div className="flex flex-wrap gap-x-4 gap-y-1">
                 {['Dedicated infrastructure', 'Custom integrations', 'Priority support'].map((feature) => (
                   <span key={feature} className="flex items-center gap-1.5 text-sm text-surface-300">
-                    <CheckCircle className="w-3.5 h-3.5 text-primary-400" strokeWidth={2} />
+                    <CheckCircle className="w-4 h-4 text-primary-400" strokeWidth={2} />
                     {feature}
                   </span>
                 ))}
@@ -227,7 +227,7 @@ export function PricingPlans() {
             </div>
             <Link
               href="/contact/enterprise"
-              className="shrink-0 px-5 py-2.5 text-sm font-medium bg-white text-surface-900 rounded-lg hover:bg-surface-100 transition-colors"
+              className="shrink-0 px-5 py-2.5 text-sm font-medium bg-white text-surface-900 rounded-md hover:bg-surface-100 transition-colors"
             >
               Contact Sales
             </Link>

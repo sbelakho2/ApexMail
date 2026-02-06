@@ -7,7 +7,8 @@ import { createLogger } from '@apexmail/lib';
 import { config } from './config.js';
 import app from './routes.js';
 import { startCampaignProcessor, stopCampaignProcessor } from './campaigns/index.js';
-import { getLead } from './crm/index.js';
+import { getLead, initCrmDatabase } from './crm/index.js';
+import { closeDbPool, getDbPool } from './db.js';
 
 const logger = createLogger({ name: 'autopilot', level: 'info' });
 
@@ -16,6 +17,9 @@ async function main(): Promise<void> {
         port: config.port,
         env: config.nodeEnv,
     });
+
+    const pool = getDbPool();
+    initCrmDatabase(pool);
 
     // Start the campaign processor
     startCampaignProcessor(
@@ -39,6 +43,7 @@ async function main(): Promise<void> {
     const shutdown = async (): Promise<void> => {
         logger.info('Shutting down Sales Autopilot...');
         stopCampaignProcessor();
+        await closeDbPool();
         server.close();
         process.exit(0);
     };

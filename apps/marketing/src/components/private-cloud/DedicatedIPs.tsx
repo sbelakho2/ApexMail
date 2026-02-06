@@ -17,7 +17,7 @@ export function DedicatedIPs() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  >
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
-            <Globe className="w-3.5 h-3.5" />
+            <Globe className="w-4 h-4" />
             Dedicated IPs
           </div>
  <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
@@ -65,10 +65,10 @@ export function DedicatedIPs() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  transition={{ delay: 0.2 }}
  >
- <div className="bg-white rounded-xl border border-surface-200 p-8 shadow-sm">
+ <div className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm">
  <div className="flex items-center justify-between mb-8">
  <div className="text-xs font-semibold text-surface-500">IP Pool Dashboard</div>
- <div className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100/50 text-[10px] font-medium rounded">
+ <div className="px-2 py-1 bg-emerald-50 text-emerald-700 border border-emerald-100/50 text-xs font-medium rounded">
  All Healthy
  </div>
  </div>
@@ -100,7 +100,7 @@ export function DedicatedIPs() {
  </div>
  <div className="flex items-center gap-8">
  <div className="text-right hidden sm:block">
- <div className="text-[10px] font-medium text-surface-500 mb-0.5">Reputation</div>
+ <div className="text-xs font-medium text-surface-500 mb-0.5">Reputation</div>
  <div
  className={`text-sm font-semibold ${
  ipData.reputation >= 90

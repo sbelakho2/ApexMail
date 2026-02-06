@@ -41,30 +41,13 @@ interface TenantOverride {
     createdAt: string;
 }
 
-const DEMO_FLAGS: FeatureFlag[] = [
-    { id: 'f1', key: 'ai_reply_suggestions', name: 'AI Reply Suggestions', description: 'Show AI-generated reply suggestions in compose view', type: 'percentage', enabled: true, percentage: 25, category: 'beta', createdAt: '2025-01-15T00:00:00Z', updatedAt: '2025-01-20T14:30:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f2', key: 'advanced_analytics', name: 'Advanced Analytics', description: 'Enhanced analytics dashboard with ML-powered insights', type: 'percentage', enabled: true, percentage: 50, category: 'beta', createdAt: '2025-01-10T00:00:00Z', updatedAt: '2025-01-18T10:15:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f3', key: 'smart_scheduling', name: 'Smart Send Time', description: 'AI-optimized send time recommendations', type: 'boolean', enabled: true, category: 'core', createdAt: '2024-12-01T00:00:00Z', updatedAt: '2025-01-05T09:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f4', key: 'webhook_v2', name: 'Webhook API v2', description: 'New webhook payload format with additional metadata', type: 'allowlist', enabled: true, allowlist: ['tenant-001', 'tenant-002', 'tenant-003'], category: 'beta', createdAt: '2025-01-08T00:00:00Z', updatedAt: '2025-01-19T16:45:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f5', key: 'email_preview_render', name: 'Email Preview Rendering', description: 'Server-side email preview rendering', type: 'boolean', enabled: true, category: 'core', createdAt: '2024-11-15T00:00:00Z', updatedAt: '2024-12-10T11:30:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f6', key: 'bulk_import_v2', name: 'Bulk Import v2', description: 'New bulk contact import with streaming support', type: 'percentage', enabled: true, percentage: 75, category: 'beta', createdAt: '2025-01-05T00:00:00Z', updatedAt: '2025-01-17T08:20:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f7', key: 'experimental_editor', name: 'Experimental Email Editor', description: 'Next-gen drag-and-drop email editor', type: 'allowlist', enabled: true, allowlist: ['tenant-001'], category: 'experimental', createdAt: '2025-01-20T00:00:00Z', updatedAt: '2025-01-20T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f8', key: 'ks_disable_sends', name: '[KS] Disable All Sends', description: 'KILLSWITCH: Immediately halt all email sending', type: 'boolean', enabled: false, category: 'killswitch', createdAt: '2024-10-01T00:00:00Z', updatedAt: '2024-10-01T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f9', key: 'ks_disable_webhooks', name: '[KS] Disable Webhooks', description: 'KILLSWITCH: Stop all webhook deliveries', type: 'boolean', enabled: false, category: 'killswitch', createdAt: '2024-10-01T00:00:00Z', updatedAt: '2024-10-01T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f10', key: 'ks_maintenance_mode', name: '[KS] Maintenance Mode', description: 'KILLSWITCH: Show maintenance page to all users', type: 'boolean', enabled: false, category: 'killswitch', createdAt: '2024-10-01T00:00:00Z', updatedAt: '2024-10-01T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-];
 
-const DEMO_OVERRIDES: TenantOverride[] = [
-    { tenantId: 'tenant-001', tenantName: 'Acme Corp', flagKey: 'ai_reply_suggestions', value: true, reason: 'Early beta partner', createdAt: '2025-01-15T00:00:00Z' },
-    { tenantId: 'tenant-002', tenantName: 'TechStart Inc', flagKey: 'ai_reply_suggestions', value: true, reason: 'Requested beta access', createdAt: '2025-01-16T00:00:00Z' },
-    { tenantId: 'tenant-005', tenantName: 'Legacy Systems Ltd', flagKey: 'bulk_import_v2', value: false, reason: 'Uses legacy API integration', createdAt: '2025-01-10T00:00:00Z' },
-];
 
 const CATEGORY_CONFIG: Record<string, { label: string; bg: string; text: string; icon: string }> = {
-    core: { label: 'Core', bg: 'bg-blue-100', text: 'text-blue-700', icon: '🔵' },
-    beta: { label: 'Beta', bg: 'bg-violet-100', text: 'text-violet-700', icon: '🟣' },
-    experimental: { label: 'Experimental', bg: 'bg-amber-100', text: 'text-amber-700', icon: '🟡' },
-    killswitch: { label: 'Killswitch', bg: 'bg-red-100', text: 'text-red-700', icon: '🔴' },
+    core: { label: 'Core', bg: 'bg-info/10', text: 'text-info', icon: '🔵' },
+    beta: { label: 'Beta', bg: 'bg-purple-500/10', text: 'text-purple-600', icon: '🟣' },
+    experimental: { label: 'Experimental', bg: 'bg-warning/10', text: 'text-warning', icon: '🟡' },
+    killswitch: { label: 'Killswitch', bg: 'bg-destructive/10', text: 'text-destructive', icon: '🔴' },
 };
 
 function FeatureFlagsPageContent() {
@@ -82,9 +65,13 @@ function FeatureFlagsPageContent() {
 
     const loadData = useCallback(async () => {
         try {
-            // In production: fetch from API
-            setFlags(DEMO_FLAGS);
-            setOverrides(DEMO_OVERRIDES);
+            const response = await fetch('/api/features', { credentials: 'include' });
+            if (!response.ok) throw new Error(`Failed to fetch features: ${response.status}`);
+            const data = await response.json();
+            setFlags(data.flags);
+            setOverrides(data.overrides);
+        } catch (err) {
+            console.error('Failed to load feature flags:', err);
         } finally {
             setLoading(false);
         }
@@ -126,7 +113,7 @@ function FeatureFlagsPageContent() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
             </div>
         );
     }
@@ -136,15 +123,15 @@ function FeatureFlagsPageContent() {
             {/* Header */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-surface-900">Feature Flags</h1>
-                    <p className="text-surface-600 mt-1">
+                    <h1 className="text-2xl font-bold text-foreground">Feature Flags</h1>
+                    <p className="text-muted-foreground mt-1">
                         Control feature rollout and beta access
                     </p>
                 </div>
                 <div className="flex items-center gap-3">
                     <button 
                         onClick={() => setShowAddOverride(true)}
-                        className="px-4 py-2 bg-surface-100 text-surface-700 rounded-lg text-sm hover:bg-surface-200 font-medium transition-colors"
+                        className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors"
                     >
                         + Add Override
                     </button>
@@ -153,13 +140,13 @@ function FeatureFlagsPageContent() {
 
             {/* Killswitch Warning */}
             {flags.some(f => f.category === 'killswitch' && f.enabled) && (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
-                    <div className="flex items-center gap-2 text-red-700 font-medium">
+                <div className="bg-destructive/10 border border-destructive/20 rounded-xl p-4 mb-6">
+                    <div className="flex items-center gap-2 text-destructive font-medium">
                         🚨 Active Killswitches Detected
                     </div>
                     <div className="mt-2 space-y-1">
                         {flags.filter(f => f.category === 'killswitch' && f.enabled).map(f => (
-                            <div key={f.id} className="text-sm text-red-600">{f.name}: {f.description}</div>
+                            <div key={f.id} className="text-sm text-destructive">{f.name}: {f.description}</div>
                         ))}
                     </div>
                 </div>
@@ -167,30 +154,30 @@ function FeatureFlagsPageContent() {
 
             {/* Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">Total Flags</div>
-                    <div className="text-2xl font-bold text-surface-900 mt-1">{flags.length}</div>
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">Total Flags</div>
+                    <div className="text-2xl font-bold text-foreground mt-1">{flags.length}</div>
                 </div>
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">Enabled</div>
-                    <div className="text-2xl font-bold text-emerald-600 mt-1">
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">Enabled</div>
+                    <div className="text-2xl font-bold text-success mt-1">
                         {flags.filter(f => f.enabled).length}
                     </div>
                 </div>
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">In Beta</div>
-                    <div className="text-2xl font-bold text-violet-600 mt-1">
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">In Beta</div>
+                    <div className="text-2xl font-bold text-purple-600 mt-1">
                         {flags.filter(f => f.category === 'beta').length}
                     </div>
                 </div>
-                <div className="bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm">
-                    <div className="text-sm text-surface-500 font-medium">Overrides</div>
-                    <div className="text-2xl font-bold text-surface-900 mt-1">{overrides.length}</div>
+                <div className="bg-card rounded-xl border border-border p-4 shadow-sm">
+                    <div className="text-sm text-muted-foreground font-medium">Overrides</div>
+                    <div className="text-2xl font-bold text-foreground mt-1">{overrides.length}</div>
                 </div>
             </div>
 
             {/* Tabs */}
-            <div className="border-b border-surface-200 mb-6 overflow-x-auto">
+            <div className="border-b border-border mb-6 overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
                         { key: 'flags', label: 'Feature Flags', count: flags.length },
@@ -202,14 +189,14 @@ function FeatureFlagsPageContent() {
                             className={cn(
                                 'flex items-center gap-2 pb-3 text-sm font-medium transition-colors border-b-2 -mb-px',
                                 activeTab === tab.key
-                                    ? 'border-blue-600 text-blue-600'
-                                    : 'border-transparent text-surface-500 hover:text-surface-700'
+                                    ? 'border-primary text-primary'
+                                    : 'border-transparent text-muted-foreground hover:text-foreground'
                             )}
                         >
                             {tab.label}
                             <span className={cn(
                                 'px-2.5 py-0.5 rounded-full text-xs',
-                                activeTab === tab.key ? 'bg-blue-100 text-blue-600' : 'bg-surface-100 text-surface-500'
+                                activeTab === tab.key ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'
                             )}>
                                 {tab.count}
                             </span>
@@ -229,7 +216,7 @@ function FeatureFlagsPageContent() {
                                 placeholder="Search flags..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
-                                className="w-full px-4 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-4 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground placeholder:text-muted-foreground"
                             />
                         </div>
                         <div className="flex gap-2 flex-wrap">
@@ -240,8 +227,8 @@ function FeatureFlagsPageContent() {
                                     className={cn(
                                         'px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
                                         categoryFilter === cat
-                                            ? 'bg-blue-100 text-blue-700'
-                                            : 'bg-surface-100 text-surface-600 hover:bg-surface-200'
+                                            ? 'bg-primary/10 text-primary'
+                                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
                                     )}
                                 >
                                     {cat === 'all' ? 'All' : CATEGORY_CONFIG[cat]?.label || cat}
@@ -260,14 +247,14 @@ function FeatureFlagsPageContent() {
                                 <div 
                                     key={flag.id}
                                     className={cn(
-                                        'bg-surface-0 rounded-xl border border-surface-200 p-4 shadow-sm',
-                                        flag.category === 'killswitch' && flag.enabled && 'border-red-300 bg-red-50/30'
+                                        'bg-card rounded-xl border border-border p-4 shadow-sm',
+                                        flag.category === 'killswitch' && flag.enabled && 'border-destructive/30 bg-destructive/5'
                                     )}
                                 >
                                     <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                                         <div className="flex-1 min-w-0">
                                             <div className="flex items-center gap-3 mb-1">
-                                                <h3 className="font-semibold text-surface-900">{flag.name}</h3>
+                                                <h3 className="font-semibold text-foreground">{flag.name}</h3>
                                                 <span className={cn(
                                                     'px-2.5 py-0.5 rounded-full text-xs font-medium',
                                                     catConfig.bg,
@@ -276,14 +263,14 @@ function FeatureFlagsPageContent() {
                                                     {catConfig.label}
                                                 </span>
                                                 {flagOverrides.length > 0 && (
-                                                    <span className="px-2.5 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-medium">
+                                                    <span className="px-2.5 py-0.5 bg-warning/10 text-warning rounded-full text-xs font-medium">
                                                         {flagOverrides.length} override{flagOverrides.length > 1 ? 's' : ''}
                                                     </span>
                                                 )}
                                             </div>
-                                            <p className="text-sm text-surface-500 mb-2">{flag.description}</p>
-                                            <div className="flex items-center gap-4 text-xs text-surface-400">
-                                                <span className="font-mono bg-surface-100 px-2.5 py-1 rounded">{flag.key}</span>
+                                            <p className="text-sm text-muted-foreground mb-2">{flag.description}</p>
+                                            <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                                                <span className="font-mono bg-muted px-2.5 py-1 rounded">{flag.key}</span>
                                                 <span>Updated {timeAgo(flag.updatedAt)}</span>
                                             </div>
                                         </div>
@@ -298,16 +285,16 @@ function FeatureFlagsPageContent() {
                                                         max="100"
                                                         value={flag.percentage || 0}
                                                         onChange={(e) => updatePercentage(flag.id, parseInt(e.target.value))}
-                                                        className="w-24 h-2 bg-surface-200 rounded-lg appearance-none cursor-pointer"
+                                                        className="w-24 h-2 bg-muted rounded-lg appearance-none cursor-pointer"
                                                     />
-                                                    <span className="text-sm font-medium text-surface-700 w-10">
+                                                    <span className="text-sm font-medium text-muted-foreground w-10">
                                                         {flag.percentage}%
                                                     </span>
                                                 </div>
                                             )}
                                             
                                             {flag.type === 'allowlist' && flag.enabled && (
-                                                <span className="text-sm text-surface-500">
+                                                <span className="text-sm text-muted-foreground">
                                                     {flag.allowlist?.length || 0} tenant{(flag.allowlist?.length || 0) !== 1 ? 's' : ''}
                                                 </span>
                                             )}
@@ -316,10 +303,10 @@ function FeatureFlagsPageContent() {
                                             <button
                                                 onClick={() => toggleFlag(flag.id)}
                                                 className={cn(
-                                                    'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2',
+                                                    'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2',
                                                     flag.enabled 
-                                                        ? flag.category === 'killswitch' ? 'bg-red-600' : 'bg-emerald-600'
-                                                        : 'bg-surface-200'
+                                                        ? flag.category === 'killswitch' ? 'bg-destructive' : 'bg-success'
+                                                        : 'bg-muted'
                                                 )}
                                             >
                                                 <span
@@ -334,7 +321,7 @@ function FeatureFlagsPageContent() {
                                             {flag.type === 'allowlist' && (
                                                 <button
                                                     onClick={() => setEditingFlag(flag)}
-                                                    className="p-2 text-surface-400 hover:text-surface-600 transition-colors"
+                                                    className="p-2 text-muted-foreground hover:text-foreground transition-colors"
                                                 >
                                                     ✏️
                                                 </button>
@@ -346,7 +333,7 @@ function FeatureFlagsPageContent() {
                         })}
                         
                         {filteredFlags.length === 0 && (
-                            <div className="text-center py-12 text-surface-500">
+                            <div className="text-center py-12 text-muted-foreground">
                                 No feature flags match your filters
                             </div>
                         )}
@@ -356,28 +343,28 @@ function FeatureFlagsPageContent() {
 
             {/* Overrides Tab */}
             {activeTab === 'overrides' && (
-                <div className="bg-surface-0 rounded-xl border border-surface-200 overflow-hidden shadow-sm">
+                <div className="bg-card rounded-xl border border-border overflow-hidden shadow-sm">
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[700px]">
-                            <thead className="bg-surface-50 border-b border-surface-200">
+                            <thead className="bg-muted/50 border-b border-border">
                                 <tr>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Tenant</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Flag</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Value</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Reason</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-surface-600 uppercase tracking-wider">Created</th>
-                                    <th className="px-4 py-3 text-right text-xs font-semibold text-surface-600 uppercase tracking-wider">Actions</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Tenant</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Flag</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Value</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Reason</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Created</th>
+                                    <th className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-surface-100">
+                            <tbody className="divide-y divide-border">
                                 {overrides.map(override => (
-                                    <tr key={`${override.tenantId}-${override.flagKey}`} className="hover:bg-surface-50/50">
+                                    <tr key={`${override.tenantId}-${override.flagKey}`} className="hover:bg-muted/50">
                                         <td className="px-4 py-4">
-                                            <div className="font-medium text-surface-900">{override.tenantName}</div>
-                                            <div className="text-xs text-surface-400 font-mono">{override.tenantId}</div>
+                                            <div className="font-medium text-foreground">{override.tenantName}</div>
+                                            <div className="text-xs text-muted-foreground font-mono">{override.tenantId}</div>
                                         </td>
                                         <td className="px-4 py-4">
-                                            <span className="font-mono text-sm bg-surface-100 px-2.5 py-1 rounded">
+                                            <span className="font-mono text-sm bg-muted px-2.5 py-1 rounded">
                                                 {override.flagKey}
                                             </span>
                                         </td>
@@ -385,22 +372,22 @@ function FeatureFlagsPageContent() {
                                             <span className={cn(
                                                 'px-2.5 py-0.5 rounded-full text-xs font-medium',
                                                 override.value 
-                                                    ? 'bg-emerald-100 text-emerald-700'
-                                                    : 'bg-surface-100 text-surface-600'
+                                                    ? 'bg-success/10 text-success'
+                                                    : 'bg-muted text-muted-foreground'
                                             )}>
                                                 {override.value ? 'Enabled' : 'Disabled'}
                                             </span>
                                         </td>
-                                        <td className="px-4 py-4 text-sm text-surface-600">
+                                        <td className="px-4 py-4 text-sm text-muted-foreground">
                                             {override.reason}
                                         </td>
-                                        <td className="px-4 py-4 text-sm text-surface-500">
+                                        <td className="px-4 py-4 text-sm text-muted-foreground">
                                             {timeAgo(override.createdAt)}
                                         </td>
                                         <td className="px-4 py-4 text-right">
                                             <button
                                                 onClick={() => deleteOverride(override.tenantId, override.flagKey)}
-                                                className="text-red-600 hover:text-red-700 text-sm font-medium"
+                                                className="text-destructive hover:text-destructive/90 text-sm font-medium"
                                             >
                                                 Remove
                                             </button>
@@ -409,7 +396,7 @@ function FeatureFlagsPageContent() {
                                 ))}
                                 {overrides.length === 0 && (
                                     <tr>
-                                        <td colSpan={6} className="px-4 py-12 text-center text-surface-500">
+                                        <td colSpan={6} className="px-4 py-12 text-center text-muted-foreground">
                                             No tenant overrides configured
                                         </td>
                                     </tr>
@@ -422,21 +409,21 @@ function FeatureFlagsPageContent() {
 
             {/* Edit Allowlist Modal */}
             {editingFlag && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-surface-0 rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
-                        <div className="p-6 border-b border-surface-200">
-                            <h2 className="text-lg font-semibold text-surface-900">
+                <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                    <div className="bg-card rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto border border-border">
+                        <div className="p-6 border-b border-border">
+                            <h2 className="text-lg font-semibold text-foreground">
                                 Edit Allowlist: {editingFlag.name}
                             </h2>
                         </div>
                         <div className="p-6">
-                            <p className="text-sm text-surface-600 mb-4">
+                            <p className="text-sm text-muted-foreground mb-4">
                                 Tenant IDs with access to this feature:
                             </p>
                             <div className="space-y-2 mb-4">
                                 {editingFlag.allowlist?.map(tenantId => (
-                                    <div key={tenantId} className="flex items-center justify-between bg-surface-50 px-3 py-2 rounded-lg">
-                                        <span className="font-mono text-sm">{tenantId}</span>
+                                    <div key={tenantId} className="flex items-center justify-between bg-muted/30 px-3 py-2 rounded-lg border border-border">
+                                        <span className="font-mono text-sm text-foreground">{tenantId}</span>
                                         <button
                                             onClick={() => {
                                                 const newList = editingFlag.allowlist?.filter(id => id !== tenantId) || [];
@@ -447,14 +434,14 @@ function FeatureFlagsPageContent() {
                                                 ));
                                                 setEditingFlag({ ...editingFlag, allowlist: newList });
                                             }}
-                                            className="text-red-600 hover:text-red-700 text-sm"
+                                            className="text-destructive hover:text-destructive/90 text-sm"
                                         >
                                             Remove
                                         </button>
                                     </div>
                                 ))}
                                 {(!editingFlag.allowlist || editingFlag.allowlist.length === 0) && (
-                                    <p className="text-sm text-surface-400 text-center py-4">No tenants in allowlist</p>
+                                    <p className="text-sm text-muted-foreground text-center py-4">No tenants in allowlist</p>
                                 )}
                             </div>
                             <div className="flex gap-2">
@@ -462,7 +449,7 @@ function FeatureFlagsPageContent() {
                                     type="text"
                                     placeholder="Add tenant ID..."
                                     id="new-tenant-id"
-                                    className="flex-1 px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="flex-1 px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground placeholder:text-muted-foreground"
                                 />
                                 <button
                                     onClick={() => {
@@ -479,16 +466,16 @@ function FeatureFlagsPageContent() {
                                             input.value = '';
                                         }
                                     }}
-                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                                    className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
                                 >
                                     Add
                                 </button>
                             </div>
                         </div>
-                        <div className="p-6 border-t border-surface-200 bg-surface-50 flex justify-end">
+                        <div className="p-6 border-t border-border bg-muted/10 flex justify-end">
                             <button
                                 onClick={() => setEditingFlag(null)}
-                                className="px-4 py-2 bg-surface-900 text-white rounded-lg text-sm font-medium hover:bg-surface-800"
+                                className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
                             >
                                 Done
                             </button>
@@ -499,10 +486,10 @@ function FeatureFlagsPageContent() {
 
             {/* Add Override Modal */}
             {showAddOverride && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-surface-0 rounded-xl shadow-xl max-w-lg w-full">
-                        <div className="p-6 border-b border-surface-200">
-                            <h2 className="text-lg font-semibold text-surface-900">Add Tenant Override</h2>
+                <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                    <div className="bg-card rounded-xl shadow-xl max-w-lg w-full border border-border">
+                        <div className="p-6 border-b border-border">
+                            <h2 className="text-lg font-semibold text-foreground">Add Tenant Override</h2>
                         </div>
                         <form 
                             className="p-6 space-y-4"
@@ -523,31 +510,31 @@ function FeatureFlagsPageContent() {
                             }}
                         >
                             <div>
-                                <label className="block text-sm font-medium text-surface-700 mb-1">Tenant ID</label>
+                                <label className="block text-sm font-medium text-foreground mb-1">Tenant ID</label>
                                 <input
                                     name="tenantId"
                                     type="text"
                                     required
-                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground placeholder:text-muted-foreground"
                                     placeholder="tenant-xxx"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-surface-700 mb-1">Tenant Name</label>
+                                <label className="block text-sm font-medium text-foreground mb-1">Tenant Name</label>
                                 <input
                                     name="tenantName"
                                     type="text"
                                     required
-                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground placeholder:text-muted-foreground"
                                     placeholder="Company Name"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-surface-700 mb-1">Feature Flag</label>
+                                <label className="block text-sm font-medium text-foreground mb-1">Feature Flag</label>
                                 <select
                                     name="flagKey"
                                     required
-                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground"
                                 >
                                     {flags.map(flag => (
                                         <option key={flag.key} value={flag.key}>{flag.name}</option>
@@ -555,23 +542,23 @@ function FeatureFlagsPageContent() {
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-surface-700 mb-1">Override Value</label>
+                                <label className="block text-sm font-medium text-foreground mb-1">Override Value</label>
                                 <select
                                     name="value"
                                     required
-                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground"
                                 >
                                     <option value="true">Enabled</option>
                                     <option value="false">Disabled</option>
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-surface-700 mb-1">Reason</label>
+                                <label className="block text-sm font-medium text-foreground mb-1">Reason</label>
                                 <input
                                     name="reason"
                                     type="text"
                                     required
-                                    className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 bg-background text-foreground placeholder:text-muted-foreground"
                                     placeholder="Why this override?"
                                 />
                             </div>
@@ -579,13 +566,13 @@ function FeatureFlagsPageContent() {
                                 <button
                                     type="button"
                                     onClick={() => setShowAddOverride(false)}
-                                    className="px-4 py-2 text-surface-600 hover:text-surface-900 text-sm font-medium"
+                                    className="px-4 py-2 text-muted-foreground hover:text-foreground text-sm font-medium"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     type="submit"
-                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+                                    className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90"
                                 >
                                     Add Override
                                 </button>

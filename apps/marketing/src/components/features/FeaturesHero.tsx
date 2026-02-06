@@ -62,7 +62,7 @@ export function FeaturesHero() {
                 <div className="text-3xl lg:text-4xl font-bold text-surface-900 mb-2 tracking-tight">
                   {stat.value}
                 </div>
-                <div className="text-sm text-surface-500 font-medium uppercase tracking-wide">{stat.label}</div>
+                <div className="text-sm text-surface-500 font-medium">{stat.label}</div>
               </motion.div>
             ))}
           </div>

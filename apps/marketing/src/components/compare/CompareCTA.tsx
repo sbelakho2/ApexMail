@@ -21,7 +21,7 @@ export function CompareCTA({ verdict }: CompareCTAProps) {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl p-8 lg:p-12"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12"
         >
           <div className="text-center mb-10">
             <h2 className="text-2xl lg:text-3xl font-bold text-surface-900 mb-6 tracking-tight">
@@ -40,7 +40,7 @@ export function CompareCTA({ verdict }: CompareCTAProps) {
                 className="flex items-start gap-3 p-3 rounded-lg bg-surface-50 border border-surface-100"
               >
                 <span className="w-5 h-5 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                  <Check className="w-3 h-3 text-primary-600" />
+                  <Check className="w-4 h-4 text-primary-600" />
                 </span>
                 <span className="text-surface-700 text-sm font-medium">{point}</span>
               </motion.li>

@@ -155,4 +155,6 @@ client = ApexMail(
 
 ## License
 
-MIT
+MIT - Bel Consulting OÜ
+
+ApexMail is a brand of Bel Consulting OÜ, Estonia.

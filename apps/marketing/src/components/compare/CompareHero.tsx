@@ -26,7 +26,7 @@ export function CompareHero({ competitor }: CompareHeroProps) {
           transition={{ duration: 0.5 }}
           className="text-center"
         >
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-xl bg-white border border-surface-200 text-sm text-primary-700 mb-6">
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-lg bg-white border border-surface-200 text-sm text-primary-700 mb-6">
             <ArrowLeftRight className="w-4 h-4" />
             Feature Comparison
           </div>

@@ -32,26 +32,26 @@ export function formatPercentage(value: number): string {
 
 export function getRiskColor(level: 'low' | 'medium' | 'high' | 'critical'): string {
     const colors = {
-        low: 'text-emerald-600 bg-emerald-50',
-        medium: 'text-amber-600 bg-amber-50',
-        high: 'text-orange-600 bg-orange-50',
-        critical: 'text-red-600 bg-red-50',
+        low: 'text-emerald-600 bg-emerald-500/10 border border-emerald-500/20',
+        medium: 'text-amber-600 bg-amber-500/10 border border-amber-500/20',
+        high: 'text-orange-600 bg-orange-500/10 border border-orange-500/20',
+        critical: 'text-destructive bg-destructive/10 border border-destructive/20',
     };
     return colors[level];
 }
 
 export function getStatusColor(status: string): string {
     const colors: Record<string, string> = {
-        active: 'text-emerald-600 bg-emerald-50',
-        paused: 'text-amber-600 bg-amber-50',
-        completed: 'text-blue-600 bg-blue-50',
-        draft: 'text-slate-600 bg-slate-50',
-        pending: 'text-amber-600 bg-amber-50',
-        processing: 'text-blue-600 bg-blue-50',
-        success: 'text-emerald-600 bg-emerald-50',
-        failed: 'text-red-600 bg-red-50',
+        active: 'text-success bg-success/10 border border-success/20',
+        paused: 'text-amber-600 bg-amber-500/10 border border-amber-500/20',
+        completed: 'text-info bg-info/10 border border-info/20',
+        draft: 'text-muted-foreground bg-muted border border-border',
+        pending: 'text-amber-600 bg-amber-500/10 border border-amber-500/20',
+        processing: 'text-info bg-info/10 border border-info/20',
+        success: 'text-success bg-success/10 border border-success/20',
+        failed: 'text-destructive bg-destructive/10 border border-destructive/20',
     };
-    return colors[status] || 'text-slate-600 bg-slate-50';
+    return colors[status] || 'text-muted-foreground bg-muted border border-border';
 }
 
 export function truncate(str: string, length: number): string {

@@ -198,7 +198,7 @@ export function PricingCalculator() {
                 <button
                   key={mark.value}
                   className={cn(
-                    'text-[10px] font-bold uppercase tracking-tight transition-colors focus:outline-none',
+                    'text-xs font-bold tracking-tight transition-colors focus:outline-none',
                     Math.abs(volume - mark.value) < 50000 ? 'text-primary-600' : 'text-surface-400 hover:text-surface-600'
                   )}
                   onClick={() => setVolume(mark.value)}
@@ -234,7 +234,7 @@ export function PricingCalculator() {
                       ? "bg-primary-600 border-primary-600 text-white" 
                       : "border-surface-300 bg-white"
                   )}>
-                    {options[option.key as keyof PricingOption] && <Check className="w-3 h-3" strokeWidth={3} />}
+                    {options[option.key as keyof PricingOption] && <Check className="w-4 h-4" strokeWidth={3} />}
                   </div>
                   <input
                     type="checkbox"
@@ -251,12 +251,12 @@ export function PricingCalculator() {
           {/* Price Comparison */}
           <div className="grid md:grid-cols-4 gap-4">
             {/* ApexMail - Featured */}
-            <div className="md:col-span-1 p-6 rounded-xl bg-surface-900 text-white relative overflow-hidden group shadow-lg">
+            <div className="md:col-span-1 p-6 rounded-lg bg-surface-900 text-white relative overflow-hidden group shadow-lg">
               <div className="relative z-10">
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-xs font-bold uppercase tracking-wider text-primary-400">ApexMail</span>
+                  <span className="text-xs font-bold text-primary-400">ApexMail</span>
                   {savings > 0 && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-primary-500 text-white shadow-sm">
+                    <span className="px-1.5 py-0.5 rounded text-xs font-bold bg-primary-500 text-white shadow-sm">
                       Save {formatCurrency(savings)}
                     </span>
                   )}
@@ -281,9 +281,9 @@ export function PricingCalculator() {
             ].map((competitor) => (
               <div
                 key={competitor.name}
-                className="p-6 rounded-xl border border-surface-200 bg-surface-50/50 flex flex-col justify-center transition-colors hover:bg-white hover:shadow-sm"
+                className="p-6 rounded-lg border border-surface-200 bg-surface-50/50 flex flex-col justify-center transition-colors hover:bg-white hover:shadow-sm"
               >
-                <div className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">{competitor.name}</div>
+                <div className="text-xs font-semibold text-surface-500 mb-2">{competitor.name}</div>
                 <div className="flex items-baseline gap-1 mb-1">
                   <span className="text-2xl font-semibold text-surface-900 tabular-nums tracking-tight">
                     {formatCurrency(competitor.price)}

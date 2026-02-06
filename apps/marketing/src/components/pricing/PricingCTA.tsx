@@ -26,21 +26,21 @@ export function PricingCTA() {
  <div className="flex flex-col sm:flex-row gap-4 justify-center">
  <Link
  href="/signup"
- className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors shadow-sm"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors shadow-sm"
  >
  Start Free
  <ArrowRight className="w-4 h-4 ml-2" />
  </Link>
  <Link
  href="/pricing/calculator"
- className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
  >
  <Calculator className="w-4 h-4 mr-2 text-surface-500" />
  Price Calculator
  </Link>
  <Link
  href="/contact/sales"
- className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
  >
  <MessageCircle className="w-4 h-4 mr-2 text-surface-500" />
  Talk to Sales

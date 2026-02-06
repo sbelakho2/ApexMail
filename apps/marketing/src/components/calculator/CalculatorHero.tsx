@@ -13,7 +13,7 @@ export function CalculatorHero() {
             animate={{ opacity: 1, y: 0 }}
             className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100/50 text-xs font-medium mb-6"
           >
-            <Calculator className="w-3.5 h-3.5" />
+            <Calculator className="w-4 h-4" />
             <span>Pricing Calculator</span>
           </motion.div>
 

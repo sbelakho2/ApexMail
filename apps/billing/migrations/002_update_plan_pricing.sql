@@ -39,13 +39,15 @@ UPDATE plans SET
 WHERE name = 'enterprise';
 
 -- Log the pricing update for audit
-INSERT INTO billing_audit_log (tenant_id, action, resource_type, resource_id, details)
+-- NOTE: billing_audit_log columns are: tenant_id VARCHAR(26), action, actor_id, actor_type, details JSONB
+INSERT INTO billing_audit_log (tenant_id, action, actor_id, actor_type, details)
 SELECT 
-  '00000000-0000-0000-0000-000000000000'::uuid,
+  'system',
   'pricing_update',
-  'plan',
-  id,
+  gen_random_uuid(),
+  'system',
   jsonb_build_object(
+    'plan_id', id,
     'plan_name', name,
     'new_price_monthly', price_monthly,
     'new_price_yearly', price_yearly,

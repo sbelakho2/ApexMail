@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react';
 import { cn } from '../../lib/utils';
+import { useDialog } from '../../components/ui/confirm-dialog';
 import {
     StatCard,
     DonutChart,
@@ -28,19 +29,32 @@ import {
 
 type TimeRange = '24h' | '7d' | '30d' | '90d' | '12m';
 
+// Deterministic pseudo-random number generator (seeded)
+function seededRandom(seed: number): () => number {
+    let s = seed;
+    return () => {
+        s = (s * 16807 + 0) % 2147483647;
+        return (s - 1) / 2147483646;
+    };
+}
+
+const STABLE_BASE_DATE = new Date('2026-01-15T10:00:00Z');
+
 // Demo data generators
 function generateTimeSeries(days: number, baseValue: number, variance: number) {
+    const random = seededRandom(days * 1000 + Math.round(baseValue));
     return Array.from({ length: days }, (_, i) => {
-        const date = new Date();
+        const date = new Date(STABLE_BASE_DATE);
         date.setDate(date.getDate() - (days - 1 - i));
         return {
             date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-            value: Math.round(baseValue + (Math.random() - 0.5) * variance * 2),
+            value: Math.round(baseValue + (random() - 0.5) * variance * 2),
         };
     });
 }
 
 function generateHeatMapData() {
+    const random = seededRandom(42);
     const data: { day: number; hour: number; value: number }[] = [];
     for (let day = 0; day < 7; day++) {
         for (let hour = 0; hour < 24; hour++) {
@@ -48,13 +62,14 @@ function generateHeatMapData() {
             const isWeekday = day >= 1 && day <= 5;
             const isBusinessHour = hour >= 9 && hour <= 17;
             const base = isWeekday && isBusinessHour ? 80 : isWeekday ? 30 : 15;
-            data.push({ day, hour, value: Math.round(base + Math.random() * 40) });
+            data.push({ day, hour, value: Math.round(base + random() * 40) });
         }
     }
     return data;
 }
 
 export default function AnalyticsPage() {
+    const dialog = useDialog();
     const [timeRange, setTimeRange] = useState<TimeRange>('30d');
     const [activeSection, setActiveSection] = useState<'overview' | 'email' | 'tenants' | 'revenue' | 'sales'>('overview');
     const printRef = useRef<HTMLDivElement>(null);
@@ -65,14 +80,15 @@ export default function AnalyticsPage() {
     const revenueData = generateTimeSeries(30, 125000, 25000);
     const heatMapData = generateHeatMapData();
 
+    const multiSeriesRandom = seededRandom(99);
     const multiSeriesData = Array.from({ length: 30 }, (_, i) => {
-        const date = new Date();
+        const date = new Date(STABLE_BASE_DATE);
         date.setDate(date.getDate() - (29 - i));
         return {
             date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-            delivered: Math.round(40000 + Math.random() * 20000),
-            opened: Math.round(15000 + Math.random() * 10000),
-            clicked: Math.round(3000 + Math.random() * 3000),
+            delivered: Math.round(40000 + multiSeriesRandom() * 20000),
+            opened: Math.round(15000 + multiSeriesRandom() * 10000),
+            clicked: Math.round(3000 + multiSeriesRandom() * 3000),
         };
     });
 
@@ -82,7 +98,7 @@ export default function AnalyticsPage() {
 
     function handleExport() {
         // In production: generate CSV/PDF export
-        alert('Exporting report...');
+        dialog.alert({ title: 'Export', message: 'Exporting report...' });
     }
 
     return (
@@ -92,7 +108,7 @@ export default function AnalyticsPage() {
                 <div className="flex items-center justify-between">
                     <div>
                         <h1 className="text-2xl font-bold text-surface-900">ApexMail Analytics Report</h1>
-                        <p className="text-sm text-surface-500">Generated on {new Date().toLocaleDateString()}</p>
+                        <p className="text-sm text-surface-500">Generated on {STABLE_BASE_DATE.toLocaleDateString()}</p>
                     </div>
                     <div className="text-right">
                         <p className="text-sm font-medium text-surface-700">Control Plane</p>
@@ -104,12 +120,12 @@ export default function AnalyticsPage() {
             {/* Page Header */}
             <div className="flex items-center justify-between mb-6 no-print">
                 <div>
-                    <h1 className="text-2xl font-bold text-surface-900">Analytics & Insights</h1>
-                    <p className="text-surface-600 mt-1">Deep business intelligence across all operations</p>
+                    <h1 className="text-2xl font-bold text-foreground">Analytics & Insights</h1>
+                    <p className="text-muted-foreground mt-1">Deep business intelligence across all operations</p>
                 </div>
                 <div className="flex items-center gap-3">
                     {/* Time Range Selector */}
-                    <div className="flex bg-surface-100 rounded-lg p-1">
+                    <div className="flex bg-muted rounded-lg p-1">
                         {(['24h', '7d', '30d', '90d', '12m'] as TimeRange[]).map(range => (
                             <button
                                 key={range}
@@ -117,25 +133,25 @@ export default function AnalyticsPage() {
                                 className={cn(
                                     'px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
                                     timeRange === range
-                                        ? 'bg-surface-0 text-surface-900 shadow-sm'
-                                        : 'text-surface-600 hover:text-surface-900'
+                                        ? 'bg-background text-foreground shadow-sm'
+                                        : 'text-muted-foreground hover:text-foreground'
                                 )}
                             >
                                 {range}
                             </button>
                         ))}
                     </div>
-                    <button onClick={handleExport} className="btn-secondary">
+                    <button onClick={handleExport} className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted shadow-sm transition-colors">
                         📊 Export
                     </button>
-                    <button onClick={handlePrint} className="btn-primary">
+                    <button onClick={handlePrint} className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
                         🖨️ Print Report
                     </button>
                 </div>
             </div>
 
             {/* Section Tabs */}
-            <div className="border-b border-surface-200 mb-6 no-print overflow-x-auto">
+            <div className="border-b border-border mb-6 no-print overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
                         { key: 'overview', label: 'Overview', icon: '📈' },
@@ -150,8 +166,8 @@ export default function AnalyticsPage() {
                             className={cn(
                                 'flex items-center gap-2 pb-3 text-sm font-medium transition-colors border-b-2 -mb-px',
                                 activeSection === tab.key
-                                    ? 'border-blue-600 text-blue-600'
-                                    : 'border-transparent text-surface-500 hover:text-surface-700'
+                                    ? 'border-primary text-primary'
+                                    : 'border-transparent text-muted-foreground hover:text-foreground'
                             )}
                         >
                             <span>{tab.icon}</span>
@@ -173,15 +189,15 @@ export default function AnalyticsPage() {
                     </div>
 
                     {/* Email Volume Trend */}
-                    <div className="card p-6 print-avoid-break">
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
                         <div className="flex items-center justify-between mb-4">
                             <div>
-                                <h3 className="text-lg font-semibold text-surface-900">Email Volume Trend</h3>
-                                <p className="text-sm text-surface-500">Daily email volume over the selected period</p>
+                                <h3 className="text-lg font-semibold text-foreground">Email Volume Trend</h3>
+                                <p className="text-sm text-muted-foreground">Daily email volume over the selected period</p>
                             </div>
                             <div className="flex items-center gap-4">
                                 <Sparkline data={emailVolumeData.slice(-7).map(d => d.value)} color={CHART_COLORS.primary} />
-                                <span className="text-sm text-emerald-600 font-medium">↑ 8.2%</span>
+                                <span className="text-sm text-success font-medium">↑ 8.2%</span>
                             </div>
                         </div>
                         <LineChart data={emailVolumeData} width={800} height={200} showArea showGrid />
@@ -189,8 +205,8 @@ export default function AnalyticsPage() {
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         {/* Email Engagement Breakdown */}
-                        <div className="card p-6 print-avoid-break">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Email Engagement</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Email Engagement</h3>
                             <MultiLineChart
                                 data={multiSeriesData}
                                 series={[
@@ -204,8 +220,8 @@ export default function AnalyticsPage() {
                         </div>
 
                         {/* Revenue Distribution */}
-                        <div className="card p-6 print-avoid-break">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Revenue by Plan</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Revenue by Plan</h3>
                             <DonutChart
                                 data={[
                                     { label: 'Enterprise', value: 485000 },
@@ -221,15 +237,15 @@ export default function AnalyticsPage() {
                     </div>
 
                     {/* Activity Heatmap */}
-                    <div className="card p-6 print-avoid-break">
-                        <h3 className="text-lg font-semibold text-surface-900 mb-2">API Activity Heatmap</h3>
-                        <p className="text-sm text-surface-500 mb-4">Email sends by day and hour (last 7 days)</p>
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                        <h3 className="text-lg font-semibold text-foreground mb-2">API Activity Heatmap</h3>
+                        <p className="text-sm text-muted-foreground mb-4">Email sends by day and hour (last 7 days)</p>
                         <HeatMap data={heatMapData} width={700} height={160} />
                     </div>
 
                     {/* Conversion Funnel */}
-                    <div className="card p-6 print-avoid-break">
-                        <h3 className="text-lg font-semibold text-surface-900 mb-4">Sales Funnel</h3>
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                        <h3 className="text-lg font-semibold text-foreground mb-4">Sales Funnel</h3>
                         <div className="flex flex-col lg:flex-row gap-6 lg:gap-8">
                             <div className="flex-1 min-w-0">
                                 <FunnelChart
@@ -244,15 +260,15 @@ export default function AnalyticsPage() {
                                 />
                             </div>
                             <div className="grid grid-cols-2 lg:grid-cols-1 lg:w-64 gap-4">
-                                <div className="bg-emerald-50 rounded-lg p-4">
-                                    <p className="text-sm text-emerald-700 font-medium">Overall Conversion</p>
-                                    <p className="text-2xl font-bold text-emerald-800">0.54%</p>
-                                    <p className="text-xs text-emerald-600">Lead → Customer</p>
+                                <div className="bg-success/10 rounded-lg p-4 border border-success/20">
+                                    <p className="text-sm text-success font-medium">Overall Conversion</p>
+                                    <p className="text-2xl font-bold text-success">0.54%</p>
+                                    <p className="text-xs text-success/80">Lead → Customer</p>
                                 </div>
-                                <div className="bg-blue-50 rounded-lg p-4">
-                                    <p className="text-sm text-blue-700 font-medium">Reply Rate</p>
-                                    <p className="text-2xl font-bold text-blue-800">22.4%</p>
-                                    <p className="text-xs text-blue-600">Above industry avg</p>
+                                <div className="bg-primary/10 rounded-lg p-4 border border-primary/20">
+                                    <p className="text-sm text-primary font-medium">Reply Rate</p>
+                                    <p className="text-2xl font-bold text-primary">22.4%</p>
+                                    <p className="text-xs text-primary/80">Above industry avg</p>
                                 </div>
                             </div>
                         </div>
@@ -272,8 +288,8 @@ export default function AnalyticsPage() {
                     </div>
 
                     {/* Deliverability Health */}
-                    <div className="card p-6">
-                        <h3 className="text-lg font-semibold text-surface-900 mb-4">Deliverability Health by ISP</h3>
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                        <h3 className="text-lg font-semibold text-foreground mb-4">Deliverability Health by ISP</h3>
                         <div className="space-y-4">
                             {[
                                 { name: 'Gmail', delivered: 98.9, inbox: 94.2, spam: 3.8, color: CHART_COLORS.danger },
@@ -283,28 +299,28 @@ export default function AnalyticsPage() {
                                 { name: 'Other', delivered: 98.2, inbox: 93.4, spam: 4.1, color: CHART_COLORS.teal },
                             ].map((isp, i) => (
                                 <div key={i} className="flex items-center gap-4">
-                                    <div className="w-32 font-medium text-surface-700">{isp.name}</div>
+                                    <div className="w-32 font-medium text-muted-foreground">{isp.name}</div>
                                     <div className="flex-1">
                                         <div className="flex gap-1 h-6 rounded-lg overflow-hidden">
                                             <div
-                                                className="flex items-center justify-center text-xs text-white font-medium"
+                                                className="flex items-center justify-center text-xs text-primary-foreground font-medium"
                                                 style={{ width: `${isp.inbox}%`, backgroundColor: CHART_COLORS.success }}
                                             >
                                                 {isp.inbox}% Inbox
                                             </div>
                                             <div
-                                                className="flex items-center justify-center text-xs text-white font-medium"
+                                                className="flex items-center justify-center text-xs text-primary-foreground font-medium"
                                                 style={{ width: `${isp.spam}%`, backgroundColor: CHART_COLORS.warning }}
                                             >
                                                 {isp.spam}%
                                             </div>
                                             <div
-                                                className="flex items-center justify-center text-xs text-white font-medium"
+                                                className="flex items-center justify-center text-xs text-primary-foreground font-medium"
                                                 style={{ width: `${100 - isp.delivered}%`, backgroundColor: CHART_COLORS.danger }}
                                             />
                                         </div>
                                     </div>
-                                    <div className="w-24 text-right text-sm text-surface-600">
+                                    <div className="w-24 text-right text-sm text-muted-foreground">
                                         {isp.delivered}% delivered
                                     </div>
                                 </div>
@@ -314,8 +330,8 @@ export default function AnalyticsPage() {
 
                     {/* Bounce & Complaint Analysis */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Bounce Reasons</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Bounce Reasons</h3>
                             <DonutChart
                                 data={[
                                     { label: 'Invalid Address', value: 42 },
@@ -326,8 +342,8 @@ export default function AnalyticsPage() {
                                 size={140}
                             />
                         </div>
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Engagement by Email Type</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Engagement by Email Type</h3>
                             <BarChart
                                 data={[
                                     { label: 'Transactional', value: 45.2, color: CHART_COLORS.primary },
@@ -354,8 +370,8 @@ export default function AnalyticsPage() {
 
                     {/* Tenant Health Distribution */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Tenant Health Score Distribution</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Tenant Health Score Distribution</h3>
                             <BarChart
                                 data={[
                                     { label: 'Excellent (90-100)', value: 1245, color: CHART_COLORS.success },
@@ -366,8 +382,8 @@ export default function AnalyticsPage() {
                                 horizontal
                             />
                         </div>
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Tenants by Plan</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Tenants by Plan</h3>
                             <DonutChart
                                 data={[
                                     { label: 'Enterprise', value: 156 },
@@ -383,18 +399,18 @@ export default function AnalyticsPage() {
                     </div>
 
                     {/* Top Tenants by Volume */}
-                    <div className="card p-6 overflow-hidden">
-                        <h3 className="text-lg font-semibold text-surface-900 mb-4">Top 10 Tenants by Email Volume</h3>
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm overflow-hidden">
+                        <h3 className="text-lg font-semibold text-foreground mb-4">Top 10 Tenants by Email Volume</h3>
                         <div className="overflow-x-auto -mx-6 px-6">
-                            <table className="data-table min-w-[600px]">
+                            <table className="w-full text-sm">
                                 <thead>
-                                    <tr>
-                                        <th>Tenant</th>
-                                        <th>Plan</th>
-                                        <th>Emails Sent</th>
-                                        <th>Delivery Rate</th>
-                                        <th>Health Score</th>
-                                        <th>MRR</th>
+                                    <tr className="border-b border-border text-left">
+                                        <th className="pb-3 text-muted-foreground font-medium">Tenant</th>
+                                        <th className="pb-3 text-muted-foreground font-medium">Plan</th>
+                                        <th className="pb-3 text-muted-foreground font-medium">Emails Sent</th>
+                                        <th className="pb-3 text-muted-foreground font-medium">Delivery Rate</th>
+                                        <th className="pb-3 text-muted-foreground font-medium">Health Score</th>
+                                        <th className="pb-3 text-muted-foreground font-medium">MRR</th>
                                     </tr>
                                 </thead>
                             <tbody>
@@ -405,18 +421,25 @@ export default function AnalyticsPage() {
                                     { name: 'SaaS Company', plan: 'Professional', emails: 1230000, delivery: 99.1, health: 94, mrr: 3200 },
                                     { name: 'E-Commerce Plus', plan: 'Enterprise', emails: 980000, delivery: 97.8, health: 78, mrr: 6800 },
                                 ].map((t, i) => (
-                                    <tr key={i}>
-                                        <td className="font-medium">{t.name}</td>
-                                        <td><span className={`badge ${t.plan === 'Enterprise' ? 'badge-primary' : 'badge-neutral'}`}>{t.plan}</span></td>
-                                        <td>{(t.emails / 1000000).toFixed(2)}M</td>
-                                        <td>{t.delivery}%</td>
-                                        <td>
+                                    <tr key={i} className="border-b border-border last:border-0 hover:bg-muted/50 transition-colors">
+                                        <td className="py-3 font-medium text-foreground">{t.name}</td>
+                                        <td className="py-3">
+                                            <span className={cn(
+                                                "px-2 py-0.5 rounded text-xs font-semibold",
+                                                t.plan === 'Enterprise' 
+                                                    ? 'bg-primary/10 text-primary border border-primary/20' 
+                                                    : 'bg-muted text-muted-foreground border border-border'
+                                            )}>{t.plan}</span>
+                                        </td>
+                                        <td className="py-3 text-muted-foreground">{(t.emails / 1000000).toFixed(2)}M</td>
+                                        <td className="py-3 text-muted-foreground">{t.delivery}%</td>
+                                        <td className="py-3">
                                             <div className="flex items-center gap-2">
                                                 <ProgressBar value={t.health} max={100} showLabel={false} size="sm" color={t.health >= 80 ? CHART_COLORS.success : t.health >= 60 ? CHART_COLORS.warning : CHART_COLORS.danger} />
-                                                <span className="text-sm">{t.health}</span>
+                                                <span className="text-sm text-foreground">{t.health}</span>
                                             </div>
                                         </td>
-                                        <td className="font-medium">${t.mrr.toLocaleString()}</td>
+                                        <td className="py-3 font-medium text-foreground">${t.mrr.toLocaleString()}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -437,37 +460,37 @@ export default function AnalyticsPage() {
                     </div>
 
                     {/* Revenue Trend */}
-                    <div className="card p-6">
-                        <h3 className="text-lg font-semibold text-surface-900 mb-4">Revenue Growth</h3>
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                        <h3 className="text-lg font-semibold text-foreground mb-4">Revenue Growth</h3>
                         <LineChart data={revenueData} width={800} height={200} color={CHART_COLORS.success} showArea showGrid />
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         {/* MRR Movement */}
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">MRR Movement (This Month)</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">MRR Movement (This Month)</h3>
                             <div className="space-y-4">
-                                <div className="flex justify-between items-center p-3 bg-surface-50 rounded-lg">
-                                    <span className="text-surface-600">Starting MRR</span>
-                                    <span className="font-semibold">$752,450</span>
+                                <div className="flex justify-between items-center p-3 bg-muted rounded-lg border border-border">
+                                    <span className="text-muted-foreground">Starting MRR</span>
+                                    <span className="font-semibold text-foreground">$752,450</span>
                                 </div>
-                                <div className="flex justify-between items-center p-3 bg-emerald-50 rounded-lg">
-                                    <span className="text-emerald-700">+ New MRR</span>
-                                    <span className="font-semibold text-emerald-700">+$42,800</span>
+                                <div className="flex justify-between items-center p-3 bg-success/10 rounded-lg border border-success/20">
+                                    <span className="text-success">+ New MRR</span>
+                                    <span className="font-semibold text-success">+$42,800</span>
                                 </div>
-                                <div className="flex justify-between items-center p-3 bg-blue-50 rounded-lg">
-                                    <span className="text-blue-700">+ Expansion</span>
-                                    <span className="font-semibold text-blue-700">+$28,450</span>
+                                <div className="flex justify-between items-center p-3 bg-primary/10 rounded-lg border border-primary/20">
+                                    <span className="text-primary">+ Expansion</span>
+                                    <span className="font-semibold text-primary">+$28,450</span>
                                 </div>
-                                <div className="flex justify-between items-center p-3 bg-amber-50 rounded-lg">
-                                    <span className="text-amber-700">- Contraction</span>
-                                    <span className="font-semibold text-amber-700">-$12,380</span>
+                                <div className="flex justify-between items-center p-3 bg-warning/10 rounded-lg border border-warning/20">
+                                    <span className="text-warning">- Contraction</span>
+                                    <span className="font-semibold text-warning">-$12,380</span>
                                 </div>
-                                <div className="flex justify-between items-center p-3 bg-red-50 rounded-lg">
-                                    <span className="text-red-700">- Churn</span>
-                                    <span className="font-semibold text-red-700">-$34,000</span>
+                                <div className="flex justify-between items-center p-3 bg-destructive/10 rounded-lg border border-destructive/20">
+                                    <span className="text-destructive">- Churn</span>
+                                    <span className="font-semibold text-destructive">-$34,000</span>
                                 </div>
-                                <div className="flex justify-between items-center p-3 bg-surface-900 rounded-lg text-white">
+                                <div className="flex justify-between items-center p-3 bg-foreground rounded-lg text-background">
                                     <span>Ending MRR</span>
                                     <span className="font-bold">$847,320</span>
                                 </div>
@@ -475,8 +498,8 @@ export default function AnalyticsPage() {
                         </div>
 
                         {/* Churn Analysis */}
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Churn Analysis</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Churn Analysis</h3>
                             <DonutChart
                                 data={[
                                     { label: 'Price', value: 35, color: CHART_COLORS.danger },
@@ -505,8 +528,8 @@ export default function AnalyticsPage() {
                     </div>
 
                     {/* Sales Funnel */}
-                    <div className="card p-6">
-                        <h3 className="text-lg font-semibold text-surface-900 mb-4">Sales Pipeline Funnel</h3>
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                        <h3 className="text-lg font-semibold text-foreground mb-4">Sales Pipeline Funnel</h3>
                         <FunnelChart
                             data={[
                                 { label: 'Leads', value: 12450, color: CHART_COLORS.slate },
@@ -521,8 +544,8 @@ export default function AnalyticsPage() {
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         {/* Lead Sources */}
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Lead Sources Performance</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Lead Sources Performance</h3>
                             <BarChart
                                 data={[
                                     { label: 'LinkedIn', value: 4520, color: CHART_COLORS.primary },
@@ -536,20 +559,20 @@ export default function AnalyticsPage() {
                         </div>
 
                         {/* Campaign Performance */}
-                        <div className="card p-6">
-                            <h3 className="text-lg font-semibold text-surface-900 mb-4">Top Performing Campaigns</h3>
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                            <h3 className="text-lg font-semibold text-foreground mb-4">Top Performing Campaigns</h3>
                             <div className="space-y-3">
                                 {[
                                     { name: 'SaaS Founders Q1', sent: 8234, replies: 1847, meetings: 423, conversion: 5.1 },
                                     { name: 'Enterprise IT Leaders', sent: 5420, replies: 892, meetings: 245, conversion: 4.5 },
                                     { name: 'Product Hunt Followers', sent: 3200, replies: 534, meetings: 156, conversion: 4.9 },
                                 ].map((c, i) => (
-                                    <div key={i} className="p-3 bg-surface-50 rounded-lg">
+                                    <div key={i} className="p-3 bg-muted rounded-lg border border-border">
                                         <div className="flex justify-between items-center mb-2">
-                                            <span className="font-medium text-surface-800">{c.name}</span>
-                                            <span className="text-sm text-emerald-600 font-medium">{c.conversion}% conv.</span>
+                                            <span className="font-medium text-foreground">{c.name}</span>
+                                            <span className="text-sm text-success font-medium">{c.conversion}% conv.</span>
                                         </div>
-                                        <div className="flex gap-4 text-xs text-surface-600">
+                                        <div className="flex gap-4 text-xs text-muted-foreground">
                                             <span>📧 {c.sent.toLocaleString()} sent</span>
                                             <span>💬 {c.replies} replies</span>
                                             <span>📅 {c.meetings} meetings</span>
@@ -563,7 +586,7 @@ export default function AnalyticsPage() {
             )}
 
             {/* Print Footer */}
-            <div className="hidden print:block mt-8 pt-4 border-t border-surface-200 text-xs text-surface-500">
+            <div className="hidden print:block mt-8 pt-4 border-t border-border text-xs text-muted-foreground">
                 <div className="flex justify-between">
                     <span>ApexMail Control Plane - Confidential</span>
                     <span>Page 1 of 1</span>

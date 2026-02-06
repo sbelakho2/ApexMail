@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { formatDate, cn } from '../../lib/utils';
+import { useDialog } from '../../components/ui/confirm-dialog';
 
 /**
  * Audit Logs - Complete audit trail viewer
@@ -28,18 +29,7 @@ interface AuditEntry {
     details: Record<string, unknown>;
 }
 
-const DEMO_AUDIT_LOGS: AuditEntry[] = [
-    { id: '1', timestamp: new Date(Date.now() - 60000).toISOString(), action: 'email.sent', resource: 'message', resourceId: 'msg-12345', actorType: 'api', actorId: 'api-key-abc', tenantId: 'tenant-saas', status: 'success', ipAddress: '52.23.145.12', userAgent: 'ApexMail-SDK/1.0', details: { recipients: 1, template: 'welcome' } },
-    { id: '2', timestamp: new Date(Date.now() - 120000).toISOString(), action: 'auth.login', resource: 'session', resourceId: 'sess-xyz', actorType: 'user', actorId: 'user-456', tenantId: 'tenant-newsletter', status: 'success', ipAddress: '192.168.1.100', userAgent: 'Mozilla/5.0...', details: { method: 'password' } },
-    { id: '3', timestamp: new Date(Date.now() - 180000).toISOString(), action: 'auth.login', resource: 'session', resourceId: 'sess-fail', actorType: 'user', actorId: 'unknown', tenantId: null, status: 'failure', ipAddress: '45.33.32.156', userAgent: 'curl/7.68.0', details: { reason: 'invalid_credentials', attempts: 5 } },
-    { id: '4', timestamp: new Date(Date.now() - 240000).toISOString(), action: 'domain.verified', resource: 'domain', resourceId: 'dom-789', actorType: 'system', actorId: 'dns-verifier', tenantId: 'tenant-ecommerce', status: 'success', ipAddress: '127.0.0.1', userAgent: 'ApexMail-Worker', details: { domain: 'shop.example.com', records: ['SPF', 'DKIM'] } },
-    { id: '5', timestamp: new Date(Date.now() - 300000).toISOString(), action: 'api_key.created', resource: 'api_key', resourceId: 'key-new', actorType: 'user', actorId: 'user-admin', tenantId: 'tenant-growth', status: 'success', ipAddress: '10.0.0.5', userAgent: 'Mozilla/5.0...', details: { permissions: ['send', 'read'] } },
-    { id: '6', timestamp: new Date(Date.now() - 360000).toISOString(), action: 'webhook.delivered', resource: 'webhook', resourceId: 'hook-456', actorType: 'system', actorId: 'webhook-worker', tenantId: 'tenant-saas', status: 'success', ipAddress: '127.0.0.1', userAgent: 'ApexMail-Webhook', details: { event: 'email.delivered', retries: 0 } },
-    { id: '7', timestamp: new Date(Date.now() - 420000).toISOString(), action: 'template.updated', resource: 'template', resourceId: 'tpl-welcome', actorType: 'user', actorId: 'user-123', tenantId: 'tenant-newsletter', status: 'success', ipAddress: '192.168.1.50', userAgent: 'Mozilla/5.0...', details: { version: 3 } },
-    { id: '8', timestamp: new Date(Date.now() - 480000).toISOString(), action: 'gdpr.request_created', resource: 'gdpr_request', resourceId: 'gdpr-001', actorType: 'system', actorId: 'gdpr-processor', tenantId: 'tenant-ecommerce', status: 'success', ipAddress: '127.0.0.1', userAgent: 'ApexMail-GDPR', details: { type: 'deletion', email: 'user@***.com' } },
-    { id: '9', timestamp: new Date(Date.now() - 540000).toISOString(), action: 'rate_limit.exceeded', resource: 'api', resourceId: 'endpoint-send', actorType: 'api', actorId: 'api-key-xyz', tenantId: 'tenant-spammy', status: 'failure', ipAddress: '203.0.113.50', userAgent: 'ApexMail-SDK/1.0', details: { limit: 1000, current: 1001 } },
-    { id: '10', timestamp: new Date(Date.now() - 600000).toISOString(), action: 'subscription.upgraded', resource: 'subscription', resourceId: 'sub-456', actorType: 'system', actorId: 'billing-worker', tenantId: 'tenant-growth', status: 'success', ipAddress: '127.0.0.1', userAgent: 'ApexMail-Billing', details: { from: 'starter', to: 'professional' } },
-];
+
 
 // Action categories for filtering and grouping
 const _ACTION_CATEGORIES = {
@@ -52,6 +42,7 @@ const _ACTION_CATEGORIES = {
 };
 
 export default function AuditLogsPage() {
+    const dialog = useDialog();
     const [logs, setLogs] = useState<AuditEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
@@ -70,8 +61,12 @@ export default function AuditLogsPage() {
 
     async function loadAuditLogs() {
         try {
-            // In production: fetch from Compliance API
-            setLogs(DEMO_AUDIT_LOGS);
+            const response = await fetch('/api/audit', { credentials: 'include' });
+            if (!response.ok) throw new Error(`Failed to fetch audit logs: ${response.status}`);
+            const data = await response.json();
+            setLogs(data);
+        } catch (err) {
+            console.error('Failed to load audit logs:', err);
         } finally {
             setLoading(false);
         }
@@ -92,7 +87,7 @@ export default function AuditLogsPage() {
 
     async function exportLogs() {
         // In production: call Compliance API to generate export
-        alert('Export started. You will receive a download link via email.');
+        await dialog.alert({ title: 'Export Started', message: 'You will receive a download link via email.' });
     }
 
     const filteredLogs = logs.filter(log => {
@@ -108,7 +103,7 @@ export default function AuditLogsPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             </div>
         );
     }
@@ -117,18 +112,18 @@ export default function AuditLogsPage() {
         <div className="max-w-7xl mx-auto">
             <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-surface-900">Audit Logs</h1>
-                    <p className="text-surface-500 mt-1">
+                    <h1 className="text-2xl font-bold text-foreground">Audit Logs</h1>
+                    <p className="text-muted-foreground mt-1">
                         Complete audit trail for compliance and security monitoring
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button className="px-4 py-2 bg-surface-0 border border-surface-200 rounded-lg text-sm font-medium text-surface-700 hover:bg-surface-50 hover:border-surface-300 shadow-sm transition-all">
+                    <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
                         ⚙️ Configure Alerts
                     </button>
                     <button
                         onClick={exportLogs}
-                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm transition-all hover:shadow-md"
+                        className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md"
                     >
                         📥 Export Logs
                     </button>
@@ -136,24 +131,24 @@ export default function AuditLogsPage() {
             </div>
 
             {/* Filters */}
-            <div className="bg-surface-0 rounded-xl border border-surface-200 p-5 mb-8 shadow-sm">
+            <div className="bg-card rounded-xl border border-border p-5 mb-8 shadow-sm">
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
                     <div>
-                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Search</label>
+                        <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Search</label>
                         <input
                             type="text"
                             placeholder="Search logs..."
                             value={filters.search}
                             onChange={(e) => setFilters(prev => ({ ...prev, search: e.target.value }))}
-                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900 placeholder:text-surface-400"
+                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground placeholder:text-muted-foreground bg-background"
                         />
                     </div>
                     <div>
-                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Action Category</label>
+                        <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Action Category</label>
                         <select
                             value={filters.action}
                             onChange={(e) => setFilters(prev => ({ ...prev, action: e.target.value }))}
-                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900"
+                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
                         >
                             <option value="">All Actions</option>
                             <option value="auth">Authentication</option>
@@ -165,11 +160,11 @@ export default function AuditLogsPage() {
                         </select>
                     </div>
                     <div>
-                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Status</label>
+                        <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Status</label>
                         <select
                             value={filters.status}
                             onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
-                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900"
+                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
                         >
                             <option value="">All Statuses</option>
                             <option value="success">Success</option>
@@ -177,11 +172,11 @@ export default function AuditLogsPage() {
                         </select>
                     </div>
                     <div>
-                        <label className="text-xs font-semibold text-surface-600 mb-1.5 block uppercase tracking-wider">Tenant</label>
+                        <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Tenant</label>
                         <select
                             value={filters.tenantId}
                             onChange={(e) => setFilters(prev => ({ ...prev, tenantId: e.target.value }))}
-                            className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-surface-900"
+                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
                         >
                             <option value="">All Tenants</option>
                             {uniqueTenants.map(tenant => (
@@ -192,7 +187,7 @@ export default function AuditLogsPage() {
                     <div className="flex items-end">
                         <button
                             onClick={() => setFilters({ search: '', action: '', status: '', tenantId: '', dateFrom: '', dateTo: '' })}
-                            className="px-4 py-2 text-sm font-medium text-surface-600 hover:text-surface-900 hover:bg-surface-100 rounded-lg transition-colors w-full"
+                            className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full"
                         >
                             Clear Filters
                         </button>
@@ -201,36 +196,36 @@ export default function AuditLogsPage() {
             </div>
 
             {/* Audit Log List */}
-            <div className="bg-surface-0 rounded-xl border border-surface-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-surface-100 bg-surface-50/50">
-                    <span className="text-sm font-medium text-surface-500">{filteredLogs.length} events found</span>
+            <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-border bg-muted/50">
+                    <span className="text-sm font-medium text-muted-foreground">{filteredLogs.length} events found</span>
                 </div>
-                <div className="divide-y divide-surface-100">
+                <div className="divide-y divide-border">
                     {filteredLogs.map(log => (
                         <div
                             key={log.id}
-                            className="p-4 hover:bg-surface-50/80 cursor-pointer transition-colors"
+                            className="p-4 hover:bg-muted/50 cursor-pointer transition-colors"
                             onClick={() => setSelectedLog(log)}
                         >
                             <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-4">
-                                    <span className="text-2xl bg-surface-100 rounded-lg p-2">{getActionIcon(log.action)}</span>
+                                    <span className="text-2xl bg-muted rounded-lg p-2">{getActionIcon(log.action)}</span>
                                     <div>
                                         <div className="flex items-center gap-2.5">
-                                            <span className="font-semibold text-surface-900">{log.action}</span>
+                                            <span className="font-semibold text-foreground">{log.action}</span>
                                             <span className={cn(
                                                 'px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border',
-                                                log.status === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'
+                                                log.status === 'success' ? 'bg-success/10 text-success border-success/20' : 'bg-destructive/10 text-destructive border-destructive/20'
                                             )}>
                                                 {log.status}
                                             </span>
                                         </div>
-                                        <div className="text-sm text-surface-500 mt-0.5 flex items-center gap-2">
-                                            <span className="font-medium text-surface-700">{log.resource}:</span> 
-                                            <span className="font-mono text-xs bg-surface-100 px-1.5 py-0.5 rounded">{log.resourceId}</span>
+                                        <div className="text-sm text-muted-foreground mt-0.5 flex items-center gap-2">
+                                            <span className="font-medium text-foreground">{log.resource}:</span> 
+                                            <span className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">{log.resourceId}</span>
                                             {log.tenantId && (
                                                 <>
-                                                    <span className="text-surface-300">•</span>
+                                                    <span className="text-muted-foreground/50">•</span>
                                                     <span>{log.tenantId}</span>
                                                 </>
                                             )}
@@ -238,8 +233,8 @@ export default function AuditLogsPage() {
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <div className="text-sm font-medium text-surface-900">{formatDate(log.timestamp)}</div>
-                                    <div className="text-xs font-mono text-surface-400 mt-1">{log.ipAddress}</div>
+                                    <div className="text-sm font-medium text-foreground">{formatDate(log.timestamp)}</div>
+                                    <div className="text-xs font-mono text-muted-foreground mt-1">{log.ipAddress}</div>
                                 </div>
                             </div>
                         </div>
@@ -249,17 +244,17 @@ export default function AuditLogsPage() {
 
             {/* Log Detail Modal */}
             {selectedLog && (
-                <div className="fixed inset-0 bg-surface-900/40 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLog(null)}>
-                    <div className="bg-surface-0 rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-surface-200 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-start justify-between mb-8 border-b border-surface-100 pb-6">
+                <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLog(null)}>
+                    <div className="bg-card rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-border max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-start justify-between mb-8 border-b border-border pb-6">
                             <div className="flex items-center gap-4">
-                                <span className="text-4xl bg-surface-50 p-3 rounded-xl">{getActionIcon(selectedLog.action)}</span>
+                                <span className="text-4xl bg-muted p-3 rounded-xl">{getActionIcon(selectedLog.action)}</span>
                                 <div>
-                                    <h2 className="text-xl font-bold text-surface-900">{selectedLog.action}</h2>
+                                    <h2 className="text-xl font-bold text-foreground">{selectedLog.action}</h2>
                                     <div className="mt-1">
                                         <span className={cn(
                                             'px-2.5 py-0.5 rounded-md text-xs font-bold uppercase tracking-wide border',
-                                            selectedLog.status === 'success' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'
+                                            selectedLog.status === 'success' ? 'bg-success/10 text-success border-success/20' : 'bg-destructive/10 text-destructive border-destructive/20'
                                         )}>
                                             {selectedLog.status}
                                         </span>
@@ -268,7 +263,7 @@ export default function AuditLogsPage() {
                             </div>
                             <button 
                                 onClick={() => setSelectedLog(null)} 
-                                className="text-surface-400 hover:text-surface-600 p-2 rounded-lg hover:bg-surface-100 transition-colors"
+                                className="text-muted-foreground hover:text-foreground p-2 rounded-lg hover:bg-muted transition-colors"
                                 aria-label="Close modal"
                             >
                                 ✕
@@ -277,51 +272,51 @@ export default function AuditLogsPage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6 mb-8">
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Timestamp</label>
-                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{formatDate(selectedLog.timestamp)}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Timestamp</label>
+                                <div className="font-medium text-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors">{formatDate(selectedLog.timestamp)}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Event ID</label>
-                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.id}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Event ID</label>
+                                <div className="font-mono text-sm text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors">{selectedLog.id}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Resource</label>
-                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors capitalize">{selectedLog.resource}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Resource</label>
+                                <div className="font-medium text-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors capitalize">{selectedLog.resource}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Resource ID</label>
-                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.resourceId}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Resource ID</label>
+                                <div className="font-mono text-sm text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors">{selectedLog.resourceId}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Actor Type</label>
-                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors capitalize">{selectedLog.actorType}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Actor Type</label>
+                                <div className="font-medium text-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors capitalize">{selectedLog.actorType}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Actor ID</label>
-                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.actorId}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Actor ID</label>
+                                <div className="font-mono text-sm text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors">{selectedLog.actorId}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">Tenant</label>
-                                <div className="font-medium text-surface-900 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.tenantId || 'System'}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">Tenant</label>
+                                <div className="font-medium text-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors">{selectedLog.tenantId || 'System'}</div>
                             </div>
                             <div className="group">
-                                <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-1 block">IP Address</label>
-                                <div className="font-mono text-sm text-surface-600 bg-surface-50 px-3 py-2 rounded-lg border border-transparent group-hover:border-surface-200 transition-colors">{selectedLog.ipAddress}</div>
+                                <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1 block">IP Address</label>
+                                <div className="font-mono text-sm text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg border border-transparent group-hover:border-border transition-colors">{selectedLog.ipAddress}</div>
                             </div>
                         </div>
 
                         <div className="mb-8">
-                            <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2 block">User Agent</label>
-                            <div className="font-mono text-sm text-surface-600 bg-surface-50 p-3 rounded-lg border border-surface-200 break-all">{selectedLog.userAgent}</div>
+                            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">User Agent</label>
+                            <div className="font-mono text-sm text-muted-foreground bg-muted/50 p-3 rounded-lg border border-border break-all">{selectedLog.userAgent}</div>
                         </div>
 
                         <div>
-                            <label className="text-xs font-semibold text-surface-600 uppercase tracking-wider mb-2 block">Event Details</label>
-                            <div className="bg-surface-900 rounded-xl overflow-hidden shadow-inner">
-                                <div className="flex items-center justify-between px-4 py-2 bg-surface-800 border-b border-surface-700">
-                                    <span className="text-xs font-mono text-surface-400">JSON</span>
+                            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Event Details</label>
+                            <div className="bg-slate-950 rounded-xl overflow-hidden shadow-inner">
+                                <div className="flex items-center justify-between px-4 py-2 bg-slate-900 border-b border-slate-800">
+                                    <span className="text-xs font-mono text-slate-400">JSON</span>
                                 </div>
-                                <pre className="font-mono text-sm text-blue-300 p-4 overflow-x-auto">
+                                <pre className="font-mono text-sm text-blue-400 p-4 overflow-x-auto">
                                     {JSON.stringify(selectedLog.details, null, 2)}
                                 </pre>
                             </div>

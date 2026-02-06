@@ -19,6 +19,7 @@ const PUBLIC_PATHS = [
     '/login',
     '/api/auth/login',
     '/api/auth/logout',
+    '/api/csrf',
     '/_next',
     '/favicon.ico',
 ];
@@ -32,6 +33,9 @@ const CONTROL_PLANE_SESSION_COOKIE = 'cp_session';
 
 // Control plane API key header
 const CONTROL_PLANE_API_KEY_HEADER = 'x-control-plane-key';
+const CSRF_HEADER = 'x-csrf-token';
+const CSRF_COOKIE = 'csrf_token';
+const CSRF_SIG_COOKIE = 'csrf_token_sig';
 
 /**
  * Validates the control plane session token
@@ -209,6 +213,46 @@ export async function middleware(request: NextRequest) {
         // Clear the invalid cookie
         response.cookies.delete(CONTROL_PLANE_SESSION_COOKIE);
         return response;
+    }
+
+    // ==== SECURITY LAYER 3.5: CSRF Protection for state-changing API requests ====
+    if (path.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        if (!path.startsWith('/api/auth/login') && !path.startsWith('/api/csrf')) {
+            const csrfToken = request.headers.get(CSRF_HEADER);
+            const csrfCookie = request.cookies.get(CSRF_COOKIE)?.value;
+            const csrfSig = request.cookies.get(CSRF_SIG_COOKIE)?.value;
+
+            if (!csrfToken || !csrfCookie || !csrfSig || csrfToken !== csrfCookie) {
+                return new NextResponse(
+                    JSON.stringify({ error: 'CSRF token missing or invalid' }),
+                    { status: 403, headers: { 'Content-Type': 'application/json' } }
+                );
+            }
+
+            const secret = process.env.CSRF_SECRET || process.env.CONTROL_PLANE_JWT_SECRET;
+            if (!secret) {
+                return new NextResponse(
+                    JSON.stringify({ error: 'Server configuration error' }),
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
+            }
+
+            const crypto = await import('crypto');
+            const expectedSig = crypto
+                .createHmac('sha256', secret)
+                .update(csrfCookie)
+                .digest('base64url');
+
+            if (
+                expectedSig.length !== csrfSig.length ||
+                !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(csrfSig))
+            ) {
+                return new NextResponse(
+                    JSON.stringify({ error: 'CSRF token invalid' }),
+                    { status: 403, headers: { 'Content-Type': 'application/json' } }
+                );
+            }
+        }
     }
     
     // ==== SECURITY LAYER 4: Add security headers ====

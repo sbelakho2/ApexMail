@@ -7,6 +7,8 @@ import { createApp } from './app.js';
 import { createLogger } from '@apexmail/lib';
 import { getDatabase } from '@apexmail/db';
 import { loadConfig } from './config.js';
+import { disconnectTokenBlacklist } from './middleware/token-blacklist.js';
+import { Redis } from 'ioredis';
 
 const logger = createLogger({ name: 'api' });
 
@@ -42,6 +44,7 @@ async function main(): Promise<void> {
     server.close(async () => {
       logger.info('HTTP server closed');
       
+      await disconnectTokenBlacklist();
       await db.disconnect();
       
       logger.info('Shutdown complete');
@@ -49,10 +52,11 @@ async function main(): Promise<void> {
     });
 
     // Force exit after timeout
-    setTimeout(() => {
+    const forceTimer = setTimeout(() => {
       logger.error('Forced shutdown after timeout');
       process.exit(1);
     }, 30000);
+    forceTimer.unref();
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

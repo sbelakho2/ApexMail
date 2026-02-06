@@ -93,3 +93,32 @@ export const config = {
     return parseInt(getConfig().METERING_FLUSH_INTERVAL_MS, 10);
   },
 };
+
+/**
+ * Company Information
+ * Bel Consulting OÜ - ApexMail brand owner
+ * Used for invoices, contracts, and legal documents
+ */
+export const COMPANY_INFO = {
+  name: 'Bel Consulting OÜ',
+  tradingAs: 'ApexMail',
+  address: {
+    street: 'Sakala 7-2',
+    city: 'Tallinn',
+    postalCode: '10141',
+    country: 'Estonia',
+    countryCode: 'EE',
+  },
+  registryCode: '16192499',
+  vatNumber: 'EE102951727',
+  email: {
+    billing: 'billing@apexmail.ee',
+    info: 'info@apexmail.ee',
+    support: 'support@apexmail.ee',
+  },
+  bank: {
+    name: 'Swedbank AS',
+    iban: 'EE382200221012345678',
+    bic: 'HABAEE2X',
+  },
+} as const;

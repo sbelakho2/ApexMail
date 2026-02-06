@@ -115,7 +115,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Bulk add suppressions
-  router.post('/bulk', async (c) => {
+  router.post('/bulk', requireScopes('suppressions:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -172,7 +172,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Check single email
-  router.get('/check/:email', async (c) => {
+  router.get('/check/:email', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const email = decodeURIComponent(c.req.param('email'));
 
@@ -207,7 +207,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Bulk check emails
-  router.post('/check', async (c) => {
+  router.post('/check', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
 
     const body = await c.req.json();
@@ -285,7 +285,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get suppression stats
-  router.get('/stats', async (c) => {
+  router.get('/stats', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -305,11 +305,11 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get suppression by ID
-  router.get('/:id', async (c) => {
+  router.get('/:id', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const suppressionId = c.req.param('id');
 
-    const result = await suppressionsRepo.findById(suppressionId);
+    const result = await suppressionsRepo.findById(suppressionId, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch suppression');
@@ -350,7 +350,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const logger = c.get('logger');
 
     // Verify ownership
-    const existing = await suppressionsRepo.findById(suppressionId);
+    const existing = await suppressionsRepo.findById(suppressionId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Suppression');
     }
@@ -380,7 +380,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Remove suppression by email
-  router.delete('/email/:email', async (c) => {
+  router.delete('/email/:email', requireScopes('suppressions:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const email = decodeURIComponent(c.req.param('email'));
@@ -425,7 +425,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Bulk remove suppressions
-  router.post('/bulk/remove', async (c) => {
+  router.post('/bulk/remove', requireScopes('suppressions:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');
@@ -478,7 +478,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Export suppressions
-  router.get('/export', async (c) => {
+  router.get('/export', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const format = c.req.query('format') ?? 'json';
     const type = c.req.query('type') as SuppressionType | undefined;
@@ -521,7 +521,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Import suppressions
-  router.post('/import', async (c) => {
+  router.post('/import', requireScopes('suppressions:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const logger = c.get('logger');

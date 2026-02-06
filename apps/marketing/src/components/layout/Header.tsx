@@ -71,7 +71,7 @@ export function Header() {
                 >
                   <button className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
                     {item.name}
-                    <ChevronDown className={cn('w-3.5 h-3.5 transition-transform duration-200', activeDropdown === item.name && 'rotate-180')} />
+                    <ChevronDown className={cn('w-4 h-4 transition-transform duration-150', activeDropdown === item.name && 'rotate-180')} />
                   </button>
                   <AnimatePresence>
                     {activeDropdown === item.name && (
@@ -79,7 +79,7 @@ export function Header() {
                         initial={{ opacity: 0, y: 8, scale: 0.98 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 8, scale: 0.98 }}
-                        transition={{ duration: 0.2, ease: "easeOut" }}
+                        transition={{ duration: 0.15, ease: "easeOut" }}
                         className="absolute top-full left-0 mt-2 w-80 p-2 bg-white rounded-xl border border-surface-200 shadow-xl shadow-surface-900/5"
                       >
                         {item.items?.map((subItem) => (
@@ -89,7 +89,7 @@ export function Header() {
                             className="flex items-start gap-3 p-3 rounded-lg hover:bg-surface-50 transition-colors group"
                           >
                             <div className="w-9 h-9 rounded-lg bg-surface-50 flex items-center justify-center text-surface-500 group-hover:text-primary-600 transition-colors">
-                              <subItem.icon className="w-[18px] h-[18px]" />
+                              <subItem.icon className="w-5 h-5" />
                             </div>
                             <div>
                               <div className="font-semibold text-surface-900 text-sm mb-0.5">{subItem.name}</div>
@@ -123,6 +123,7 @@ export function Header() {
           <button
             className="lg:hidden p-2 text-surface-600 hover:text-surface-900 rounded-lg hover:bg-surface-50 transition-colors"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
           >
             {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
           </button>
@@ -142,7 +143,7 @@ export function Header() {
               {navigation.map((item) => (
                 'items' in item ? (
                   <div key={item.name} className="space-y-3">
-                    <div className="text-xs font-bold text-surface-900 uppercase tracking-wide px-3">{item.name}</div>
+                    <div className="text-xs font-bold text-surface-900 px-3">{item.name}</div>
                     <div className="space-y-1">
                       {item.items?.map((subItem) => (
                         <Link

@@ -16,7 +16,6 @@
 
 import {
     SUBJECT_LINE_TRAINING_DATA,
-    type SubjectLineSample,
     type EmailCategory
 } from './huggingface-datasets.js';
 

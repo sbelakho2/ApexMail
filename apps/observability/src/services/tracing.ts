@@ -95,6 +95,10 @@ export class TracingService {
   private provider: NodeTracerProvider | null = null;
   private tracer: Tracer | null = null;
   private activeSpans: Map<string, Span> = new Map();
+  private spanTimestamps: Map<string, number> = new Map();
+  private static readonly MAX_ACTIVE_SPANS = 10000;
+  private static readonly SPAN_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  private spanCleanupInterval: NodeJS.Timeout | null = null;
   private spanBuffer: SpanRecord[] = [];
   private flushInterval: NodeJS.Timeout | null = null;
 
@@ -163,6 +167,22 @@ export class TracingService {
       this.flushSpanBuffer();
     }, 5000);
 
+    // Start periodic cleanup of stale active spans (TTL-based eviction)
+    this.spanCleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [spanId, startedAt] of this.spanTimestamps) {
+        if (now - startedAt > TracingService.SPAN_TTL_MS) {
+          const span = this.activeSpans.get(spanId);
+          if (span) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: 'Span expired (TTL)' });
+            span.end();
+          }
+          this.activeSpans.delete(spanId);
+          this.spanTimestamps.delete(spanId);
+        }
+      }
+    }, 60_000);
+
     console.log('[Tracing] Service initialized');
   }
 
@@ -215,10 +235,21 @@ export class TracingService {
       end: () => {
         span.end();
         this.activeSpans.delete(spanContext.spanId);
+        this.spanTimestamps.delete(spanContext.spanId);
       },
     };
 
+    // Evict oldest spans if at capacity
+    if (this.activeSpans.size >= TracingService.MAX_ACTIVE_SPANS) {
+      const oldest = this.activeSpans.keys().next().value;
+      if (oldest) {
+        this.activeSpans.delete(oldest);
+        this.spanTimestamps.delete(oldest);
+      }
+    }
+
     this.activeSpans.set(spanContext.spanId, span);
+    this.spanTimestamps.set(spanContext.spanId, Date.now());
 
     return traceContext;
   }
@@ -243,6 +274,7 @@ export class TracingService {
 
     span.end();
     this.activeSpans.delete(spanId);
+    this.spanTimestamps.delete(spanId);
   }
 
   /**

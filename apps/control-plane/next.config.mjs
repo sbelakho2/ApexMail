@@ -8,9 +8,9 @@ const nextConfig = {
         NEXT_PUBLIC_APP_NAME: 'ApexMail Control Plane',
         NEXT_PUBLIC_APP_TYPE: 'control-plane',
         
-        // Control plane talks to Sales Autopilot API (port 3010), NOT customer API (port 3001)
-        NEXT_PUBLIC_AUTOPILOT_API_URL: process.env.AUTOPILOT_API_URL || 'http://localhost:3010',
-        NEXT_PUBLIC_COMPLIANCE_API_URL: process.env.COMPLIANCE_API_URL || 'http://localhost:3011',
+        // Client uses relative paths through Next.js rewrites — no internal URLs leaked
+        NEXT_PUBLIC_AUTOPILOT_API_URL: '/api/autopilot',
+        NEXT_PUBLIC_COMPLIANCE_API_URL: '/api/compliance',
     },
     
     // Security: Ensure control plane cannot accidentally reference customer API
@@ -40,8 +40,28 @@ const nextConfig = {
                         value: 'true',
                     },
                     {
+                        key: 'Strict-Transport-Security',
+                        value: 'max-age=31536000; includeSubDomains; preload',
+                    },
+                    {
                         key: 'X-Frame-Options',
                         value: 'DENY',
+                    },
+                    {
+                        key: 'X-Content-Type-Options',
+                        value: 'nosniff',
+                    },
+                    {
+                        key: 'Referrer-Policy',
+                        value: 'strict-origin-when-cross-origin',
+                    },
+                    {
+                        key: 'X-XSS-Protection',
+                        value: '0',
+                    },
+                    {
+                        key: 'Permissions-Policy',
+                        value: 'camera=(), microphone=(), geolocation=()',
                     },
                 ],
             },

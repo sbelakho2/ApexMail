@@ -168,7 +168,7 @@ export function LiveAPIConsole() {
           className="grid lg:grid-cols-2 gap-8 mb-16"
         >
           {/* Left - Interactive Demo */}
-          <div className="p-8 bg-white rounded-xl border border-surface-200 shadow-sm">
+          <div className="p-8 bg-white rounded-lg border border-surface-200 shadow-sm">
             <div className="flex items-center gap-3 mb-8">
               <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                 <Terminal className="w-5 h-5" strokeWidth={1.5} />
@@ -177,7 +177,7 @@ export function LiveAPIConsole() {
                 <h3 className="font-bold text-surface-900 text-sm">Live API Console</h3>
                 <p className="text-xs text-surface-500 font-medium">Test delivery speed in real-time</p>
               </div>
-              <span className="ml-auto text-[10px] px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 font-bold">
+              <span className="ml-auto text-xs px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 font-bold">
                 No Login
               </span>
             </div>
@@ -192,7 +192,7 @@ export function LiveAPIConsole() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 aria-describedby="email-hint"
-                className="w-full px-4 py-3 bg-white border border-surface-200 rounded-lg text-surface-900 placeholder-surface-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/10 transition-colors"
+                className="w-full px-4 py-3 bg-white border border-surface-200 rounded-sm text-surface-900 placeholder-surface-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/10 transition-colors"
               />
               <span id="email-hint" className="sr-only">Enter your email to receive a test email from the API</span>
             </div>
@@ -203,9 +203,10 @@ export function LiveAPIConsole() {
                 <span className="text-xs font-semibold text-surface-700">cURL command</span>
                 <button
                   onClick={handleCopy}
-                  className="flex items-center gap-1.5 text-[10px] font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-2 py-1 rounded border border-surface-200 hover:bg-surface-50"
+                  aria-label={copied ? 'Copied to clipboard' : 'Copy cURL command'}
+                  className="flex items-center gap-1.5 text-xs font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-2 py-1 rounded border border-surface-200 hover:bg-surface-50"
                 >
-                  {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   {copied ? 'Copied' : 'Copy'}
                 </button>
               </div>
@@ -219,7 +220,7 @@ export function LiveAPIConsole() {
               onClick={handleSend}
               disabled={isSending}
               className={cn(
-                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm',
+                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm',
               )}
             >
               {isSending ? (
@@ -254,7 +255,7 @@ export function LiveAPIConsole() {
           </div>
 
           {/* Right - SDK Examples */}
-          <div className="p-8 bg-white rounded-xl border border-surface-200 shadow-sm flex flex-col">
+          <div className="p-8 bg-white rounded-lg border border-surface-200 shadow-sm flex flex-col">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h3 className="font-bold text-surface-900 text-sm">Official SDKs</h3>
@@ -273,6 +274,7 @@ export function LiveAPIConsole() {
                 <button
                   key={lang.id}
                   onClick={() => setSelectedLanguage(lang.id)}
+                  aria-label={`Show ${lang.name} example`}
                   className={cn(
                     'px-4 py-2 text-xs font-bold transition-colors relative',
                     selectedLanguage === lang.id
@@ -294,7 +296,7 @@ export function LiveAPIConsole() {
             {/* Code Example Container */}
             <div className="flex-1 bg-surface-900 rounded-lg border border-surface-800 overflow-hidden flex flex-col min-h-[300px] shadow-inner">
               <div className="px-5 py-3 border-b border-surface-800 bg-surface-950/50 flex items-center justify-between">
-                <span className="text-[10px] font-mono text-surface-500 font-bold">{selectedLanguage}.example</span>
+                <span className="text-xs font-mono text-surface-500 font-bold">{selectedLanguage}.example</span>
               </div>
               <div className="flex-1 p-0 overflow-auto custom-scrollbar">
                 <CodeBlock 

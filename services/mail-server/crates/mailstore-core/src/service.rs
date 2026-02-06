@@ -34,6 +34,7 @@ use mail_proto::generated::{
     MessageMeta, Mailbox, MessageFlags, EmailEnvelope, Quota,
 };
 use crate::storage::MessageStorage;
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 
 /// Mailstore gRPC service
 pub struct MailstoreServiceImpl {
@@ -435,13 +436,59 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<AuthenticateRequest>,
     ) -> Result<Response<AuthenticateResponse>, Status> {
         let req = request.into_inner();
-        
-        // Placeholder - actual implementation would verify credentials
         debug!(email = %req.email, "Authentication attempt");
-        
+
+        if req.email.is_empty() || req.password.is_empty() {
+            return Ok(Response::new(AuthenticateResponse {
+                success: false,
+                account_id: String::new(),
+                error: "Invalid credentials".to_string(),
+            }));
+        }
+
+        let account = self
+            .storage
+            .get_account_by_email(&req.email)
+            .await
+            .map_err(|e| Status::internal(format!("Storage error: {e}")))?;
+
+        let account = match account {
+            Some(account) => account,
+            None => {
+                return Ok(Response::new(AuthenticateResponse {
+                    success: false,
+                    account_id: String::new(),
+                    error: "Invalid credentials".to_string(),
+                }))
+            }
+        };
+
+        let parsed = match PasswordHash::new(&account.password_hash) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return Ok(Response::new(AuthenticateResponse {
+                    success: false,
+                    account_id: String::new(),
+                    error: "Invalid credentials".to_string(),
+                }))
+            }
+        };
+
+        let is_valid = Argon2::default()
+            .verify_password(req.password.as_bytes(), &parsed)
+            .is_ok();
+
+        if !is_valid {
+            return Ok(Response::new(AuthenticateResponse {
+                success: false,
+                account_id: String::new(),
+                error: "Invalid credentials".to_string(),
+            }));
+        }
+
         Ok(Response::new(AuthenticateResponse {
             success: true,
-            account_id: Uuid::new_v4().to_string(),
+            account_id: account.id.to_string(),
             error: String::new(),
         }))
     }

@@ -14,8 +14,7 @@
 
 import {
     EMAILS, SUBJECTS, COMPANIES,
-    EMAIL_SPLITS, SUBJECT_SPLITS, COMPANY_SPLITS,
-    type EmailSample, type SubjectLineSample, type CompanySample
+    EMAIL_SPLITS, SUBJECT_SPLITS, COMPANY_SPLITS
 } from './massive-dataset.js';
 
 // =====================================================

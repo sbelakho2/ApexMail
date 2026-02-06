@@ -5,9 +5,21 @@
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
-      "env": ["NODE_ENV", "DATABASE_URL"]
+      "env": [
+        "NODE_ENV",
+        "DATABASE_URL",
+        "NEXT_PUBLIC_API_URL",
+        "NEXT_PUBLIC_TRACKING_URL",
+        "NEXT_PUBLIC_APP_URL",
+        "BASE_URL"
+      ]
     },
     "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "start": {
+      "dependsOn": ["build"],
       "cache": false,
       "persistent": true
     },
@@ -16,9 +28,28 @@
       "outputs": ["coverage/**"],
       "env": ["CI", "NODE_ENV"]
     },
+    "test:watch": {
+      "cache": false,
+      "persistent": true
+    },
     "test:e2e": {
       "dependsOn": ["build"],
       "outputs": [],
+      "env": ["CI", "NODE_ENV", "DATABASE_URL"]
+    },
+    "test:unit": {
+      "dependsOn": ["build"],
+      "outputs": ["coverage/**"],
+      "env": ["CI", "NODE_ENV"]
+    },
+    "test:integration": {
+      "dependsOn": ["build"],
+      "outputs": [],
+      "env": ["CI", "NODE_ENV", "DATABASE_URL", "REDIS_URL"]
+    },
+    "test:coverage": {
+      "dependsOn": ["build"],
+      "outputs": ["coverage/**"],
       "env": ["CI", "NODE_ENV", "DATABASE_URL"]
     },
     "lint": {
@@ -27,6 +58,9 @@
     "typecheck": {
       "dependsOn": ["^build"],
       "outputs": []
+    },
+    "clean": {
+      "cache": false
     }
   }
 }

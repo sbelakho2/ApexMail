@@ -90,7 +90,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    container_name: apexmail-api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -105,9 +104,20 @@ services:
       # SECURITY: These secrets MUST be set in production
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       API_KEY_SECRET: ${API_KEY_SECRET:?API_KEY_SECRET must be set}
-      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost:3001}
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://tracking:3001}
     ports:
       - "${API_PORT:-3000}:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       - apexmail
     deploy:
@@ -124,7 +134,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    container_name: apexmail-worker
     restart: unless-stopped
     depends_on:
       postgres:
@@ -147,7 +156,7 @@ services:
       SENDING_IP_ADDRESS: ${SENDING_IP_ADDRESS:-}
       IP_HOURLY_LIMIT: ${IP_HOURLY_LIMIT:-2500}
       # Tracking
-      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://localhost:3001}
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://tracking:3001}
       TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
       # Warmup
       WARMUP_ENABLED: ${WARMUP_ENABLED:-false}
@@ -156,6 +165,17 @@ services:
       METRICS_PORT: 9090
     ports:
       - "${WORKER_METRICS_PORT:-9090}:9090"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/metrics || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       - apexmail
     deploy:
@@ -172,7 +192,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.tracking
-    container_name: apexmail-tracking
     restart: unless-stopped
     depends_on:
       postgres:
@@ -186,6 +205,17 @@ services:
       REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
     ports:
       - "${TRACKING_PORT:-3001}:3001"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       - apexmail
     deploy:

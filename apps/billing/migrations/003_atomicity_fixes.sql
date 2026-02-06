@@ -27,7 +27,7 @@ CREATE INDEX IF NOT EXISTS idx_stripe_webhook_events_status ON stripe_webhook_ev
 CREATE TABLE IF NOT EXISTS stripe_orphaned_customers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     stripe_customer_id VARCHAR(255) UNIQUE NOT NULL,
-    tenant_id UUID REFERENCES tenants(id) ON DELETE SET NULL,
+    tenant_id VARCHAR(26) REFERENCES tenants(id) ON DELETE SET NULL,
     reason VARCHAR(100) NOT NULL,
     cleanup_attempted_at TIMESTAMPTZ,
     cleanup_error TEXT,
@@ -44,7 +44,7 @@ COMMENT ON TABLE stripe_orphaned_customers IS 'Tracks Stripe customers created d
 -- BILL-002: Subscription change saga table for tracking multi-step operations
 CREATE TABLE IF NOT EXISTS subscription_change_saga (
     id VARCHAR(100) PRIMARY KEY,
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     subscription_id UUID NOT NULL,
     from_price_id VARCHAR(255),
     to_price_id VARCHAR(255) NOT NULL,

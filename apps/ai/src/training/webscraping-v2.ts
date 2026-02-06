@@ -271,7 +271,7 @@ class GBRegressor {
     
     fit(X: number[][], y: number[]): this {
         this.base = y.reduce((a, b) => a + b, 0) / y.length;
-        let pred = new Array(y.length).fill(this.base);
+        const pred = new Array(y.length).fill(this.base);
         
         for (let i = 0; i < this.n; i++) {
             const res = y.map((yi, j) => yi - pred[j]!);
@@ -297,7 +297,7 @@ class GBClassifier {
     fit(X: number[][], y: number[]): this {
         const pos = y.filter(yi => yi === 1).length;
         this.base = Math.log(pos / (y.length - pos));
-        let logOdds = new Array(y.length).fill(this.base);
+        const logOdds = new Array(y.length).fill(this.base);
         
         for (let i = 0; i < this.n; i++) {
             const probs = logOdds.map(lo => 1 / (1 + Math.exp(-lo)));

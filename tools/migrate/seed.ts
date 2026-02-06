@@ -43,24 +43,24 @@ async function seed(options: SeedOptions = {}) {
     // Create test user
     const userId = generateId('usr');
     await pool.query(`
-      INSERT INTO users (id, tenant_id, email, password_hash, first_name, last_name, role, status, created_at, updated_at)
-      VALUES ($1, $2, 'admin@test.com', $3, 'Admin', 'User', 'admin', 'active', NOW(), NOW())
+      INSERT INTO users (id, tenant_id, email, password_hash, name, role, status, created_at, updated_at)
+      VALUES ($1, $2, 'admin@test.com', $3, 'Admin User', 'admin', 'active', NOW(), NOW())
     `, [userId, tenantId, hashPassword('password123')]);
     console.log(`✓ Created user: admin@test.com`);
 
     // Create test API key
     const apiKeyId = generateId('key');
-    const apiKeyHash = hashApiKey('apx_test_' + randomBytes(32).toString('base64url'));
+    const apiKeyHash = hashApiKey('am_test_' + randomBytes(32).toString('base64url'));
     await pool.query(`
-      INSERT INTO api_keys (id, tenant_id, user_id, name, key_hash, key_prefix, scopes, status, created_at, updated_at)
-      VALUES ($1, $2, $3, 'Test API Key', $4, 'apx_test_', $5, 'active', NOW(), NOW())
+      INSERT INTO api_keys (id, tenant_id, user_id, name, key_hash, prefix, scopes, is_active, created_at, updated_at)
+      VALUES ($1, $2, $3, 'Test API Key', $4, 'am_test_', $5, true, NOW(), NOW())
     `, [apiKeyId, tenantId, userId, apiKeyHash, JSON.stringify(['send:email', 'manage:domains'])]);
     console.log(`✓ Created API key`);
 
     // Create test domain
     const domainId = generateId('dom');
     await pool.query(`
-      INSERT INTO domains (id, tenant_id, name, status, is_verified, created_at, updated_at)
+      INSERT INTO domains (id, tenant_id, domain, status, is_verified, created_at, updated_at)
       VALUES ($1, $2, 'test.example.com', 'verified', true, NOW(), NOW())
     `, [domainId, tenantId]);
     console.log(`✓ Created domain: test.example.com`);

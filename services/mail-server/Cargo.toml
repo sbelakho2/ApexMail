@@ -38,6 +38,7 @@ hmac = "0.12"
 rsa = "0.9"
 base64 = "0.22"
 rand = "0.8"
+argon2 = "0.5"
 
 # Email protocols
 mail-parser = "0.10"

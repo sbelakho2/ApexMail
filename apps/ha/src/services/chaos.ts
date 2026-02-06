@@ -114,7 +114,14 @@ export class ChaosEngineeringService {
   constructor(db: Pool, redis: Redis) {
     this.db = db;
     this.redis = redis;
-    this.enabled = config.chaosEnabled ?? false;
+
+    // SAFETY: Never allow chaos in production unless explicitly overridden
+    if (process.env.NODE_ENV === 'production' && !process.env.CHAOS_FORCE_ENABLE) {
+      this.enabled = false;
+      console.warn('[Chaos] DISABLED in production. Set CHAOS_FORCE_ENABLE=true to override (dangerous).');
+    } else {
+      this.enabled = config.chaosEnabled ?? false;
+    }
   }
 
   /**

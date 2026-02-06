@@ -36,7 +36,7 @@ Response:
 {
   "id": "key_abc123",
   "name": "Production Server",
-  "key": "apx_live_sk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  "key": "am_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   "scopes": ["messages:send", "templates:read"],
   "expiresAt": "2025-12-31T23:59:59Z",
   "ipWhitelist": ["10.0.0.0/8", "192.168.1.0/24"],
@@ -51,7 +51,7 @@ Include the API key in the `Authorization` header:
 
 ```http
 POST /api/v1/messages
-Authorization: Bearer apx_live_sk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+Authorization: Bearer am_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 Content-Type: application/json
 
 {
@@ -65,9 +65,8 @@ Content-Type: application/json
 ### Key Prefixes
 | Prefix | Environment | Purpose |
 |--------|-------------|---------|
-| `apx_live_sk_` | Production | Sending emails |
-| `apx_test_sk_` | Sandbox | Testing (no delivery) |
-| `apx_live_pk_` | Production | Public operations |
+| `am_live_` | Production | Sending emails |
+| `am_test_` | Sandbox | Testing (no delivery) |
 
 ### Scopes
 | Scope | Description |

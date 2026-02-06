@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
+import { ImpersonationBanner } from '@/components/impersonation-banner';
 import { cn } from '@/lib/utils';
 
 export default function DashboardLayout({
@@ -14,6 +15,9 @@ export default function DashboardLayout({
 
     return (
         <div className="flex h-screen overflow-hidden">
+            {/* Impersonation Banner - Shows when control plane operator is viewing */}
+            <ImpersonationBanner />
+            
             {/* Desktop Sidebar */}
             <Sidebar className="hidden md:flex" />
 

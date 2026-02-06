@@ -106,6 +106,31 @@ function parseBoolean(value: string | undefined, defaultValue: boolean): boolean
   return value.toLowerCase() === 'true' || value === '1';
 }
 
+/**
+ * SECURITY FIX: Require hostname configuration in production.
+ * In development, falls back to a localhost placeholder.
+ * In production/staging, throws if not explicitly configured.
+ */
+function requireHostname(envVar: string, nodeEnv: string): string {
+  const value = process.env[envVar];
+  if (value) return value;
+  
+  if (nodeEnv === 'production' || nodeEnv === 'staging') {
+    throw new Error(
+      `CRITICAL: ${envVar} is not configured. ` +
+      `Refusing to start with default example.com hostname in ${nodeEnv} mode. ` +
+      `Set the ${envVar} environment variable to a valid hostname.`
+    );
+  }
+  
+  // Development fallback with warning
+  console.warn(
+    `[MTA CONFIG WARNING] ${envVar} is not set, using placeholder. ` +
+    `This MUST be configured for production use.`
+  );
+  return `${envVar.toLowerCase().replace(/_/g, '-')}.localhost`;
+}
+
 export function loadConfig(): MTAConfig {
   const nodeEnv = process.env.NODE_ENV ?? 'development';
   
@@ -128,7 +153,7 @@ export function loadConfig(): MTAConfig {
       host: process.env.INBOUND_HOST ?? '0.0.0.0',
       port: parseNumber(process.env.INBOUND_PORT, 25),
       securePort: parseNumber(process.env.INBOUND_SECURE_PORT, 465),
-      hostname: process.env.INBOUND_HOSTNAME ?? 'mx.example.com',
+      hostname: requireHostname('INBOUND_HOSTNAME', nodeEnv),
       maxMessageSize: parseNumber(process.env.INBOUND_MAX_MESSAGE_SIZE, 25 * 1024 * 1024), // 25MB
       maxRecipients: parseNumber(process.env.INBOUND_MAX_RECIPIENTS, 100),
       authRequired: parseBoolean(process.env.INBOUND_AUTH_REQUIRED, false),
@@ -143,15 +168,15 @@ export function loadConfig(): MTAConfig {
       enabled: parseBoolean(process.env.BOUNCE_ENABLED, true),
       host: process.env.BOUNCE_HOST ?? '0.0.0.0',
       port: parseNumber(process.env.BOUNCE_PORT, 2525),
-      hostname: process.env.BOUNCE_HOSTNAME ?? 'bounce.example.com',
-      verpDomain: process.env.VERP_DOMAIN ?? 'bounce.example.com',
+      hostname: requireHostname('BOUNCE_HOSTNAME', nodeEnv),
+      verpDomain: requireHostname('VERP_DOMAIN', nodeEnv),
     },
     
     feedback: {
       enabled: parseBoolean(process.env.FEEDBACK_ENABLED, true),
       host: process.env.FEEDBACK_HOST ?? '0.0.0.0',
       port: parseNumber(process.env.FEEDBACK_PORT, 2526),
-      hostname: process.env.FEEDBACK_HOSTNAME ?? 'feedback.example.com',
+      hostname: requireHostname('FEEDBACK_HOSTNAME', nodeEnv),
     },
     
     dkim: {
@@ -164,8 +189,8 @@ export function loadConfig(): MTAConfig {
     },
     
     dmarc: {
-      reportEmail: process.env.DMARC_REPORT_EMAIL ?? 'dmarc@example.com',
-      reportDomain: process.env.DMARC_REPORT_DOMAIN ?? 'example.com',
+      reportEmail: requireHostname('DMARC_REPORT_EMAIL', nodeEnv),
+      reportDomain: requireHostname('DMARC_REPORT_DOMAIN', nodeEnv),
     },
     
     rateLimit: {

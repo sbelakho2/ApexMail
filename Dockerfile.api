@@ -9,7 +9,7 @@
 FROM node:20-alpine AS builder
 
 # Install pnpm
-RUN npm install -g pnpm@9
+RUN npm install -g pnpm@8.14.0
 
 WORKDIR /app
 
@@ -35,11 +35,14 @@ RUN pnpm --filter @apexmail/lib build && \
     pnpm --filter @apexmail/db build && \
     pnpm --filter @apexmail/api build
 
-# Prune dev dependencies for production
-RUN pnpm prune --prod
+# Use pnpm deploy for clean production output (pnpm prune is unreliable in workspaces)
+RUN pnpm --filter @apexmail/api deploy --prod /app/deploy
 
 # Stage 2: Production
 FROM node:20-alpine AS production
+
+# Install tini for proper PID 1 signal handling (zombie reaping, SIGTERM forwarding)
+RUN apk add --no-cache tini
 
 # Security: Don't run as root
 RUN addgroup -g 1001 apexmail && \
@@ -47,8 +50,8 @@ RUN addgroup -g 1001 apexmail && \
 
 WORKDIR /app
 
-# Copy production dependencies and built files
-COPY --from=builder --chown=apexmail:apexmail /app/node_modules ./node_modules
+# Copy production deployment (created by pnpm deploy)
+COPY --from=builder --chown=apexmail:apexmail /app/deploy/node_modules ./node_modules
 COPY --from=builder --chown=apexmail:apexmail /app/packages/lib/dist ./packages/lib/dist
 COPY --from=builder --chown=apexmail:apexmail /app/packages/lib/package.json ./packages/lib/
 COPY --from=builder --chown=apexmail:apexmail /app/packages/db/dist ./packages/db/dist
@@ -68,5 +71,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # Set environment
 ENV NODE_ENV=production
 
-# Start the API
+# Start the API with tini as init process
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "apps/api/dist/index.js"]

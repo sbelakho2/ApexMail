@@ -14,6 +14,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
 import bcrypt from 'bcrypt';
+import { validateCsrf } from '@/lib/csrf';
 
 // Rate limiting store (in production, use Redis)
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
@@ -83,30 +84,71 @@ function recordAttempt(ip: string, success: boolean): void {
  * Verifies owner credentials using bcrypt for secure password comparison
  * In production, this would check against a secure database with hashed passwords
  */
-async function verifyCredentials(email: string, password: string): Promise<{ valid: boolean; userId?: string }> {
-    // SECURITY: In production, these would be stored securely in the database
-    // with properly hashed passwords (bcrypt/argon2)
-    const OWNER_EMAIL = process.env.CONTROL_PLANE_OWNER_EMAIL || 'admin@apexmail.ee';
-    const OWNER_PASSWORD_HASH = process.env.CONTROL_PLANE_OWNER_PASSWORD_HASH;
+async function verifyCredentials(email: string, password: string): Promise<{ valid: boolean; userId?: string; name?: string; role?: string }> {
+    // SECURITY: All credentials MUST come from environment variables.
+    // No hardcoded passwords, no plaintext fallbacks.
     
-    if (!OWNER_PASSWORD_HASH) {
-        console.error('[SECURITY] CONTROL_PLANE_OWNER_PASSWORD_HASH not configured');
+    // Build owner credentials from environment
+    const OWNER_CREDENTIALS: Array<{
+        email: string;
+        passwordHash: string;
+        userId: string;
+        name: string;
+        role: string;
+    }> = [];
+
+    // CEO account
+    if (process.env.CEO_EMAIL && process.env.CEO_PASSWORD_HASH) {
+        OWNER_CREDENTIALS.push({
+            email: process.env.CEO_EMAIL,
+            passwordHash: process.env.CEO_PASSWORD_HASH,
+            userId: 'owner_ceo',
+            name: process.env.CEO_DISPLAY_NAME || 'CEO',
+            role: 'super_admin',
+        });
+    }
+
+    // Additional admin account
+    if (process.env.CONTROL_PLANE_OWNER_EMAIL && process.env.CONTROL_PLANE_OWNER_PASSWORD_HASH) {
+        OWNER_CREDENTIALS.push({
+            email: process.env.CONTROL_PLANE_OWNER_EMAIL,
+            passwordHash: process.env.CONTROL_PLANE_OWNER_PASSWORD_HASH,
+            userId: 'owner_001',
+            name: process.env.CONTROL_PLANE_OWNER_NAME || 'Admin',
+            role: 'admin',
+        });
+    }
+
+    if (OWNER_CREDENTIALS.length === 0) {
+        console.error('[SECURITY CRITICAL] No owner credentials configured. Set CEO_EMAIL + CEO_PASSWORD_HASH or CONTROL_PLANE_OWNER_EMAIL + CONTROL_PLANE_OWNER_PASSWORD_HASH environment variables.');
+        // Still do timing-safe delay to avoid leak
+        await bcrypt.hash('dummy', 10);
         return { valid: false };
     }
     
-    if (email.toLowerCase() !== OWNER_EMAIL.toLowerCase()) {
-        // Perform a dummy bcrypt compare to prevent timing attacks on email check
-        await bcrypt.compare(password, '$2b$10$dummyhashtopreventtimingattacks');
+    // Find matching user
+    const owner = OWNER_CREDENTIALS.find(o => o.email.toLowerCase() === email.toLowerCase());
+    
+    if (!owner) {
+        // Perform a constant-time operation to prevent email enumeration
+        await bcrypt.hash('dummy', 10);
         return { valid: false };
     }
     
-    // Use bcrypt.compare for secure password verification
-    // bcrypt.compare is timing-safe internally
-    const isValid = await bcrypt.compare(password, OWNER_PASSWORD_HASH);
+    // Verify password using bcrypt (timing-safe internally)
+    let isValid = false;
+    try {
+        isValid = await bcrypt.compare(password, owner.passwordHash);
+    } catch {
+        console.error('[AUTH] bcrypt compare failed');
+        isValid = false;
+    }
     
     return { 
         valid: isValid,
-        userId: isValid ? 'owner_001' : undefined // In production, this would be the actual user ID
+        userId: isValid ? owner.userId : undefined,
+        name: isValid ? owner.name : undefined,
+        role: isValid ? owner.role : undefined,
     };
 }
 
@@ -217,35 +259,40 @@ function timingSafeEqual(a: string, b: string): boolean {
 /**
  * Creates a session token
  */
-function createSessionToken(userId: string): string {
+function createSessionToken(userId: string, name?: string, role?: string): string {
     const payload = {
         sub: userId,
+        name: name || 'Owner',
+        role: role || 'admin',
         type: 'control_plane', // CRITICAL: Marks this as control plane session
         iat: Date.now(),
         exp: Date.now() + SESSION_DURATION_MS,
     };
     
-    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64');
+    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
     
-    // Sign the payload - MUST have JWT secret in production
+    // Sign the payload — CONTROL_PLANE_JWT_SECRET MUST be set
     const secret = process.env.CONTROL_PLANE_JWT_SECRET;
     if (!secret) {
-        if (process.env.NODE_ENV === 'production') {
-            throw new Error('CONTROL_PLANE_JWT_SECRET must be set in production');
-        }
-        // Only allow dev fallback in non-production environments
-        console.warn('[SECURITY] Using dev JWT secret - set CONTROL_PLANE_JWT_SECRET in production');
+        throw new Error(
+            'CONTROL_PLANE_JWT_SECRET is not configured. ' +
+            'Set this environment variable before starting the control plane.'
+        );
     }
-    const effectiveSecret = secret || 'dev-secret-DO-NOT-USE-IN-PRODUCTION';
     const signature = crypto
-        .createHmac('sha256', effectiveSecret)
+        .createHmac('sha256', secret)
         .update(payloadB64)
-        .digest('base64');
+        .digest('base64url');
     
     return `${payloadB64}.${signature}`;
 }
 
 export async function POST(request: NextRequest) {
+    const csrf = validateCsrf(request);
+    if (!csrf.ok) {
+        return csrf.response!;
+    }
+
     const clientIp = getClientIp(request);
     
     // Check rate limiting
@@ -285,8 +332,20 @@ export async function POST(request: NextRequest) {
             );
         }
         
-        // MFA required in production
-        if (process.env.NODE_ENV === 'production' || mfaCode !== undefined) {
+        // MFA enforcement
+        const mfaConfigured = !!process.env.CONTROL_PLANE_MFA_SECRET;
+        const isProduction = process.env.NODE_ENV === 'production';
+        
+        if (isProduction && !mfaConfigured) {
+            console.error('[SECURITY CRITICAL] CONTROL_PLANE_MFA_SECRET not configured in production - blocking login');
+            return NextResponse.json(
+                { error: 'Server configuration error' },
+                { status: 500 }
+            );
+        }
+        
+        if (mfaConfigured) {
+            // MFA is configured — ALWAYS require it, regardless of whether the field was sent
             if (!mfaCode) {
                 return NextResponse.json(
                     { 
@@ -305,11 +364,18 @@ export async function POST(request: NextRequest) {
                     { status: 401 }
                 );
             }
+        } else {
+            // Development mode: MFA not configured, allow login with warning
+            console.warn('[AUTH] MFA not configured - set CONTROL_PLANE_MFA_SECRET to enable');
         }
         
         // Success - create session
         recordAttempt(clientIp, true);
-        const sessionToken = createSessionToken(credentialCheck.userId!);
+        const sessionToken = createSessionToken(
+            credentialCheck.userId!,
+            credentialCheck.name,
+            credentialCheck.role
+        );
         
         console.log(`[CONTROL_PLANE] Successful login for ${email} from ${clientIp}`);
         
@@ -317,6 +383,10 @@ export async function POST(request: NextRequest) {
         const response = NextResponse.json({ 
             success: true,
             message: 'Login successful',
+            user: {
+                name: credentialCheck.name,
+                role: credentialCheck.role,
+            },
         });
         
         response.cookies.set(CONTROL_PLANE_SESSION_COOKIE, sessionToken, {

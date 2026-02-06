@@ -5,8 +5,9 @@
 use anyhow::{anyhow, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -15,8 +16,7 @@ use crate::ServerState;
 
 /// SMTP submission session state
 pub struct SubmissionSession {
-    reader: BufReader<tokio::io::ReadHalf<TcpStream>>,
-    writer: BufWriter<tokio::io::WriteHalf<TcpStream>>,
+    stream: SessionStream,
     peer_addr: SocketAddr,
     state: Arc<ServerState>,
     
@@ -29,13 +29,54 @@ pub struct SubmissionSession {
     data_buffer: Vec<u8>,
 }
 
+enum SessionStream {
+    Plain(BufStream<TcpStream>),
+    Tls(BufStream<TlsStream<TcpStream>>),
+    Invalid,
+}
+
+impl SessionStream {
+    async fn read_line(&mut self, line: &mut String) -> Result<usize> {
+        match self {
+            SessionStream::Plain(stream) => Ok(stream.read_line(line).await?),
+            SessionStream::Tls(stream) => Ok(stream.read_line(line).await?),
+            SessionStream::Invalid => Err(anyhow!("Invalid session stream state")),
+        }
+    }
+
+    async fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            SessionStream::Plain(stream) => {
+                stream.write_all(data).await?;
+                Ok(())
+            }
+            SessionStream::Tls(stream) => {
+                stream.write_all(data).await?;
+                Ok(())
+            }
+            SessionStream::Invalid => Err(anyhow!("Invalid session stream state")),
+        }
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        match self {
+            SessionStream::Plain(stream) => {
+                stream.flush().await?;
+                Ok(())
+            }
+            SessionStream::Tls(stream) => {
+                stream.flush().await?;
+                Ok(())
+            }
+            SessionStream::Invalid => Err(anyhow!("Invalid session stream state")),
+        }
+    }
+}
+
 impl SubmissionSession {
     pub fn new(stream: TcpStream, peer_addr: SocketAddr, state: Arc<ServerState>) -> Self {
-        let (read_half, write_half) = tokio::io::split(stream);
-        
         Self {
-            reader: BufReader::new(read_half),
-            writer: BufWriter::new(write_half),
+            stream: SessionStream::Plain(BufStream::new(stream)),
             peer_addr,
             state,
             authenticated: false,
@@ -56,7 +97,7 @@ impl SubmissionSession {
         let mut line = String::new();
         loop {
             line.clear();
-            match self.reader.read_line(&mut line).await {
+            match self.stream.read_line(&mut line).await {
                 Ok(0) => {
                     debug!(peer = %self.peer_addr, "Client disconnected");
                     break;
@@ -151,7 +192,7 @@ impl SubmissionSession {
                         // Request credentials
                         self.send_response(334, "").await?;
                         let mut creds = String::new();
-                        self.reader.read_line(&mut creds).await?;
+                        self.stream.read_line(&mut creds).await?;
                         creds.trim().to_string()
                     }
                 };
@@ -163,13 +204,13 @@ impl SubmissionSession {
                 // Request username
                 self.send_response(334, "VXNlcm5hbWU6").await?; // "Username:" in base64
                 let mut username = String::new();
-                self.reader.read_line(&mut username).await?;
+                self.stream.read_line(&mut username).await?;
                 let username = username.trim().to_string();
                 
                 // Request password  
                 self.send_response(334, "UGFzc3dvcmQ6").await?; // "Password:" in base64
                 let mut password = String::new();
-                self.reader.read_line(&mut password).await?;
+                self.stream.read_line(&mut password).await?;
                 let password = password.trim().to_string();
                 
                 let result = auth_login(&username, &password, &self.state.db_pool).await?;
@@ -288,7 +329,7 @@ impl SubmissionSession {
         
         loop {
             line.clear();
-            match self.reader.read_line(&mut line).await {
+            match self.stream.read_line(&mut line).await {
                 Ok(0) => {
                     return Err(anyhow!("Client disconnected during DATA"));
                 }
@@ -390,13 +431,41 @@ impl SubmissionSession {
             self.send_response(502, "STARTTLS not available").await?;
             return Ok(());
         }
-        
-        // TLS upgrade would happen here
+
+        if matches!(self.stream, SessionStream::Tls(_)) {
+            self.send_response(503, "TLS already active").await?;
+            return Ok(());
+        }
+
+        let acceptor: &TlsAcceptor = self
+            .state
+            .tls_acceptor
+            .as_ref()
+            .ok_or_else(|| anyhow!("TLS acceptor not configured"))?;
+
         self.send_response(220, "Ready to start TLS").await?;
-        
-        // In production, upgrade the connection to TLS here
-        // For now, just acknowledge
-        
+
+        let current = std::mem::replace(&mut self.stream, SessionStream::Invalid);
+        let plain_stream = match current {
+            SessionStream::Plain(stream) => stream,
+            other => {
+                self.stream = other;
+                return Err(anyhow!("Invalid stream state during STARTTLS"));
+            }
+        };
+
+        let tcp_stream = plain_stream.into_inner();
+        let tls_stream = acceptor.accept(tcp_stream).await?;
+        self.stream = SessionStream::Tls(BufStream::new(tls_stream));
+
+        // Reset session state per RFC after TLS negotiation
+        self.authenticated = false;
+        self.auth_account_id = None;
+        self.auth_email = None;
+        self.mail_from = None;
+        self.rcpt_to.clear();
+        self.data_buffer.clear();
+
         Ok(())
     }
     
@@ -407,9 +476,9 @@ impl SubmissionSession {
     
     /// Send a line
     async fn send_line(&mut self, line: &str) -> Result<()> {
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.write_all(b"\r\n").await?;
-        self.writer.flush().await?;
+        self.stream.write_all(line.as_bytes()).await?;
+        self.stream.write_all(b"\r\n").await?;
+        self.stream.flush().await?;
         Ok(())
     }
 }

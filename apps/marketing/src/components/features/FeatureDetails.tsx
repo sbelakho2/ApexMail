@@ -151,7 +151,7 @@ export function FeatureDetails() {
                   {feature.benefits.map((benefit) => (
                     <li key={benefit} className="flex items-start gap-3">
                       <span className="w-5 h-5 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0 mt-0.5">
-                        <Check className="w-3 h-3 text-primary-600" />
+                        <Check className="w-4 h-4 text-primary-600" />
                       </span>
                       <span className="text-surface-700">{benefit}</span>
                     </li>
@@ -169,7 +169,7 @@ export function FeatureDetails() {
 
               {/* Code Block */}
               <div className={index % 2 === 1 ? 'lg:order-1' : ''}>
-                <div className="rounded-xl border border-surface-200 bg-surface-900 overflow-hidden shadow-sm">
+                <div className="rounded-lg border border-surface-200 bg-surface-900 overflow-hidden shadow-sm">
                   <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
                     <div className="flex gap-1.5">
                       <span className="w-2.5 h-2.5 rounded-full bg-surface-700" />

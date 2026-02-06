@@ -74,7 +74,7 @@ export function Footer() {
                   href={link.href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="w-8 h-8 rounded-lg bg-surface-50 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
+                  className="w-11 h-11 rounded-lg bg-surface-50 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
                   aria-label={link.name}
                 >
                   <link.icon className="w-4 h-4" />
@@ -158,8 +158,15 @@ export function Footer() {
         <div className="mt-12 pt-8 border-t border-surface-200">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
             <div className="text-sm text-surface-500 font-medium">
-              © {new Date().getFullYear()} Bel Consulting OÜ. All rights reserved.
+              <p>© 2026 Bel Consulting OÜ. All rights reserved.</p>
+              <p className="mt-1">ApexMail is a brand of Bel Consulting OÜ.</p>
             </div>
+            <div className="text-sm text-surface-500 font-medium text-right">
+              <p>Bel Consulting OÜ · Sakala 7-2 · 10141 Tallinn · Estonia</p>
+              <p>Reg. 16192499 · VAT EE102951727</p>
+            </div>
+          </div>
+          <div className="mt-4 flex flex-col md:flex-row justify-between items-center gap-4">
             <div className="flex items-center gap-6 text-sm text-surface-500 font-medium">
               <span>Made with ❤️ in Estonia 🇪🇪</span>
               <span className="flex items-center gap-2">

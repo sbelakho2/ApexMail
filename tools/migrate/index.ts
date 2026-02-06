@@ -121,7 +121,7 @@ class MigrationEngine {
         }
 
         const files = fs.readdirSync(this.migrationsDir)
-            .filter(f => f.endsWith('.sql'))
+            .filter(f => f.endsWith('.sql') && !f.endsWith('_down.sql'))
             .sort();
 
         return files.map(filename => {
@@ -227,6 +227,127 @@ class MigrationEngine {
         }
     }
 
+    private loadDownMigrationFile(upMigration: MigrationFile): MigrationFile | null {
+        const downFilename = upMigration.filename.replace(/\.sql$/, '_down.sql');
+        const downPath = path.join(this.migrationsDir, downFilename);
+
+        if (!fs.existsSync(downPath)) {
+            return null;
+        }
+
+        const sql = fs.readFileSync(downPath, 'utf-8');
+        return {
+            version: upMigration.version,
+            name: upMigration.name + '_down',
+            filename: downFilename,
+            path: downPath,
+            checksum: this.calculateChecksum(sql),
+            sql,
+        };
+    }
+
+    async rollback(targetVersion?: string): Promise<{ rolledBack: number }> {
+        const client = await this.pool.connect();
+        let rolledBack = 0;
+
+        try {
+            if (!this.dryRun) {
+                const locked = await this.acquireLock();
+                if (!locked) {
+                    throw new Error('Could not acquire migration lock');
+                }
+            }
+
+            await this.ensureAuditTable();
+
+            const appliedMigrations = await this.getAppliedMigrations();
+            const migrationFiles = this.loadMigrationFiles();
+
+            // Get applied migrations sorted in reverse order (newest first)
+            const appliedVersions = Array.from(appliedMigrations.keys()).sort().reverse();
+
+            if (appliedVersions.length === 0) {
+                this.log('No migrations to roll back');
+                return { rolledBack: 0 };
+            }
+
+            // Determine which migrations to roll back
+            const migrationsToRollback: MigrationFile[] = [];
+
+            for (const version of appliedVersions) {
+                // Stop if we've reached the target version (don't roll it back)
+                if (targetVersion && version <= targetVersion) {
+                    break;
+                }
+
+                const upMigration = migrationFiles.find(m => m.version === version);
+                if (!upMigration) {
+                    throw new Error(
+                        `Cannot find migration file for applied version ${version}`
+                    );
+                }
+
+                migrationsToRollback.push(upMigration);
+            }
+
+            if (migrationsToRollback.length === 0) {
+                this.log(`Already at target version ${targetVersion}`);
+                return { rolledBack: 0 };
+            }
+
+            this.log(`Rolling back ${migrationsToRollback.length} migration(s)...`);
+
+            for (const migration of migrationsToRollback) {
+                const downMigration = this.loadDownMigrationFile(migration);
+
+                if (!downMigration) {
+                    throw new Error(
+                        `No rollback file found for migration ${migration.version}_${migration.name}. ` +
+                        `Expected: ${migration.filename.replace(/\.sql$/, '_down.sql')}`
+                    );
+                }
+
+                this.log(`Rolling back ${migration.version}_${migration.name}...`);
+
+                if (this.dryRun) {
+                    this.log(`[DRY RUN] Would roll back: ${migration.filename}`);
+                    this.log(`[DRY RUN] Using: ${downMigration.filename}`);
+                    this.log(`[DRY RUN] SQL preview:\n${downMigration.sql.slice(0, 200)}...`);
+                    rolledBack++;
+                    continue;
+                }
+
+                const startTime = Date.now();
+
+                await client.query('BEGIN');
+                try {
+                    await client.query(downMigration.sql);
+
+                    await client.query(
+                        'DELETE FROM _migrations WHERE version = $1',
+                        [migration.version]
+                    );
+
+                    await client.query('COMMIT');
+                    this.log(`✓ Rolled back ${migration.version} (${Date.now() - startTime}ms)`);
+                    rolledBack++;
+                } catch (error) {
+                    await client.query('ROLLBACK');
+                    throw error;
+                }
+            }
+
+            this.log(`Rollback complete: ${rolledBack} rolled back`);
+            return { rolledBack };
+
+        } finally {
+            if (!this.dryRun) {
+                await this.releaseLock();
+            }
+            client.release();
+        }
+    }
+
     async status(): Promise<void> {
         await this.ensureAuditTable();
         
@@ -243,8 +364,11 @@ class MigrationEngine {
             const checksumStatus = applied 
                 ? (checksumMatch ? '' : ' [CHECKSUM MISMATCH!]')
                 : '';
+
+            const downFile = this.loadDownMigrationFile(file);
+            const downStatus = downFile ? ' [↩ rollback available]' : '';
             
-            console.log(`${status} ${file.version}_${file.name}${checksumStatus}`);
+            console.log(`${status} ${file.version}_${file.name}${checksumStatus}${downStatus}`);
         }
 
         console.log(`\nTotal: ${migrationFiles.length} migrations, ${appliedMigrations.size} applied`);
@@ -270,11 +394,36 @@ async function main(): Promise<void> {
             case 'up':
                 await engine.migrate();
                 break;
+            case 'rollback':
+            case 'down': {
+                // Target version: the version to roll back TO (exclusive)
+                // If not specified, rolls back the most recent migration
+                const targetArg = args.find(a => !a.startsWith('--') && a !== command);
+                if (targetArg) {
+                    await engine.rollback(targetArg);
+                } else {
+                    // Roll back only the last applied migration
+                    // We achieve this by getting applied migrations and targeting the second-to-last
+                    await engine.rollback(targetArg);
+                }
+                break;
+            }
             case 'status':
                 await engine.status();
                 break;
             default:
-                console.log('Usage: migrate [migrate|status] [--dry-run] [--quiet]');
+                console.log('Usage: migrate [migrate|up|rollback|down|status] [target_version] [--dry-run] [--quiet]');
+                console.log('');
+                console.log('Commands:');
+                console.log('  migrate, up       Apply pending migrations');
+                console.log('  rollback, down     Roll back migrations');
+                console.log('    [target_version] Roll back TO this version (exclusive)');
+                console.log('    (no version)     Roll back all applied migrations');
+                console.log('  status             Show migration status');
+                console.log('');
+                console.log('Options:');
+                console.log('  --dry-run          Preview changes without applying');
+                console.log('  --quiet            Suppress verbose output');
         }
     } finally {
         await engine.close();

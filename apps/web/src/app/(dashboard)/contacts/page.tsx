@@ -67,8 +67,8 @@ const mockContacts = [
         status: 'subscribed' as const,
         tags: ['vip', 'customer'],
         score: 85,
-        createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
-        lastActivity: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        createdAt: new Date(1737000000000 - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        lastActivity: new Date(1737000000000 - 2 * 60 * 60 * 1000).toISOString(),
     },
     {
         id: '2',
@@ -79,8 +79,8 @@ const mockContacts = [
         status: 'subscribed' as const,
         tags: ['lead'],
         score: 72,
-        createdAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(),
-        lastActivity: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        createdAt: new Date(1737000000000 - 60 * 24 * 60 * 60 * 1000).toISOString(),
+        lastActivity: new Date(1737000000000 - 24 * 60 * 60 * 1000).toISOString(),
     },
     {
         id: '3',
@@ -90,8 +90,8 @@ const mockContacts = [
         status: 'unsubscribed' as const,
         tags: [],
         score: 0,
-        createdAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString(),
-        lastActivity: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        createdAt: new Date(1737000000000 - 90 * 24 * 60 * 60 * 1000).toISOString(),
+        lastActivity: new Date(1737000000000 - 30 * 24 * 60 * 60 * 1000).toISOString(),
     },
     {
         id: '4',
@@ -102,8 +102,8 @@ const mockContacts = [
         status: 'subscribed' as const,
         tags: ['vip', 'enterprise'],
         score: 94,
-        createdAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString(),
-        lastActivity: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+        createdAt: new Date(1737000000000 - 15 * 24 * 60 * 60 * 1000).toISOString(),
+        lastActivity: new Date(1737000000000 - 1 * 60 * 60 * 1000).toISOString(),
     },
     {
         id: '5',
@@ -113,8 +113,8 @@ const mockContacts = [
         status: 'bounced' as const,
         tags: [],
         score: 0,
-        createdAt: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString(),
-        lastActivity: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString(),
+        createdAt: new Date(1737000000000 - 45 * 24 * 60 * 60 * 1000).toISOString(),
+        lastActivity: new Date(1737000000000 - 45 * 24 * 60 * 60 * 1000).toISOString(),
     },
 ];
 

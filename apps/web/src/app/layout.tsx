@@ -62,6 +62,12 @@ export default function RootLayout({
                 <meta name="color-scheme" content="light dark" />
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+                {/* FIX-095: Prevent flash of wrong theme on load */}
+                <script
+                    dangerouslySetInnerHTML={{
+                        __html: `(function(){try{var s=JSON.parse(localStorage.getItem('apexmail-ui')||'{}');var t=(s.state&&s.state.theme)||'system';if(t==='system'){t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'}if(t==='dark'){document.documentElement.classList.add('dark')}}catch(e){}})();`,
+                    }}
+                />
             </head>
             <body className={`${inter.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
                 <main className="min-h-screen bg-background">{children}</main>

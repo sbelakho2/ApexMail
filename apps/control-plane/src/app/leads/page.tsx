@@ -34,12 +34,7 @@ interface DiscoveredLead {
     imported: boolean;
 }
 
-const SOURCES: DiscoverySource[] = [
-    { id: 'product_hunt', name: 'Product Hunt', icon: '🚀', enabled: true, lastRun: new Date(Date.now() - 3600000).toISOString(), leadsFound: 47, status: 'idle' },
-    { id: 'g2', name: 'G2 Crowd', icon: '⭐', enabled: true, lastRun: new Date(Date.now() - 7200000).toISOString(), leadsFound: 89, status: 'idle' },
-    { id: 'capterra', name: 'Capterra', icon: '📊', enabled: true, lastRun: new Date(Date.now() - 14400000).toISOString(), leadsFound: 63, status: 'idle' },
-    { id: 'crunchbase', name: 'Crunchbase', icon: '💼', enabled: false, lastRun: null, leadsFound: 0, status: 'idle' },
-];
+
 
 const CATEGORIES = [
     'Email Marketing',
@@ -52,7 +47,7 @@ const CATEGORIES = [
 ];
 
 export default function LeadDiscoveryPage() {
-    const [sources, setSources] = useState<DiscoverySource[]>(SOURCES);
+    const [sources, setSources] = useState<DiscoverySource[]>([]);
     const [discoveredLeads, setDiscoveredLeads] = useState<DiscoveredLead[]>([]);
     const [selectedCategories, setSelectedCategories] = useState<string[]>(['Email Marketing', 'Newsletter Platforms']);
     const [isRunning, setIsRunning] = useState(false);
@@ -64,14 +59,13 @@ export default function LeadDiscoveryPage() {
 
     async function loadDiscoveredLeads() {
         try {
-            // Demo data
-            setDiscoveredLeads([
-                { id: '1', companyName: 'EmailNinja Pro', domain: 'emailninja.io', source: 'product_hunt', category: 'Email Marketing', description: 'AI-powered email scheduling for busy professionals', foundAt: new Date(Date.now() - 1800000).toISOString(), imported: false },
-                { id: '2', companyName: 'NewsletterOS', domain: 'newsletteros.com', source: 'g2', category: 'Newsletter Platforms', description: 'Complete newsletter management platform', foundAt: new Date(Date.now() - 3600000).toISOString(), imported: false },
-                { id: '3', companyName: 'SendMetrics', domain: 'sendmetrics.co', source: 'capterra', category: 'Email Marketing', description: 'Email analytics and reporting dashboard', foundAt: new Date(Date.now() - 7200000).toISOString(), imported: true },
-                { id: '4', companyName: 'AutoMailer Hub', domain: 'automailerhub.com', source: 'product_hunt', category: 'Marketing Automation', description: 'Automated email sequences for SaaS', foundAt: new Date(Date.now() - 14400000).toISOString(), imported: false },
-                { id: '5', companyName: 'ColdReach AI', domain: 'coldreach.ai', source: 'g2', category: 'Sales Enablement', description: 'AI cold email personalization', foundAt: new Date(Date.now() - 21600000).toISOString(), imported: false },
-            ]);
+            const response = await fetch('/api/leads/discovery', { credentials: 'include' });
+            if (!response.ok) throw new Error(`Failed to fetch leads: ${response.status}`);
+            const data = await response.json();
+            setSources(data.sources);
+            setDiscoveredLeads(data.leads);
+        } catch (err) {
+            console.error('Failed to load discovered leads:', err);
         } finally {
             setLoading(false);
         }
@@ -143,7 +137,7 @@ export default function LeadDiscoveryPage() {
     if (loading) {
         return (
             <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             </div>
         );
     }
@@ -154,8 +148,8 @@ export default function LeadDiscoveryPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-2xl font-bold text-slate-900">Lead Discovery</h1>
-                    <p className="text-slate-500 mt-1">
+                    <h1 className="text-2xl font-bold text-foreground">Lead Discovery</h1>
+                    <p className="text-muted-foreground mt-1">
                         Automatically discover potential customers from multiple sources
                     </p>
                 </div>
@@ -165,8 +159,8 @@ export default function LeadDiscoveryPage() {
                     className={cn(
                         'px-6 py-2.5 rounded-lg font-semibold transition-all shadow-sm',
                         isRunning || sources.filter(s => s.enabled).length === 0
-                            ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                            : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-md'
+                            ? 'bg-muted text-muted-foreground cursor-not-allowed'
+                            : 'bg-primary text-primary-foreground hover:bg-primary/90 hover:shadow-md'
                     )}
                 >
                     {isRunning ? (
@@ -182,8 +176,8 @@ export default function LeadDiscoveryPage() {
             {/* Configuration */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
                 {/* Sources */}
-                <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Discovery Sources</h2>
+                <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                    <h2 className="text-lg font-semibold text-foreground mb-4">Discovery Sources</h2>
                     <div className="space-y-3">
                         {sources.map(source => (
                             <div
@@ -191,15 +185,15 @@ export default function LeadDiscoveryPage() {
                                 className={cn(
                                     'flex items-center justify-between p-4 rounded-xl border transition-colors',
                                     source.enabled 
-                                        ? 'border-blue-200 bg-blue-50/50' 
-                                        : 'border-slate-200 bg-slate-50'
+                                        ? 'border-primary/20 bg-primary/5' 
+                                        : 'border-border bg-muted/30'
                                 )}
                             >
                                 <div className="flex items-center gap-4">
                                     <span className="text-2xl">{source.icon}</span>
                                     <div>
-                                        <div className="font-semibold text-slate-900">{source.name}</div>
-                                        <div className="text-xs text-slate-500 mt-0.5">
+                                        <div className="font-semibold text-foreground">{source.name}</div>
+                                        <div className="text-xs text-muted-foreground mt-0.5">
                                             {source.lastRun ? `Last run: ${new Date(source.lastRun).toLocaleString()}` : 'Never run'}
                                             {source.leadsFound > 0 && ` • ${source.leadsFound} leads found`}
                                         </div>
@@ -207,18 +201,18 @@ export default function LeadDiscoveryPage() {
                                 </div>
                                 <div className="flex items-center gap-3">
                                     {source.status === 'running' && (
-                                        <span className="text-blue-600 animate-pulse text-xs font-medium uppercase tracking-wider">Running...</span>
+                                        <span className="text-primary animate-pulse text-xs font-medium uppercase tracking-wider">Running...</span>
                                     )}
                                     <button
                                         onClick={() => toggleSource(source.id)}
                                         className={cn(
                                             'w-12 h-6 rounded-full transition-colors relative',
-                                            source.enabled ? 'bg-blue-600' : 'bg-slate-300'
+                                            source.enabled ? 'bg-primary' : 'bg-muted'
                                         )}
                                     >
                                         <span
                                             className={cn(
-                                                'absolute top-1 w-4 h-4 rounded-full bg-white transition-transform shadow-sm',
+                                                'absolute top-1 w-4 h-4 rounded-full bg-background transition-transform shadow-sm',
                                                 source.enabled ? 'translate-x-7' : 'translate-x-1'
                                             )}
                                         />
@@ -230,8 +224,8 @@ export default function LeadDiscoveryPage() {
                 </div>
 
                 {/* Categories */}
-                <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-                    <h2 className="text-lg font-semibold text-slate-900 mb-4">Target Categories</h2>
+                <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
+                    <h2 className="text-lg font-semibold text-foreground mb-4">Target Categories</h2>
                     <div className="flex flex-wrap gap-2">
                         {CATEGORIES.map(category => (
                             <button
@@ -240,18 +234,18 @@ export default function LeadDiscoveryPage() {
                                 className={cn(
                                     'px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors border',
                                     selectedCategories.includes(category)
-                                        ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50 hover:border-slate-300'
+                                        ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+                                        : 'bg-card text-muted-foreground border-border hover:bg-muted hover:border-muted-foreground'
                                 )}
                             >
                                 {category}
                             </button>
                         ))}
                     </div>
-                    <div className="mt-6 p-4 bg-amber-50 rounded-xl border border-amber-200">
+                    <div className="mt-6 p-4 bg-warning/10 rounded-xl border border-warning/20">
                         <div className="flex gap-3">
-                            <span className="text-amber-600">💡</span>
-                            <div className="text-sm text-amber-800">
+                            <span className="text-warning">💡</span>
+                            <div className="text-sm text-warning/90">
                                 <strong>Tip:</strong> Select categories related to email marketing to find prospects who may benefit from ApexMail.
                             </div>
                         </div>
@@ -260,41 +254,41 @@ export default function LeadDiscoveryPage() {
             </div>
 
             {/* Discovered Leads */}
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="flex items-center justify-between p-6 border-b border-slate-200 bg-slate-50/50">
+            <div className="bg-card rounded-xl border border-border shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between p-6 border-b border-border bg-muted/30">
                     <div>
-                        <h2 className="text-lg font-semibold text-slate-900">Discovered Leads</h2>
-                        <p className="text-sm text-slate-500 mt-0.5">{unimportedCount} leads pending import</p>
+                        <h2 className="text-lg font-semibold text-foreground">Discovered Leads</h2>
+                        <p className="text-sm text-muted-foreground mt-0.5">{unimportedCount} leads pending import</p>
                     </div>
                     {unimportedCount > 0 && (
                         <button
                             onClick={importAllLeads}
-                            className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 shadow-sm transition-colors"
+                            className="px-4 py-2 bg-success text-primary-foreground rounded-lg text-sm font-medium hover:bg-success/90 shadow-sm transition-colors"
                         >
                             Import All ({unimportedCount})
                         </button>
                     )}
                 </div>
-                <div className="divide-y divide-slate-100">
+                <div className="divide-y divide-border">
                     {discoveredLeads.length === 0 ? (
-                        <div className="p-12 text-center text-slate-500">
+                        <div className="p-12 text-center text-muted-foreground">
                             No leads discovered yet. Run a discovery job to find prospects.
                         </div>
                     ) : (
                         discoveredLeads.map(lead => (
-                            <div key={lead.id} className="p-4 hover:bg-slate-50 transition-colors flex items-center justify-between group">
+                            <div key={lead.id} className="p-4 hover:bg-muted/30 transition-colors flex items-center justify-between group">
                                 <div className="flex-1">
                                     <div className="flex items-center gap-3 mb-1.5">
-                                        <span className="font-semibold text-slate-900">{lead.companyName}</span>
-                                        <span className="text-xs px-2.5 py-0.5 bg-slate-100 text-slate-600 border border-slate-200 rounded-md font-medium">{lead.source.replace('_', ' ')}</span>
+                                        <span className="font-semibold text-foreground">{lead.companyName}</span>
+                                        <span className="text-xs px-2.5 py-0.5 bg-muted text-muted-foreground border border-border rounded-md font-medium">{lead.source.replace('_', ' ')}</span>
                                         {lead.imported && (
-                                            <span className="text-xs px-2.5 py-0.5 bg-green-50 text-green-700 border border-green-200 rounded-md font-medium flex items-center gap-1">
+                                            <span className="text-xs px-2.5 py-0.5 bg-success/10 text-success border border-success/20 rounded-md font-medium flex items-center gap-1">
                                                 <span>✓</span> Imported
                                             </span>
                                         )}
                                     </div>
-                                    <div className="text-sm text-slate-600 mb-2">{lead.description}</div>
-                                    <div className="flex items-center gap-4 text-xs text-slate-400">
+                                    <div className="text-sm text-muted-foreground mb-2">{lead.description}</div>
+                                    <div className="flex items-center gap-4 text-xs text-muted-foreground/70">
                                         <span className="flex items-center gap-1"><span className="opacity-70">🌐</span> {lead.domain}</span>
                                         <span className="flex items-center gap-1"><span className="opacity-70">📁</span> {lead.category}</span>
                                         <span className="flex items-center gap-1"><span className="opacity-70">⏰</span> {new Date(lead.foundAt).toLocaleString()}</span>
@@ -303,7 +297,7 @@ export default function LeadDiscoveryPage() {
                                 {!lead.imported && (
                                     <button
                                         onClick={() => importLead(lead.id)}
-                                        className="ml-4 px-4 py-2 bg-white border border-blue-200 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-50 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                        className="ml-4 px-4 py-2 bg-card border border-primary/30 text-primary rounded-lg text-sm font-medium hover:bg-primary/5 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100"
                                     >
                                         Import to CRM
                                     </button>

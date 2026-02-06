@@ -401,7 +401,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Regenerate webhook secret
-  router.post('/:id/rotate-secret', async (c) => {
+  router.post('/:id/rotate-secret', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
@@ -441,7 +441,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Test webhook
-  router.post('/:id/test', async (c) => {
+  router.post('/:id/test', requireScopes('webhooks:write'), async (c) => {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
@@ -531,7 +531,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Get webhook deliveries
-  router.get('/:id/deliveries', async (c) => {
+  router.get('/:id/deliveries', requireScopes('webhooks:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
     const status = c.req.query('status');
@@ -671,16 +671,25 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Verify webhook signature (utility endpoint)
+  // SECURITY FIX (FIX-031): No longer requires customers to send their secret
+  // over the wire. Instead, looks up the webhook by ID and uses the stored secret.
   router.post('/verify-signature', requireScopes('webhooks:read'), async (c) => {
+    const tenantId = c.get('tenantId');
     const body = await c.req.json();
     const schema = z.object({
+      webhookId: z.string().min(1).max(100),
       payload: z.unknown(),
       signature: z.string().max(512), // HMAC-SHA256 hex is 64 chars, allow margin
       timestamp: z.number(),
-      secret: z.string().min(1).max(256), // Match createWebhookSchema secret limit
     });
     
-    const { payload, signature, timestamp, secret } = schema.parse(body);
+    const { webhookId, payload, signature, timestamp } = schema.parse(body);
+
+    // Look up webhook to get stored secret (never sent over the wire)
+    const webhook = await webhooksRepo.findById(webhookId, tenantId);
+    if (!webhook) {
+      throw ApiError.notFound('Webhook');
+    }
 
     // Check timestamp is within 5 minutes
     const now = Date.now();
@@ -691,7 +700,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       });
     }
 
-    const expectedSignature = signPayload(secret, timestamp, payload);
+    const expectedSignature = signPayload(webhook.secret, timestamp, payload);
     
     // Use timing-safe comparison to prevent timing attacks
     const valid = signature.length === expectedSignature.length && 

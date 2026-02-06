@@ -330,12 +330,14 @@ export class InvoiceService {
   <div class="addresses">
     <div class="address">
       <h3>From</h3>
-      <strong>ApexMail OÜ</strong><br>
-      Tartu mnt 67/1-13b<br>
-      10115 Tallinn<br>
+      <strong>Bel Consulting OÜ</strong><br>
+      (trading as ApexMail)<br>
+      Sakala 7-2<br>
+      10141 Tallinn<br>
       Estonia<br>
-      VAT: EE102345678<br>
-      info@apexmail.ee
+      Reg. 16192499<br>
+      VAT: EE102951727<br>
+      billing@apexmail.ee
     </div>
     <div class="address">
       <h3>Bill To</h3>
@@ -399,7 +401,8 @@ export class InvoiceService {
 
   <div class="footer">
     <p>Payment terms: Net 30 days. Please include invoice number in payment reference.</p>
-    <p>ApexMail OÜ | Registry code: 16123456 | IBAN: EE38 2200 2210 1234 5678 | BIC: HABAEE2X</p>
+    <p>Bel Consulting OÜ (trading as ApexMail) | Reg. 16192499 | VAT: EE102951727 | IBAN: EE38 2200 2210 1234 5678 | BIC: HABAEE2X</p>
+    <p>Sakala 7-2, 10141 Tallinn, Estonia</p>
     <p>Period: ${formatDate(invoice.periodStart)} to ${formatDate(invoice.periodEnd)}</p>
   </div>
 </body>
@@ -425,14 +428,14 @@ export class InvoiceService {
   <Invoice>
     <InvoiceParties>
       <SellerParty>
-        <Name>ApexMail OÜ</Name>
-        <RegNumber>16123456</RegNumber>
-        <VATRegNumber>EE102345678</VATRegNumber>
+        <Name>Bel Consulting OÜ</Name>
+        <RegNumber>16192499</RegNumber>
+        <VATRegNumber>EE102951727</VATRegNumber>
         <ContactData>
           <LegalAddress>
-            <PostalAddress1>Tartu mnt 67/1-13b</PostalAddress1>
+            <PostalAddress1>Sakala 7-2</PostalAddress1>
             <City>Tallinn</City>
-            <PostalCode>10115</PostalCode>
+            <PostalCode>10141</PostalCode>
             <Country>EE</Country>
           </LegalAddress>
           <PhoneNumber>+372 5XX XXXX</PhoneNumber>
@@ -506,7 +509,7 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
       <PayerName>${this.escapeXml(invoice.billingAddress.companyName)}</PayerName>
       <PayToAccount>EE382200221012345678</PayToAccount>
       <PayToBIC>HABAEE2X</PayToBIC>
-      <PayToName>ApexMail OÜ</PayToName>
+      <PayToName>Bel Consulting OÜ</PayToName>
     </PaymentInfo>
   </Invoice>
 </E_Invoice>`;

@@ -286,7 +286,11 @@ export class MessagesRepository {
     return Result.ok(message);
   }
 
-  async findById(id: string): Promise<Result<Message | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<Message | null, Error>> {
+    const sql = tenantId
+      ? 'SELECT * FROM messages WHERE id = $1 AND tenant_id = $2'
+      : 'SELECT * FROM messages WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -325,8 +329,8 @@ export class MessagesRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      'SELECT * FROM messages WHERE id = $1',
-      [id]
+      sql,
+      params
     );
 
     if (!result.ok) return result;

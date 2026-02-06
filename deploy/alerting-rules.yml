@@ -1,0 +1,151 @@
+# ApexMail Prometheus Alerting Rules
+# FIX-072: Production-ready alerting for critical services
+
+groups:
+  - name: apexmail-availability
+    rules:
+      # API service down
+      - alert: ApiServiceDown
+        expr: up{job="apexmail-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail API service is down"
+          description: "API service {{ $labels.instance }} has been unreachable for more than 1 minute."
+
+      # Worker service down
+      - alert: WorkerServiceDown
+        expr: up{job="apexmail-worker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail Worker service is down"
+          description: "Worker service {{ $labels.instance }} has been unreachable for more than 1 minute."
+
+      # Tracking service down
+      - alert: TrackingServiceDown
+        expr: up{job="apexmail-tracking"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail Tracking service is down"
+          description: "Tracking service {{ $labels.instance }} has been unreachable for more than 1 minute."
+
+  - name: apexmail-performance
+    rules:
+      # High API latency
+      - alert: HighApiLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="apexmail-api"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API p95 latency"
+          description: "API p95 latency is {{ $value }}s, exceeding 1s threshold for 5 minutes."
+
+      # High error rate
+      - alert: HighApiErrorRate
+        expr: sum(rate(http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="apexmail-api"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API error rate"
+          description: "API 5xx error rate is {{ $value | humanizePercentage }}, exceeding 5% threshold."
+
+      - alert: CriticalApiErrorRate
+        expr: sum(rate(http_requests_total{job="apexmail-api",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="apexmail-api"}[5m])) > 0.15
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical API error rate"
+          description: "API 5xx error rate is {{ $value | humanizePercentage }}, exceeding 15% threshold."
+
+  - name: apexmail-resources
+    rules:
+      # High CPU usage
+      - alert: HighCpuUsage
+        expr: rate(apexmail_process_cpu_seconds_total[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.job }}"
+          description: "CPU usage is {{ $value | humanizePercentage }} for more than 10 minutes."
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: apexmail_process_memory_bytes / 1073741824 > 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.job }}"
+          description: "Memory usage is {{ $value }}GB, exceeding 1.5GB threshold."
+
+      # Event loop lag (Node.js)
+      - alert: HighEventLoopLag
+        expr: apexmail_event_loop_lag_seconds > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High event loop lag on {{ $labels.job }}"
+          description: "Event loop lag is {{ $value }}s, exceeding 100ms threshold."
+
+  - name: apexmail-email-delivery
+    rules:
+      # Email queue backing up
+      - alert: EmailQueueBacklog
+        expr: apexmail_queue_depth{queue="email"} > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Email queue backlog growing"
+          description: "Email queue has {{ $value }} pending jobs, exceeding 10k threshold for 10 minutes."
+
+      - alert: CriticalEmailQueueBacklog
+        expr: apexmail_queue_depth{queue="email"} > 50000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical email queue backlog"
+          description: "Email queue has {{ $value }} pending jobs, exceeding 50k threshold."
+
+      # Webhook delivery failures
+      - alert: HighWebhookFailureRate
+        expr: sum(rate(apexmail_webhook_deliveries_total{status="failed"}[10m])) / sum(rate(apexmail_webhook_deliveries_total[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High webhook delivery failure rate"
+          description: "Webhook failure rate is {{ $value | humanizePercentage }}, exceeding 10% threshold."
+
+      # Tracking events processing
+      - alert: TrackingProcessingBacklog
+        expr: rate(tracking_requests_total[5m]) == 0 and up{job="apexmail-tracking"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No tracking events being processed"
+          description: "Tracking service is up but processing zero events for 15 minutes."
+
+  - name: apexmail-billing
+    rules:
+      # Stripe webhook processing failures
+      - alert: StripeWebhookFailures
+        expr: increase(apexmail_stripe_webhook_errors_total[1h]) > 10
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Multiple Stripe webhook processing failures"
+          description: "{{ $value }} Stripe webhook errors in the last hour."

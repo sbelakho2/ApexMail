@@ -14,10 +14,10 @@ export function CalculatorCTA() {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl p-8 lg:p-12 text-center"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12 text-center"
         >
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100/50 text-xs font-medium mb-6">
-            <Calculator className="w-3.5 h-3.5" />
+            <Calculator className="w-4 h-4" />
             <span>Start saving today</span>
           </div>
 

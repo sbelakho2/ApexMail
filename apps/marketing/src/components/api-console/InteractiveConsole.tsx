@@ -105,7 +105,7 @@ export function InteractiveConsole() {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl overflow-hidden"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
         >
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 bg-white border-b border-surface-200">
@@ -169,30 +169,30 @@ export function InteractiveConsole() {
               {activeTab === 'request' && (
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-xs font-medium text-surface-500 uppercase tracking-wide mb-2">To</label>
+                    <label className="block text-xs font-medium text-surface-500 mb-2">To</label>
                     <input
                       type="email"
                       value={requestBody.to}
                       onChange={(e) => setRequestBody({ ...requestBody, to: e.target.value })}
-                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-lg text-surface-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
+                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-sm text-surface-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-surface-500 uppercase tracking-wide mb-2">Subject</label>
+                    <label className="block text-xs font-medium text-surface-500 mb-2">Subject</label>
                     <input
                       type="text"
                       value={requestBody.subject}
                       onChange={(e) => setRequestBody({ ...requestBody, subject: e.target.value })}
-                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-lg text-surface-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
+                      className="w-full px-4 py-2 bg-surface-50 border border-surface-200 rounded-sm text-surface-900 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-surface-500 uppercase tracking-wide mb-2">HTML Body</label>
+                    <label className="block text-xs font-medium text-surface-500 mb-2">HTML Body</label>
                     <textarea
                       value={requestBody.html}
                       onChange={(e) => setRequestBody({ ...requestBody, html: e.target.value })}
                       rows={6}
-                      className="w-full px-4 py-3 bg-surface-50 border border-surface-200 rounded-lg text-surface-900 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
+                      className="w-full px-4 py-3 bg-surface-50 border border-surface-200 rounded-sm text-surface-900 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-colors"
                     />
                   </div>
                 </div>
@@ -209,7 +209,7 @@ export function InteractiveConsole() {
                     <div className="space-y-4">
                       <div className="flex items-center gap-2 text-emerald-600">
                         <CheckCircle className="w-5 h-5" strokeWidth={2} />
-                        <span className="text-xs font-bold uppercase tracking-widest">200 OK</span>
+                        <span className="text-xs font-bold">200 OK</span>
                       </div>
                       <pre className="text-xs text-surface-300 font-mono bg-surface-900 p-4 rounded-lg overflow-auto shadow-inner border border-surface-800">
                         {JSON.stringify(response, null, 2)}
@@ -246,11 +246,11 @@ export function InteractiveConsole() {
                         >
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-primary-600 font-mono text-xs font-semibold">{webhook.type}</span>
-                            <span className="text-[10px] font-medium text-surface-600 tabular-nums">
+                            <span className="text-xs font-medium text-surface-600 tabular-nums">
                               {new Date(webhook.timestamp).toLocaleTimeString()}
                             </span>
                           </div>
-                          <pre className="text-[10px] text-surface-500 font-mono bg-white p-2 rounded border border-surface-200 overflow-auto">
+                          <pre className="text-xs text-surface-500 font-mono bg-white p-2 rounded border border-surface-200 overflow-auto">
                             {JSON.stringify(webhook.data, null, 2)}
                           </pre>
                         </motion.div>
@@ -263,14 +263,14 @@ export function InteractiveConsole() {
 
             {/* Right Panel - Preview */}
             <div className="p-6 bg-surface-50/50 min-h-[400px]">
-              <div className="text-xs font-medium text-surface-500 uppercase tracking-wide mb-4">Email Live Preview</div>
-              <div className="bg-white border border-surface-200 rounded-xl overflow-hidden shadow-sm">
+              <div className="text-xs font-medium text-surface-500 mb-4">Email Live Preview</div>
+              <div className="bg-white border border-surface-200 rounded-lg overflow-hidden shadow-sm">
                 <div className="bg-surface-50 px-4 py-3 border-b border-surface-200">
                   <div className="text-xs text-surface-500 font-medium">
-                    <strong className="text-surface-900 uppercase text-[10px] tracking-widest mr-2">To:</strong> {requestBody.to}
+                    <strong className="text-surface-900 text-xs mr-2">To:</strong> {requestBody.to}
                   </div>
                   <div className="text-xs text-surface-500 font-medium mt-1">
-                    <strong className="text-surface-900 uppercase text-[10px] tracking-widest mr-2">Subject:</strong> {requestBody.subject}
+                    <strong className="text-surface-900 text-xs mr-2">Subject:</strong> {requestBody.subject}
                   </div>
                 </div>
                 {/* XSS Protection: HTML is sanitized with DOMPurify before rendering */}

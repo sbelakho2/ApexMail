@@ -139,7 +139,7 @@ app.post('/api/v1/discovery/run', async (c) => {
     // Store leads in CRM
     for (const lead of result.leads) {
         if (lead.id && lead.tenantId && lead.companyName && lead.domain) {
-            crm.storeLead(lead as Lead);
+            await crm.storeLead(lead as Lead);
         }
     }
 
@@ -165,7 +165,7 @@ app.post('/api/v1/discovery/export', async (c) => {
         };
     }>();
 
-    const leads = crm.filterLeads(body.tenantId, (body.filters || {}) as LeadFilters);
+    const leads = await crm.filterLeads(body.tenantId, (body.filters || {}) as LeadFilters);
     const csv = scrapers.exportLeadsToCsv(leads);
 
     return new Response(csv, {
@@ -221,16 +221,16 @@ app.post('/api/v1/scoring/calculate', async (c) => {
         leadId: string;
     }>();
 
-    const lead = crm.getLead(body.leadId);
+    const lead = await crm.getLead(body.leadId);
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
     }
 
-    const activities = crm.getLeadActivities(body.leadId);
+    const activities = await crm.getLeadActivities(body.leadId);
     const score = enrichment.calculateLeadScore(lead, null, activities);
 
     // Update lead score
-    crm.updateLead(body.leadId, { score: score.totalScore });
+    await crm.updateLead(body.leadId, { score: score.totalScore });
 
     return c.json({ success: true, data: score });
 });
@@ -239,23 +239,27 @@ app.get('/api/v1/scoring/top/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
     const limit = parseInt(c.req.query('limit') || '10', 10);
 
-    const leads = crm.filterLeads(tenantId, {});
+    const leads = await crm.filterLeads(tenantId, {});
     const scoredLeads = new Map<string, ReturnType<typeof enrichment.calculateLeadScore>>();
 
     for (const lead of leads) {
-        const activities = crm.getLeadActivities(lead.id);
+        const activities = await crm.getLeadActivities(lead.id);
         const score = enrichment.calculateLeadScore(lead, null, activities);
         scoredLeads.set(lead.id, score);
     }
 
     const topLeads = enrichment.getTopLeads(scoredLeads, limit);
 
+    const topLeadDetails = await Promise.all(
+        topLeads.map(async (item) => ({
+            lead: await crm.getLead(item.leadId),
+            score: item.score,
+        }))
+    );
+
     return c.json({
         success: true,
-        data: topLeads.map((item) => ({
-            lead: crm.getLead(item.leadId),
-            score: item.score,
-        })),
+        data: topLeadDetails,
     });
 });
 
@@ -351,7 +355,7 @@ app.post('/api/v1/campaigns/:campaignId/enroll', async (c) => {
     const campaignId = c.req.param('campaignId');
     const body = await c.req.json<{ leadId: string }>();
 
-    const lead = crm.getLead(body.leadId);
+    const lead = await crm.getLead(body.leadId);
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
     }
@@ -362,7 +366,7 @@ app.post('/api/v1/campaigns/:campaignId/enroll', async (c) => {
         return c.json({ success: false, error: 'Failed to enroll lead' }, 400);
     }
 
-    crm.recordActivity(body.leadId, {
+    await crm.recordActivity(body.leadId, {
         type: 'campaign_enrolled',
         description: `Enrolled in campaign`,
         data: { campaignId, enrollmentId: enrollment.id },
@@ -413,7 +417,7 @@ app.post('/api/v1/inbox/process', async (c) => {
 
     // If we identified the lead, update their record
     if (message.leadId) {
-        crm.recordActivity(message.leadId, {
+            await crm.recordActivity(message.leadId, {
             type: 'email_replied',
             description: `Reply received: ${message.classification}`,
             data: {
@@ -475,21 +479,21 @@ app.get('/api/v1/leads/:tenantId', async (c) => {
         search: c.req.query('search'),
     };
 
-    const leads = crm.filterLeads(tenantId, filters);
+    const leads = await crm.filterLeads(tenantId, filters);
 
     return c.json({ success: true, data: leads });
 });
 
 app.get('/api/v1/leads/detail/:leadId', async (c) => {
     const leadId = c.req.param('leadId');
-    const lead = crm.getLead(leadId);
+    const lead = await crm.getLead(leadId);
 
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
     }
 
-    const activities = crm.getLeadActivities(leadId, { limit: 20 });
-    const tasks = crm.getLeadTasks(leadId);
+    const activities = await crm.getLeadActivities(leadId, { limit: 20 });
+    const tasks = await crm.getLeadTasks(leadId);
     const enrollments = campaigns.getLeadEnrollments(leadId);
 
     return c.json({
@@ -507,7 +511,7 @@ app.patch('/api/v1/leads/:leadId', async (c) => {
     const leadId = c.req.param('leadId');
     const updates = await c.req.json();
 
-    const lead = crm.updateLead(leadId, updates);
+    const lead = await crm.updateLead(leadId, updates);
 
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
@@ -524,7 +528,7 @@ app.post('/api/v1/leads/:leadId/stage', async (c) => {
         return c.json({ success: false, error: 'Invalid pipeline stage' }, 400);
     }
 
-    const lead = crm.moveLeadToStage(leadId, body.stage, body.userId);
+    const lead = await crm.moveLeadToStage(leadId, body.stage, body.userId);
 
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
@@ -551,12 +555,12 @@ app.post('/api/v1/leads/:leadId/tasks', async (c) => {
         return c.json({ success: false, error: 'Invalid task priority' }, 400);
     }
 
-    const lead = crm.getLead(leadId);
+    const lead = await crm.getLead(leadId);
     if (!lead) {
         return c.json({ success: false, error: 'Lead not found' }, 404);
     }
 
-    const task = crm.createTask(leadId, lead.tenantId, {
+    const task = await crm.createTask(leadId, lead.tenantId, {
         title: body.title,
         description: body.description,
         type: body.type,
@@ -572,7 +576,7 @@ app.patch('/api/v1/tasks/:taskId/complete', async (c) => {
     const taskId = c.req.param('taskId');
     const body = await c.req.json<{ completedBy: string }>();
 
-    const task = crm.completeTask(taskId, body.completedBy);
+    const task = await crm.completeTask(taskId, body.completedBy);
 
     if (!task) {
         return c.json({ success: false, error: 'Task not found' }, 404);
@@ -584,12 +588,12 @@ app.patch('/api/v1/tasks/:taskId/complete', async (c) => {
 app.get('/api/v1/pipeline/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
 
-    let pipeline = crm.getPipeline(tenantId);
+    let pipeline = await crm.getPipeline(tenantId);
     if (!pipeline) {
-        pipeline = crm.createDefaultPipeline(tenantId);
+        pipeline = await crm.createDefaultPipeline(tenantId);
     }
 
-    const stats = crm.getPipelineStats(tenantId);
+    const stats = await crm.getPipelineStats(tenantId);
 
     return c.json({ success: true, data: { pipeline, stats } });
 });
@@ -642,7 +646,7 @@ app.post('/api/v1/calendar/book', async (c) => {
     }
 
     // Record activity
-    crm.recordActivity(body.leadId, {
+    await crm.recordActivity(body.leadId, {
         type: 'meeting_scheduled',
         description: `Meeting scheduled for ${slot.startTime.toISOString()}`,
         data: { slotId: slot.id, meetingType: slot.meetingType },
@@ -650,7 +654,7 @@ app.post('/api/v1/calendar/book', async (c) => {
     });
 
     // Move lead to demo scheduled stage
-    crm.moveLeadToStage(body.leadId, 'demo_scheduled');
+    await crm.moveLeadToStage(body.leadId, 'demo_scheduled');
 
     return c.json({ success: true, data: slot });
 });

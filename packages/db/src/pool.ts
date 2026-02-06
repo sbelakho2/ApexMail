@@ -103,7 +103,7 @@ class DatabasePool {
       idleTimeoutMs: config.idleTimeoutMs ?? DEFAULT_CONFIG.idleTimeoutMs!,
       connectionTimeoutMs: config.connectionTimeoutMs ?? DEFAULT_CONFIG.connectionTimeoutMs!,
       statementTimeoutMs: config.statementTimeoutMs ?? DEFAULT_CONFIG.statementTimeoutMs!,
-      ssl: config.ssl ?? (process.env['DB_SSL'] === 'true' ? { rejectUnauthorized: false } : undefined),
+      ssl: config.ssl ?? (process.env['DB_SSL'] === 'true' ? { rejectUnauthorized: process.env['DB_SSL_REJECT_UNAUTHORIZED'] !== 'false' } : undefined),
     };
     
     this.logger = getLogger().child({ component: 'db-pool' });

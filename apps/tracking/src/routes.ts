@@ -218,6 +218,28 @@ export function createRoutes(ctx: TrackingContext): Hono {
   const { db, redis, logger, codec, processor } = ctx;
   const app = new Hono();
 
+  // FIX-040: Rate limiting middleware using Redis sliding window
+  if (config.rateLimit.enabled) {
+    app.use('*', async (c, next) => {
+      const ip = getClientIP(c);
+      const key = `rl:tracking:${ip}`;
+      const now = Math.floor(Date.now() / 60000); // Current minute
+      const windowKey = `${key}:${now}`;
+      
+      const count = await redis.incr(windowKey);
+      if (count === 1) {
+        await redis.expire(windowKey, 120); // 2 min TTL (covers current + next window)
+      }
+      
+      if (count > config.rateLimit.maxRequestsPerMinute) {
+        logger.warn('Rate limit exceeded', { ip, count });
+        return c.json({ error: 'Rate limit exceeded' }, 429);
+      }
+      
+      return next();
+    });
+  }
+
   // CORS for pixel (needed for cross-origin image loading)
   app.use(`${config.tracking.pixel.path}/*`, cors({
     origin: '*',
@@ -317,10 +339,12 @@ export function createRoutes(ctx: TrackingContext): Hono {
     // Decode tracking data
     const data = codec.decode(trackingId);
     
-    // Determine redirect URL
-    let redirectUrl = originalUrl 
-      ? decodeURIComponent(originalUrl) 
-      : config.tracking.click.fallbackUrl;
+    // SECURITY FIX (FIX-041): Prefer the URL from inside the encrypted token
+    // over the query parameter, since the query param can be tampered with.
+    // The encrypted token's originalUrl is authoritative.
+    let redirectUrl = (data?.originalUrl)
+      ? data.originalUrl
+      : (originalUrl ? decodeURIComponent(originalUrl) : config.tracking.click.fallbackUrl);
 
     // SECURITY: Validate URL to prevent open redirect vulnerability
     // Without proper validation, attackers could use: /click/xxx?r=https://evil.com

@@ -8,7 +8,7 @@ import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
-import { sha256, timingSafeCompare } from '@apexmail/lib/crypto';
+import { verifyPassword } from '@apexmail/lib/crypto';
 import { SMTPServer, type SMTPServerSession, type SMTPServerAddress, type SMTPServerDataStream } from 'smtp-server';
 import { simpleParser, type ParsedMail, type AddressObject, type Headers } from 'mailparser';
 import { EmailAuthenticator, type AuthenticationResults } from '../auth/email-authentication.js';
@@ -406,9 +406,10 @@ export class InboundServer {
 
     const { tenant_id, password_hash } = row;
 
-    // SECURITY: Use timing-safe comparison to prevent timing attacks
-    const hash = sha256(password);
-    if (!timingSafeCompare(hash, password_hash)) {
+    // SECURITY: Use scrypt-based password verification (replaces weak SHA-256 hashing)
+    // scrypt is a memory-hard KDF resistant to GPU/ASIC brute-force attacks
+    const isValid = await verifyPassword(password, password_hash);
+    if (!isValid) {
       return { valid: false };
     }
 

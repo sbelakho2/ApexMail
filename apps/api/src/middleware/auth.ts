@@ -8,6 +8,7 @@ import type { AppEnv, AppContext } from '../app.js';
 import { ApiKeysRepository } from '@apexmail/db';
 import { ApiError } from './error-handler.js';
 import { createHmacSignature, timingSafeCompare } from '@apexmail/lib/crypto';
+import { isTokenBlacklisted } from './token-blacklist.js';
 
 interface JwtPayload {
   sub: string;       // User ID
@@ -55,6 +56,16 @@ export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
       if (!result.valid) {
         logger.warn('JWT authentication failed', { reason: result.reason });
         throw ApiError.unauthorized(`Invalid token: ${result.reason}`, 'INVALID_TOKEN');
+      }
+
+      // SECURITY FIX: Check server-side token blacklist for logged-out tokens
+      const tokenSignature = token.split('.')[2];
+      if (tokenSignature) {
+        const blacklisted = await isTokenBlacklisted(ctx.config, tokenSignature);
+        if (blacklisted) {
+          logger.warn('Rejected blacklisted token', { userId: result.payload!.sub });
+          throw ApiError.unauthorized('Token has been invalidated', 'TOKEN_REVOKED');
+        }
       }
 
       c.set('tenantId', result.payload!.tid);
@@ -213,9 +224,10 @@ export function createJwt(
   return `${headerB64}.${payloadB64}.${signature}`;
 }
 
-function parseExpiry(expiry: string): number {
+export function parseExpiry(expiry: string): number {
   const match = expiry.match(/^(\d+)([smhd])$/);
   if (!match || !match[1] || !match[2]) {
+    console.warn(`[Auth] Invalid token expiry format "${expiry}", defaulting to 1 hour. Expected format: <number><s|m|h|d>`);
     return 3600; // Default 1 hour
   }
 
@@ -232,6 +244,11 @@ function parseExpiry(expiry: string): number {
 }
 
 function getClientIp(c: { req: { header: (name: string) => string | undefined } }): string {
+  // Prefer the validated IP set by the trusted-proxy middleware
+  const validatedIp = c.req.header('X-Validated-Client-IP');
+  if (validatedIp) return validatedIp;
+
+  // Fallback: read proxy headers directly (less trustworthy)
   return (
     c.req.header('CF-Connecting-IP') ??
     c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ??

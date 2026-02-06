@@ -58,7 +58,7 @@ const mockCampaigns = [
         subject: '☀️ Summer Sale is HERE! Up to 50% off',
         status: 'sent' as const,
         listName: 'All Subscribers',
-        sentAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        sentAt: new Date(1737000000000 - 2 * 60 * 60 * 1000).toISOString(),
         stats: { sent: 12458, openRate: 28.4, clickRate: 4.2, bounceRate: 0.8 },
     },
     {
@@ -67,7 +67,7 @@ const mockCampaigns = [
         subject: 'This Week in Tech: AI Updates & More',
         status: 'sent' as const,
         listName: 'Newsletter',
-        sentAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        sentAt: new Date(1737000000000 - 24 * 60 * 60 * 1000).toISOString(),
         stats: { sent: 34521, openRate: 22.1, clickRate: 2.8, bounceRate: 1.2 },
     },
     {
@@ -76,7 +76,7 @@ const mockCampaigns = [
         subject: 'Something big is coming...',
         status: 'scheduled' as const,
         listName: 'VIP Customers',
-        scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        scheduledAt: new Date(1737000000000 + 24 * 60 * 60 * 1000).toISOString(),
         stats: { sent: 0, openRate: 0, clickRate: 0, bounceRate: 0 },
     },
     {
@@ -85,7 +85,7 @@ const mockCampaigns = [
         subject: 'We miss you! Come back for 20% off',
         status: 'sending' as const,
         listName: 'Inactive Users',
-        sentAt: new Date().toISOString(),
+        sentAt: new Date(1737000000000).toISOString(),
         stats: { sent: 4521, openRate: 18.5, clickRate: 1.9, bounceRate: 2.1 },
     },
     {
@@ -110,7 +110,7 @@ const mockCampaigns = [
         subject: 'Your 2024 Year in Review',
         status: 'paused' as const,
         listName: 'All Subscribers',
-        sentAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
+        sentAt: new Date(1737000000000 - 5 * 24 * 60 * 60 * 1000).toISOString(),
         stats: { sent: 8234, openRate: 15.2, clickRate: 1.1, bounceRate: 0.9 },
     },
 ];

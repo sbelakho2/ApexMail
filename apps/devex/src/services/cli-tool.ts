@@ -52,7 +52,7 @@ export class CliToolService {
         { flag: '--profile <name>', description: 'Profile name for multiple accounts', required: false, type: 'string', defaultValue: 'default' },
       ],
       examples: [
-        'apexmail configure --api-key apx_live_abc123',
+        'apexmail configure --api-key am_live_abc123',
         'apexmail configure --profile production',
       ],
       action: 'configure',

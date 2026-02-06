@@ -3,13 +3,18 @@
 //! Authenticated SMTP submission server on port 587 for sending emails.
 //! This is the entry point for users/applications to submit emails for delivery.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::fs::File;
+use std::io::BufReader as StdBufReader;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::{self, pki_types::PrivateKeyDer};
+use rustls_pemfile::{certs, private_key};
 
 mod auth;
 mod session;
@@ -43,6 +48,14 @@ struct Args {
     /// Enable STARTTLS
     #[arg(long, default_value = "true")]
     enable_starttls: bool,
+
+    /// TLS certificate path (PEM)
+    #[arg(long, env = "TLS_CERT_PATH")]
+    tls_cert_path: Option<String>,
+
+    /// TLS private key path (PEM)
+    #[arg(long, env = "TLS_KEY_PATH")]
+    tls_key_path: Option<String>,
 }
 
 /// Server state shared across connections
@@ -52,6 +65,33 @@ pub struct ServerState {
     pub enable_starttls: bool,
     pub outbound_url: String,
     pub db_pool: sqlx::PgPool,
+    pub tls_acceptor: Option<TlsAcceptor>,
+}
+
+fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
+    let cert_file = File::open(cert_path)
+        .map_err(|e| anyhow!("Failed to open TLS cert file: {}", e))?;
+    let mut cert_reader = StdBufReader::new(cert_file);
+    let certs = certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("Failed to read TLS certs: {}", e))?;
+    if certs.is_empty() {
+        return Err(anyhow!("No TLS certificates found"));
+    }
+
+    let key_file = File::open(key_path)
+        .map_err(|e| anyhow!("Failed to open TLS key file: {}", e))?;
+    let mut key_reader = StdBufReader::new(key_file);
+    let key: PrivateKeyDer<'static> = private_key(&mut key_reader)
+        .map_err(|e| anyhow!("Failed to read TLS private key: {}", e))?
+        .ok_or_else(|| anyhow!("No TLS private key found"))?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow!("Invalid TLS config: {}", e))?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 #[tokio::main]
@@ -77,6 +117,18 @@ async fn main() -> Result<()> {
     // Connect to database
     let db_pool = sqlx::PgPool::connect(&args.database_url).await?;
     info!("Connected to database");
+
+    let tls_acceptor = if args.enable_starttls {
+        let cert_path = args.tls_cert_path.clone().ok_or_else(|| {
+            anyhow!("TLS_CERT_PATH is required when STARTTLS is enabled")
+        })?;
+        let key_path = args.tls_key_path.clone().ok_or_else(|| {
+            anyhow!("TLS_KEY_PATH is required when STARTTLS is enabled")
+        })?;
+        Some(load_tls_acceptor(&cert_path, &key_path)?)
+    } else {
+        None
+    };
     
     // Create server state
     let state = Arc::new(ServerState {
@@ -85,6 +137,7 @@ async fn main() -> Result<()> {
         enable_starttls: args.enable_starttls,
         outbound_url: args.outbound_url,
         db_pool,
+        tls_acceptor,
     });
     
     // Bind to address

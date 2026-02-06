@@ -229,32 +229,51 @@ export class CircuitBreaker {
 }
 
 /**
- * Factory for creating circuit breakers with shared Redis instance
+ * Factory for creating circuit breakers with shared Redis instance.
+ * Includes LRU eviction to prevent unbounded memory growth.
  */
 export class CircuitBreakerFactory {
   private readonly redis: Redis;
   private readonly breakers: Map<string, CircuitBreaker> = new Map();
   private readonly defaultConfig: Partial<Omit<CircuitBreakerConfig, 'name'>>;
+  private readonly maxSize: number;
 
-  constructor(redis: Redis, defaultConfig?: Partial<Omit<CircuitBreakerConfig, 'name'>>) {
+  constructor(redis: Redis, defaultConfig?: Partial<Omit<CircuitBreakerConfig, 'name'>>, maxSize: number = 10000) {
     this.redis = redis;
     this.defaultConfig = defaultConfig || {};
+    this.maxSize = maxSize;
   }
 
   /**
-   * Get or create a circuit breaker for a given name
+   * Get or create a circuit breaker for a given name.
+   * Uses LRU eviction: oldest entries removed when maxSize is exceeded.
    */
   get(name: string, config?: Partial<Omit<CircuitBreakerConfig, 'name'>>): CircuitBreaker {
     let breaker = this.breakers.get(name);
 
-    if (!breaker) {
-      breaker = new CircuitBreaker(this.redis, {
-        name,
-        ...this.defaultConfig,
-        ...config,
-      });
+    if (breaker) {
+      // Move to end (most recently used) by re-inserting
+      this.breakers.delete(name);
       this.breakers.set(name, breaker);
+      return breaker;
     }
+
+    // Evict oldest entries if at capacity
+    while (this.breakers.size >= this.maxSize) {
+      const oldestKey = this.breakers.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.breakers.delete(oldestKey);
+      } else {
+        break;
+      }
+    }
+
+    breaker = new CircuitBreaker(this.redis, {
+      name,
+      ...this.defaultConfig,
+      ...config,
+    });
+    this.breakers.set(name, breaker);
 
     return breaker;
   }

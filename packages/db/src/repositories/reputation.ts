@@ -57,10 +57,20 @@ export class ReputationRepository {
     // Daily Stats
     // -------------------------------------------------------------------------
 
+    // Allowed column names for incrementStat — prevents SQL injection at runtime
+    private static readonly ALLOWED_STAT_COLUMNS = new Set<string>([
+        'sent', 'delivered', 'bounces', 'complaints', 'opens', 'clicks', 'unsubscribes',
+    ]);
+
     /**
      * Increment stats for a specific metric
      */
     async incrementStat(tenantId: string, metric: keyof Omit<ReputationStats, 'tenantId' | 'date'>): Promise<void> {
+        // Runtime whitelist check to prevent SQL injection via dynamic column name
+        if (!ReputationRepository.ALLOWED_STAT_COLUMNS.has(metric)) {
+            throw new Error(`Invalid metric column: ${metric}`);
+        }
+
         const today = new Date().toISOString().split('T')[0];
         
         await this.pool.query(

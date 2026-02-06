@@ -2,14 +2,14 @@ import * as React from 'react';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
-const cardVariants = cva('rounded-md border bg-card text-card-foreground transition-all duration-300', {
+const cardVariants = cva('rounded-lg border bg-card text-card-foreground transition-all duration-150 ease-out', {
   variants: {
     variant: {
-      default: 'border-border shadow-sm',
+      default: 'border-border shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)]',
       ghost: 'border-transparent shadow-none',
       premium: 'premium-card border-border',
       outline: 'border-border bg-transparent',
-      elevated: 'border-border shadow-md hover:shadow-lg',
+      elevated: 'border-border shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)] hover:shadow-[0_14px_40px_rgba(15,23,42,0.08)]',
       inset: 'border-border bg-muted/30 shadow-inner',
     },
     padding: {
@@ -21,7 +21,7 @@ const cardVariants = cva('rounded-md border bg-card text-card-foreground transit
       xl: 'p-8', // var(--space-8)
     },
     interactive: {
-      true: 'cursor-pointer hover:border-primary/30 hover:bg-muted/50 active:scale-[0.99] shadow-sm hover:shadow-md',
+      true: 'cursor-pointer hover:border-primary/30 hover:bg-muted/50 active:scale-[0.99] shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)] hover:shadow-[0_14px_40px_rgba(15,23,42,0.08)]',
       false: '',
     },
   },

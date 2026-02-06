@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatDate, cn } from '../../lib/utils';
 
 /**
@@ -82,14 +82,65 @@ export default function SettingsPage() {
         backupRetentionDays: 30,
         drEnabled: true,
         drRegion: 'us-west-2',
-        lastBackup: new Date(Date.now() - 3600000).toISOString(),
+        lastBackup: new Date(1737000000000 - 3600000).toISOString(),
     });
+
+    // Refs for timeout cleanup (Fix 38)
+    const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // Cleanup timeouts on unmount (Fix 38)
+    useEffect(() => {
+        return () => {
+            if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+            if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+        };
+    }, []);
+
+    // Load saved settings from localStorage on mount (Fix 39)
+    useEffect(() => {
+        try {
+            const saved = localStorage.getItem('control-plane-settings');
+            if (saved) {
+                const data = JSON.parse(saved);
+                if (data.ipWhitelist) setIpWhitelist(data.ipWhitelist);
+                if (data.mfaRequired !== undefined) setMfaRequired(data.mfaRequired);
+                if (data.sessionTimeout) setSessionTimeout(data.sessionTimeout);
+                if (data.emailConfig) setEmailConfig(prev => ({ ...prev, ...data.emailConfig }));
+                if (data.tenantDefaults) setTenantDefaults(prev => ({ ...prev, ...data.tenantDefaults }));
+                if (data.complianceConfig) setComplianceConfig(prev => ({ ...prev, ...data.complianceConfig }));
+                if (data.backupConfig) setBackupConfig(prev => ({ ...prev, ...data.backupConfig }));
+            }
+        } catch {
+            // Ignore invalid localStorage data
+        }
+    }, []);
 
     function save() {
         setSaveStatus('saving');
-        setTimeout(() => {
+
+        // Persist settings to localStorage (Fix 39)
+        try {
+            const settingsData = {
+                ipWhitelist,
+                mfaRequired,
+                sessionTimeout,
+                emailConfig,
+                tenantDefaults,
+                complianceConfig,
+                backupConfig: { ...backupConfig, lastBackup: backupConfig.lastBackup },
+            };
+            localStorage.setItem('control-plane-settings', JSON.stringify(settingsData));
+        } catch {
+            // localStorage might be full or unavailable
+        }
+
+        // In production: POST to /api/settings endpoint
+        // fetch('/api/autopilot/settings', { method: 'PUT', body: JSON.stringify(settingsData) })
+
+        saveTimerRef.current = setTimeout(() => {
             setSaveStatus('saved');
-            setTimeout(() => setSaveStatus('idle'), 2000);
+            resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
         }, 1000);
     }
 
@@ -108,8 +159,8 @@ export default function SettingsPage() {
         <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-6">
                 <div>
-                    <h1 className="text-2xl font-bold text-surface-900">Platform Settings</h1>
-                    <p className="text-surface-600 mt-1">
+                    <h1 className="text-2xl font-bold text-foreground">Platform Settings</h1>
+                    <p className="text-muted-foreground mt-1">
                         Configure your SaaS platform settings
                     </p>
                 </div>
@@ -118,9 +169,9 @@ export default function SettingsPage() {
                     disabled={saveStatus !== 'idle'}
                     className={cn(
                         'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-                        saveStatus === 'idle' && 'bg-blue-600 text-white hover:bg-blue-700',
-                        saveStatus === 'saving' && 'bg-surface-400 text-white cursor-not-allowed',
-                        saveStatus === 'saved' && 'bg-emerald-600 text-white'
+                        saveStatus === 'idle' && 'bg-primary text-primary-foreground hover:bg-primary/90',
+                        saveStatus === 'saving' && 'bg-muted text-muted-foreground cursor-not-allowed',
+                        saveStatus === 'saved' && 'bg-success text-success-foreground'
                     )}
                 >
                     {saveStatus === 'idle' && '💾 Save Changes'}
@@ -140,14 +191,14 @@ export default function SettingsPage() {
                                 className={cn(
                                     'flex items-center gap-2 lg:gap-3 px-3 lg:px-4 py-2 lg:py-3 rounded-lg text-left transition-colors whitespace-nowrap lg:whitespace-normal flex-shrink-0 lg:flex-shrink lg:w-full',
                                     activeSection === section.id
-                                        ? 'bg-blue-50 text-blue-700 font-medium'
-                                        : 'text-surface-600 hover:bg-surface-50 hover:text-surface-900'
+                                        ? 'bg-primary/10 text-primary font-medium'
+                                        : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                                 )}
                             >
                                 <span className="text-lg lg:text-xl">{section.icon}</span>
                                 <div>
-                                    <div className={cn("text-sm lg:text-base font-medium", activeSection !== section.id && "text-surface-700")}>{section.title}</div>
-                                    <div className="hidden lg:block text-xs text-surface-500">{section.description}</div>
+                                    <div className={cn("text-sm lg:text-base font-medium", activeSection !== section.id && "text-foreground")}>{section.title}</div>
+                                    <div className="hidden lg:block text-xs text-muted-foreground">{section.description}</div>
                                 </div>
                             </button>
                         ))}
@@ -155,29 +206,29 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Settings Content */}
-                <div className="flex-1 bg-surface-0 rounded-xl border border-surface-200 p-6 shadow-sm">
+                <div className="flex-1 bg-card rounded-xl border border-border p-6 shadow-sm">
                     {/* Access Control */}
                     {activeSection === 'access' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-bold text-surface-900">Access Control</h2>
+                            <h2 className="text-lg font-bold text-foreground">Access Control</h2>
                             
                             {/* IP Whitelist */}
                             <div>
-                                <label className="block text-sm font-medium text-surface-700 mb-2">
+                                <label className="block text-sm font-medium text-foreground mb-2">
                                     IP Whitelist
                                 </label>
-                                <p className="text-sm text-surface-500 mb-3">
+                                <p className="text-sm text-muted-foreground mb-3">
                                     Only allow access from these IP addresses or CIDR ranges
                                 </p>
                                 <div className="space-y-2 mb-3">
                                     {ipWhitelist.map(ip => (
                                         <div key={ip} className="flex items-center gap-2">
-                                            <code className="flex-1 px-3 py-2 bg-surface-50 rounded-lg text-sm font-mono text-surface-600 border border-surface-100">
+                                            <code className="flex-1 px-3 py-2 bg-muted/50 rounded-lg text-sm font-mono text-muted-foreground border border-border">
                                                 {ip}
                                             </code>
                                             <button
                                                 onClick={() => removeIp(ip)}
-                                                className="px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg font-medium transition-colors"
+                                                className="px-3 py-2 text-destructive hover:bg-destructive/10 rounded-lg font-medium transition-colors"
                                             >
                                                 Remove
                                             </button>
@@ -190,11 +241,11 @@ export default function SettingsPage() {
                                         value={newIp}
                                         onChange={(e) => setNewIp(e.target.value)}
                                         placeholder="10.0.0.0/8 or 192.168.1.1"
-                                        className="flex-1 px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="flex-1 px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                     <button
                                         onClick={addIp}
-                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors"
+                                        className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors"
                                     >
                                         Add IP
                                     </button>
@@ -202,10 +253,10 @@ export default function SettingsPage() {
                             </div>
 
                             {/* MFA */}
-                            <div className="flex items-center justify-between py-4 border-t border-surface-100">
+                            <div className="flex items-center justify-between py-4 border-t border-border">
                                 <div>
-                                    <div className="font-medium text-surface-900">Require MFA</div>
-                                    <div className="text-sm text-surface-500">
+                                    <div className="font-medium text-foreground">Require MFA</div>
+                                    <div className="text-sm text-muted-foreground">
                                         All control plane users must use two-factor authentication
                                     </div>
                                 </div>
@@ -213,19 +264,19 @@ export default function SettingsPage() {
                                     onClick={() => setMfaRequired(!mfaRequired)}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
-                                        mfaRequired ? 'bg-blue-600' : 'bg-surface-300'
+                                        mfaRequired ? 'bg-primary' : 'bg-muted'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
+                                        'absolute top-1 w-5 h-5 bg-background rounded-full shadow-sm transition-transform',
                                         mfaRequired ? 'left-8' : 'left-1'
                                     )} />
                                 </button>
                             </div>
 
                             {/* Session Timeout */}
-                            <div className="py-4 border-t border-surface-100">
-                                <label className="block font-medium text-surface-900 mb-2">
+                            <div className="py-4 border-t border-border">
+                                <label className="block font-medium text-foreground mb-2">
                                     Session Timeout
                                 </label>
                                 <div className="flex items-center gap-2">
@@ -233,9 +284,9 @@ export default function SettingsPage() {
                                         type="number"
                                         value={sessionTimeout}
                                         onChange={(e) => setSessionTimeout(Number(e.target.value))}
-                                        className="w-24 px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-24 px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
-                                    <span className="text-surface-500">minutes of inactivity</span>
+                                    <span className="text-muted-foreground">minutes of inactivity</span>
                                 </div>
                             </div>
                         </div>
@@ -244,17 +295,17 @@ export default function SettingsPage() {
                     {/* Integrations */}
                     {activeSection === 'integrations' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-bold text-surface-900">Integrations</h2>
+                            <h2 className="text-lg font-bold text-foreground">Integrations</h2>
                             <div className="space-y-4">
                                 {integrations.map(integration => (
-                                    <div key={integration.id} className="flex items-center justify-between py-4 border-b border-surface-100 last:border-0">
+                                    <div key={integration.id} className="flex items-center justify-between py-4 border-b border-border last:border-0">
                                         <div className="flex items-center gap-3">
                                             <span className="text-2xl">{integration.icon}</span>
                                             <div>
-                                                <div className="font-medium text-surface-900">{integration.name}</div>
+                                                <div className="font-medium text-foreground">{integration.name}</div>
                                                 <div className={cn(
                                                     'text-sm',
-                                                    integration.status === 'connected' ? 'text-emerald-600' : 'text-surface-400'
+                                                    integration.status === 'connected' ? 'text-success' : 'text-muted-foreground'
                                                 )}>
                                                     {integration.status === 'connected' ? '✓ Connected' : 'Not connected'}
                                                 </div>
@@ -263,8 +314,8 @@ export default function SettingsPage() {
                                         <button className={cn(
                                             'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                                             integration.status === 'connected'
-                                                ? 'bg-surface-100 text-surface-700 hover:bg-surface-200'
-                                                : 'bg-blue-600 text-white hover:bg-blue-700'
+                                                ? 'bg-muted text-foreground hover:bg-muted/80'
+                                                : 'bg-primary text-primary-foreground hover:bg-primary/90'
                                         )}>
                                             {integration.status === 'connected' ? 'Configure' : 'Connect'}
                                         </button>
@@ -277,59 +328,59 @@ export default function SettingsPage() {
                     {/* Email Configuration */}
                     {activeSection === 'email' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-bold text-surface-900">Email Configuration</h2>
+                            <h2 className="text-lg font-bold text-foreground">Email Configuration</h2>
                             
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Default Daily Send Limit
                                     </label>
                                     <input
                                         type="number"
                                         value={emailConfig.defaultDailyLimit}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, defaultDailyLimit: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Max Bounce Rate (%)
                                     </label>
                                     <input
                                         type="number"
                                         value={emailConfig.maxBounceRate}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, maxBounceRate: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Default From Name
                                     </label>
                                     <input
                                         type="text"
                                         value={emailConfig.defaultFromName}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, defaultFromName: e.target.value })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Reply-To Address
                                     </label>
                                     <input
                                         type="email"
                                         value={emailConfig.replyToAddress}
                                         onChange={(e) => setEmailConfig({ ...emailConfig, replyToAddress: e.target.value })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
 
-                            <div className="flex items-center justify-between py-4 border-t border-surface-100">
+                            <div className="flex items-center justify-between py-4 border-t border-border">
                                 <div>
-                                    <div className="font-medium text-surface-900">Domain Warmup</div>
-                                    <div className="text-sm text-surface-500">
+                                    <div className="font-medium text-foreground">Domain Warmup</div>
+                                    <div className="text-sm text-muted-foreground">
                                         Gradually increase sending volume for new domains
                                     </div>
                                 </div>
@@ -337,11 +388,11 @@ export default function SettingsPage() {
                                     onClick={() => setEmailConfig({ ...emailConfig, warmupEnabled: !emailConfig.warmupEnabled })}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
-                                        emailConfig.warmupEnabled ? 'bg-blue-600' : 'bg-surface-300'
+                                        emailConfig.warmupEnabled ? 'bg-primary' : 'bg-muted'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
+                                        'absolute top-1 w-5 h-5 bg-background rounded-full shadow-sm transition-transform',
                                         emailConfig.warmupEnabled ? 'left-8' : 'left-1'
                                     )} />
                                 </button>
@@ -352,17 +403,17 @@ export default function SettingsPage() {
                     {/* Tenant Defaults */}
                     {activeSection === 'tenants' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-bold text-surface-900">Tenant Defaults</h2>
+                            <h2 className="text-lg font-bold text-foreground">Tenant Defaults</h2>
                             
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Default Plan
                                     </label>
                                     <select
                                         value={tenantDefaults.defaultPlan}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, defaultPlan: e.target.value })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     >
                                         <option value="free">Free</option>
                                         <option value="starter">Starter</option>
@@ -371,36 +422,36 @@ export default function SettingsPage() {
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Trial Days
                                     </label>
                                     <input
                                         type="number"
                                         value={tenantDefaults.trialDays}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, trialDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Default Max Users
                                     </label>
                                     <input
                                         type="number"
                                         value={tenantDefaults.maxUsersDefault}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, maxUsersDefault: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Default Max Emails/Month
                                     </label>
                                     <input
                                         type="number"
                                         value={tenantDefaults.maxEmailsDefault}
                                         onChange={(e) => setTenantDefaults({ ...tenantDefaults, maxEmailsDefault: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
@@ -410,34 +461,34 @@ export default function SettingsPage() {
                     {/* Compliance */}
                     {activeSection === 'compliance' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-bold text-surface-900">Compliance Settings</h2>
+                            <h2 className="text-lg font-bold text-foreground">Compliance Settings</h2>
                             
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Data Retention (days)
                                     </label>
                                     <input
                                         type="number"
                                         value={complianceConfig.dataRetentionDays}
                                         onChange={(e) => setComplianceConfig({ ...complianceConfig, dataRetentionDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Audit Log Retention (days)
                                     </label>
                                     <input
                                         type="number"
                                         value={complianceConfig.auditLogRetentionDays}
                                         onChange={(e) => setComplianceConfig({ ...complianceConfig, auditLogRetentionDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
 
-                            <div className="space-y-4 pt-4 border-t border-surface-100">
+                            <div className="space-y-4 pt-4 border-t border-border">
                                 {[
                                     { key: 'gdprAutoDelete', label: 'GDPR Auto-Delete', desc: 'Automatically delete data upon GDPR request completion' },
                                     { key: 'hipaaMode', label: 'HIPAA Mode', desc: 'Enable HIPAA-compliant data handling' },
@@ -445,8 +496,8 @@ export default function SettingsPage() {
                                 ].map(item => (
                                     <div key={item.key} className="flex items-center justify-between py-2">
                                         <div>
-                                            <div className="font-medium text-surface-900">{item.label}</div>
-                                            <div className="text-sm text-surface-500">{item.desc}</div>
+                                            <div className="font-medium text-foreground">{item.label}</div>
+                                            <div className="text-sm text-muted-foreground">{item.desc}</div>
                                         </div>
                                         <button
                                             onClick={() => setComplianceConfig({
@@ -455,11 +506,11 @@ export default function SettingsPage() {
                                             })}
                                             className={cn(
                                                 'relative w-14 h-7 rounded-full transition-colors',
-                                                complianceConfig[item.key as keyof typeof complianceConfig] ? 'bg-blue-600' : 'bg-surface-300'
+                                                complianceConfig[item.key as keyof typeof complianceConfig] ? 'bg-primary' : 'bg-muted'
                                             )}
                                         >
                                             <div className={cn(
-                                                'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
+                                                'absolute top-1 w-5 h-5 bg-background rounded-full shadow-sm transition-transform',
                                                 complianceConfig[item.key as keyof typeof complianceConfig] ? 'left-8' : 'left-1'
                                             )} />
                                         </button>
@@ -472,10 +523,10 @@ export default function SettingsPage() {
                     {/* Backup & Recovery */}
                     {activeSection === 'backup' && (
                         <div className="space-y-6">
-                            <h2 className="text-lg font-bold text-surface-900">Backup & Recovery</h2>
+                            <h2 className="text-lg font-bold text-foreground">Backup & Recovery</h2>
                             
-                            <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-6">
-                                <div className="flex items-center gap-2 text-emerald-700">
+                            <div className="bg-success/10 border border-success/20 rounded-lg p-4 mb-6">
+                                <div className="flex items-center gap-2 text-success">
                                     <span>✓</span>
                                     <span className="font-medium">Last backup: {formatDate(backupConfig.lastBackup)}</span>
                                 </div>
@@ -483,13 +534,13 @@ export default function SettingsPage() {
 
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Backup Frequency
                                     </label>
                                     <select
                                         value={backupConfig.backupFrequency}
                                         onChange={(e) => setBackupConfig({ ...backupConfig, backupFrequency: e.target.value })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     >
                                         <option value="hourly">Hourly</option>
                                         <option value="daily">Daily</option>
@@ -497,22 +548,22 @@ export default function SettingsPage() {
                                     </select>
                                 </div>
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         Retention (days)
                                     </label>
                                     <input
                                         type="number"
                                         value={backupConfig.backupRetentionDays}
                                         onChange={(e) => setBackupConfig({ ...backupConfig, backupRetentionDays: Number(e.target.value) })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
                                 </div>
                             </div>
 
-                            <div className="flex items-center justify-between py-4 border-t border-surface-100">
+                            <div className="flex items-center justify-between py-4 border-t border-border">
                                 <div>
-                                    <div className="font-medium text-surface-900">Disaster Recovery</div>
-                                    <div className="text-sm text-surface-500">
+                                    <div className="font-medium text-foreground">Disaster Recovery</div>
+                                    <div className="text-sm text-muted-foreground">
                                         Enable cross-region replication for disaster recovery
                                     </div>
                                 </div>
@@ -520,11 +571,11 @@ export default function SettingsPage() {
                                     onClick={() => setBackupConfig({ ...backupConfig, drEnabled: !backupConfig.drEnabled })}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
-                                        backupConfig.drEnabled ? 'bg-blue-600' : 'bg-surface-300'
+                                        backupConfig.drEnabled ? 'bg-primary' : 'bg-muted'
                                     )}
                                 >
                                     <div className={cn(
-                                        'absolute top-1 w-5 h-5 bg-surface-0 rounded-full shadow-sm transition-transform',
+                                        'absolute top-1 w-5 h-5 bg-background rounded-full shadow-sm transition-transform',
                                         backupConfig.drEnabled ? 'left-8' : 'left-1'
                                     )} />
                                 </button>
@@ -532,13 +583,13 @@ export default function SettingsPage() {
 
                             {backupConfig.drEnabled && (
                                 <div>
-                                    <label className="block text-sm font-medium text-surface-700 mb-2">
+                                    <label className="block text-sm font-medium text-foreground mb-2">
                                         DR Region
                                     </label>
                                     <select
                                         value={backupConfig.drRegion}
                                         onChange={(e) => setBackupConfig({ ...backupConfig, drRegion: e.target.value })}
-                                        className="w-full px-3 py-2 border border-surface-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     >
                                         <option value="us-east-1">US East (N. Virginia)</option>
                                         <option value="us-west-2">US West (Oregon)</option>
@@ -548,14 +599,14 @@ export default function SettingsPage() {
                                 </div>
                             )}
 
-                            <div className="flex gap-2 pt-4 border-t border-surface-100">
-                                <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 font-medium transition-colors">
+                            <div className="flex gap-2 pt-4 border-t border-border">
+                                <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
                                     🔄 Run Backup Now
                                 </button>
-                                <button className="px-4 py-2 bg-surface-100 text-surface-700 rounded-lg text-sm hover:bg-surface-200 font-medium transition-colors">
+                                <button className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">
                                     📋 View Backup History
                                 </button>
-                                <button className="px-4 py-2 bg-amber-100 text-amber-700 rounded-lg text-sm hover:bg-amber-200 font-medium transition-colors">
+                                <button className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
                                     ⚠️ Test DR Failover
                                 </button>
                             </div>

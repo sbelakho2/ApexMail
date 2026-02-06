@@ -76,8 +76,8 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
     }
 
     // Validate API key and get tenant
-    // For sandbox keys (apx_test_*), validate with sandbox service
-    // For production keys (apx_live_*), validate with main auth service
+    // For sandbox keys (am_test_*), validate with sandbox service
+    // For production keys (am_live_*), validate with main auth service
     
     // In a real implementation, this would validate the key
     // For now, we'll extract a tenant ID from the key format
@@ -249,11 +249,11 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
  * Extract tenant ID from API key
  */
 function extractTenantFromKey(apiKey: string): string | null {
-  // API key format: apx_{env}_{tenantPrefix}_{secret}
+  // API key format: am_{env}_{tenantPrefix}_{secret}
   // env: live or test
   // tenantPrefix: first 8 chars of tenant ID
   
-  if (!apiKey.startsWith('apx_live_') && !apiKey.startsWith('apx_test_')) {
+  if (!apiKey.startsWith('am_live_') && !apiKey.startsWith('am_test_')) {
     return null;
   }
 

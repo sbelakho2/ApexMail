@@ -16,7 +16,7 @@ export function PrivateCloudHero() {
           animate={{ opacity: 1, y: 0 }}
           className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6"
         >
-          <Cloud className="w-3.5 h-3.5" />
+          <Cloud className="w-4 h-4" />
           Private Cloud
         </motion.div>
 
@@ -51,13 +51,13 @@ export function PrivateCloudHero() {
  >
  <Link
  href="/contact/enterprise"
- className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors"
  >
  Request Demo
  </Link>
  <Link
  href="/docs/private-cloud"
- className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors"
+ className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
  >
  View Architecture
  </Link>
@@ -90,19 +90,19 @@ export function PrivateCloudHero() {
  transition={{ delay: 0.2 }}
  className="relative"
  >
- <div className="bg-white rounded-xl border border-surface-200 p-8 shadow-sm">
+ <div className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm">
  {/* VPC Diagram */}
  <div className="text-xs font-semibold text-surface-500 mb-6 text-center">Cloud VPC Architecture</div>
  
  <div className="relative bg-surface-50/50 rounded-lg p-6 border border-surface-200">
  {/* VPC Label */}
- <div className="absolute -top-3 left-4 px-2 bg-white border border-surface-200 rounded text-[10px] font-medium text-surface-600">
+ <div className="absolute -top-3 left-4 px-2 bg-white border border-surface-200 rounded text-xs font-medium text-surface-600">
  vpc-production
  </div>
 
  {/* Private Subnet */}
  <div className="bg-white rounded p-4 border border-dashed border-surface-300 mb-4 ">
- <div className="text-[10px] font-medium text-surface-500 mb-3 text-center">Private Subnet (10.0.1.0/24)</div>
+ <div className="text-xs font-medium text-surface-500 mb-3 text-center">Private Subnet (10.0.1.0/24)</div>
  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
  {[
  { icon: Server, label: 'API Cluster', count: '3x' },
@@ -111,8 +111,8 @@ export function PrivateCloudHero() {
  ].map((item) => (
  <div key={item.label} className="bg-surface-50 rounded p-3 text-center border border-surface-100">
  <item.icon className="w-5 h-5 text-surface-900 mx-auto mb-1.5" strokeWidth={1.5} />
- <div className="text-[10px] font-medium text-surface-900">{item.label}</div>
- <div className="text-[10px] text-surface-500">{item.count}</div>
+ <div className="text-xs font-medium text-surface-900">{item.label}</div>
+ <div className="text-xs text-surface-500">{item.count}</div>
  </div>
  ))}
  </div>
@@ -120,7 +120,7 @@ export function PrivateCloudHero() {
 
  {/* Public Subnet */}
  <div className="bg-white rounded p-4 border border-dashed border-surface-300 ">
- <div className="text-[10px] font-medium text-surface-500 mb-3 text-center">Public Subnet (10.0.0.0/24)</div>
+ <div className="text-xs font-medium text-surface-500 mb-3 text-center">Public Subnet (10.0.0.0/24)</div>
  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
  {[
  { icon: Shield, label: 'Load Balancer' },
@@ -128,7 +128,7 @@ export function PrivateCloudHero() {
  ].map((item) => (
  <div key={item.label} className="bg-surface-50 rounded p-3 text-center border border-surface-100">
  <item.icon className="w-5 h-5 text-surface-900 mx-auto mb-1.5" strokeWidth={1.5} />
- <div className="text-[10px] font-medium text-surface-900">{item.label}</div>
+ <div className="text-xs font-medium text-surface-900">{item.label}</div>
  </div>
  ))}
  </div>

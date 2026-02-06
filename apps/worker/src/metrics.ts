@@ -52,7 +52,7 @@ export class MetricsServer {
     this.registerGauge('apexmail_analytics_processor_active_jobs', 'Number of active analytics processing jobs');
 
     // System metrics
-    this.registerGauge('apexmail_process_cpu_seconds_total', 'Total CPU time spent');
+    this.registerCounter('apexmail_process_cpu_seconds_total', 'Total CPU time spent');
     this.registerGauge('apexmail_process_resident_memory_bytes', 'Resident memory size in bytes');
     this.registerGauge('apexmail_process_heap_bytes', 'Node.js heap size in bytes');
     this.registerGauge('apexmail_process_uptime_seconds', 'Process uptime in seconds');
@@ -150,7 +150,7 @@ export class MetricsServer {
     const memUsage = process.memoryUsage();
     const cpuUsage = process.cpuUsage();
 
-    this.setGauge('apexmail_process_cpu_seconds_total', 
+    this.setCounter('apexmail_process_cpu_seconds_total', 
       (cpuUsage.user + cpuUsage.system) / 1000000);
     this.setGauge('apexmail_process_resident_memory_bytes', memUsage.rss);
     this.setGauge('apexmail_process_heap_bytes', memUsage.heapUsed);
@@ -211,6 +211,17 @@ export class MetricsServer {
     const labelKey = labels ? this.formatLabels(labels) : '';
     const current = metric.values?.get(labelKey) ?? 0;
     metric.values?.set(labelKey, current + value);
+  }
+
+  setCounter(name: string, value: number, labels?: Record<string, string>): void {
+    const metric = this.metrics.get(name);
+    if (!metric || metric.type !== 'counter') return;
+
+    const labelKey = labels ? this.formatLabels(labels) : '';
+    if (!metric.values) {
+      metric.values = new Map();
+    }
+    metric.values.set(labelKey, value);
   }
 
   setGauge(name: string, value: number, labels?: Record<string, string>): void {

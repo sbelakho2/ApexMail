@@ -39,6 +39,9 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default('*'),
   CORS_CREDENTIALS: z.enum(['true', 'false', '1', '0']).default('true'),
   
+  // Trusted proxies (comma-separated IPs/CIDRs that are allowed to set X-Forwarded-For)
+  TRUSTED_PROXIES: z.string().default('127.0.0.1,::1'),
+  
   // Idempotency
   IDEMPOTENCY_TTL_SECONDS: z.string().transform(Number).pipe(z.number().min(1)).default('86400'),
   
@@ -87,6 +90,8 @@ export interface Config {
     credentials: boolean;
   };
   
+  trustedProxies: string[];
+  
   idempotency: {
     ttlSeconds: number;
   };
@@ -132,6 +137,14 @@ export function loadConfig(): Config {
   
   // SECURITY: Additional validation for production secrets
   if (!isDev) {
+    // SECURITY FIX: Reject wildcard CORS origin in production
+    if (validated.CORS_ORIGINS === '*') {
+      throw new Error(
+        'SECURITY: CORS_ORIGINS cannot be "*" in production. ' +
+        'Set CORS_ORIGINS to a comma-separated list of allowed origins (e.g., "https://app.apexmail.com,https://admin.apexmail.com").'
+      );
+    }
+
     const devDefaultValues = Object.values(devDefaults);
     
     if (devDefaultValues.includes(validated.JWT_SECRET)) {
@@ -192,6 +205,8 @@ export function loadConfig(): Config {
       origins: validated.CORS_ORIGINS.split(',').map(s => s.trim()),
       credentials: validated.CORS_CREDENTIALS === 'true' || validated.CORS_CREDENTIALS === '1',
     },
+    
+    trustedProxies: validated.TRUSTED_PROXIES.split(',').map(s => s.trim()).filter(Boolean),
     
     idempotency: {
       ttlSeconds: validated.IDEMPOTENCY_TTL_SECONDS,

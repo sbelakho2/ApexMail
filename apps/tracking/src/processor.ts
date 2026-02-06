@@ -88,10 +88,12 @@ export class EventProcessor {
     userAgent?: string;
     ipAddress?: string;
   }): Promise<void> {
-    // Dedupe: Check if this exact open was already recorded
+    // Dedupe: Use atomic SETNX to prevent race condition between duplicate checks
     const dedupeKey = this.generateDedupeKey('open', data.messageId, data.recipient);
     
-    if (await this.isDuplicate(dedupeKey)) {
+    // Atomic check-and-set: returns null if key already exists (duplicate)
+    const isNew = await this.redis.set(`dedupe:${dedupeKey}`, '1', 'EX', 86400 * 30, 'NX');
+    if (isNew === null) {
       this.logger.debug('Duplicate open event, skipping', { messageId: data.messageId });
       return;
     }
@@ -108,9 +110,6 @@ export class EventProcessor {
     };
     
     this.addToBuffer(event);
-    
-    // Mark as processed
-    await this.markProcessed(dedupeKey);
     
     // Update Redis real-time counter
     await this.incrementCounter(data.tenantId, 'opens');
@@ -228,20 +227,22 @@ export class EventProcessor {
     }
     
     this.flushing = true;
-    const eventsToFlush = [...this.buffer];
-    this.buffer = [];
+    // FIX-039: Snapshot events but do NOT clear the buffer yet.
+    // Buffer is only cleared after a successful write.
+    const eventsToFlush = this.buffer.slice();
     
     try {
       await this.writeEvents(eventsToFlush);
+      // Success — now safe to remove flushed events from buffer
+      // (new events may have arrived during write, so splice rather than reassign)
+      this.buffer.splice(0, eventsToFlush.length);
       this.logger.debug('Flushed events', { count: eventsToFlush.length });
     } catch (error) {
-      // Put events back in buffer on failure
-      this.buffer = [...eventsToFlush, ...this.buffer];
-      this.logger.error('Failed to flush events', { 
+      // Events remain in buffer for retry on next flush cycle
+      this.logger.error('Failed to flush events, will retry', { 
         error: error instanceof Error ? error.message : 'Unknown',
         count: eventsToFlush.length,
       });
-      throw error;
     } finally {
       this.flushing = false;
     }
@@ -283,7 +284,7 @@ export class EventProcessor {
         ON CONFLICT (id) DO NOTHING
       `, values);
       
-      // Update message stats in batch
+      // Update message stats in batch using unnest (FIX-042: replaces per-message UPDATE loop)
       const messageUpdates = new Map<string, { opens: number; clicks: number; unsubscribes: number }>();
       
       for (const event of events) {
@@ -297,19 +298,39 @@ export class EventProcessor {
         messageUpdates.set(key, stats);
       }
       
+      // Build arrays for batch UPDATE with unnest
+      const msgIds: string[] = [];
+      const openCounts: number[] = [];
+      const clickCounts: number[] = [];
+      const unsubCounts: number[] = [];
+      
       for (const [messageId, stats] of messageUpdates) {
         if (stats.opens > 0 || stats.clicks > 0 || stats.unsubscribes > 0) {
-          await client.query(`
-            UPDATE messages SET
-              open_count = open_count + $1,
-              click_count = click_count + $2,
-              unsubscribe_count = unsubscribe_count + $3,
-              first_opened_at = COALESCE(first_opened_at, CASE WHEN $1 > 0 THEN NOW() END),
-              first_clicked_at = COALESCE(first_clicked_at, CASE WHEN $2 > 0 THEN NOW() END),
-              updated_at = NOW()
-            WHERE id = $4
-          `, [stats.opens, stats.clicks, stats.unsubscribes, messageId]);
+          msgIds.push(messageId);
+          openCounts.push(stats.opens);
+          clickCounts.push(stats.clicks);
+          unsubCounts.push(stats.unsubscribes);
         }
+      }
+      
+      if (msgIds.length > 0) {
+        await client.query(`
+          UPDATE messages AS m SET
+            open_count = m.open_count + v.opens,
+            click_count = m.click_count + v.clicks,
+            unsubscribe_count = m.unsubscribe_count + v.unsubs,
+            first_opened_at = COALESCE(m.first_opened_at, CASE WHEN v.opens > 0 THEN NOW() END),
+            first_clicked_at = COALESCE(m.first_clicked_at, CASE WHEN v.clicks > 0 THEN NOW() END),
+            updated_at = NOW()
+          FROM (
+            SELECT
+              unnest($1::text[]) AS id,
+              unnest($2::int[]) AS opens,
+              unnest($3::int[]) AS clicks,
+              unnest($4::int[]) AS unsubs
+          ) AS v
+          WHERE m.id = v.id
+        `, [msgIds, openCounts, clickCounts, unsubCounts]);
       }
       
       await client.query('COMMIT');
@@ -327,6 +348,7 @@ export class EventProcessor {
     return sha256(data).substring(0, 32);
   }
 
+  // @ts-expect-error Retained — superseded by isDuplicateWithTTL (FIX-043)
   private async isDuplicate(key: string): Promise<boolean> {
     const exists = await this.redis.get(`dedupe:${key}`);
     return exists !== null;
@@ -337,7 +359,8 @@ export class EventProcessor {
     return result === null; // Returns null if key already exists
   }
 
-  private async markProcessed(key: string): Promise<void> {
+  // @ts-expect-error Retained — manual deduplication helper for future use
+  private async _markProcessed(key: string): Promise<void> {
     // TTL of 30 days for open deduplication
     await this.redis.set(`dedupe:${key}`, '1', 'EX', 86400 * 30);
   }
@@ -346,15 +369,16 @@ export class EventProcessor {
     const date = new Date().toISOString().split('T')[0];
     const hour = new Date().getUTCHours();
     
-    // Hourly counter
+    // FIX-046: Use Redis pipeline to batch 4 commands into a single round-trip
     const hourlyKey = `stats:${tenantId}:${date}:${hour}:${metric}`;
-    await this.redis.incr(hourlyKey);
-    await this.redis.expire(hourlyKey, 86400 * 7); // 7 day TTL
-    
-    // Daily counter
     const dailyKey = `stats:${tenantId}:${date}:${metric}`;
-    await this.redis.incr(dailyKey);
-    await this.redis.expire(dailyKey, 86400 * 90); // 90 day TTL
+    
+    const pipeline = this.redis.pipeline();
+    pipeline.incr(hourlyKey);
+    pipeline.expire(hourlyKey, 86400 * 7); // 7 day TTL
+    pipeline.incr(dailyKey);
+    pipeline.expire(dailyKey, 86400 * 90); // 90 day TTL
+    await pipeline.exec();
   }
 
   private async addToSuppressionList(

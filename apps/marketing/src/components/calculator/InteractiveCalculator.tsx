@@ -103,7 +103,7 @@ export function InteractiveCalculator() {
   return (
     <section ref={ref} className="py-12 lg:py-20 relative bg-surface-50">
       <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="bg-white border border-surface-200 shadow-sm rounded-xl p-8 lg:p-10">
+        <div className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-10">
           {/* Volume Slider */}
           <div className="mb-12">
             <div className="flex items-center justify-between mb-6">
@@ -131,7 +131,7 @@ export function InteractiveCalculator() {
                 <span
                   key={mark.value}
                   className={cn(
-                    "text-[10px] tabular-nums font-medium transition-colors",
+                    "text-xs tabular-nums font-medium transition-colors",
                     emailVolume >= mark.value ? 'text-primary-700 font-bold' : 'text-surface-400'
                   )}
                 >
@@ -144,7 +144,7 @@ export function InteractiveCalculator() {
           <div className="grid lg:grid-cols-3 gap-8 lg:gap-12">
             {/* Price Comparison */}
             <div className="lg:col-span-2 space-y-6">
-              <h3 className="text-sm font-semibold text-surface-900 uppercase tracking-tight mb-4">Estimated Monthly Cost</h3>
+              <h3 className="text-sm font-semibold text-surface-900 tracking-tight mb-4">Estimated Monthly Cost</h3>
               <div className="space-y-4">
                 {sortedPrices.map((provider) => (
                   <div key={provider.id} className="space-y-2 group">
@@ -186,10 +186,10 @@ export function InteractiveCalculator() {
 
             {/* Savings Summary */}
             <div className="lg:col-span-1">
-              <div className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-6 h-full flex flex-col justify-center text-center">
+              <div className="bg-emerald-50/50 border border-emerald-100 rounded-lg p-6 h-full flex flex-col justify-center text-center">
                 {savings > 0 ? (
                   <>
-                    <div className="text-emerald-700 text-xs font-bold uppercase tracking-wide mb-3">Potential Savings</div>
+                    <div className="text-emerald-700 text-xs font-bold mb-3">Potential Savings</div>
                     <div className="text-4xl font-bold text-surface-900 mb-2 tabular-nums tracking-tight">
                       {formatPrice(savings)}<span className="text-lg text-surface-500 font-medium">/mo</span>
                     </div>
@@ -202,7 +202,7 @@ export function InteractiveCalculator() {
                   </>
                 ) : (
                   <>
-                    <div className="text-primary-700 text-xs font-bold uppercase tracking-wide mb-3">Best Value</div>
+                    <div className="text-primary-700 text-xs font-bold mb-3">Best Value</div>
                     <p className="text-surface-700 text-sm">
                       ApexMail offers the most competitive pricing for high-volume senders.
                     </p>

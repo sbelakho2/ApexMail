@@ -1,9 +1,10 @@
-'use client';
-
 /**
  * ApexMail Chart Components
  * Pure SVG-based charts for Control Plane analytics
  * No external dependencies - printable and lightweight
+ *
+ * NOTE: This is a server component — it contains no hooks or browser APIs.
+ * It can be safely imported by both server and client components.
  */
 
 // Chart color palette following design system

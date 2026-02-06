@@ -11,7 +11,7 @@
 
 import { runEmailWritingTraining, EmailWritingModel, type TrainingMetrics } from './email-training-pipeline.js';
 import { runSubjectLineTraining, SubjectLineOptimizer } from './subject-line-optimizer.js';
-import { runLeadScoringTraining, LeadScoringModel, type LeadScoringMetrics } from './lead-scoring-pipeline.js';
+import { runLeadScoringTraining, LeadScoringModel } from './lead-scoring-pipeline.js';
 import { EmailQualityEvaluator } from './email-quality-evaluator.js';
 
 // =====================================================

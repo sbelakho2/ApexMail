@@ -6,7 +6,7 @@
  * entry, creating an immutable, verifiable audit trail.
  */
 
-import * as CryptoJS from 'crypto-js';
+import * as crypto from 'crypto';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
 import { generateUUID, timingSafeCompareBuffers } from '@apexmail/lib/crypto';
@@ -562,17 +562,14 @@ export class AuditLogger {
      */
     private calculateHash(data: Record<string, unknown>): string {
         const jsonString = JSON.stringify(data, Object.keys(data).sort());
-        return CryptoJS.SHA256(jsonString).toString(CryptoJS.enc.Hex);
+        return crypto.createHash('sha256').update(jsonString).digest('hex');
     }
 
     /**
      * Sign a hash using HMAC-SHA256 with the secure key buffer
      */
     private sign(hash: string): string {
-        // CryptoJS accepts string keys, but we convert from our secure buffer
-        // This ensures the key is not accidentally exposed through string operations
-        const keyString = this.signingKeyBuffer.toString('utf8');
-        return CryptoJS.HmacSHA256(hash, keyString).toString(CryptoJS.enc.Hex);
+        return crypto.createHmac('sha256', this.signingKeyBuffer).update(hash).digest('hex');
     }
 
     /**

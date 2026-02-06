@@ -100,14 +100,14 @@ export function generateIdempotencyKey(): string {
 
 /**
  * Generate an API key
- * Format: apx_live_<random> or apx_test_<random>
+ * Format: am_live_<random> or am_test_<random>
  */
 export function generateApiKey(mode: 'live' | 'test' = 'live'): {
   key: string;
   prefix: string;
   hash: string;
 } {
-  const prefix = `apx_${mode}_`;
+  const prefix = `am_${mode}_`;
   const secret = secureRandomBase64(32);
   const key = `${prefix}${secret}`;
   
@@ -125,8 +125,8 @@ export function parseApiKey(key: string): {
   mode: 'live' | 'test' | null;
   prefix: string | null;
 } {
-  const livePrefix = 'apx_live_';
-  const testPrefix = 'apx_test_';
+  const livePrefix = 'am_live_';
+  const testPrefix = 'am_test_';
   
   if (key.startsWith(livePrefix)) {
     return { valid: true, mode: 'live', prefix: livePrefix };

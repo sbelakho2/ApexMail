@@ -142,14 +142,14 @@ export function FeaturesSection() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: categoryIndex * 0.1 + index * 0.1 }}
-              className="p-6 bg-white rounded-xl border border-surface-200 hover:border-surface-300 transition-colors"
+              className="p-6 bg-white rounded-lg border border-surface-200 hover:border-surface-300 transition-colors"
             >
               {/* Icon & Badge */}
               <div className="flex items-start justify-between mb-5">
                 <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                   <feature.icon className="w-5 h-5" strokeWidth={1.5} />
                 </div>
-                <span className="inline-flex items-center px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 text-[10px] font-medium uppercase tracking-wide">
+                <span className="inline-flex items-center px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 text-xs font-medium">
                   {feature.badge}
                 </span>
               </div>
@@ -183,7 +183,7 @@ export function FeaturesSection() {
     ].map((stat) => (
       <div key={stat.label} className="text-center py-8 bg-white">
         <div className="text-3xl font-semibold text-surface-900 mb-1 tabular-nums tracking-tight">{stat.value}</div>
-        <div className="text-xs font-medium text-surface-500 uppercase tracking-wide">{stat.label}</div>
+        <div className="text-xs font-medium text-surface-500">{stat.label}</div>
       </div>
     ))}
   </motion.div>

@@ -14,10 +14,10 @@ export function FeatureCTA() {
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl p-8 lg:p-12 text-center"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 lg:p-12 text-center"
         >
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100/50 text-xs font-medium mb-6">
-            <Zap className="w-3.5 h-3.5" />
+            <Zap className="w-4 h-4" />
             <span>Start in 5 Minutes</span>
           </div>
 
@@ -33,14 +33,14 @@ export function FeatureCTA() {
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
              <Link
               href="https://app.apexmail.ee/signup"
-              className="inline-flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-6 py-3 rounded-lg font-semibold transition-colors group"
+              className="inline-flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-6 py-3 rounded-md font-semibold transition-colors group"
             >
               Get Started Free
               <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </Link>
             <Link
               href="/contact"
-              className="inline-flex items-center justify-center gap-2 bg-white text-surface-900 border border-surface-200 hover:bg-surface-50 px-6 py-3 rounded-lg font-semibold transition-colors"
+              className="inline-flex items-center justify-center gap-2 bg-white text-surface-900 border border-surface-200 hover:bg-surface-50 px-6 py-3 rounded-md font-semibold transition-colors"
             >
                <MessageCircle className="w-4 h-4 text-surface-500" />
               Talk to Sales

@@ -9,6 +9,7 @@ import { EmailProcessor } from './processors/email.js';
 import { WebhookProcessor } from './processors/webhook.js';
 import { AnalyticsProcessor } from './processors/analytics.js';
 import { MetricsServer } from './metrics.js';
+import { QueueNotifier } from './queue-notifier.js';
 import { Redis } from 'ioredis';
 
 const logger = createLogger({ name: 'worker' });
@@ -17,6 +18,7 @@ const config = loadConfig();
 let isShuttingDown = false;
 const processors: Array<{ stop: () => Promise<void> }> = [];
 let metricsServer: MetricsServer | null = null;
+let queueNotifier: QueueNotifier | null = null;
 
 async function main(): Promise<void> {
   logger.info('Starting ApexMail Worker', {
@@ -65,11 +67,19 @@ async function main(): Promise<void> {
     await metricsServer.start();
   }
 
+  // Start queue notifier (LISTEN/NOTIFY for instant wakeup instead of polling)
+  queueNotifier = new QueueNotifier(
+    { connectionString: config.database.connectionString },
+    logger.child({ component: 'queue-notifier' }),
+  );
+  await queueNotifier.start();
+
   // Initialize processors
   const emailProcessor = new EmailProcessor({
     db,
     dbPool,
     redis,
+    notifier: queueNotifier,
     config: config.queues.email,
     smtp: config.smtp,
     dkim: config.dkim,
@@ -82,6 +92,7 @@ async function main(): Promise<void> {
   const webhookProcessor = new WebhookProcessor({
     db,
     redis,
+    notifier: queueNotifier,
     config: config.queues.webhook,
     logger: logger.child({ processor: 'webhook' }),
   });
@@ -89,6 +100,7 @@ async function main(): Promise<void> {
   const analyticsProcessor = new AnalyticsProcessor({
     db,
     redis,
+    notifier: queueNotifier,
     config: config.queues.analytics,
     logger: logger.child({ processor: 'analytics' }),
   });
@@ -168,6 +180,29 @@ async function shutdown(signal: string): Promise<void> {
     }
 
     logger.info('All processors stopped');
+
+    // Stop queue notifier
+    if (queueNotifier) {
+      await queueNotifier.stop();
+      logger.info('Queue notifier stopped');
+    }
+
+    // Close Redis connection
+    try {
+      await redis.quit();
+      logger.info('Redis connection closed');
+    } catch (err) {
+      logger.error('Failed to close Redis connection', { error: err });
+    }
+
+    // Close database pool
+    try {
+      await db.end();
+      logger.info('Database pool closed');
+    } catch (err) {
+      logger.error('Failed to close database pool', { error: err });
+    }
+
     clearTimeout(timeout);
     process.exit(0);
   } catch (error) {

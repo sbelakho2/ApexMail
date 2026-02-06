@@ -261,7 +261,7 @@ export class SuppressionsRepository {
     return Result.ok(resultMap);
   }
 
-  async findById(id: string): Promise<Result<Suppression | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<Suppression | null, Error>> {
     const result = await this.db.query<{
       id: string;
       tenant_id: string | null;
@@ -281,8 +281,10 @@ export class SuppressionsRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      'SELECT * FROM suppressions WHERE id = $1',
-      [id]
+      tenantId
+        ? 'SELECT * FROM suppressions WHERE id = $1 AND tenant_id = $2'
+        : 'SELECT * FROM suppressions WHERE id = $1',
+      tenantId ? [id, tenantId] : [id]
     );
 
     if (!result.ok) return result;

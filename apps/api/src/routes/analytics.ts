@@ -110,7 +110,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Sending volume over time
-  router.get('/volume', async (c) => {
+  router.get('/volume', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const interval = (c.req.query('interval') ?? 'day') as z.infer<typeof intervalSchema>;
     const since = c.req.query('since');
@@ -155,7 +155,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Engagement metrics over time
-  router.get('/engagement', async (c) => {
+  router.get('/engagement', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const interval = (c.req.query('interval') ?? 'day') as z.infer<typeof intervalSchema>;
     const since = c.req.query('since');
@@ -206,7 +206,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Domain performance comparison
-  router.get('/domains', async (c) => {
+  router.get('/domains', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -276,7 +276,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Campaign performance
-  router.get('/campaigns', async (c) => {
+  router.get('/campaigns', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -348,7 +348,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Bounce analysis
-  router.get('/bounces', async (c) => {
+  router.get('/bounces', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -397,7 +397,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Suppression trends
-  router.get('/suppressions', async (c) => {
+  router.get('/suppressions', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const interval = (c.req.query('interval') ?? 'day') as z.infer<typeof intervalSchema>;
     const since = c.req.query('since');
@@ -440,7 +440,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Deliverability report
-  router.get('/deliverability', async (c) => {
+  router.get('/deliverability', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
@@ -523,7 +523,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Export report
-  router.get('/export', async (c) => {
+  router.get('/export', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const format = c.req.query('format') ?? 'json';
     const reportType = c.req.query('type') ?? 'summary';
@@ -927,7 +927,7 @@ function convertReportToCSV(data: ReportData): string {
     const firstCampaign = data.campaigns[0];
     if (firstCampaign) {
       const headers = Object.keys(firstCampaign);
-      lines.push(headers.join(','));
+      lines.push(headers.map(h => `"${String(h).replace(/"/g, '""')}"`).join(','));
       for (const campaign of data.campaigns) {
         lines.push(headers.map(h => `"${String(campaign[h] ?? '').replace(/"/g, '""')}"`).join(','));
       }
@@ -938,7 +938,7 @@ function convertReportToCSV(data: ReportData): string {
     const firstDomain = data.domains[0];
     if (firstDomain) {
       const headers = Object.keys(firstDomain);
-      lines.push(headers.join(','));
+      lines.push(headers.map(h => `"${String(h).replace(/"/g, '""')}"`).join(','));
       for (const domain of data.domains) {
         lines.push(headers.map(h => `"${String(domain[h] ?? '').replace(/"/g, '""')}"`).join(','));
       }

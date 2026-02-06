@@ -46,7 +46,7 @@ CREATE TYPE goal_status AS ENUM ('not_started', 'in_progress', 'at_risk', 'compl
 
 CREATE TABLE sso_configurations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     provider sso_provider NOT NULL,
     status sso_status NOT NULL DEFAULT 'pending',
     enabled BOOLEAN NOT NULL DEFAULT false,
@@ -81,12 +81,12 @@ CREATE TABLE sso_configurations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    UNIQUE(account_id)
+    UNIQUE(tenant_id)
 );
 
 CREATE TABLE sso_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id UUID NOT NULL,
     sso_config_id UUID NOT NULL REFERENCES sso_configurations(id) ON DELETE CASCADE,
     session_token TEXT NOT NULL UNIQUE,
@@ -102,7 +102,7 @@ CREATE TABLE sso_sessions (
 
 CREATE TABLE sso_oidc_state (
     state TEXT PRIMARY KEY,
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     code_verifier TEXT,
     redirect_uri TEXT,
     nonce TEXT,
@@ -110,7 +110,7 @@ CREATE TABLE sso_oidc_state (
     expires_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX idx_sso_config_account ON sso_configurations(account_id);
+CREATE INDEX idx_sso_config_account ON sso_configurations(tenant_id);
 CREATE INDEX idx_sso_config_domain ON sso_configurations(domain) WHERE domain IS NOT NULL;
 CREATE INDEX idx_sso_sessions_user ON sso_sessions(user_id);
 CREATE INDEX idx_sso_sessions_token ON sso_sessions(session_token);
@@ -120,7 +120,7 @@ CREATE INDEX idx_sso_sessions_expires ON sso_sessions(expires_at);
 
 CREATE TABLE sub_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    parent_account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    parent_tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     company_name TEXT,
     contact_email TEXT NOT NULL,
@@ -148,12 +148,12 @@ CREATE TABLE sub_accounts (
     suspension_reason TEXT,
     deleted_at TIMESTAMPTZ,
     
-    UNIQUE(parent_account_id, name)
+    UNIQUE(parent_tenant_id, name)
 );
 
 CREATE TABLE sub_account_api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    sub_account_id UUID NOT NULL REFERENCES sub_accounts(id) ON DELETE CASCADE,
+    sub_tenant_id UUID NOT NULL REFERENCES sub_accounts(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     key_prefix TEXT NOT NULL,
     key_hash TEXT NOT NULL,
@@ -169,7 +169,7 @@ CREATE TABLE sub_account_api_keys (
 
 CREATE TABLE sub_account_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    sub_account_id UUID NOT NULL REFERENCES sub_accounts(id) ON DELETE CASCADE,
+    sub_tenant_id UUID NOT NULL REFERENCES sub_accounts(id) ON DELETE CASCADE,
     event_type TEXT NOT NULL,
     event_data JSONB DEFAULT '{}',
     ip_address INET,
@@ -177,16 +177,16 @@ CREATE TABLE sub_account_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_sub_accounts_parent ON sub_accounts(parent_account_id);
+CREATE INDEX idx_sub_accounts_parent ON sub_accounts(parent_tenant_id);
 CREATE INDEX idx_sub_accounts_status ON sub_accounts(status);
-CREATE INDEX idx_sub_account_keys_sub ON sub_account_api_keys(sub_account_id);
-CREATE INDEX idx_sub_account_events_sub ON sub_account_events(sub_account_id, created_at DESC);
+CREATE INDEX idx_sub_account_keys_sub ON sub_account_api_keys(sub_tenant_id);
+CREATE INDEX idx_sub_account_events_sub ON sub_account_events(sub_tenant_id, created_at DESC);
 
 -- ==================== WHITE-LABEL TABLES ====================
 
 CREATE TABLE whitelabel_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     enabled BOOLEAN NOT NULL DEFAULT false,
     
     -- Branding
@@ -212,7 +212,7 @@ CREATE TABLE whitelabel_configs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    UNIQUE(account_id)
+    UNIQUE(tenant_id)
 );
 
 CREATE TABLE whitelabel_domains (
@@ -236,7 +236,7 @@ CREATE TABLE whitelabel_domains (
 
 CREATE TABLE whitelabel_email_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     type TEXT NOT NULL,
     name TEXT NOT NULL,
     subject TEXT,
@@ -247,19 +247,19 @@ CREATE TABLE whitelabel_email_templates (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    UNIQUE(account_id, type)
+    UNIQUE(tenant_id, type)
 );
 
-CREATE INDEX idx_whitelabel_config_account ON whitelabel_configs(account_id);
+CREATE INDEX idx_whitelabel_config_account ON whitelabel_configs(tenant_id);
 CREATE INDEX idx_whitelabel_domains_config ON whitelabel_domains(config_id);
 CREATE INDEX idx_whitelabel_domains_domain ON whitelabel_domains(domain);
-CREATE INDEX idx_whitelabel_templates_account ON whitelabel_email_templates(account_id);
+CREATE INDEX idx_whitelabel_templates_account ON whitelabel_email_templates(tenant_id);
 
 -- ==================== TEMPLATE APPROVAL TABLES ====================
 
 CREATE TABLE template_submissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     template_type template_type NOT NULL,
     name TEXT NOT NULL,
     description TEXT,
@@ -310,7 +310,7 @@ CREATE TABLE template_approval_comments (
 
 CREATE TABLE template_approval_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT,
     enabled BOOLEAN NOT NULL DEFAULT true,
@@ -321,17 +321,17 @@ CREATE TABLE template_approval_rules (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_template_submissions_account ON template_submissions(account_id);
+CREATE INDEX idx_template_submissions_account ON template_submissions(tenant_id);
 CREATE INDEX idx_template_submissions_status ON template_submissions(status);
 CREATE INDEX idx_template_submissions_submitted ON template_submissions(submitted_at DESC);
 CREATE INDEX idx_template_comments_submission ON template_approval_comments(submission_id, created_at);
-CREATE INDEX idx_template_rules_account ON template_approval_rules(account_id, priority);
+CREATE INDEX idx_template_rules_account ON template_approval_rules(tenant_id, priority);
 
 -- ==================== LOG STREAMING TABLES ====================
 
 CREATE TABLE log_streams (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT,
     destination_type stream_destination_type NOT NULL,
@@ -376,7 +376,7 @@ CREATE TABLE log_stream_deliveries (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_log_streams_account ON log_streams(account_id);
+CREATE INDEX idx_log_streams_account ON log_streams(tenant_id);
 CREATE INDEX idx_log_streams_status ON log_streams(status) WHERE enabled = true;
 CREATE INDEX idx_log_deliveries_stream ON log_stream_deliveries(stream_id, created_at DESC);
 
@@ -384,7 +384,7 @@ CREATE INDEX idx_log_deliveries_stream ON log_stream_deliveries(stream_id, creat
 
 CREATE TABLE compliance_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     enabled_frameworks compliance_framework[] NOT NULL DEFAULT '{}',
     status compliance_status NOT NULL DEFAULT 'pending',
     
@@ -419,12 +419,12 @@ CREATE TABLE compliance_configs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    UNIQUE(account_id)
+    UNIQUE(tenant_id)
 );
 
 CREATE TABLE compliance_audit_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL,
+    tenant_id VARCHAR(26) NOT NULL,
     user_id UUID,
     action TEXT NOT NULL,
     resource_type TEXT NOT NULL,
@@ -459,7 +459,7 @@ CREATE TABLE compliance_audit_logs_2025_q4 PARTITION OF compliance_audit_logs
 
 CREATE TABLE data_access_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     type data_request_type NOT NULL,
     status data_request_status NOT NULL DEFAULT 'pending',
     requester_id UUID NOT NULL,
@@ -487,17 +487,17 @@ CREATE TABLE data_access_requests (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_compliance_config_account ON compliance_configs(account_id);
-CREATE INDEX idx_compliance_audit_account ON compliance_audit_logs(account_id, created_at DESC);
+CREATE INDEX idx_compliance_config_account ON compliance_configs(tenant_id);
+CREATE INDEX idx_compliance_audit_account ON compliance_audit_logs(tenant_id, created_at DESC);
 CREATE INDEX idx_compliance_audit_user ON compliance_audit_logs(user_id, created_at DESC);
 CREATE INDEX idx_compliance_audit_action ON compliance_audit_logs(action, created_at DESC);
-CREATE INDEX idx_data_access_account ON data_access_requests(account_id, status);
+CREATE INDEX idx_data_access_account ON data_access_requests(tenant_id, status);
 
 -- ==================== DEPLOYMENT TABLES ====================
 
 CREATE TABLE private_deployments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     deployment_type deployment_type NOT NULL,
     status deployment_status NOT NULL DEFAULT 'pending',
@@ -538,7 +538,7 @@ CREATE TABLE private_deployments (
 
 CREATE TABLE dedicated_ips (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     deployment_id UUID REFERENCES private_deployments(id) ON DELETE SET NULL,
     ip_address INET NOT NULL UNIQUE,
     ptr_record TEXT,
@@ -572,7 +572,7 @@ CREATE TABLE dedicated_ips (
 
 CREATE TABLE byoip_ranges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     cidr_block CIDR NOT NULL UNIQUE,
     status byoip_status NOT NULL DEFAULT 'pending_verification',
     
@@ -594,18 +594,18 @@ CREATE TABLE byoip_ranges (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_deployments_account ON private_deployments(account_id);
+CREATE INDEX idx_deployments_account ON private_deployments(tenant_id);
 CREATE INDEX idx_deployments_status ON private_deployments(status);
-CREATE INDEX idx_dedicated_ips_account ON dedicated_ips(account_id);
+CREATE INDEX idx_dedicated_ips_account ON dedicated_ips(tenant_id);
 CREATE INDEX idx_dedicated_ips_status ON dedicated_ips(status);
 CREATE INDEX idx_dedicated_ips_ip ON dedicated_ips(ip_address);
-CREATE INDEX idx_byoip_account ON byoip_ranges(account_id);
+CREATE INDEX idx_byoip_account ON byoip_ranges(tenant_id);
 
 -- ==================== SUPPORT TABLES ====================
 
 CREATE TABLE support_tickets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     number SERIAL NOT NULL,
     subject TEXT NOT NULL,
     description TEXT NOT NULL,
@@ -699,7 +699,7 @@ CREATE TABLE support_agents (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_tickets_account ON support_tickets(account_id);
+CREATE INDEX idx_tickets_account ON support_tickets(tenant_id);
 CREATE INDEX idx_tickets_status ON support_tickets(status);
 CREATE INDEX idx_tickets_priority ON support_tickets(priority, status);
 CREATE INDEX idx_tickets_assigned ON support_tickets(assigned_to) WHERE assigned_to IS NOT NULL;
@@ -711,7 +711,7 @@ CREATE INDEX idx_ticket_history_ticket ON ticket_history(ticket_id, created_at D
 
 CREATE TABLE quarterly_business_reviews (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     quarter TEXT NOT NULL,
     year INTEGER NOT NULL,
     status qbr_status NOT NULL DEFAULT 'scheduled',
@@ -757,7 +757,7 @@ CREATE TABLE quarterly_business_reviews (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
-    UNIQUE(account_id, quarter, year)
+    UNIQUE(tenant_id, quarter, year)
 );
 
 CREATE TABLE qbr_goals (
@@ -800,7 +800,7 @@ CREATE TABLE industry_benchmarks (
     UNIQUE(industry, metric_name, period, valid_from)
 );
 
-CREATE INDEX idx_qbr_account ON quarterly_business_reviews(account_id);
+CREATE INDEX idx_qbr_account ON quarterly_business_reviews(tenant_id);
 CREATE INDEX idx_qbr_quarter ON quarterly_business_reviews(quarter, year);
 CREATE INDEX idx_qbr_status ON quarterly_business_reviews(status);
 CREATE INDEX idx_qbr_goals_qbr ON qbr_goals(qbr_id);
@@ -869,7 +869,7 @@ DECLARE
 BEGIN
     SELECT COALESCE(MAX(number), 0) + 1 INTO next_number
     FROM support_tickets
-    WHERE account_id = NEW.account_id;
+    WHERE tenant_id = NEW.tenant_id;
     
     NEW.number = next_number;
     RETURN NEW;
@@ -885,16 +885,16 @@ CREATE OR REPLACE FUNCTION audit_sensitive_tables()
 RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        INSERT INTO compliance_audit_logs (account_id, action, resource_type, resource_id, old_value)
-        VALUES (OLD.account_id, 'DELETE', TG_TABLE_NAME, OLD.id::text, row_to_json(OLD));
+        INSERT INTO compliance_audit_logs (tenant_id, action, resource_type, resource_id, old_value)
+        VALUES (OLD.tenant_id, 'DELETE', TG_TABLE_NAME, OLD.id::text, row_to_json(OLD));
         RETURN OLD;
     ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO compliance_audit_logs (account_id, action, resource_type, resource_id, old_value, new_value)
-        VALUES (NEW.account_id, 'UPDATE', TG_TABLE_NAME, NEW.id::text, row_to_json(OLD), row_to_json(NEW));
+        INSERT INTO compliance_audit_logs (tenant_id, action, resource_type, resource_id, old_value, new_value)
+        VALUES (NEW.tenant_id, 'UPDATE', TG_TABLE_NAME, NEW.id::text, row_to_json(OLD), row_to_json(NEW));
         RETURN NEW;
     ELSIF TG_OP = 'INSERT' THEN
-        INSERT INTO compliance_audit_logs (account_id, action, resource_type, resource_id, new_value)
-        VALUES (NEW.account_id, 'INSERT', TG_TABLE_NAME, NEW.id::text, row_to_json(NEW));
+        INSERT INTO compliance_audit_logs (tenant_id, action, resource_type, resource_id, new_value)
+        VALUES (NEW.tenant_id, 'INSERT', TG_TABLE_NAME, NEW.id::text, row_to_json(NEW));
         RETURN NEW;
     END IF;
     RETURN NULL;

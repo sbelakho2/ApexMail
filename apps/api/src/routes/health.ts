@@ -184,26 +184,38 @@ export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
       latency: eventLoopLag,
     };
 
+    // In production, redact internal details from unauthenticated health checks
+    const redactedChecks = ctx.config.env === 'production'
+      ? Object.fromEntries(
+          Object.entries(checks).map(([key, val]) => [key, { status: val.status }])
+        )
+      : checks;
+
     return c.json({
       status: criticalHealthy ? (overallHealthy ? 'healthy' : 'degraded') : 'unhealthy',
       timestamp: new Date().toISOString(),
       uptime: Math.floor((Date.now() - startTime) / 1000),
-      environment: ctx.config.env,
-      checks,
+      checks: redactedChecks,
     }, criticalHealthy ? 200 : 503);
   });
 
   // Version info
   router.get('/version', (c) => {
-    return c.json({
+    const info: Record<string, unknown> = {
       name: 'apexmail-api',
       version: process.env.npm_package_version ?? '1.0.0',
-      node: process.version,
-      env: ctx.config.env,
       uptime: Math.floor((Date.now() - startTime) / 1000),
-      buildTime: process.env.BUILD_TIME ?? 'unknown',
-      commitSha: process.env.COMMIT_SHA ?? 'unknown',
-    });
+    };
+
+    // Only expose internals outside production
+    if (ctx.config.env !== 'production') {
+      info.node = process.version;
+      info.env = ctx.config.env;
+      info.buildTime = process.env.BUILD_TIME ?? 'unknown';
+      info.commitSha = process.env.COMMIT_SHA ?? 'unknown';
+    }
+
+    return c.json(info);
   });
 
   return router;

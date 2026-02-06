@@ -58,7 +58,7 @@ export function SecuritySection() {
  className="text-center mb-16"
  >
  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-50 border border-surface-200 text-xs font-medium text-surface-600 mb-6">
-          <Shield className="w-3.5 h-3.5" />
+          <Shield className="w-4 h-4" />
           Enterprise-Grade Security
         </div>
  <h2 className="section-title mb-4">
@@ -99,7 +99,7 @@ export function SecuritySection() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.6 }}
-          className="p-8 lg:p-10 bg-surface-50 rounded-xl border border-surface-200"
+          className="p-8 lg:p-10 bg-surface-50 rounded-lg border border-surface-200"
         >
           <div className="flex flex-col lg:flex-row items-center justify-between gap-10">
             <div className="text-center lg:text-left max-w-md">
@@ -114,7 +114,7 @@ export function SecuritySection() {
                   <div className="w-16 h-16 rounded-lg bg-white border border-surface-200 flex items-center justify-center mb-2 shadow-sm">
                     <span className="text-sm font-semibold text-surface-900 tracking-tight">{logo.name}</span>
                   </div>
-                  <div className="text-[10px] text-surface-500 font-medium uppercase tracking-wide whitespace-nowrap">{logo.description}</div>
+                  <div className="text-xs text-surface-500 font-medium whitespace-nowrap">{logo.description}</div>
                 </div>
               ))}
             </div>

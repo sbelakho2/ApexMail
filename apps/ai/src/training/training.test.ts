@@ -25,8 +25,7 @@ import {
 } from './subject-line-optimizer.js';
 
 import {
-    EmailWritingModel,
-    type TrainingConfig
+    EmailWritingModel
 } from './email-training-pipeline.js';
 
 import {

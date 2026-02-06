@@ -47,7 +47,7 @@ export function CTASection() {
        className="flex items-center gap-3 text-left"
      >
        <div className="w-6 h-6 rounded bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
-         <feature.icon className="w-3.5 h-3.5" />
+         <feature.icon className="w-4 h-4" />
        </div>
        <span className="text-surface-600 text-sm font-medium">{feature.text}</span>
      </motion.div>
@@ -63,14 +63,14 @@ export function CTASection() {
  >
    <Link
      href="https://app.apexmail.ee/signup"
-     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors w-full sm:w-auto"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors w-full sm:w-auto"
    >
      Deploy to Production
      <ArrowRight className="w-4 h-4 ml-2" />
    </Link>
    <Link
      href="/contact"
-     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors w-full sm:w-auto"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors w-full sm:w-auto"
    >
      Book Architecture Review
    </Link>

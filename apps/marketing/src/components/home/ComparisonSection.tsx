@@ -87,7 +87,7 @@ export function ComparisonSection() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.2 }}
-          className="overflow-x-auto bg-white rounded-xl border border-surface-200 shadow-sm"
+          className="overflow-x-auto bg-white rounded-lg border border-surface-200 shadow-sm"
         >
           {/* Table Header */}
           <div className="min-w-[900px]">
@@ -95,19 +95,19 @@ export function ComparisonSection() {
               <div className="font-bold text-surface-900 text-xs flex items-center">Feature</div>
               <div className="text-center">
                 <div className="font-bold text-primary-700">ApexMail</div>
-                <div className="text-[10px] text-primary-600 font-medium">Our Platform</div>
+                <div className="text-xs text-primary-600 font-medium">Our Platform</div>
               </div>
               <div className="text-center text-surface-900">
                 <div className="font-semibold text-surface-700">SendGrid</div>
-                <div className="text-[10px] text-surface-400 font-medium">Twilio</div>
+                <div className="text-xs text-surface-400 font-medium">Twilio</div>
               </div>
               <div className="text-center text-surface-900">
                 <div className="font-semibold text-surface-700">Mailchimp</div>
-                <div className="text-[10px] text-surface-400 font-medium">Intuit</div>
+                <div className="text-xs text-surface-400 font-medium">Intuit</div>
               </div>
               <div className="text-center text-surface-900">
                 <div className="font-semibold text-surface-700">AWS SES</div>
-                <div className="text-[10px] text-surface-400 font-medium">Amazon</div>
+                <div className="text-xs text-surface-400 font-medium">Amazon</div>
               </div>
             </div>
 
@@ -116,7 +116,7 @@ export function ComparisonSection() {
               <div key={category.name}>
                 {/* Category Header */}
                 <div className="px-4 lg:px-6 py-2 bg-surface-50/30 border-b border-surface-100">
-                  <span className="text-[10px] font-bold text-surface-500 uppercase tracking-wider">
+                  <span className="text-xs font-bold text-surface-500">
                     {category.name}
                   </span>
                 </div>

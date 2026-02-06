@@ -182,12 +182,12 @@ describe('Phase 1: Foundations - Functional Runtime Tests', () => {
         
         it('should generate API key with correct format', () => {
             const liveKey = generateApiKey('live');
-            expect(liveKey.key).toMatch(/^apx_live_/);
-            expect(liveKey.prefix).toBe('apx_live_');
+            expect(liveKey.key).toMatch(/^am_live_/);
+            expect(liveKey.prefix).toBe('am_live_');
             expect(liveKey.hash).toMatch(/^[0-9a-f]{64}$/);
             
             const testKey = generateApiKey('test');
-            expect(testKey.key).toMatch(/^apx_test_/);
+            expect(testKey.key).toMatch(/^am_test_/);
         });
         
         it('should parse API key correctly', () => {

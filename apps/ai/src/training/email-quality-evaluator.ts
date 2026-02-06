@@ -14,11 +14,7 @@
  * Target: 92%+ quality with 95% confidence interval
  */
 
-import type { 
-    EmailSample, 
-    SubjectLineSample, 
-    EmailQuality, 
-    EmailMetrics,
+import type {
     EmailCategory 
 } from './huggingface-datasets.js';
 

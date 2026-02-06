@@ -8,6 +8,8 @@ import type { AppEnv, AppContext } from '../app.js';
 import { UsersRepository, ApiKeysRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { createJwt } from '../middleware/auth.js';
+import { blacklistToken } from '../middleware/token-blacklist.js';
+import { generateCsrfToken } from '../middleware/csrf.js';
 
 const loginSchema = z.object({
   email: z.string().email().max(254), // RFC 5321 max email length
@@ -321,6 +323,81 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     logger.info('API key revoked', { apiKeyId });
 
     return c.json({ success: true });
+  });
+
+  // Logout - Server-side token invalidation
+  // SECURITY FIX: Adds the JWT to a Redis blacklist so it cannot be reused
+  router.post('/logout', async (c) => {
+    const userId = c.get('userId');
+    const tenantId = c.get('tenantId');
+    const logger = c.get('logger');
+    const authHeader = c.req.header('Authorization');
+
+    if (!authHeader?.startsWith('Bearer ') || !userId) {
+      // API key sessions don't need logout
+      return c.json({ success: true, message: 'No active JWT session' });
+    }
+
+    const token = authHeader.slice(7);
+    // Use the token's signature (last segment) as the blacklist key — 
+    // it uniquely identifies the token without storing the full JWT
+    const tokenSignature = token.split('.')[2];
+    if (!tokenSignature) {
+      throw ApiError.badRequest('Invalid token format', 'INVALID_TOKEN');
+    }
+
+    // Calculate remaining TTL from the JWT expiry so blacklist entry
+    // auto-expires when the token would have expired anyway
+    const payloadB64 = token.split('.')[1];
+    let ttlSeconds = 86400; // default 24h
+    if (payloadB64) {
+      try {
+        const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as { exp?: number };
+        if (payload.exp) {
+          const remaining = payload.exp - Math.floor(Date.now() / 1000);
+          if (remaining > 0) {
+            ttlSeconds = remaining;
+          }
+        }
+      } catch {
+        // Use default TTL if payload parsing fails
+      }
+    }
+
+    await blacklistToken(ctx.config, tokenSignature, { userId, tenantId }, ttlSeconds);
+
+    // Audit log
+    await auditRepo.create({
+      tenantId,
+      userId,
+      action: 'user.logout',
+      resourceType: 'user',
+      resourceId: userId,
+      ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+      userAgent: c.req.header('User-Agent') ?? undefined,
+    });
+
+    logger.info('User logged out, token blacklisted', { userId, ttlSeconds });
+
+    return c.json({ success: true, message: 'Logged out successfully' });
+  });
+
+  // Generate CSRF token for the current session
+  router.get('/csrf-token', async (c) => {
+    const userId = c.get('userId');
+
+    if (!userId) {
+      // API key sessions don't need CSRF tokens
+      throw ApiError.badRequest(
+        'CSRF tokens are only issued for JWT-authenticated sessions',
+        'CSRF_NOT_APPLICABLE'
+      );
+    }
+
+    const sessionId = `user:${userId}`;
+    const token = await generateCsrfToken(ctx, sessionId);
+
+    return c.json({ csrfToken: token });
   });
 
   return router;

@@ -6,7 +6,7 @@
  * and access control.
  */
 
-import * as CryptoJS from 'crypto-js';
+import * as crypto from 'crypto';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
 import {
@@ -546,43 +546,39 @@ export class SecretManager {
     }
 
     /**
-     * Encrypt a value
+     * Encrypt a value using AES-256-GCM
      */
     private encrypt(value: string): string {
-        const iv = CryptoJS.lib.WordArray.random(16);
-        const encrypted = CryptoJS.AES.encrypt(value, this.encryptionKey, {
-            iv,
-            mode: CryptoJS.mode.CBC,
-            padding: CryptoJS.pad.Pkcs7,
-        });
+        const iv = crypto.randomBytes(12);
+        const key = crypto.scryptSync(this.encryptionKey, 'apexmail-secrets', 32);
+        const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
 
-        // Combine IV and ciphertext
-        const combined = iv.concat(encrypted.ciphertext);
-        return combined.toString(CryptoJS.enc.Base64);
+        let encrypted = cipher.update(value, 'utf8');
+        encrypted = Buffer.concat([encrypted, cipher.final()]);
+        const authTag = cipher.getAuthTag();
+
+        // Combine IV (12) + authTag (16) + ciphertext
+        const combined = Buffer.concat([iv, authTag, encrypted]);
+        return combined.toString('base64');
     }
 
     /**
-     * Decrypt a value
+     * Decrypt a value using AES-256-GCM
      */
     private decrypt(encryptedValue: string): string {
-        const combined = CryptoJS.enc.Base64.parse(encryptedValue);
-        const iv = CryptoJS.lib.WordArray.create(combined.words.slice(0, 4), 16);
-        const ciphertext = CryptoJS.lib.WordArray.create(
-            combined.words.slice(4),
-            combined.sigBytes - 16
-        );
+        const combined = Buffer.from(encryptedValue, 'base64');
+        const iv = combined.subarray(0, 12);
+        const authTag = combined.subarray(12, 28);
+        const ciphertext = combined.subarray(28);
 
-        const decrypted = CryptoJS.AES.decrypt(
-            { ciphertext } as CryptoJS.lib.CipherParams,
-            this.encryptionKey,
-            {
-                iv,
-                mode: CryptoJS.mode.CBC,
-                padding: CryptoJS.pad.Pkcs7,
-            }
-        );
+        const key = crypto.scryptSync(this.encryptionKey, 'apexmail-secrets', 32);
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(authTag);
 
-        return decrypted.toString(CryptoJS.enc.Utf8);
+        let decrypted = decipher.update(ciphertext);
+        decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+        return decrypted.toString('utf8');
     }
 
     /**
@@ -591,7 +587,7 @@ export class SecretManager {
     private generateSecretValue(type?: SecretType): string {
         switch (type) {
             case 'api_key':
-                return `apx_${randomToken(32)}`;
+                return `am_${randomToken(32)}`;
             case 'webhook_secret':
                 return `whsec_${randomToken(32)}`;
             case 'encryption_key':

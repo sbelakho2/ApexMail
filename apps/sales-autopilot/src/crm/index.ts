@@ -3,6 +3,7 @@
  */
 
 export {
+    initCrmDatabase,
     createDefaultPipeline,
     getPipeline,
     addStageAutomation,

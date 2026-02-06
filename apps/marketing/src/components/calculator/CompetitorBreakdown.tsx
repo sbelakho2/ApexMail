@@ -145,7 +145,7 @@ export function CompetitorBreakdown() {
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.2 }}
-          className="bg-white border border-surface-200 shadow-sm rounded-xl overflow-hidden"
+          className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
         >
           <div className="overflow-x-auto">
             <table className="w-full">

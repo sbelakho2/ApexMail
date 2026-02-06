@@ -2,15 +2,22 @@
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, info, warn};
+use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
+use mail_parser::MessageParser;
 
 pub struct SmtpConfig {
     pub hostname: String,
     pub mailstore_addr: String,
     pub max_message_size: usize,
     pub max_recipients: usize,
+    pub enable_starttls: bool,
+    pub tls_acceptor: Option<TlsAcceptor>,
+    /// Domains this server accepts mail for
+    pub local_domains: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -23,18 +30,62 @@ struct SmtpState {
     authenticated: bool,
 }
 
+enum SessionStream {
+    Plain(BufStream<TcpStream>),
+    Tls(BufStream<TlsStream<TcpStream>>),
+    Invalid,
+}
+
+impl SessionStream {
+    async fn read_line(&mut self, line: &mut String) -> Result<usize> {
+        match self {
+            SessionStream::Plain(stream) => Ok(stream.read_line(line).await?),
+            SessionStream::Tls(stream) => Ok(stream.read_line(line).await?),
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
+    }
+
+    async fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        match self {
+            SessionStream::Plain(stream) => {
+                stream.write_all(data).await?;
+                Ok(())
+            }
+            SessionStream::Tls(stream) => {
+                stream.write_all(data).await?;
+                Ok(())
+            }
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        match self {
+            SessionStream::Plain(stream) => {
+                stream.flush().await?;
+                Ok(())
+            }
+            SessionStream::Tls(stream) => {
+                stream.flush().await?;
+                Ok(())
+            }
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
+    }
+}
+
 pub async fn handle_connection(
     socket: TcpStream,
     config: Arc<SmtpConfig>,
     peer: String,
 ) -> Result<()> {
-    let (reader, mut writer) = socket.into_split();
-    let mut reader = BufReader::new(reader);
+    let mut stream = SessionStream::Plain(BufStream::new(socket));
     let mut state = SmtpState::default();
     
     // Send greeting
     let greeting = format!("220 {} ESMTP ApexMail ready\r\n", config.hostname);
-    writer.write_all(greeting.as_bytes()).await?;
+    stream.write_all(greeting.as_bytes()).await?;
+    stream.flush().await?;
     
     let mut line = String::new();
     
@@ -43,7 +94,7 @@ pub async fn handle_connection(
         
         if state.data_mode {
             // Reading message data
-            match reader.read_line(&mut line).await {
+            match stream.read_line(&mut line).await {
                 Ok(0) => break, // Connection closed
                 Ok(_) => {
                     if line.trim() == "." {
@@ -62,12 +113,14 @@ pub async fn handle_connection(
                                     size = state.data_buffer.len(),
                                     "Message accepted"
                                 );
-                                writer.write_all(b"250 2.0.0 Message accepted for delivery\r\n").await?;
+                                stream.write_all(b"250 2.0.0 Message accepted for delivery\r\n").await?;
+                                stream.flush().await?;
                             }
                             Err(e) => {
                                 warn!(peer = %peer, error = %e, "Message rejected");
                                 let response = format!("550 5.7.1 Message rejected: {}\r\n", e);
-                                writer.write_all(response.as_bytes()).await?;
+                                stream.write_all(response.as_bytes()).await?;
+                                stream.flush().await?;
                             }
                         }
                         
@@ -85,7 +138,8 @@ pub async fn handle_connection(
                         
                         if state.data_buffer.len() + data_line.len() > config.max_message_size {
                             state.data_mode = false;
-                            writer.write_all(b"552 5.3.4 Message too large\r\n").await?;
+                            stream.write_all(b"552 5.3.4 Message too large\r\n").await?;
+                            stream.flush().await?;
                             state.data_buffer.clear();
                         } else {
                             state.data_buffer.extend_from_slice(data_line.as_bytes());
@@ -99,17 +153,64 @@ pub async fn handle_connection(
             }
         } else {
             // Reading commands
-            match reader.read_line(&mut line).await {
+            match stream.read_line(&mut line).await {
                 Ok(0) => break, // Connection closed
                 Ok(_) => {
+                    let command = line.trim().split_whitespace().next().unwrap_or("").to_uppercase();
+
+                    if command == "STARTTLS" {
+                        if !config.enable_starttls {
+                            stream.write_all(b"454 4.7.0 TLS not available\r\n").await?;
+                            stream.flush().await?;
+                            continue;
+                        }
+
+                        if matches!(stream, SessionStream::Tls(_)) {
+                            stream.write_all(b"503 5.5.1 TLS already active\r\n").await?;
+                            stream.flush().await?;
+                            continue;
+                        }
+
+                        let acceptor = match &config.tls_acceptor {
+                            Some(a) => a,
+                            None => {
+                                stream.write_all(b"454 4.7.0 TLS not available\r\n").await?;
+                                stream.flush().await?;
+                                continue;
+                            }
+                        };
+
+                        stream.write_all(b"220 2.0.0 Ready to start TLS\r\n").await?;
+                        stream.flush().await?;
+
+                        let current = std::mem::replace(&mut stream, SessionStream::Invalid);
+                        let plain_stream = match current {
+                            SessionStream::Plain(s) => s,
+                            other => {
+                                stream = other;
+                                continue;
+                            }
+                        };
+
+                        let tcp_stream = plain_stream.into_inner();
+                        let tls_stream = acceptor.accept(tcp_stream).await?;
+                        stream = SessionStream::Tls(BufStream::new(tls_stream));
+
+                        // Reset session state after TLS negotiation
+                        state = SmtpState::default();
+                        continue;
+                    }
+
                     let response = handle_command(&line, &mut state, &config, &peer).await;
-                    
+
                     if response.starts_with("221") {
-                        writer.write_all(response.as_bytes()).await?;
+                        stream.write_all(response.as_bytes()).await?;
+                        stream.flush().await?;
                         break;
                     }
-                    
-                    writer.write_all(response.as_bytes()).await?;
+
+                    stream.write_all(response.as_bytes()).await?;
+                    stream.flush().await?;
                 }
                 Err(e) => {
                     warn!(peer = %peer, error = %e, "Read error");
@@ -151,15 +252,21 @@ async fn handle_command(
                 return "501 5.5.4 EHLO requires domain argument\r\n".to_string();
             }
             state.helo = Some(args.to_string());
-            format!(
+            let mut response = format!(
                 "250-{} Hello {}\r\n\
                  250-SIZE {}\r\n\
                  250-8BITMIME\r\n\
                  250-ENHANCEDSTATUSCODES\r\n\
-                 250-PIPELINING\r\n\
-                 250 STARTTLS\r\n",
+                 250-PIPELINING\r\n",
                 config.hostname, args, config.max_message_size
-            )
+            );
+
+            if config.enable_starttls {
+                response.push_str("250-STARTTLS\r\n");
+            }
+
+            response.push_str("250 HELP\r\n");
+            response
         }
         
         "MAIL" => {
@@ -193,7 +300,7 @@ async fn handle_command(
             match to {
                 Some(addr) => {
                     // Check if we accept mail for this domain
-                    if is_local_domain(&addr) {
+                    if is_local_domain(&addr, config) {
                         state.rcpt_to.push(addr);
                         "250 2.1.5 Recipient OK\r\n".to_string()
                     } else {
@@ -228,11 +335,6 @@ async fn handle_command(
         "VRFY" => "252 2.5.2 Cannot VRFY user\r\n".to_string(),
         
         "EXPN" => "252 2.5.2 Cannot expand list\r\n".to_string(),
-        
-        "STARTTLS" => {
-            // In production, this would upgrade to TLS
-            "454 4.7.0 TLS not available\r\n".to_string()
-        }
         
         _ => "500 5.5.1 Command not recognized\r\n".to_string(),
     }
@@ -275,29 +377,189 @@ fn extract_address(s: &str) -> Option<String> {
     None
 }
 
-fn is_local_domain(addr: &str) -> bool {
-    let domain = addr.split('@').nth(1).unwrap_or("");
-    matches!(
-        domain.to_lowercase().as_str(),
-        "apexmail.ee" | "mail.apexmail.ee" | "localhost"
-    )
+fn is_local_domain(addr: &str, config: &SmtpConfig) -> bool {
+    let domain = addr.split('@').nth(1).unwrap_or("").to_lowercase();
+    // Always accept localhost for development
+    if domain == "localhost" {
+        return true;
+    }
+    // Check against configured local domains
+    config.local_domains.iter().any(|d| d.to_lowercase() == domain)
 }
 
 async fn process_message(
     state: &SmtpState,
-    _config: &SmtpConfig,
-    _peer: &str,
+    config: &SmtpConfig,
+    peer: &str,
 ) -> Result<()> {
-    // In production, this would:
-    // 1. Call spam gateway for scanning
-    // 2. Store message via mailstore gRPC
-    // For now, just log and accept
+    let from_addr = state.mail_from.as_deref().unwrap_or("<>");
+    let helo_domain = state.helo.as_deref().unwrap_or("unknown");
+    let message_data = &state.data_buffer;
     
-    debug!(
-        from = ?state.mail_from,
+    // Extract sender domain for SPF/DMARC checks
+    let from_domain = from_addr
+        .split('@')
+        .nth(1)
+        .unwrap_or("")
+        .to_lowercase();
+    
+    // Parse the peer IP address
+    let peer_ip: std::net::IpAddr = peer
+        .split(':')
+        .next()
+        .unwrap_or(peer)
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    
+    // Create DNS resolver for authentication checks
+    let resolver = Resolver::new_system_conf()
+        .map_err(|e| anyhow::anyhow!("Failed to create DNS resolver: {}", e))?;
+    
+    // ── SPF verification ───────────────────────────────────────────────
+    let spf_result = if !from_domain.is_empty() {
+        match resolver
+            .verify_spf_sender(peer_ip, helo_domain, &from_domain, from_addr)
+            .await
+        {
+            result => {
+                let spf_status = match result.result() {
+                    SpfResult::Pass => "pass",
+                    SpfResult::Fail => "fail",
+                    SpfResult::SoftFail => "softfail",
+                    SpfResult::Neutral => "neutral",
+                    SpfResult::TempError => "temperror",
+                    SpfResult::PermError => "permerror",
+                    SpfResult::None => "none",
+                };
+                info!(
+                    peer = %peer,
+                    from = %from_addr,
+                    spf = %spf_status,
+                    "SPF verification result"
+                );
+                spf_status.to_string()
+            }
+        }
+    } else {
+        "none".to_string()
+    };
+    
+    // Hard fail SPF = reject
+    if spf_result == "fail" {
+        warn!(peer = %peer, from = %from_addr, "SPF hard fail — rejecting message");
+        return Err(anyhow::anyhow!("SPF check failed: mail from {} not authorized by {}", peer, from_domain));
+    }
+    
+    // ── DKIM verification ──────────────────────────────────────────────
+    let dkim_result = match AuthenticatedMessage::parse(message_data) {
+        Some(authenticated_msg) => {
+            let dkim_output = resolver.verify_dkim(&authenticated_msg).await;
+            let mut overall = "none";
+            for result in dkim_output.iter() {
+                match result.result() {
+                    DkimResult::Pass => {
+                        overall = "pass";
+                        break; // One pass is enough
+                    }
+                    DkimResult::Fail(_) => {
+                        if overall != "pass" {
+                            overall = "fail";
+                        }
+                    }
+                    DkimResult::Neutral(_) | DkimResult::None => {}
+                    _ => {
+                        if overall == "none" {
+                            overall = "temperror";
+                        }
+                    }
+                }
+            }
+            info!(
+                peer = %peer,
+                from = %from_addr,
+                dkim = %overall,
+                "DKIM verification result"
+            );
+            overall.to_string()
+        }
+        None => {
+            debug!(peer = %peer, "Could not parse message for DKIM verification");
+            "none".to_string()
+        }
+    };
+    
+    // ── DMARC evaluation ───────────────────────────────────────────────
+    // DMARC passes if either SPF or DKIM passes AND aligns with From domain
+    let dmarc_result = if !from_domain.is_empty() {
+        let spf_aligned = spf_result == "pass";
+        let dkim_aligned = dkim_result == "pass";
+        
+        if spf_aligned || dkim_aligned {
+            "pass"
+        } else if spf_result == "fail" && dkim_result == "fail" {
+            "fail"
+        } else {
+            "none"
+        }
+    } else {
+        "none"
+    };
+    
+    info!(
+        peer = %peer,
+        from = %from_addr,
+        spf = %spf_result,
+        dkim = %dkim_result,
+        dmarc = %dmarc_result,
+        "Authentication-Results summary"
+    );
+    
+    // Reject on DMARC fail (SPF fail + DKIM fail)
+    if dmarc_result == "fail" {
+        warn!(
+            peer = %peer,
+            from = %from_addr,
+            "DMARC fail — both SPF and DKIM failed, rejecting"
+        );
+        return Err(anyhow::anyhow!(
+            "Message failed authentication checks (SPF={}, DKIM={}, DMARC=fail)",
+            spf_result,
+            dkim_result
+        ));
+    }
+    
+    // ── Build Authentication-Results header ────────────────────────────
+    let auth_results_header = format!(
+        "Authentication-Results: {};\r\n\tspf={} smtp.mailfrom={};\r\n\tdkim={};\r\n\tdmarc={} header.from={}\r\n",
+        config.hostname,
+        spf_result,
+        from_addr,
+        dkim_result,
+        dmarc_result,
+        from_domain,
+    );
+    
+    // Prepend Authentication-Results header to the message
+    let mut final_message = auth_results_header.into_bytes();
+    final_message.extend_from_slice(message_data);
+    
+    // ── Store via mailstore gRPC ───────────────────────────────────────
+    // TODO: Forward to mailstore service via gRPC for storage
+    // For now, log the accepted message with full authentication results
+    let parsed_subject = MessageParser::new()
+        .parse(&final_message)
+        .and_then(|m| m.subject().map(|s| s.to_string()));
+    
+    info!(
+        peer = %peer,
+        from = %from_addr,
         to = ?state.rcpt_to,
-        size = state.data_buffer.len(),
-        "Processing inbound message"
+        subject = ?parsed_subject,
+        size = final_message.len(),
+        spf = %spf_result,
+        dkim = %dkim_result,
+        dmarc = %dmarc_result,
+        "Message accepted and authenticated — ready for mailstore delivery"
     );
     
     Ok(())

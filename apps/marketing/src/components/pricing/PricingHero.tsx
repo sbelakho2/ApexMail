@@ -12,7 +12,7 @@ export function PricingHero() {
             animate={{ opacity: 1, y: 0 }}
             className="inline-flex items-center gap-2 mb-6"
           >
-           <span className="text-sm font-semibold text-primary-600 tracking-wide uppercase">Simple Pricing</span>
+           <span className="text-sm font-semibold text-primary-600">Simple Pricing</span>
           </motion.div>
 
  <motion.h1

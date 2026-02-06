@@ -40,6 +40,18 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* Reduced motion for accessibility */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   body {
     @apply bg-surface-50 text-surface-900 font-sans text-[17px] leading-[1.6];
     font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
