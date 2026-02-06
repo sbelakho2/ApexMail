@@ -64,6 +64,13 @@ export class AnalyticsProcessor {
   // MEM-003 FIX: Store reference to hourly aggregation timer for cleanup
   private hourlyAggregationTimer: NodeJS.Timeout | null = null;
   private readonly aggregationBuffer = new Map<string, AggregatedStats>();
+  /**
+   * IMP-004: Maximum number of aggregation keys before forced eviction.
+   * Without a cap, if Postgres writes fail repeatedly the aggregationBuffer
+   * grows without bound → eventual OOM. With the cap, oldest entries are
+   * evicted when the buffer exceeds this size, bounding memory usage.
+   */
+  private static readonly MAX_AGGREGATION_BUFFER_SIZE = 10_000;
 
   constructor(options: AnalyticsProcessorConfig) {
     this.db = options.db;
@@ -275,6 +282,23 @@ export class AnalyticsProcessor {
           break;
       }
     }
+
+    // IMP-004: Evict oldest entries when buffer exceeds cap to prevent OOM.
+    // Map iteration order is insertion order, so the first keys are the oldest.
+    if (this.aggregationBuffer.size > AnalyticsProcessor.MAX_AGGREGATION_BUFFER_SIZE) {
+      const excess = this.aggregationBuffer.size - AnalyticsProcessor.MAX_AGGREGATION_BUFFER_SIZE;
+      let removed = 0;
+      for (const oldKey of this.aggregationBuffer.keys()) {
+        if (removed >= excess) break;
+        this.aggregationBuffer.delete(oldKey);
+        removed++;
+      }
+      this.logger.warn('Aggregation buffer exceeded cap, evicted oldest entries', {
+        evicted: removed,
+        bufferSize: this.aggregationBuffer.size,
+        cap: AnalyticsProcessor.MAX_AGGREGATION_BUFFER_SIZE,
+      });
+    }
   }
 
   /**
@@ -329,59 +353,87 @@ export class AnalyticsProcessor {
     }
   }
 
+  /**
+   * Batch upsert: single multi-row INSERT … ON CONFLICT instead of N individual queries.
+   * Uses unnest() to pass typed arrays, giving PostgreSQL one parse/plan/execute cycle
+   * regardless of how many aggregation buckets are in the batch.
+   */
   private async writeAggregations(aggregations: Map<string, AggregatedStats>): Promise<void> {
     if (aggregations.size === 0) return;
 
-    const client = await this.db.connect();
+    // Build parallel arrays for each column
+    const ids: string[] = [];
+    const tenantIds: string[] = [];
+    const domainIds: (string | null)[] = [];
+    const campaignIds: (string | null)[] = [];
+    const periodStarts: Date[] = [];
+    const periodEnds: Date[] = [];
+    const sentArr: number[] = [];
+    const deliveredArr: number[] = [];
+    const openedArr: number[] = [];
+    const clickedArr: number[] = [];
+    const bouncedArr: number[] = [];
+    const unsubscribedArr: number[] = [];
+    const complainedArr: number[] = [];
+    const failedArr: number[] = [];
 
-    try {
-      await client.query('BEGIN');
-
-      for (const [_key, stats] of aggregations) {
-        void _key; // Key is used as map identifier but not needed in the insert
-        await client.query(`
-          INSERT INTO analytics_hourly (
-            id, tenant_id, domain_id, campaign_id, period_start, period_end,
-            sent, delivered, opened, clicked, bounced, unsubscribed, complained, failed,
-            created_at, updated_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
-          ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)
-          DO UPDATE SET
-            sent = analytics_hourly.sent + EXCLUDED.sent,
-            delivered = analytics_hourly.delivered + EXCLUDED.delivered,
-            opened = analytics_hourly.opened + EXCLUDED.opened,
-            clicked = analytics_hourly.clicked + EXCLUDED.clicked,
-            bounced = analytics_hourly.bounced + EXCLUDED.bounced,
-            unsubscribed = analytics_hourly.unsubscribed + EXCLUDED.unsubscribed,
-            complained = analytics_hourly.complained + EXCLUDED.complained,
-            failed = analytics_hourly.failed + EXCLUDED.failed,
-            updated_at = NOW()
-        `, [
-          generateId('anh'),
-          stats.tenantId,
-          stats.domainId ?? null,
-          stats.campaignId ?? null,
-          stats.periodStart,
-          stats.periodEnd,
-          stats.sent,
-          stats.delivered,
-          stats.opened,
-          stats.clicked,
-          stats.bounced,
-          stats.unsubscribed,
-          stats.complained,
-          stats.failed,
-        ]);
-      }
-
-      await client.query('COMMIT');
-
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    for (const stats of aggregations.values()) {
+      ids.push(generateId('anh'));
+      tenantIds.push(stats.tenantId);
+      domainIds.push(stats.domainId ?? null);
+      campaignIds.push(stats.campaignId ?? null);
+      periodStarts.push(stats.periodStart);
+      periodEnds.push(stats.periodEnd);
+      sentArr.push(stats.sent);
+      deliveredArr.push(stats.delivered);
+      openedArr.push(stats.opened);
+      clickedArr.push(stats.clicked);
+      bouncedArr.push(stats.bounced);
+      unsubscribedArr.push(stats.unsubscribed);
+      complainedArr.push(stats.complained);
+      failedArr.push(stats.failed);
     }
+
+    await this.db.query(`
+      INSERT INTO analytics_hourly (
+        id, tenant_id, domain_id, campaign_id, period_start, period_end,
+        sent, delivered, opened, clicked, bounced, unsubscribed, complained, failed,
+        created_at, updated_at
+      )
+      SELECT
+        unnest($1::text[]),
+        unnest($2::text[]),
+        unnest($3::text[]),
+        unnest($4::text[]),
+        unnest($5::timestamptz[]),
+        unnest($6::timestamptz[]),
+        unnest($7::int[]),
+        unnest($8::int[]),
+        unnest($9::int[]),
+        unnest($10::int[]),
+        unnest($11::int[]),
+        unnest($12::int[]),
+        unnest($13::int[]),
+        unnest($14::int[]),
+        NOW(),
+        NOW()
+      ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)
+      DO UPDATE SET
+        sent = analytics_hourly.sent + EXCLUDED.sent,
+        delivered = analytics_hourly.delivered + EXCLUDED.delivered,
+        opened = analytics_hourly.opened + EXCLUDED.opened,
+        clicked = analytics_hourly.clicked + EXCLUDED.clicked,
+        bounced = analytics_hourly.bounced + EXCLUDED.bounced,
+        unsubscribed = analytics_hourly.unsubscribed + EXCLUDED.unsubscribed,
+        complained = analytics_hourly.complained + EXCLUDED.complained,
+        failed = analytics_hourly.failed + EXCLUDED.failed,
+        updated_at = NOW()
+    `, [
+      ids, tenantIds, domainIds, campaignIds,
+      periodStarts, periodEnds,
+      sentArr, deliveredArr, openedArr, clickedArr,
+      bouncedArr, unsubscribedArr, complainedArr, failedArr,
+    ]);
   }
 
   private async updateRedisCounters(events: AnalyticsEvent[]): Promise<void> {
@@ -451,6 +503,10 @@ export class AnalyticsProcessor {
 
     try {
       // Aggregate events from the previous hour that weren't processed in real-time
+      // FIX-001: Use gen_random_uuid() instead of a single $1 ID parameter.
+      // The GROUP BY produces N rows (one per tenant/domain/campaign combo),
+      // so each row needs its own unique ID. Previously $1 was the same for
+      // all rows, causing ON CONFLICT DO NOTHING to silently drop all but one.
       await this.db.query(`
         INSERT INTO analytics_hourly (
           id, tenant_id, domain_id, campaign_id, period_start, period_end,
@@ -458,12 +514,12 @@ export class AnalyticsProcessor {
           created_at, updated_at
         )
         SELECT 
-          $1,
+          gen_random_uuid()::text,
           tenant_id,
           domain_id,
           campaign_id,
-          $2 as period_start,
-          $3 as period_end,
+          $1 as period_start,
+          $2 as period_end,
           COUNT(*) FILTER (WHERE event_type = 'sent'),
           COUNT(*) FILTER (WHERE event_type = 'delivered'),
           COUNT(*) FILTER (WHERE event_type = 'opened'),
@@ -475,11 +531,11 @@ export class AnalyticsProcessor {
           NOW(),
           NOW()
         FROM events
-        WHERE timestamp >= $2 AND timestamp < $3
+        WHERE timestamp >= $1 AND timestamp < $2
         GROUP BY tenant_id, domain_id, campaign_id
         ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)
         DO NOTHING
-      `, [generateId('anh'), previousHour, hourEnd]);
+      `, [previousHour, hourEnd]);
 
       // Run daily rollup at midnight
       if (previousHour.getHours() === 23) {
@@ -507,7 +563,9 @@ export class AnalyticsProcessor {
     dayEnd.setDate(dayEnd.getDate() + 1);
 
     try {
-      // Rollup hourly stats into daily stats
+      // FIX-001: Use gen_random_uuid() instead of a single $1 ID parameter.
+      // Same bug as hourly aggregation — GROUP BY produces N rows that all
+      // need unique IDs.
       await this.db.query(`
         INSERT INTO analytics_daily (
           id, tenant_id, domain_id, campaign_id, date,
@@ -516,11 +574,11 @@ export class AnalyticsProcessor {
           created_at, updated_at
         )
         SELECT 
-          $1,
+          gen_random_uuid()::text,
           tenant_id,
           domain_id,
           campaign_id,
-          $2::date,
+          $1::date,
           SUM(sent),
           SUM(delivered),
           SUM(opened),
@@ -534,7 +592,7 @@ export class AnalyticsProcessor {
           NOW(),
           NOW()
         FROM analytics_hourly
-        WHERE period_start >= $2 AND period_start < $3
+        WHERE period_start >= $1 AND period_start < $2
         GROUP BY tenant_id, domain_id, campaign_id
         ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), date)
         DO UPDATE SET
@@ -547,7 +605,7 @@ export class AnalyticsProcessor {
           complained = EXCLUDED.complained,
           failed = EXCLUDED.failed,
           updated_at = NOW()
-      `, [generateId('and'), dayStart, dayEnd]);
+      `, [dayStart, dayEnd]);
 
       // Calculate unique opens and clicks
       await this.db.query(`

@@ -131,8 +131,9 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     let content = bodyMatch[1] || '';
     
     // Convert MJML sections to table rows
+    // SECURITY: Use (?:[^">]|"[^"]*")* instead of [^>]* to handle > inside quoted attributes
     content = content.replace(
-        /<mj-section([^>]*)>([\s\S]*?)<\/mj-section>/gi,
+        /<mj-section((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-section>/gi,
         (_match, attrs, inner) => {
             const bgColor = extractAttr(attrs, 'background-color') || '#ffffff';
             const padding = extractAttr(attrs, 'padding') || '20px';
@@ -142,7 +143,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     
     // Convert MJML columns to table cells
     content = content.replace(
-        /<mj-column([^>]*)>([\s\S]*?)<\/mj-column>/gi,
+        /<mj-column((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-column>/gi,
         (_match, attrs, inner) => {
             const width = extractAttr(attrs, 'width') || '100%';
             const padding = extractAttr(attrs, 'padding') || '0';
@@ -152,7 +153,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     
     // Convert MJML text to paragraphs
     content = content.replace(
-        /<mj-text([^>]*)>([\s\S]*?)<\/mj-text>/gi,
+        /<mj-text((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-text>/gi,
         (_match, attrs, inner) => {
             const color = extractAttr(attrs, 'color') || '#000000';
             const fontSize = extractAttr(attrs, 'font-size') || '14px';
@@ -166,7 +167,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     // Convert MJML buttons
     // SECURITY: Sanitize href to prevent javascript: XSS
     content = content.replace(
-        /<mj-button([^>]*)>([\s\S]*?)<\/mj-button>/gi,
+        /<mj-button((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-button>/gi,
         (_match, attrs, inner) => {
             const href = sanitizeUrl(extractAttr(attrs, 'href') || '#');
             const bgColor = sanitizeAttr(extractAttr(attrs, 'background-color') || '#007bff');
@@ -183,7 +184,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     // Convert MJML images
     // SECURITY: Sanitize src and href to prevent XSS, escape alt text
     content = content.replace(
-        /<mj-image([^>]*)\/?>/gi,
+        /<mj-image((?:[^">]|"[^"]*")*)\/?>/gi,
         (_match, attrs) => {
             const src = sanitizeUrl(extractAttr(attrs, 'src') || '');
             const alt = sanitizeAttr(extractAttr(attrs, 'alt') || '');
@@ -201,7 +202,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     
     // Convert MJML dividers
     content = content.replace(
-        /<mj-divider([^>]*)\/?>/gi,
+        /<mj-divider((?:[^">]|"[^"]*")*)\/?>/gi,
         (_match, attrs) => {
             const borderColor = extractAttr(attrs, 'border-color') || '#e0e0e0';
             const borderWidth = extractAttr(attrs, 'border-width') || '1px';
@@ -212,7 +213,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     
     // Convert MJML spacers
     content = content.replace(
-        /<mj-spacer([^>]*)\/?>/gi,
+        /<mj-spacer((?:[^">]|"[^"]*")*)\/?>/gi,
         (_match, attrs) => {
             const height = sanitizeAttr(extractAttr(attrs, 'height') || '20px');
             return `<div style="height:${height}"></div>`;
@@ -221,7 +222,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     
     // Convert MJML social elements
     content = content.replace(
-        /<mj-social([^>]*)>([\s\S]*?)<\/mj-social>/gi,
+        /<mj-social((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-social>/gi,
         (_match, _attrs, inner) => {
             return `<div style="text-align:center;padding:10px 0">${inner}</div>`;
         }
@@ -229,7 +230,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     
     // SECURITY: Sanitize social element URLs and text
     content = content.replace(
-        /<mj-social-element([^>]*)>([\s\S]*?)<\/mj-social-element>/gi,
+        /<mj-social-element((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-social-element>/gi,
         (_match, attrs, inner) => {
             const href = sanitizeUrl(extractAttr(attrs, 'href') || '#');
             const src = extractAttr(attrs, 'src') || '';

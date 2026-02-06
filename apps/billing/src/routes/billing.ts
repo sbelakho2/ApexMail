@@ -161,6 +161,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Get invoice details
   router.get('/invoices/:id', async (c) => {
     const invoiceId = c.req.param('id');
+    const tenantId = c.get('tenantId');
 
     const result = await ctx.invoices.getInvoice(invoiceId);
 
@@ -172,12 +173,18 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'Invoice not found' }, 404);
     }
 
+    // FIX-016: Verify the invoice belongs to the requesting tenant
+    if (result.value.tenantId !== tenantId) {
+      return c.json({ error: 'Invoice not found' }, 404);
+    }
+
     return c.json(result.value);
   });
 
   // Get invoice PDF
   router.get('/invoices/:id/pdf', async (c) => {
     const invoiceId = c.req.param('id');
+    const tenantId = c.get('tenantId');
 
     const result = await ctx.invoices.getInvoice(invoiceId);
 
@@ -186,6 +193,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     if (!result.value) {
+      return c.json({ error: 'Invoice not found' }, 404);
+    }
+
+    // FIX-016: Verify the invoice belongs to the requesting tenant
+    if (result.value.tenantId !== tenantId) {
       return c.json({ error: 'Invoice not found' }, 404);
     }
 
@@ -197,6 +209,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Get invoice e-Invoice XML
   router.get('/invoices/:id/xml', async (c) => {
     const invoiceId = c.req.param('id');
+    const tenantId = c.get('tenantId');
 
     const result = await ctx.invoices.getInvoice(invoiceId);
 
@@ -205,6 +218,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     if (!result.value) {
+      return c.json({ error: 'Invoice not found' }, 404);
+    }
+
+    // FIX-016: Verify the invoice belongs to the requesting tenant
+    if (result.value.tenantId !== tenantId) {
       return c.json({ error: 'Invoice not found' }, 404);
     }
 

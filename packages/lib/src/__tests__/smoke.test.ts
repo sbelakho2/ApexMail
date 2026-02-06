@@ -423,13 +423,13 @@ describe('Email Validation - Smoke Tests', () => {
     it('should fail MX check for invalid domain', async () => {
         const result = await validateEmail('test@thisdomain-definitely-does-not-exist-12345.com', {
             checkMx: true,
-            timeout: 5000,
+            timeout: 3000,
         });
         
         expect(result.checks.syntax).toBe(true);
         expect(result.checks.mxRecord).toBe(false);
         expect(result.valid).toBe(false);
-    });
+    }, 15_000);
 
     it('should normalize Gmail addresses without subaddressing', async () => {
         // By default, subaddressing is allowed so +tag is kept

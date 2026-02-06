@@ -540,14 +540,14 @@ export class ReplyHandler {
      * Detect urgency from text
      */
     private detectUrgency(text: string): 'high' | 'medium' | 'low' {
-        const highUrgency = ['urgent', 'asap', 'immediately', 'today', 'now', 'emergency', 'critical'];
-        const mediumUrgency = ['soon', 'this week', 'when possible', 'at your earliest'];
+        const highUrgency = [/\burgent\b/, /\basap\b/, /\bimmediately\b/, /\btoday\b/, /\bnow\b/, /\bemergency\b/, /\bcritical\b/];
+        const mediumUrgency = [/\bsoon\b/, /\bthis week\b/, /\bwhen possible\b/, /\bat your earliest\b/];
         
-        for (const word of highUrgency) {
-            if (text.includes(word)) return 'high';
+        for (const pattern of highUrgency) {
+            if (pattern.test(text)) return 'high';
         }
-        for (const word of mediumUrgency) {
-            if (text.includes(word)) return 'medium';
+        for (const pattern of mediumUrgency) {
+            if (pattern.test(text)) return 'medium';
         }
         return 'low';
     }

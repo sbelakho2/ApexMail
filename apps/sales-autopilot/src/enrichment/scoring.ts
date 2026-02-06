@@ -224,13 +224,6 @@ function calculateBehaviorScore(
         score += weights.recentActivityBonus;
     }
 
-    // Activity frequency multiplier
-    if (activities.length > 10) {
-        score *= weights.frequencyMultiplier;
-    } else if (activities.length > 5) {
-        score *= 1.2;
-    }
-
     // Stage progress bonus
     const stageOrder: PipelineStage[] = [
         'prospect',
@@ -245,6 +238,15 @@ function calculateBehaviorScore(
     const currentStageIndex = stageOrder.indexOf(lead.stage);
     if (currentStageIndex > 0) {
         score += weights.stageProgressBonus * currentStageIndex;
+    }
+
+    // FIX-020: Activity frequency multiplier applied AFTER all sub-scores
+    // are accumulated. Previously it was applied before stageProgressBonus,
+    // so stage progress was never frequency-boosted.
+    if (activities.length > 10) {
+        score *= weights.frequencyMultiplier;
+    } else if (activities.length > 5) {
+        score *= 1.2;
     }
 
     return Math.round(score);
@@ -293,9 +295,43 @@ export function calculateLeadScore(
     };
     grade: 'A' | 'B' | 'C' | 'D' | 'F';
 } {
+    // FIX-010: Deep-merge nested weight objects instead of shallow spread.
+    // { ...DEFAULT_WEIGHTS, ...customWeights } would replace the entire
+    // firmographic/engagement/behavior/timing objects when the caller only
+    // overrides a single sub-key, silently zeroing all other defaults.
     const weights: ScoringWeights = {
-        ...DEFAULT_WEIGHTS,
-        ...customWeights,
+        firmographic: {
+            ...DEFAULT_WEIGHTS.firmographic,
+            ...customWeights?.firmographic,
+            employeeRangeMultiplier: {
+                ...DEFAULT_WEIGHTS.firmographic.employeeRangeMultiplier,
+                ...customWeights?.firmographic?.employeeRangeMultiplier,
+            },
+            industryMultiplier: {
+                ...DEFAULT_WEIGHTS.firmographic.industryMultiplier,
+                ...customWeights?.firmographic?.industryMultiplier,
+            },
+            technologyBonus: {
+                ...DEFAULT_WEIGHTS.firmographic.technologyBonus,
+                ...customWeights?.firmographic?.technologyBonus,
+            },
+            locationBonus: {
+                ...DEFAULT_WEIGHTS.firmographic.locationBonus,
+                ...customWeights?.firmographic?.locationBonus,
+            },
+        },
+        engagement: {
+            ...DEFAULT_WEIGHTS.engagement,
+            ...customWeights?.engagement,
+        },
+        behavior: {
+            ...DEFAULT_WEIGHTS.behavior,
+            ...customWeights?.behavior,
+        },
+        timing: {
+            ...DEFAULT_WEIGHTS.timing,
+            ...customWeights?.timing,
+        },
     };
 
     // Calculate component scores

@@ -106,10 +106,11 @@ class PinoLoggerWrapper implements Logger {
   private readonly pino: PinoLogger;
 
   constructor(options: LoggerOptions = {}) {
-    const isPretty = process.env['NODE_ENV'] !== 'production';
+    const nodeEnv = process.env['NODE_ENV'];
+    const isPretty = nodeEnv !== 'production' && nodeEnv !== 'test';
     
     this.pino = createPino({
-      level: process.env['LOG_LEVEL'] ?? 'info',
+      level: process.env['LOG_LEVEL'] ?? (nodeEnv === 'test' ? 'silent' : 'info'),
       redact: {
         paths: REDACT_PATHS,
         censor: '[REDACTED]',

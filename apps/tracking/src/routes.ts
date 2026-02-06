@@ -190,7 +190,7 @@ function ipInCIDR(ip: string, cidr: string): boolean {
     return false;
   }
   
-  const mask = ~(0xFFFFFFFF >>> prefix);
+  const mask = prefix >= 32 ? ~0 : ~(0xFFFFFFFF >>> prefix);
   return (ipNum & mask) === (rangeNum & mask);
 }
 

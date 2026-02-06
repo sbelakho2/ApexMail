@@ -619,10 +619,16 @@ async function renderTemplate(
 }
 
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
+  // FIX-019: Block prototype-chain traversal to prevent prototype pollution.
+  // Without this, a template like {{__proto__.polluted}} or
+  // {{constructor.prototype.isAdmin}} could leak or mutate Object.prototype.
+  const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
   const keys = path.split('.');
   let value: unknown = obj;
   
   for (const key of keys) {
+    if (BLOCKED_KEYS.has(key)) return undefined;
     if (value === null || value === undefined) return undefined;
     if (typeof value !== 'object') return undefined;
     value = (value as Record<string, unknown>)[key];

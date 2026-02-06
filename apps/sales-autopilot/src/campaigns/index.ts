@@ -18,7 +18,10 @@ export {
     resumeEnrollment,
     startCampaignProcessor,
     stopCampaignProcessor,
+    setCampaignRepository,
 } from './drip-engine.js';
+
+export { CampaignRepository } from './repository.js';
 
 export {
     campaignTemplates,

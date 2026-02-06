@@ -764,6 +764,10 @@ export class TracingService {
    * Shutdown
    */
   async shutdown(): Promise<void> {
+    if (this.spanCleanupInterval) {
+      clearInterval(this.spanCleanupInterval);
+    }
+
     if (this.flushInterval) {
       clearInterval(this.flushInterval);
     }

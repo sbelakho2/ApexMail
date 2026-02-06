@@ -185,8 +185,8 @@ export class ApiKeysRepository {
 
     if (!result.ok) return result;
 
-    const row = result.value.rows[0];
-    if (!row) {
+    const rows = result.value.rows;
+    if (rows.length === 0) {
       return Result.ok({
         valid: false,
         apiKey: null,
@@ -194,7 +194,27 @@ export class ApiKeysRepository {
       });
     }
 
-    const apiKey = this.mapRow(row);
+    // FIX-005: Multiple API keys may share the same prefix.
+    // Iterate all matching rows and verify the hash against each.
+    let matchedApiKey: ApiKey | null = null;
+    for (const row of rows) {
+      const candidate = this.mapRow(row);
+      const hashMatch = await verifyPassword(key, row.key_hash);
+      if (hashMatch) {
+        matchedApiKey = candidate;
+        break;
+      }
+    }
+
+    if (!matchedApiKey) {
+      return Result.ok({
+        valid: false,
+        apiKey: null,
+        reason: 'invalid_hash',
+      });
+    }
+
+    const apiKey = matchedApiKey;
 
     // Check if active
     if (!apiKey.isActive) {
@@ -223,17 +243,6 @@ export class ApiKeysRepository {
           reason: 'ip_blocked',
         });
       }
-    }
-
-    // Verify the key hash
-    const isValid = await verifyPassword(key, row.key_hash);
-
-    if (!isValid) {
-      return Result.ok({
-        valid: false,
-        apiKey: null,
-        reason: 'invalid_hash',
-      });
     }
 
     // Update last used (fire and forget)
@@ -453,19 +462,23 @@ export class ApiKeysRepository {
     });
   }
 
-  async revoke(id: string): Promise<Result<void, Error>> {
-    const result = await this.db.query(
-      `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1`,
-      [id]
-    );
+  async revoke(id: string, tenantId?: string): Promise<Result<void, Error>> {
+    // FIX-008: Enforce tenant isolation — prevent cross-tenant key revocation
+    const sql = tenantId
+      ? `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`
+      : `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1`;
+    const params = tenantId ? [id, tenantId] : [id];
+    const result = await this.db.query(sql, params);
     return result.ok ? Result.ok(undefined) : result;
   }
 
-  async delete(id: string): Promise<Result<void, Error>> {
-    const result = await this.db.query(
-      'DELETE FROM api_keys WHERE id = $1',
-      [id]
-    );
+  async delete(id: string, tenantId?: string): Promise<Result<void, Error>> {
+    // FIX-008: Enforce tenant isolation — prevent cross-tenant key deletion
+    const sql = tenantId
+      ? 'DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2'
+      : 'DELETE FROM api_keys WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
+    const result = await this.db.query(sql, params);
     return result.ok ? Result.ok(undefined) : result;
   }
 

@@ -81,6 +81,28 @@ export class CampaignRepository {
         return result.rows.map(row => this.rowToCampaign(row));
     }
 
+    /**
+     * FIX-002: Get all non-deleted campaigns for cache hydration on startup.
+     */
+    async getAllCampaigns(): Promise<DripCampaign[]> {
+        const result = await this.db.query(
+            "SELECT * FROM drip_campaigns WHERE status != 'deleted' ORDER BY created_at DESC"
+        );
+
+        return result.rows.map(row => this.rowToCampaign(row));
+    }
+
+    /**
+     * FIX-002: Get all active/paused enrollments for cache hydration on startup.
+     */
+    async getAllActiveEnrollments(): Promise<CampaignEnrollment[]> {
+        const result = await this.db.query(
+            "SELECT * FROM campaign_enrollments WHERE status IN ('active', 'paused') ORDER BY enrolled_at DESC"
+        );
+
+        return result.rows.map(row => this.rowToEnrollment(row));
+    }
+
     async updateCampaign(
         campaignId: string,
         updates: Partial<Pick<DripCampaign, 'name' | 'description' | 'status' | 'stats' | 'startedAt' | 'pausedAt'>>

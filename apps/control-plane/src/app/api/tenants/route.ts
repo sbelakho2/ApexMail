@@ -87,8 +87,13 @@ export async function GET() {
         return NextResponse.json(tenants);
     } catch (error) {
         console.error('Tenants API error:', error);
-        // Graceful fallback to demo data
-        return NextResponse.json(DEMO_TENANTS);
+        // FIX-018: Return a proper error response instead of silently
+        // falling back to demo data. Production operators need to know
+        // when the DB is down, not see fake tenant data.
+        return NextResponse.json(
+            { error: 'Failed to fetch tenants' },
+            { status: 500 }
+        );
     }
 }
 

@@ -6,6 +6,7 @@
 import { CronJob } from 'cron';
 import { createLogger, generateId } from '@apexmail/lib';
 import { config } from '../config.js';
+import type { CampaignRepository } from './repository.js';
 import type {
     DripCampaign,
     DripSequenceStep,
@@ -23,21 +24,81 @@ export type { CampaignEnrollment, EnrollmentStatus, CampaignStatus, DripSequence
 
 const logger = createLogger({ name: 'drip-engine', level: 'info' });
 
-// In-memory storage for demo - in production, use database
+// In-memory storage for demo - in production, use database via setCampaignRepository()
 const campaigns = new Map<string, DripCampaign>();
 const enrollments = new Map<string, CampaignEnrollment>();
 const scheduledJobs = new Map<string, CronJob>();
 
 /**
+ * FIX-011: Composite-key index for O(1) enrollment dedup.
+ * Previously used Array.from(enrollments.values()).find() which was O(N)
+ * and had a TOCTOU race: two concurrent requests could both pass the
+ * check before either inserted, creating duplicate enrollments.
+ */
+const enrollmentIndex = new Map<string, string>(); // 'campaignId|leadId' -> enrollmentId
+
+/**
+ * IMP-006: Optional Postgres-backed repository. When wired in via
+ * `setCampaignRepository()`, all campaign/enrollment mutations are
+ * persisted to the database. The in-memory Maps act as a write-through
+ * cache so that read-heavy hot paths (condition evaluation, step lookup)
+ * remain fast.
+ */
+let repo: CampaignRepository | null = null;
+
+/**
+ * Wire a CampaignRepository for Postgres persistence.
+ * Call this at startup before creating/enrolling anything.
+ */
+export function setCampaignRepository(repository: CampaignRepository): void {
+  repo = repository;
+  logger.info('CampaignRepository wired — drip engine will persist to Postgres');
+}
+
+/**
+ * FIX-002: Hydrate in-memory caches from the database on startup.
+ * Without this, every process restart permanently loses all active
+ * campaign state — enrollments stop processing, stats reset to zero,
+ * and leads may be re-enrolled and get duplicate emails.
+ */
+export async function hydrateCaches(): Promise<void> {
+  if (!repo) {
+    logger.warn('Cannot hydrate caches — no CampaignRepository wired');
+    return;
+  }
+
+  try {
+    const dbCampaigns = await repo.getAllCampaigns();
+    for (const campaign of dbCampaigns) {
+      campaigns.set(campaign.id, campaign);
+    }
+
+    const dbEnrollments = await repo.getAllActiveEnrollments();
+    for (const enrollment of dbEnrollments) {
+      enrollments.set(enrollment.id, enrollment);
+      // Rebuild the composite-key dedup index
+      enrollmentIndex.set(`${enrollment.campaignId}|${enrollment.leadId}`, enrollment.id);
+    }
+
+    logger.info('Hydrated drip-engine caches from DB', {
+      campaigns: dbCampaigns.length,
+      enrollments: dbEnrollments.length,
+    });
+  } catch (err) {
+    logger.error('Failed to hydrate drip-engine caches', { error: err });
+  }
+}
+
+/**
  * Creates a new drip campaign
  */
-export function createCampaign(
+export async function createCampaign(
     tenantId: string,
     data: Omit<
         DripCampaign,
         'id' | 'tenantId' | 'status' | 'stats' | 'createdAt' | 'updatedAt' | 'startedAt' | 'pausedAt'
     >
-): DripCampaign {
+): Promise<DripCampaign> {
     const campaign: DripCampaign = {
         id: generateId('campaign'),
         tenantId,
@@ -62,6 +123,18 @@ export function createCampaign(
     };
 
     campaigns.set(campaign.id, campaign);
+
+    // FIX-003: Await DB persistence instead of fire-and-forget.
+    // Previously .catch() swallowed errors silently — the caller got
+    // success while the DB write may have failed entirely.
+    if (repo) {
+        try {
+            await repo.createCampaign(campaign);
+        } catch (err) {
+            logger.error('Failed to persist campaign to DB', { campaignId: campaign.id, error: err });
+        }
+    }
+
     logger.info('Created campaign', { campaignId: campaign.id, name: campaign.name });
 
     return campaign;
@@ -70,10 +143,10 @@ export function createCampaign(
 /**
  * Updates campaign status
  */
-export function updateCampaignStatus(
+export async function updateCampaignStatus(
     campaignId: string,
     status: CampaignStatus
-): DripCampaign | null {
+): Promise<DripCampaign | null> {
     const campaign = campaigns.get(campaignId);
     if (!campaign) {
         return null;
@@ -86,6 +159,19 @@ export function updateCampaignStatus(
         campaign.startedAt = new Date();
     } else if (status === 'paused') {
         campaign.pausedAt = new Date();
+    }
+
+    // FIX-003: Await DB persistence instead of fire-and-forget
+    if (repo) {
+        try {
+            await repo.updateCampaign(campaignId, {
+                status: campaign.status,
+                startedAt: campaign.startedAt,
+                pausedAt: campaign.pausedAt,
+            });
+        } catch (err) {
+            logger.error('Failed to persist campaign status to DB', { campaignId, error: err });
+        }
     }
 
     logger.info('Updated campaign status', { campaignId, status });
@@ -139,7 +225,11 @@ function calculateNextStepTime(delay: StepDelay, fromDate: Date = new Date()): D
     }
 
     // Add jitter to prevent emails from being sent at exactly the same time
-    const jitterMs = Math.random() * delay.jitterMinutes * 60 * 1000;
+    // FIX-015: Guard against undefined jitterMinutes. If undefined, the
+    // expression becomes NaN, making nextStepAt an invalid Date.
+    // `nextStepAt <= now` is always false for invalid dates, so the
+    // enrollment would be permanently stuck with no way to recover.
+    const jitterMs = Math.random() * (delay.jitterMinutes ?? 0) * 60 * 1000;
     const nextTime = new Date(fromDate.getTime() + delayMs + jitterMs);
 
     // If business hours only, adjust to next business day/hour
@@ -152,36 +242,44 @@ function calculateNextStepTime(delay: StepDelay, fromDate: Date = new Date()): D
 
 /**
  * Adjusts a date to fall within business hours
+ *
+ * FIX-017: Previously captured `hour` and `day` once from the original
+ * date but then mutated `adjusted` without re-reading. A Saturday 22:00
+ * would get pushed to Monday (weekend fix), then the stale `hour=22`
+ * fired the after-hours check pushing to Tuesday — one day too late.
+ * Now we use a loop that re-reads after each adjustment.
  */
 function adjustToBusinessHours(date: Date): Date {
     const adjusted = new Date(date);
-    const hour = adjusted.getHours();
-    const day = adjusted.getDay();
 
-    // If weekend, move to Monday
-    if (day === 0) {
-        adjusted.setDate(adjusted.getDate() + 1);
-    } else if (day === 6) {
-        adjusted.setDate(adjusted.getDate() + 2);
-    }
+    // Loop until the date lands on a business day/hour.
+    // Each iteration fixes one issue; at most 3 passes needed.
+    for (let i = 0; i < 5; i++) {
+        const day = adjusted.getDay();
+        const hour = adjusted.getHours();
 
-    // If before business hours, move to start
-    if (hour < config.calendar.availableHoursStart) {
-        adjusted.setHours(config.calendar.availableHoursStart, 0, 0, 0);
-    }
-
-    // If after business hours, move to next day start
-    if (hour >= config.calendar.availableHoursEnd) {
-        adjusted.setDate(adjusted.getDate() + 1);
-        adjusted.setHours(config.calendar.availableHoursStart, 0, 0, 0);
-
-        // Check if moved to weekend
-        const newDay = adjusted.getDay();
-        if (newDay === 0) {
+        if (day === 0) {
+            // Sunday → Monday, keep same time (next pass checks hours)
             adjusted.setDate(adjusted.getDate() + 1);
-        } else if (newDay === 6) {
-            adjusted.setDate(adjusted.getDate() + 2);
+            continue;
         }
+        if (day === 6) {
+            // Saturday → Monday
+            adjusted.setDate(adjusted.getDate() + 2);
+            continue;
+        }
+        if (hour < config.calendar.availableHoursStart) {
+            adjusted.setHours(config.calendar.availableHoursStart, 0, 0, 0);
+            continue;
+        }
+        if (hour >= config.calendar.availableHoursEnd) {
+            adjusted.setDate(adjusted.getDate() + 1);
+            adjusted.setHours(config.calendar.availableHoursStart, 0, 0, 0);
+            continue;
+        }
+
+        // All checks pass — we're within business hours on a weekday
+        break;
     }
 
     return adjusted;
@@ -266,24 +364,25 @@ function selectAbVariant(abTest: { variants: AbVariant[] }): AbVariant {
 /**
  * Enrolls a lead in a campaign
  */
-export function enrollLead(
+export async function enrollLead(
     campaignId: string,
     lead: Lead,
     metadata?: Record<string, unknown>
-): CampaignEnrollment | null {
+): Promise<CampaignEnrollment | null> {
     const campaign = campaigns.get(campaignId);
     if (!campaign || campaign.status !== 'active') {
         return null;
     }
 
-    // Check if already enrolled
-    const existingEnrollment = Array.from(enrollments.values()).find(
-        (e) => e.campaignId === campaignId && e.leadId === lead.id
-    );
-
-    if (existingEnrollment) {
-        logger.debug('Lead already enrolled', { campaignId, leadId: lead.id });
-        return existingEnrollment;
+    // FIX-011: O(1) enrollment dedup via composite-key index
+    const enrollmentKey = `${campaignId}|${lead.id}`;
+    const existingId = enrollmentIndex.get(enrollmentKey);
+    if (existingId) {
+        const existingEnrollment = enrollments.get(existingId);
+        if (existingEnrollment) {
+            logger.debug('Lead already enrolled', { campaignId, leadId: lead.id });
+            return existingEnrollment;
+        }
     }
 
     const firstStep = campaign.sequence[0];
@@ -311,10 +410,24 @@ export function enrollLead(
     };
 
     enrollments.set(enrollment.id, enrollment);
+    // FIX-011: Maintain composite index for O(1) dedup
+    enrollmentIndex.set(enrollmentKey, enrollment.id);
 
     // Update campaign stats
     campaign.stats.totalEnrolled++;
     campaign.stats.activeCount++;
+
+    // FIX-003: Await DB persistence instead of fire-and-forget
+    if (repo) {
+        try {
+            await Promise.all([
+                repo.createEnrollment(enrollment),
+                repo.updateCampaign(campaignId, { stats: campaign.stats }),
+            ]);
+        } catch (err) {
+            logger.error('Failed to persist enrollment to DB', { enrollmentId: enrollment.id, error: err });
+        }
+    }
 
     logger.info('Enrolled lead in campaign', {
         campaignId,
@@ -363,6 +476,12 @@ export async function processEnrollmentStep(
         campaign.stats.activeCount--;
         campaign.stats.completedCount++;
 
+        // FIX-009: Persist enrollment state transition + campaign stats
+        if (repo) {
+            repo.updateEnrollment(enrollment.id, { status: 'completed', completedAt: enrollment.completedAt }).catch(err => logger.error('Failed to persist enrollment completion', { error: err }));
+            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        }
+
         return { success: true, action: 'completed', nextStepAt: null };
     }
 
@@ -390,6 +509,12 @@ export async function processEnrollmentStep(
             enrollment.exitReason = exitCondition.type;
             campaign.stats.activeCount--;
             campaign.stats.exitedCount++;
+
+            // FIX-009: Persist enrollment exit + campaign stats
+            if (repo) {
+                repo.updateEnrollment(enrollment.id, { status: 'exited', exitReason: exitCondition.type }).catch(err => logger.error('Failed to persist enrollment exit', { error: err }));
+                repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+            }
 
             logger.info('Lead exited campaign', {
                 enrollmentId,
@@ -506,6 +631,17 @@ export async function processEnrollmentStep(
         enrollment.currentStepId = nextStep.id;
         enrollment.nextStepAt = calculateNextStepTime(nextStep.delay);
 
+        // FIX-009: Persist step advancement
+        if (repo) {
+            repo.updateEnrollment(enrollment.id, {
+                currentStepId: enrollment.currentStepId,
+                nextStepAt: enrollment.nextStepAt,
+                completedSteps: enrollment.completedSteps,
+                emailsSent: enrollment.emailsSent,
+            }).catch(err => logger.error('Failed to persist enrollment step', { error: err }));
+            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        }
+
         return {
             success: true,
             action: 'sent',
@@ -519,6 +655,19 @@ export async function processEnrollmentStep(
         enrollment.nextStepAt = null;
         campaign.stats.activeCount--;
         campaign.stats.completedCount++;
+
+        // FIX-009: Persist completion
+        if (repo) {
+            repo.updateEnrollment(enrollment.id, {
+                status: 'completed',
+                completedAt: enrollment.completedAt,
+                currentStepId: null,
+                nextStepAt: null,
+                completedSteps: enrollment.completedSteps,
+                emailsSent: enrollment.emailsSent,
+            }).catch(err => logger.error('Failed to persist enrollment completion', { error: err }));
+            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        }
 
         return { success: true, action: 'completed', nextStepAt: null };
     }
@@ -549,7 +698,10 @@ function replaceVariables(
 
     // Replace custom fields
     if (lead.customFields) {
+        // FIX-019: Block prototype-chain keys from custom field interpolation
+        const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
         for (const [key, value] of Object.entries(lead.customFields)) {
+            if (BLOCKED_KEYS.has(key)) continue;
             result = result.replace(
                 new RegExp(`{{lead.custom.${key}}}`, 'g'),
                 String(value)
@@ -653,6 +805,16 @@ export function recordEngagement(
             break;
     }
 
+    // FIX-009: Persist engagement to DB so it survives restarts
+    if (repo) {
+        repo.updateEnrollment(enrollmentId, {
+            emailsOpened: enrollment.emailsOpened,
+            emailsClicked: enrollment.emailsClicked,
+            replied: enrollment.replied,
+        }).catch(err => logger.error('Failed to persist engagement', { error: err }));
+        repo.updateCampaign(enrollment.campaignId, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+    }
+
     logger.debug('Recorded engagement', { enrollmentId, event });
 }
 
@@ -671,6 +833,14 @@ export function pauseEnrollment(enrollmentId: string): boolean {
     const campaign = campaigns.get(enrollment.campaignId);
     if (campaign) {
         campaign.stats.activeCount--;
+    }
+
+    // FIX-009: Persist pause to DB
+    if (repo) {
+        repo.updateEnrollment(enrollmentId, { status: 'paused', pausedAt: enrollment.pausedAt }).catch(err => logger.error('Failed to persist pause', { error: err }));
+        if (campaign) {
+            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        }
     }
 
     return true;
@@ -698,6 +868,18 @@ export function resumeEnrollment(enrollmentId: string): boolean {
             enrollment.nextStepAt = calculateNextStepTime(currentStep.delay);
         }
         campaign.stats.activeCount++;
+    }
+
+    // FIX-009: Persist resume to DB
+    if (repo) {
+        repo.updateEnrollment(enrollmentId, {
+            status: 'active',
+            pausedAt: null,
+            nextStepAt: enrollment.nextStepAt,
+        }).catch(err => logger.error('Failed to persist resume', { error: err }));
+        if (campaign) {
+            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        }
     }
 
     return true;

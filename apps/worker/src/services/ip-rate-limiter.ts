@@ -232,7 +232,7 @@ export class IPRateLimiter {
 
       // 4. Check ISP-specific limits if enabled
       if (this.ispAwareLimiting) {
-        const isp = this.detectISP(recipientDomain);
+        const isp = await this.detectISP(recipientDomain);
         const ispLimit = this.getISPDailyLimit(isp, warmupStatus.warmupDay);
         const ispSent = await this.getISPSentCount(ipAddress, isp);
         
@@ -266,7 +266,7 @@ export class IPRateLimiter {
    */
   async recordSend(ipAddress: string, recipientDomain: string): Promise<void> {
     const today = this.getTodayKey();
-    const isp = this.ispAwareLimiting ? this.detectISP(recipientDomain) : 'default';
+    const isp = this.ispAwareLimiting ? await this.detectISP(recipientDomain) : 'default';
     const hour = this.getHourKey();
 
     const pipeline = this.redis.pipeline();
@@ -546,24 +546,92 @@ export class IPRateLimiter {
     return schedule[warmupDay] ?? schedule[schedule.length - 1] ?? DEFAULT_INITIAL_LIMIT;
   }
 
-  private detectISP(domain: string): string {
+  /**
+   * FIX-052: Async ISP detection with DNS MX lookup for custom domains.
+   * Previous implementation only recognized 4 hardcoded consumer domains,
+   * so any company using Google Workspace or Microsoft 365 with a custom domain
+   * (e.g., company.com) fell through to 'default' schedule. Since ~60% of
+   * enterprise email is Google Workspace / M365, this caused over-sending
+   * to those ISPs and triggered spam filters during warmup.
+   *
+   * Now falls back to DNS MX lookup to detect the underlying ISP:
+   * - aspmx.l.google.com / *.googlemail.com → gmail
+   * - *.mail.protection.outlook.com → microsoft
+   * - *.yahoodns.net → yahoo
+   * - *.icloud.com → apple
+   *
+   * MX results are cached for 1 hour (mxCacheTtlMs) with LRU eviction.
+   */
+  private async detectISP(domain: string): Promise<string> {
     // Check cache
     const cached = this.mxCache.get(domain);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.isp;
     }
 
-    // For common domains, use direct mapping
+    // For common consumer domains, use direct mapping (fast path, no DNS)
     const directMapping = this.getDirectISPMapping(domain);
     if (directMapping) {
       this.mxCache.set(domain, { isp: directMapping, expiresAt: Date.now() + this.mxCacheTtlMs });
       return directMapping;
     }
 
-    // For unknown domains, return default
+    // For unknown domains, perform DNS MX lookup to detect underlying ISP
+    try {
+      const { Resolver } = await import('node:dns/promises');
+      const resolver = new Resolver();
+      resolver.setServers(['8.8.8.8', '1.1.1.1']); // Use public DNS for reliability
+      const mxRecords = await resolver.resolveMx(domain);
+
+      if (mxRecords.length > 0) {
+        // Sort by priority (lowest = highest priority) and check the primary MX
+        mxRecords.sort((a, b) => a.priority - b.priority);
+        const primaryMx = mxRecords[0]?.exchange?.toLowerCase() ?? '';
+
+        const ispFromMx = this.detectISPFromMX(primaryMx);
+        if (ispFromMx) {
+          this.mxCache.set(domain, { isp: ispFromMx, expiresAt: Date.now() + this.mxCacheTtlMs });
+          this.logger.debug('ISP detected via MX lookup', { domain, mx: primaryMx, isp: ispFromMx });
+          return ispFromMx;
+        }
+      }
+    } catch {
+      // DNS failure (NXDOMAIN, timeout, etc.) — fall through to default
+      this.logger.debug('MX lookup failed for domain, using default ISP', { domain });
+    }
+
+    // Fallback: unknown ISP
     const isp = 'default';
     this.mxCache.set(domain, { isp, expiresAt: Date.now() + this.mxCacheTtlMs });
     return isp;
+  }
+
+  /**
+   * Detect ISP from an MX exchange hostname.
+   * Covers Google Workspace, Microsoft 365, Yahoo Business, and Apple custom domains.
+   */
+  private detectISPFromMX(mxHost: string): string | null {
+    // Google Workspace: aspmx.l.google.com, alt1.aspmx.l.google.com, *.googlemail.com
+    if (mxHost.includes('.google.com') || mxHost.includes('.googlemail.com') || mxHost.includes('gmail-smtp')) {
+      return 'gmail';
+    }
+
+    // Microsoft 365: *.mail.protection.outlook.com
+    if (mxHost.includes('.outlook.com') || mxHost.includes('.microsoft.com') || mxHost.includes('mail.protection')) {
+      return 'microsoft';
+    }
+
+    // Yahoo Business: *.yahoodns.net, *.am0.yahoodns.net
+    if (mxHost.includes('yahoodns.net') || mxHost.includes('.yahoo.com')) {
+      return 'yahoo';
+    }
+
+    // Apple / iCloud custom domains
+    if (mxHost.includes('.icloud.com') || mxHost.includes('.apple.com') || mxHost.includes('.me.com')) {
+      return 'apple';
+    }
+
+    return null;
   }
 
   private getDirectISPMapping(domain: string): string | null {
@@ -612,9 +680,9 @@ export class IPRateLimiter {
 
   private calculateWarmupDay(startDate: Date): number {
     const now = new Date();
-    const diffTime = Math.abs(now.getTime() - startDate.getTime());
-    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays;
+    const diffMs = now.getTime() - startDate.getTime();
+    if (diffMs <= 0) return 0; // Warmup hasn't started yet
+    return Math.floor(diffMs / (1000 * 60 * 60 * 24));
   }
 
   private getTodayKey(): string {

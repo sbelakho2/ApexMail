@@ -476,22 +476,80 @@ export class STOOptimizer {
         return recommendations;
     }
 
-    private getNextOccurrence(hour: number, dayOfWeek: number, _timezone: string): Date {
+    /**
+     * IMP-007: Timezone-aware next occurrence calculation.
+     *
+     * Previously the `_timezone` parameter was ignored and `new Date()` was
+     * used, which returns the *server's* local time. For a subscriber in
+     * Asia/Tokyo the computed "Tuesday 10 AM" would actually be server-local
+     * Tuesday 10 AM — potentially the middle of the night for the recipient.
+     *
+     * Now we use `Intl.DateTimeFormat` to find the current hour and weekday
+     * in the *subscriber's* timezone, then calculate the correct UTC Date
+     * for the next occurrence of the requested (hour, dayOfWeek) in that tz.
+     */
+    private getNextOccurrence(hour: number, dayOfWeek: number, timezone: string): Date {
+        // Resolve recipient's current time components in their timezone
+        let resolvedTz = timezone;
+        try {
+            // Validate timezone by attempting to create a formatter
+            Intl.DateTimeFormat('en-US', { timeZone: resolvedTz });
+        } catch {
+            resolvedTz = this.config.defaultTimezone;
+        }
+
         const now = new Date();
-        const result = new Date(now);
 
-        // Find the next occurrence of this day/hour
-        const currentDay = now.getDay();
+        // Get current weekday and hour in the target timezone
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: resolvedTz,
+            weekday: 'short',
+            hour: 'numeric',
+            hour12: false,
+        });
+        const parts = formatter.formatToParts(now);
+        const currentDayStr = parts.find(p => p.type === 'weekday')?.value ?? '';
+        const currentHour = parseInt(parts.find(p => p.type === 'hour')?.value ?? '0', 10);
+
+        const dayMap: Record<string, number> = {
+            Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+        };
+        const currentDay = dayMap[currentDayStr] ?? now.getDay();
+
         let daysUntil = dayOfWeek - currentDay;
-
-        if (daysUntil < 0 || (daysUntil === 0 && now.getHours() >= hour)) {
+        if (daysUntil < 0 || (daysUntil === 0 && currentHour >= hour)) {
             daysUntil += 7;
         }
 
-        result.setDate(result.getDate() + daysUntil);
-        result.setHours(hour, 0, 0, 0);
+        // Build an ISO date string in the target timezone, then convert to UTC.
+        // Start from the current UTC date, offset by daysUntil, then set the
+        // hour using the timezone offset.
+        const targetLocal = new Date(now);
+        targetLocal.setDate(targetLocal.getDate() + daysUntil);
 
-        return result;
+        // Format the target date at the desired hour in the target timezone
+        // by computing the difference between UTC and local time in that tz.
+        const utcDate = new Date(Date.UTC(
+            targetLocal.getFullYear(),
+            targetLocal.getMonth(),
+            targetLocal.getDate(),
+            hour, 0, 0, 0
+        ));
+
+        // Adjust for timezone offset: find what UTC hour produces `hour` in `resolvedTz`
+        const testFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: resolvedTz,
+            hour: 'numeric',
+            hour12: false,
+        });
+        const testHour = parseInt(
+            testFormatter.formatToParts(utcDate).find(p => p.type === 'hour')?.value ?? '0',
+            10
+        );
+        const tzOffsetHours = testHour - hour;
+        utcDate.setHours(utcDate.getHours() - tzOffsetHours);
+
+        return utcDate;
     }
 
     private getDefaultRecommendation(
@@ -504,7 +562,7 @@ export class STOOptimizer {
             Thursday: 4, Friday: 5, Saturday: 6,
         };
 
-        const sendTime = this.getNextOccurrence(hour, dayMap[day], timezone);
+        const sendTime = this.getNextOccurrence(hour, dayMap[day] ?? 2, timezone);
 
         return {
             sendTime,

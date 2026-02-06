@@ -6,7 +6,7 @@ import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
-import { MessagesRepository, EventsRepository, DomainsRepository, SuppressionsRepository, type Domain, type DatabasePool } from '@apexmail/db';
+import { DomainsRepository, SuppressionsRepository, type Domain, type DatabasePool } from '@apexmail/db';
 import { createTransport, type Transporter, type SentMessageInfo } from 'nodemailer';
 import { CircuitBreakerFactory } from '../circuit-breaker.js';
 import { IPRateLimiter } from '../services/ip-rate-limiter.js';
@@ -95,8 +95,8 @@ export class EmailProcessor {
   private readonly notifier: QueueNotifier | undefined;
   private readonly logger: Logger;
   
-  private readonly messagesRepo: MessagesRepository;
-  private readonly eventsRepo: EventsRepository;
+  // IMP-001: messagesRepo + eventsRepo removed — handleSuccess, handleBounce,
+  // handleSuppressed, failJob and retryJob now use raw SQL within transactions.
   private readonly domainsRepo: DomainsRepository;
   private readonly suppressionsRepo: SuppressionsRepository;
   private readonly circuitBreakers: CircuitBreakerFactory;
@@ -106,9 +106,6 @@ export class EmailProcessor {
   private activeJobs = 0;
   private readonly dkimKeys = new Map<string, { privateKey: string; publicKey: string }>();
   private readonly rateLimiter: TokenBucketRateLimiter;
-  private readonly warmupCounters = new Map<string, number>();
-  // MEM-002 FIX: Store reference to warmup reset timer for cleanup
-  private warmupResetTimer: NodeJS.Timeout | null = null;
   private dkimRefreshTimer: NodeJS.Timeout | null = null;
 
   constructor(options: EmailProcessorConfig) {
@@ -125,8 +122,6 @@ export class EmailProcessor {
     this.logger = options.logger;
     
     // Create repositories using the DatabasePool
-    this.messagesRepo = new MessagesRepository(this.dbPool);
-    this.eventsRepo = new EventsRepository(this.dbPool);
     this.domainsRepo = new DomainsRepository(this.dbPool);
     this.suppressionsRepo = new SuppressionsRepository(this.dbPool);
     
@@ -202,9 +197,6 @@ export class EmailProcessor {
       }, 5 * 60 * 1000); // refresh every 5 minutes
     }
 
-    // Reset warmup counters at midnight
-    this.scheduleWarmupReset();
-
     this.isRunning = true;
     this.poll();
   }
@@ -212,12 +204,6 @@ export class EmailProcessor {
   async stop(): Promise<void> {
     this.logger.info('Stopping email processor');
     this.isRunning = false;
-
-    // MEM-002 FIX: Clear warmup reset timer
-    if (this.warmupResetTimer) {
-      clearTimeout(this.warmupResetTimer);
-      this.warmupResetTimer = null;
-    }
 
     if (this.dkimRefreshTimer) {
       clearInterval(this.dkimRefreshTimer);
@@ -554,25 +540,38 @@ export class EmailProcessor {
     // CRITICAL: Add timeout to prevent hung SMTP connections from blocking the worker forever
     const SMTP_TIMEOUT_MS = 30000; // 30 seconds
     
+    // FIX-004: Capture the timer handle so we can clearTimeout on both
+    // success and error paths. Without this, every successful send leaked
+    // a 30-second dangling timer — at high throughput this accumulated
+    // thousands of pending timers, wasting memory and event-loop resources.
+    let timeoutHandle: ReturnType<typeof setTimeout>;
     try {
       const sendPromise = this.transporter.sendMail(mailOptions);
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`SMTP send timeout after ${SMTP_TIMEOUT_MS}ms`)), SMTP_TIMEOUT_MS);
+        timeoutHandle = setTimeout(() => reject(new Error(`SMTP send timeout after ${SMTP_TIMEOUT_MS}ms`)), SMTP_TIMEOUT_MS);
       });
       
       const result = await Promise.race([sendPromise, timeoutPromise]);
+      clearTimeout(timeoutHandle!);
       
       // Record success to circuit breaker
       await circuitBreaker.recordSuccess();
       
       return result;
     } catch (error) {
+      clearTimeout(timeoutHandle!);
       // Record failure to circuit breaker
       await circuitBreaker.recordFailure();
       throw error;
     }
   }
 
+  /**
+   * IMP-001: Transactional completion — markSent + event + queue delete
+   * are wrapped in a single Postgres transaction so a crash between any
+   * two steps cannot leave the system in an inconsistent state (e.g.
+   * message marked sent but still in queue → duplicate delivery).
+   */
   private async handleSuccess(job: EmailJob, result: SentMessageInfo): Promise<void> {
     this.logger.info('Email sent successfully', {
       jobId: job.id,
@@ -580,30 +579,45 @@ export class EmailProcessor {
       response: result.response,
     });
 
-    // Update message status using proper repository method
-    await this.messagesRepo.markSent(job.messageId, result.messageId || '');
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Record sent event
-    await this.eventsRepo.create({
-      tenantId: job.tenantId,
-      messageId: job.messageId,
-      eventType: 'sent',
-      recipientEmail: job.to,
-      metadata: {
-        smtpResponse: result.response,
-        messageIdHeader: result.messageId,
-      },
-    });
+      // Update message status
+      await client.query(
+        `UPDATE messages SET status = 'sent', sent_at = NOW(), smtp_message_id = $2, updated_at = NOW() WHERE id = $1`,
+        [job.messageId, result.messageId || '']
+      );
 
-    // Remove from queue
-    await this.db.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+      // Record sent event
+      await client.query(
+        `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, metadata, timestamp)
+         VALUES ($1, $2, $3, 'sent', $4, $5, NOW())`,
+        [
+          generateId('evt'),
+          job.tenantId,
+          job.messageId,
+          job.to,
+          JSON.stringify({ smtpResponse: result.response, messageIdHeader: result.messageId }),
+        ]
+      );
 
-    // Update warmup counter
-    if (this.warmupConfig.enabled) {
-      this.incrementWarmupCounter(job.domainId);
+      // Remove from queue
+      await client.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
     }
 
-    // Record send in IP rate limiter for warmup tracking
+    // Post-transaction side-effects (Redis, non-critical)
+    if (this.warmupConfig.enabled) {
+      await this.incrementWarmupCounter(job.domainId);
+    }
+
     if (this.ipRateLimiter && this.ipRateLimitingConfig?.ipAddress) {
       const recipientDomain = job.to.split('@')[1] ?? '';
       await this.ipRateLimiter.recordSend(
@@ -633,50 +647,70 @@ export class EmailProcessor {
     }
   }
 
+  /**
+   * IMP-001: Transactional bounce handling — markBounced + event +
+   * suppression (hard bounces) + queue delete in a single transaction.
+   */
   private async handleBounce(job: EmailJob, error: Error): Promise<void> {
     const bounceType = this.classifyBounce(error);
 
-    // Update message status using proper repository method
-    await this.messagesRepo.markBounced(
-      job.messageId, 
-      bounceType.type as 'hard' | 'soft', 
-      `${bounceType.subtype}: ${error.message}`
-    );
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Record bounce event
-    await this.eventsRepo.create({
-      tenantId: job.tenantId,
-      messageId: job.messageId,
-      eventType: 'bounced',
-      recipientEmail: job.to,
-      bounceType: bounceType.type,
-      metadata: {
-        bounceSubtype: bounceType.subtype,
-        bounceMessage: error.message,
-      },
-    });
+      // Update message status
+      await client.query(
+        `UPDATE messages SET status = 'bounced', bounced_at = NOW(), bounce_type = $2, bounce_reason = $3, updated_at = NOW() WHERE id = $1`,
+        [job.messageId, bounceType.type, `${bounceType.subtype}: ${error.message}`]
+      );
 
-    // Add to suppression list for hard bounces
-    if (bounceType.type === 'hard') {
-      await this.suppressionsRepo.create({
-        tenantId: job.tenantId,
-        email: job.to,
-        type: 'bounce',  // Use 'type' not 'reason' per CreateSuppressionInput interface
-        bounceType: bounceType.type,
-        source: 'system',
-        originalMessageId: job.messageId,  // Use 'originalMessageId' not 'sourceMessageId'
-        metadata: {
-          domainId: job.domainId,
-          campaignId: job.campaignId,
-          bounceSubtype: bounceType.subtype,
-        },
-      });
+      // Record bounce event
+      await client.query(
+        `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, bounce_type, metadata, timestamp)
+         VALUES ($1, $2, $3, 'bounced', $4, $5, $6, NOW())`,
+        [
+          generateId('evt'),
+          job.tenantId,
+          job.messageId,
+          job.to,
+          bounceType.type,
+          JSON.stringify({ bounceSubtype: bounceType.subtype, bounceMessage: error.message }),
+        ]
+      );
+
+      // Add to suppression list for hard bounces
+      if (bounceType.type === 'hard') {
+        await client.query(
+          `INSERT INTO suppressions (id, tenant_id, email, reason, bounce_type, source, original_message_id, metadata, created_at)
+           VALUES ($1, $2, $3, 'bounce', $4, 'system', $5, $6, NOW())
+           ON CONFLICT (tenant_id, email) DO NOTHING`,
+          [
+            generateId('sup'),
+            job.tenantId,
+            job.to,
+            bounceType.type,
+            job.messageId,
+            JSON.stringify({ domainId: job.domainId, campaignId: job.campaignId, bounceSubtype: bounceType.subtype }),
+          ]
+        );
+      }
+
+      // Remove from queue
+      await client.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+
+      await client.query('COMMIT');
+    } catch (txError) {
+      await client.query('ROLLBACK');
+      throw txError;
+    } finally {
+      client.release();
     }
-
-    // Remove from queue
-    await this.db.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
   }
 
+  /**
+   * IMP-001: Transactional suppressed handling — status update + event +
+   * queue delete in a single transaction.
+   */
   private async handleSuppressed(job: EmailJob, reason: string): Promise<void> {
     this.logger.info('Recipient suppressed', {
       jobId: job.id,
@@ -685,83 +719,141 @@ export class EmailProcessor {
       reason,
     });
 
-    // Update message status using update method - use 'failed' status as there's no 'dropped'
-    // Store the drop reason in metadata for tracking
-    await this.messagesRepo.update(job.messageId, {
-      status: 'failed',  // No 'dropped' status in Message type, use 'failed' with reason in metadata
-      metadata: { dropReason: `suppressed:${reason}`, suppressed: true },
-    });
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Record dropped event
-    await this.eventsRepo.create({
-      tenantId: job.tenantId,
-      messageId: job.messageId,
-      eventType: 'dropped',
-      recipientEmail: job.to,
-      metadata: { reason: `suppressed:${reason}` },
-    });
+      // Update message status — use 'failed' as there's no 'dropped' status
+      await client.query(
+        `UPDATE messages SET status = 'failed', metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        [job.messageId, JSON.stringify({ dropReason: `suppressed:${reason}`, suppressed: true })]
+      );
 
-    // Remove from queue
-    await this.db.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+      // Record dropped event
+      await client.query(
+        `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, metadata, timestamp)
+         VALUES ($1, $2, $3, 'dropped', $4, $5, NOW())`,
+        [
+          generateId('evt'),
+          job.tenantId,
+          job.messageId,
+          job.to,
+          JSON.stringify({ reason: `suppressed:${reason}` }),
+        ]
+      );
+
+      // Remove from queue
+      await client.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+
+      await client.query('COMMIT');
+    } catch (txError) {
+      await client.query('ROLLBACK');
+      throw txError;
+    } finally {
+      client.release();
+    }
   }
 
+  /**
+   * FIX-006: Transactional retry — queue update + deferred event in a
+   * single Postgres transaction. Previously these were two separate
+   * operations; a crash between them would leave an incomplete event
+   * timeline (message retried but no deferred event recorded).
+   * Matches the IMP-001 pattern used by handleSuccess/handleBounce/
+   * handleSuppressed/failJob.
+   */
   private async retryJob(job: EmailJob, error: Error): Promise<void> {
     const nextAttempt = job.attempt + 1;
     const delay = this.config.retryDelay * Math.pow(2, job.attempt - 1); // Exponential backoff
     const scheduledAt = new Date(Date.now() + delay);
 
-    await this.db.query(`
-      UPDATE email_queue
-      SET 
-        status = 'pending',
-        attempt = $1,
-        scheduled_at = $2,
-        last_error = $3,
-        locked_until = NULL,
-        updated_at = NOW()
-      WHERE id = $4
-    `, [nextAttempt, scheduledAt, error.message, job.id]);
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Record deferred event
-    await this.eventsRepo.create({
-      tenantId: job.tenantId,
-      messageId: job.messageId,
-      eventType: 'deferred',
-      recipientEmail: job.to,
-      metadata: {
-        attempt: nextAttempt,
-        scheduledAt: scheduledAt.toISOString(),
-        error: error.message,
-      },
-    });
+      await client.query(`
+        UPDATE email_queue
+        SET 
+          status = 'pending',
+          attempt = $1,
+          scheduled_at = $2,
+          last_error = $3,
+          locked_until = NULL,
+          updated_at = NOW()
+        WHERE id = $4
+      `, [nextAttempt, scheduledAt, error.message, job.id]);
+
+      // Record deferred event inside the same transaction
+      await client.query(
+        `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, metadata, timestamp)
+         VALUES ($1, $2, $3, 'deferred', $4, $5, NOW())`,
+        [
+          generateId('evt'),
+          job.tenantId,
+          job.messageId,
+          job.to,
+          JSON.stringify({
+            attempt: nextAttempt,
+            scheduledAt: scheduledAt.toISOString(),
+            error: error.message,
+          }),
+        ]
+      );
+
+      await client.query('COMMIT');
+    } catch (txError) {
+      await client.query('ROLLBACK');
+      throw txError;
+    } finally {
+      client.release();
+    }
   }
 
+  /**
+   * IMP-001: Transactional failure handling — markFailed + event +
+   * DLQ insert + queue delete in a single transaction.
+   */
   private async failJob(job: EmailJob, error: Error): Promise<void> {
-    // Update message status using proper repository method
-    await this.messagesRepo.markFailed(job.messageId, error.message);
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Record dropped event for permanent failure
-    await this.eventsRepo.create({
-      tenantId: job.tenantId,
-      messageId: job.messageId,
-      eventType: 'dropped',
-      recipientEmail: job.to,
-      metadata: {
-        error: error.message,
-        attempt: job.attempt,
-        permanentFailure: true,
-        reason: 'max_retries_exceeded',
-      },
-    });
+      // Update message status
+      await client.query(
+        `UPDATE messages SET status = 'failed', bounce_reason = $2, updated_at = NOW() WHERE id = $1`,
+        [job.messageId, error.message]
+      );
 
-    // Move to dead letter queue
-    await this.db.query(`
-      INSERT INTO email_dlq (id, original_job, error_message, failed_at)
-      VALUES ($1, $2, $3, NOW())
-    `, [generateId('dlq'), JSON.stringify(job), error.message]);
+      // Record dropped event for permanent failure
+      await client.query(
+        `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, metadata, timestamp)
+         VALUES ($1, $2, $3, 'dropped', $4, $5, NOW())`,
+        [
+          generateId('evt'),
+          job.tenantId,
+          job.messageId,
+          job.to,
+          JSON.stringify({ error: error.message, attempt: job.attempt, permanentFailure: true, reason: 'max_retries_exceeded' }),
+        ]
+      );
 
-    // Remove from queue
-    await this.db.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+      // Move to dead letter queue
+      await client.query(
+        `INSERT INTO email_dlq (id, original_job, error_message, failed_at)
+         VALUES ($1, $2, $3, NOW())`,
+        [generateId('dlq'), JSON.stringify(job), error.message]
+      );
+
+      // Remove from queue
+      await client.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
+
+      await client.query('COMMIT');
+    } catch (txError) {
+      await client.query('ROLLBACK');
+      throw txError;
+    } finally {
+      client.release();
+    }
   }
 
   private async requeueJob(job: EmailJob, reason: string): Promise<void> {
@@ -783,24 +875,24 @@ export class EmailProcessor {
 
   private isBounceError(error: Error): boolean {
     const message = error.message.toLowerCase();
-    const bounceCodes = ['550', '551', '552', '553', '554', '555'];
-    return bounceCodes.some(code => message.includes(code));
+    const bouncePattern = /\b(55[0-5])\b/;
+    return bouncePattern.test(message);
   }
 
   private isRetryableError(error: Error): boolean {
     const message = error.message.toLowerCase();
-    const retryableCodes = ['421', '450', '451', '452'];
+    const retryableCodePattern = /\b(421|45[0-2])\b/;
     const retryablePatterns = ['timeout', 'econnreset', 'econnrefused', 'temporary'];
     
-    return retryableCodes.some(code => message.includes(code)) ||
+    return retryableCodePattern.test(message) ||
            retryablePatterns.some(pattern => message.includes(pattern));
   }
 
   private classifyBounce(error: Error): { type: 'hard' | 'soft'; subtype: string } {
     const message = error.message.toLowerCase();
 
-    // Hard bounce patterns
-    if (message.includes('550') || message.includes('551') || message.includes('553')) {
+    // Hard bounce patterns (550/551/553/554 are permanent failures per RFC 5321)
+    if (message.includes('550') || message.includes('551') || message.includes('553') || message.includes('554')) {
       if (message.includes('user') && (message.includes('unknown') || message.includes('not found'))) {
         return { type: 'hard', subtype: 'no-mailbox' };
       }
@@ -845,13 +937,22 @@ export class EmailProcessor {
     this.logger.info('DKIM keys loaded', { count: result.rows.length });
   }
 
+  /**
+   * FIX-051: Redis-backed warmup counters for multi-worker coordination.
+   * Previous in-memory Map caused N workers to each independently count,
+   * sending N× the intended daily warmup limit. Redis INCR is atomic and
+   * shared across all workers. Key TTL of 48h auto-resets (no cron needed).
+   */
   private async checkWarmupLimit(domainId: string, tenantId: string): Promise<boolean> {
     const schedule = this.warmupConfig.schedule[domainId];
     if (!schedule) return true; // No warmup schedule, no limit
 
     const dayOfWarmup = await this.calculateWarmupDay(domainId, tenantId);
     const dailyLimit = schedule[dayOfWarmup] ?? schedule[schedule.length - 1] ?? Number.MAX_SAFE_INTEGER;
-    const currentCount = this.warmupCounters.get(domainId) ?? 0;
+
+    const today = new Date().toISOString().split('T')[0];
+    const key = `apexmail:warmup:${domainId}:${today}`;
+    const currentCount = parseInt(await this.redis.get(key) || '0', 10);
 
     return currentCount < dailyLimit;
   }
@@ -871,37 +972,13 @@ export class EmailProcessor {
     return Math.max(0, days);
   }
 
-  private incrementWarmupCounter(domainId: string): void {
-    const current = this.warmupCounters.get(domainId) ?? 0;
-    this.warmupCounters.set(domainId, current + 1);
-  }
-
-  /**
-   * MEM-002 FIX: Store timer reference and clear on shutdown
-   */
-  private scheduleWarmupReset(): void {
-    // Clear any existing timer
-    if (this.warmupResetTimer) {
-      clearTimeout(this.warmupResetTimer);
-      this.warmupResetTimer = null;
-    }
-    
-    // Reset counters at midnight UTC
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-    tomorrow.setUTCHours(0, 0, 0, 0);
-    
-    const msUntilMidnight = tomorrow.getTime() - now.getTime();
-
-    this.warmupResetTimer = setTimeout(() => {
-      this.warmupCounters.clear();
-      this.logger.info('Warmup counters reset');
-      this.scheduleWarmupReset(); // Schedule next reset
-    }, msUntilMidnight);
-    
-    // Allow process to exit if this is the only timer
-    this.warmupResetTimer.unref();
+  private async incrementWarmupCounter(domainId: string): Promise<void> {
+    const today = new Date().toISOString().split('T')[0];
+    const key = `apexmail:warmup:${domainId}:${today}`;
+    const pipeline = this.redis.pipeline();
+    pipeline.incr(key);
+    pipeline.expire(key, 172800); // 48h TTL — auto-expires, no midnight reset needed
+    await pipeline.exec();
   }
 }
 
@@ -966,7 +1043,7 @@ class TokenBucketRateLimiter {
 
   private refill(): void {
     const now = Date.now();
-    const elapsed = (now - this.lastRefill) / 1000;
+    const elapsed = Math.max(0, (now - this.lastRefill) / 1000);
     const newTokens = elapsed * this.refillRate;
     
     this.tokens = Math.min(this.capacity, this.tokens + newTokens);

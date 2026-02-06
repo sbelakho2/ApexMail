@@ -390,36 +390,63 @@ export class WebhookProcessor {
       responseTime: result.responseTime,
     });
 
-    // Record delivery
-    await this.db.query(`
-      INSERT INTO webhook_deliveries (
-        id, webhook_id, tenant_id, event_type, status, status_code,
-        response_time, attempt, delivered_at
-      ) VALUES ($1, $2, $3, $4, 'success', $5, $6, $7, NOW())
-    `, [
-      generateId('wdl'),
-      job.webhookId,
-      job.tenantId,
-      job.eventType,
-      result.statusCode,
-      result.responseTime,
-      job.attempt,
-    ]);
+    /**
+     * PERF-003: Transactional completion — all-or-nothing.
+     *
+     * Previously these were 3 independent queries with no transaction:
+     *   1. INSERT INTO webhook_deliveries (record delivery)
+     *   2. UPDATE webhooks (update stats)
+     *   3. DELETE FROM webhook_queue (remove job)
+     *
+     * If the process crashed between step 1 and step 3, the job stayed in
+     * the queue with status='processing'. When the lock expired, it was
+     * re-fetched and re-delivered — the customer received a duplicate webhook.
+     *
+     * Now all three run in a single transaction: either the delivery is
+     * recorded AND the job is removed, or neither happens.
+     */
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Update webhook stats
-    await this.db.query(`
-      UPDATE webhooks
-      SET 
-        total_deliveries = total_deliveries + 1,
-        successful_deliveries = successful_deliveries + 1,
-        last_delivery_at = NOW(),
-        last_success_at = NOW(),
-        updated_at = NOW()
-      WHERE id = $1
-    `, [job.webhookId]);
+      // Record delivery
+      await client.query(`
+        INSERT INTO webhook_deliveries (
+          id, webhook_id, tenant_id, event_type, status, status_code,
+          response_time, attempt, delivered_at
+        ) VALUES ($1, $2, $3, $4, 'success', $5, $6, $7, NOW())
+      `, [
+        generateId('wdl'),
+        job.webhookId,
+        job.tenantId,
+        job.eventType,
+        result.statusCode,
+        result.responseTime,
+        job.attempt,
+      ]);
 
-    // Remove from queue
-    await this.db.query('DELETE FROM webhook_queue WHERE id = $1', [job.id]);
+      // Update webhook stats
+      await client.query(`
+        UPDATE webhooks
+        SET 
+          total_deliveries = total_deliveries + 1,
+          successful_deliveries = successful_deliveries + 1,
+          last_delivery_at = NOW(),
+          last_success_at = NOW(),
+          updated_at = NOW()
+        WHERE id = $1
+      `, [job.webhookId]);
+
+      // Remove from queue
+      await client.query('DELETE FROM webhook_queue WHERE id = $1', [job.id]);
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private async handleFailure(job: WebhookJob, result: WebhookDeliveryResult): Promise<void> {
@@ -490,46 +517,65 @@ export class WebhookProcessor {
       error: result.error,
     });
 
-    // Record failed delivery
-    await this.db.query(`
-      INSERT INTO webhook_deliveries (
-        id, webhook_id, tenant_id, event_type, status, status_code,
-        response_time, error_message, attempt, delivered_at
-      ) VALUES ($1, $2, $3, $4, 'failed', $5, $6, $7, $8, NOW())
-    `, [
-      generateId('wdl'),
-      job.webhookId,
-      job.tenantId,
-      job.eventType,
-      result.statusCode,
-      result.responseTime,
-      result.error,
-      job.attempt,
-    ]);
+    /**
+     * PERF-003: Transactional completion — all-or-nothing.
+     *
+     * Previously these were 4 independent queries. If the process crashed
+     * after DELETE but before INSERT INTO webhook_dlq, the job was gone
+     * with no record. Now all four run atomically.
+     */
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
 
-    // Update webhook stats
-    await this.db.query(`
-      UPDATE webhooks
-      SET 
-        total_deliveries = total_deliveries + 1,
-        failed_deliveries = failed_deliveries + 1,
-        last_delivery_at = NOW(),
-        last_failure_at = NOW(),
-        last_error = $1,
-        updated_at = NOW()
-      WHERE id = $2
-    `, [result.error, job.webhookId]);
+      // Record failed delivery
+      await client.query(`
+        INSERT INTO webhook_deliveries (
+          id, webhook_id, tenant_id, event_type, status, status_code,
+          response_time, error_message, attempt, delivered_at
+        ) VALUES ($1, $2, $3, $4, 'failed', $5, $6, $7, $8, NOW())
+      `, [
+        generateId('wdl'),
+        job.webhookId,
+        job.tenantId,
+        job.eventType,
+        result.statusCode,
+        result.responseTime,
+        result.error,
+        job.attempt,
+      ]);
 
-    // Move to dead letter queue
-    await this.db.query(`
-      INSERT INTO webhook_dlq (id, original_job, error_message, failed_at)
-      VALUES ($1, $2, $3, NOW())
-    `, [generateId('wdq'), JSON.stringify(job), result.error]);
+      // Update webhook stats
+      await client.query(`
+        UPDATE webhooks
+        SET 
+          total_deliveries = total_deliveries + 1,
+          failed_deliveries = failed_deliveries + 1,
+          last_delivery_at = NOW(),
+          last_failure_at = NOW(),
+          last_error = $1,
+          updated_at = NOW()
+        WHERE id = $2
+      `, [result.error, job.webhookId]);
 
-    // Remove from queue
-    await this.db.query('DELETE FROM webhook_queue WHERE id = $1', [job.id]);
+      // Move to dead letter queue
+      await client.query(`
+        INSERT INTO webhook_dlq (id, original_job, error_message, failed_at)
+        VALUES ($1, $2, $3, NOW())
+      `, [generateId('wdq'), JSON.stringify(job), result.error]);
 
-    // Check if webhook should be disabled
+      // Remove from queue
+      await client.query('DELETE FROM webhook_queue WHERE id = $1', [job.id]);
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    // Check if webhook should be disabled (outside transaction — best-effort)
     await this.checkWebhookHealth(job.webhookId);
   }
 

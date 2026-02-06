@@ -162,8 +162,9 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
 
       // SECURITY FIX: Get previous count first, then atomically increment current
       // This ensures we don't have a race condition on the current window count
-      const previousCountData = await redisCache.get<{ count: number }>(previousKey);
-      const previousCount = previousCountData?.count ?? 0;
+      // IMP-002 FIX: Read as raw number — incr() stores "42" not '{"count":42}'.
+      // JSON.parse("42") returns 42 (number), so get<number> is correct here.
+      const previousCount = (await redisCache.get<number>(previousKey)) ?? 0;
 
       // Atomic increment for current window count
       const currentCount = await redisCache.incr(currentKey);

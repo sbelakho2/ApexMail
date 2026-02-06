@@ -262,10 +262,16 @@ export class WebhooksRepository {
         }
     }
 
+    /**
+     * FIX-013: Set status to 'processing' instead of back to 'pending'.
+     * Previously items remained in 'pending' during delivery, meaning
+     * they could be re-dequeued by another worker once next_attempt_at
+     * passed — causing duplicate deliveries.
+     */
     async dequeue(batchSize: number = 10): Promise<WebhookQueueItem[]> {
         const result = await this.pool.query<Record<string, unknown>>(
             `UPDATE webhook_queue
-             SET status = 'pending',
+             SET status = 'processing',
                  attempt = attempt + 1,
                  next_attempt_at = NOW() + INTERVAL '1 minute' * POW(2, attempt)
              WHERE id IN (

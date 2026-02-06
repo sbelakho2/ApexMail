@@ -33,7 +33,9 @@ function ipMatchesCidr(ip: string, cidr: string): boolean {
 
   const ipNum = (ipParts[0]! << 24) | (ipParts[1]! << 16) | (ipParts[2]! << 8) | ipParts[3]!;
   const rangeNum = (rangeParts[0]! << 24) | (rangeParts[1]! << 16) | (rangeParts[2]! << 8) | rangeParts[3]!;
-  const mask = ~((1 << (32 - prefixLength)) - 1);
+  // FIX: prefixLength === 0 means match everything. In JS, 1 << 32 === 1 (not 0) due to
+  // 32-bit shift overflow, so we must special-case /0 to avoid producing mask = -1.
+  const mask = prefixLength === 0 ? 0 : ~((1 << (32 - prefixLength)) - 1);
 
   return (ipNum & mask) === (rangeNum & mask);
 }

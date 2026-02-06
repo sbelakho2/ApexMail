@@ -984,7 +984,12 @@ export class LogStreamingService {
   }
 
   private getNestedValue(obj: any, path: string): any {
-    return path.split('.').reduce((o, k) => (o || {})[k], obj);
+    // FIX-019: Block prototype-chain traversal
+    const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+    return path.split('.').reduce((o, k) => {
+      if (BLOCKED_KEYS.has(k)) return undefined;
+      return (o || {})[k];
+    }, obj);
   }
 
   private setupFlushTimer(stream: LogStream): void {

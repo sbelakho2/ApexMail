@@ -557,14 +557,21 @@ function generateSyntheticCompanies(count: number, qualified: boolean): RealComp
         return seed / 0x7fffffff;
     };
     
+    const maxCombinations = PREFIXES.length * SUFFIXES.length;
+
     for (let i = 0; i < count; i++) {
         let name: string;
+        let attempts = 0;
         do {
             const prefixIdx = Math.floor(random() * PREFIXES.length);
             const suffixIdx = Math.floor(random() * SUFFIXES.length);
             const prefix = PREFIXES[prefixIdx] ?? 'Tech';
             const suffix = SUFFIXES[suffixIdx] ?? 'Corp';
-            name = `${prefix}${suffix}`;
+            // Append numeric suffix once base combinations are exhausted
+            name = attempts >= maxCombinations
+                ? `${prefix}${suffix}${i}`
+                : `${prefix}${suffix}`;
+            attempts++;
         } while (usedNames.has(name));
         usedNames.add(name);
         

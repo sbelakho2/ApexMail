@@ -176,9 +176,28 @@ export class RedisCacheProvider implements CacheProvider {
   }
 
   async keys(pattern: string): Promise<string[]> {
+    // FIX-012: Use SCAN instead of KEYS to avoid blocking the Redis
+    // event loop. KEYS is O(N) on the entire keyspace and causes latency
+    // spikes in production; SCAN iterates incrementally.
     const fullPattern = this.key(pattern);
-    const keys = await this.client.keys(fullPattern);
-    return keys.map((k) => k.slice(this.prefix.length));
+    const result: string[] = [];
+    let cursor = '0';
+
+    do {
+      const [nextCursor, keys] = await this.client.scan(
+        cursor,
+        'MATCH',
+        fullPattern,
+        'COUNT',
+        100
+      );
+      cursor = nextCursor;
+      for (const k of keys) {
+        result.push(k.slice(this.prefix.length));
+      }
+    } while (cursor !== '0');
+
+    return result;
   }
 
   async mget<T>(keys: string[]): Promise<(T | null)[]> {

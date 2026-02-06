@@ -243,43 +243,71 @@ export class MessagesRepository {
     if (shouldQueue && input.domainId) {
       const priorityValue = input.priority === 'high' ? 10 : input.priority === 'low' ? 1 : 5;
       
-      for (const recipient of input.recipients) {
-        // Only queue 'to' recipients individually; cc/bcc are handled together
-        if (recipient.type === 'to') {
+      /**
+       * FIX-054: Multi-row INSERT for email_queue instead of per-recipient loop.
+       *
+       * Previous implementation ran a separate INSERT per 'to' recipient inside
+       * a for loop with await. For a message with 50 'to' recipients, that was
+       * 50 sequential DB round-trips. For a /batch of 1,000 such messages,
+       * it was 50,000 round-trips (~250s in production).
+       *
+       * This builds a single multi-row INSERT VALUES (...), (...), (...) and
+       * executes it in one round-trip, matching the pattern already used in
+       * EventsRepository.writeEvents and AnalyticsRepository.aggregateBatch.
+       */
+      const fromFormatted = input.fromName ? `${input.fromName} <${input.fromEmail}>` : input.fromEmail;
+      const headersJson = JSON.stringify(headers);
+      const attachmentsJson = JSON.stringify(attachments);
+      const tagsJson = JSON.stringify(input.tags ?? []);
+      const metadataJson = JSON.stringify(input.metadata ?? {});
+
+      const toRecipients = input.recipients.filter(r => r.type === 'to');
+      
+      if (toRecipients.length > 0) {
+        const queueValues: unknown[] = [];
+        const queuePlaceholders: string[] = [];
+        let paramIdx = 1;
+
+        for (const recipient of toRecipients) {
           const queueId = generateUuid();
-          await this.db.query(
-            `INSERT INTO email_queue (
-              id, message_id, tenant_id, domain_id, "from", "to", subject,
-              html, text, headers, attachments, campaign_id, tags, metadata,
-              scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
-            )`,
-            [
-              queueId,
-              message.id,
-              input.tenantId,
-              input.domainId,
-              input.fromName ? `${input.fromName} <${input.fromEmail}>` : input.fromEmail,
-              recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email,
-              input.subject,
-              input.htmlBody ?? null,
-              input.textBody ?? null,
-              JSON.stringify(headers),
-              JSON.stringify(attachments),
-              input.campaignId ?? null,
-              JSON.stringify(input.tags ?? []),
-              JSON.stringify(input.metadata ?? {}),
-              input.scheduledAt ?? null,
-              priorityValue,
-              'pending',
-              0,
-              5,
-              now,
-              now,
-            ]
+          const toFormatted = recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
+
+          queuePlaceholders.push(
+            `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`
+          );
+          queueValues.push(
+            queueId,
+            message.id,
+            input.tenantId,
+            input.domainId,
+            fromFormatted,
+            toFormatted,
+            input.subject,
+            input.htmlBody ?? null,
+            input.textBody ?? null,
+            headersJson,
+            attachmentsJson,
+            input.campaignId ?? null,
+            tagsJson,
+            metadataJson,
+            input.scheduledAt ?? null,
+            priorityValue,
+            'pending',
+            0,
+            5,
+            now,
+            now,
           );
         }
+
+        await this.db.query(
+          `INSERT INTO email_queue (
+            id, message_id, tenant_id, domain_id, "from", "to", subject,
+            html, text, headers, attachments, campaign_id, tags, metadata,
+            scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
+          ) VALUES ${queuePlaceholders.join(', ')}`,
+          queueValues
+        );
       }
     }
 
@@ -732,13 +760,24 @@ export class MessagesRepository {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-    const countResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM messages ${whereClause}`,
-      values
-    );
-
-    if (!countResult.ok) return countResult;
-
+    /**
+     * PERF-005: Column projection + window-function pagination.
+     *
+     * Two changes from the previous implementation:
+     *
+     * 1. **Column projection**: The old query used `SELECT *`, pulling
+     *    html_body (up to 10MB), text_body (1MB), attachments, headers,
+     *    template_data — all JSON-parsed per row — even though the list
+     *    endpoint only returns id, status, subject, from, sentAt, and
+     *    recipientCount. For 100 rows, that could be ~1GB of I/O
+     *    discarded immediately. Now we select only the columns needed
+     *    for the list view.
+     *
+     * 2. **Window function pagination**: The old approach ran a separate
+     *    `SELECT COUNT(*)` query — a full re-scan of the same rows. Now
+     *    `COUNT(*) OVER()` computes the total in the same query pass,
+     *    eliminating the second scan entirely.
+     */
     const limit = options.limit ?? 50;
     const offset = options.offset ?? 0;
     values.push(limit, offset);
@@ -755,12 +794,6 @@ export class MessagesRepository {
       reply_to: string | null;
       recipients: string;
       subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
       campaign_id: string | null;
       tags: string[];
       priority: Message['priority'];
@@ -780,8 +813,17 @@ export class MessagesRepository {
       metadata: string;
       created_at: Date;
       updated_at: Date;
+      total_count: string;
     }>(
-      `SELECT * FROM messages ${whereClause}
+      `SELECT
+          id, tenant_id, user_id, idempotency_key, message_id, status,
+          from_email, from_name, reply_to, recipients, subject,
+          campaign_id, tags, priority, scheduled_at,
+          sent_at, delivered_at, bounced_at, bounce_type, bounce_reason,
+          mta_message_id, ip_address, sending_domain, attempts, max_attempts,
+          last_attempt_at, next_attempt_at, metadata, created_at, updated_at,
+          COUNT(*) OVER() AS total_count
+       FROM messages ${whereClause}
        ORDER BY created_at DESC
        LIMIT $${paramIndex++} OFFSET $${paramIndex}`,
       values
@@ -789,10 +831,96 @@ export class MessagesRepository {
 
     if (!result.ok) return result;
 
+    const total = parseInt(result.value.rows[0]?.total_count ?? '0', 10);
+
     return Result.ok({
-      messages: result.value.rows.map((row) => this.mapRow(row)),
-      total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
+      messages: result.value.rows.map((row) => this.mapListRow(row)),
+      total,
     });
+  }
+
+  /**
+   * PERF-005: Lightweight row mapper for list views.
+   *
+   * Unlike mapRow() which JSON-parses html_body, text_body, headers,
+   * attachments, and template_data, this mapper handles the projected
+   * column set returned by listByTenant. The heavy text columns are
+   * set to null since they weren't selected.
+   */
+  private mapListRow(row: {
+    id: string;
+    tenant_id: string;
+    user_id: string | null;
+    idempotency_key: string | null;
+    message_id: string;
+    status: Message['status'];
+    from_email: string;
+    from_name: string | null;
+    reply_to: string | null;
+    recipients: string;
+    subject: string;
+    campaign_id: string | null;
+    tags: string[];
+    priority: Message['priority'];
+    scheduled_at: Date | null;
+    sent_at: Date | null;
+    delivered_at: Date | null;
+    bounced_at: Date | null;
+    bounce_type: Message['bounceType'];
+    bounce_reason: string | null;
+    mta_message_id: string | null;
+    ip_address: string | null;
+    sending_domain: string;
+    attempts: number;
+    max_attempts: number;
+    last_attempt_at: Date | null;
+    next_attempt_at: Date | null;
+    metadata: string;
+    created_at: Date;
+    updated_at: Date;
+  }): Message {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      userId: row.user_id,
+      idempotencyKey: row.idempotency_key,
+      messageId: row.message_id,
+      status: row.status,
+      fromEmail: row.from_email,
+      fromName: row.from_name,
+      replyTo: row.reply_to,
+      recipients: typeof row.recipients === 'string'
+        ? JSON.parse(row.recipients) as EmailRecipient[]
+        : row.recipients as unknown as EmailRecipient[],
+      subject: row.subject,
+      htmlBody: null, // Not selected in list projection
+      textBody: null, // Not selected in list projection
+      headers: { 'Message-ID': '', 'X-ApexMail-ID': row.id, 'X-ApexMail-Tenant': row.tenant_id, 'Return-Path': '' }, // Minimal placeholder
+      attachments: [], // Not selected in list projection
+      templateId: null, // Not selected in list projection
+      templateData: null, // Not selected in list projection
+      campaignId: row.campaign_id,
+      tags: row.tags,
+      priority: row.priority,
+      scheduledAt: row.scheduled_at,
+      sentAt: row.sent_at,
+      deliveredAt: row.delivered_at,
+      bouncedAt: row.bounced_at,
+      bounceType: row.bounce_type,
+      bounceReason: row.bounce_reason,
+      mtaMessageId: row.mta_message_id,
+      ipAddress: row.ip_address,
+      sendingDomain: row.sending_domain,
+      attempts: row.attempts,
+      maxAttempts: row.max_attempts,
+      lastAttemptAt: row.last_attempt_at,
+      nextAttemptAt: row.next_attempt_at,
+      metadata: typeof row.metadata === 'string'
+        ? JSON.parse(row.metadata) as Record<string, unknown>
+        : row.metadata as unknown as Record<string, unknown>,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   private mapRow(row: {

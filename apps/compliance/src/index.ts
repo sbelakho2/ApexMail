@@ -43,19 +43,36 @@ const gdprAutomation = new GDPRAutomation(db, redis);
 /**
  * Process GDPR request queue
  */
+/**
+ * FIX-014: Use LMOVE to atomically move the item to a processing queue
+ * before processing. Previously RPOP removed the item before processing —
+ * a crash between pop and completion permanently lost the GDPR request.
+ * Now the item stays in the processing queue until successfully handled,
+ * and can be recovered on restart.
+ */
 async function processGDPRQueue(): Promise<void> {
+    const PROCESSING_QUEUE = 'gdpr:requests:processing';
     // eslint-disable-next-line no-constant-condition
     while (true) {
-        const item = await redis.rpop('gdpr:requests:queue');
+        // Atomically move from main queue to processing queue
+        const item = await redis.lmove(
+            'gdpr:requests:queue',
+            PROCESSING_QUEUE,
+            'RIGHT',
+            'LEFT'
+        );
         if (!item) break;
 
         try {
             const { requestId } = JSON.parse(item);
             await gdprAutomation.processRequest(requestId);
+            // Only remove from processing queue after successful completion
+            await redis.lrem(PROCESSING_QUEUE, 1, item);
             console.log(`[GDPR] Processed request: ${requestId}`);
         } catch (err) {
             console.error('[GDPR] Error processing request:', err);
-            // Requeue on failure with delay
+            // Move from processing to failed queue for manual review
+            await redis.lrem(PROCESSING_QUEUE, 1, item);
             await redis.lpush('gdpr:requests:failed', item);
         }
     }

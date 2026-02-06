@@ -3,7 +3,7 @@
  * Implements token bucket algorithm with per-domain limits
  */
 
-import { createLogger } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import { config } from '../config.js';
 import { getCrawlDelay } from './robots-service.js';
 

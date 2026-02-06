@@ -205,8 +205,11 @@ export class MeteringService {
 
     const emailsSent = metrics.emails_sent ?? 0;
     const apiCalls = metrics.api_calls ?? 0;
-    const emailsLimit = planResult.ok && planResult.value.rows[0]?.email_limit || 10000;
-    const apiCallsLimit = planResult.ok && planResult.value.rows[0]?.api_limit || 100000;
+    // IMP-003 FIX: Use ?? instead of || so that limit=0 (suspended tenant) is respected.
+    // Previously: `planResult.ok && planResult.value.rows[0]?.email_limit || 10000`
+    // When email_limit is 0, `0 || 10000` evaluated to 10000 — bypassing suspension.
+    const emailsLimit = (planResult.ok ? planResult.value.rows[0]?.email_limit : undefined) ?? 10000;
+    const apiCallsLimit = (planResult.ok ? planResult.value.rows[0]?.api_limit : undefined) ?? 100000;
 
     return Result.ok({
       tenantId,

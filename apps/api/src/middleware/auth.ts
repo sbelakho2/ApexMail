@@ -249,9 +249,12 @@ function getClientIp(c: { req: { header: (name: string) => string | undefined } 
   if (validatedIp) return validatedIp;
 
   // Fallback: read proxy headers directly (less trustworthy)
+  // FIX: Use || instead of ?? for X-Forwarded-For to handle empty string correctly
+  // ''.split(',')[0]?.trim() returns '' which is falsy but not null/undefined
+  const forwardedFor = c.req.header('X-Forwarded-For')?.split(',')[0]?.trim();
   return (
     c.req.header('CF-Connecting-IP') ??
-    c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ??
+    (forwardedFor || undefined) ??
     c.req.header('X-Real-IP') ??
     'unknown'
   );

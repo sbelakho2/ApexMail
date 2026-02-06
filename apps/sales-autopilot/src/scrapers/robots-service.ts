@@ -5,7 +5,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
 const robotsParser = require('robots-parser') as (url: string, txt: string) => RobotsParser;
-import { createLogger } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import { config } from '../config.js';
 
 const logger = createLogger({ name: 'robots-service', level: 'info' });

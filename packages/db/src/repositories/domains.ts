@@ -229,11 +229,13 @@ export class DomainsRepository {
     return result.ok ? Result.ok(undefined) : result;
   }
 
-  async delete(id: string): Promise<Result<void, Error>> {
-    const result = await this.db.query(
-      'DELETE FROM domains WHERE id = $1',
-      [id]
-    );
+  async delete(id: string, tenantId?: string): Promise<Result<void, Error>> {
+    // FIX-008: Enforce tenant isolation — prevent cross-tenant domain deletion
+    const sql = tenantId
+      ? 'DELETE FROM domains WHERE id = $1 AND tenant_id = $2'
+      : 'DELETE FROM domains WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
+    const result = await this.db.query(sql, params);
     return result.ok ? Result.ok(undefined) : result;
   }
 

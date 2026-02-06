@@ -63,6 +63,12 @@ export async function GET() {
         })));
     } catch (error) {
         console.error('GDPR API error:', error);
-        return NextResponse.json(DEMO_REQUESTS);
+        // FIX-018: Return a proper error response instead of silently
+        // falling back to demo data. Serving fake GDPR compliance data
+        // in production masks real failures and misleads operators.
+        return NextResponse.json(
+            { error: 'Failed to fetch GDPR requests' },
+            { status: 500 }
+        );
     }
 }

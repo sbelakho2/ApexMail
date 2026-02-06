@@ -37,10 +37,20 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   const suppressionsRepo = new SuppressionsRepository(ctx.db);
 
   /**
-   * Cache-aside helper. Returns cached JSON string if available,
-   * otherwise calls `compute`, caches the result, and returns it.
+   * IMP-009: Cache-aside helper with singleflight / thundering-herd protection.
+   *
+   * On a cache miss, only the *first* concurrent caller runs `compute()`.
+   * All subsequent callers for the same key await the same in-flight promise
+   * instead of each hitting the database independently. Once the promise
+   * resolves, the result is cached normally and the in-flight entry is cleaned up.
+   *
+   * Also fixes TTL selection: historical data that doesn't change should use
+   * longer TTLs (300-600 s) while real-time dashboards stay short (30 s).
+   *
    * Degrades gracefully: if Redis is down, falls through to DB every time.
    */
+  const inflight = new Map<string, Promise<unknown>>();
+
   async function cached<T>(key: string, ttlSeconds: number, compute: () => Promise<T>): Promise<T> {
     // Try reading from cache
     try {
@@ -50,12 +60,23 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       // Redis error — fall through to DB
     }
 
-    const value = await compute();
+    // Singleflight: if another request is already computing this key, reuse its result
+    const existing = inflight.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
 
-    // Write-behind: don't block the response on cache write
-    redis.setex(key, ttlSeconds, JSON.stringify(value)).catch(() => {});
+    const promise = (async () => {
+      const value = await compute();
+      // Write-behind: don't block the response on cache write
+      redis.setex(key, ttlSeconds, JSON.stringify(value)).catch(() => {});
+      return value;
+    })();
 
-    return value;
+    inflight.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      inflight.delete(key);
+    }
   }
 
   // Dashboard overview
@@ -350,6 +371,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
+    // IMP-009: Cache campaign stats (previously uncached — every request hit DB)
+    const key = cacheKey(tenantId, 'campaigns', { since: period.since.toISOString(), until: period.until.toISOString(), sortBy, limit: String(limit) });
+
+    const body = await cached(key, 120, async () => {
     const result = await eventsRepo.getStatsByCampaign(tenantId, {
       ...period,
       limit: Math.min(limit, 100),
@@ -376,7 +401,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       });
     }
 
-    return c.json({
+    return {
       campaigns: campaigns.map((cam) => ({
         campaignId: cam.campaignId,
         metrics: {
@@ -406,7 +431,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
         until: period.until.toISOString(),
       },
       sortBy,
+    };
     });
+
+    return c.json(body);
   });
 
   // Bounce analysis
@@ -421,6 +449,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
+    // IMP-009: Cache bounce analysis (previously uncached)
+    const key = cacheKey(tenantId, 'bounces', { since: period.since.toISOString(), until: period.until.toISOString(), domainId });
+
+    const body = await cached(key, 120, async () => {
     const result = await eventsRepo.getBounceBreakdown(tenantId, {
       ...period,
       domainId,
@@ -437,7 +469,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const hardBounces = bounces.filter(b => b.bounceType === 'hard').reduce((sum, b) => sum + b.count, 0);
     const softBounces = bounces.filter(b => b.bounceType === 'soft').reduce((sum, b) => sum + b.count, 0);
 
-    return c.json({
+    return {
       bounces: {
         total: totalBounces,
         hard: hardBounces,
@@ -455,7 +487,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
         since: period.since.toISOString(),
         until: period.until.toISOString(),
       },
+    };
     });
+
+    return c.json(body);
   });
 
   // Suppression trends
@@ -475,6 +510,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
+    // IMP-009: Cache suppression trends (previously uncached)
+    const key = cacheKey(tenantId, 'suppressions', { interval, since: period.since.toISOString(), until: period.until.toISOString() });
+
+    const body = await cached(key, 120, async () => {
     const result = await suppressionsRepo.getTimeSeries(tenantId, {
       ...period,
       interval,
@@ -484,7 +523,7 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to fetch suppression trends');
     }
 
-    return c.json({
+    return {
       suppressions: result.value.map((point) => ({
         timestamp: point.timestamp,
         total: point.total,
@@ -498,7 +537,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
         since: period.since.toISOString(),
         until: period.until.toISOString(),
       },
+    };
     });
+
+    return c.json(body);
   });
 
   // Deliverability report
@@ -514,7 +556,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const key = cacheKey(tenantId, 'deliverability', { since: period.since.toISOString(), until: period.until.toISOString() });
 
-    const body = await cached(key, 60, async () => {
+    // IMP-009: Historical deliverability data changes slowly — use longer TTL (300s)
+    const body = await cached(key, 300, async () => {
       // Fetch data in parallel
       const [eventStats, bounceBreakdown, domainStats] = await Promise.all([
         eventsRepo.getStats(tenantId, period),

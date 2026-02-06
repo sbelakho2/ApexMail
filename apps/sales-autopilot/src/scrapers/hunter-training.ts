@@ -14,7 +14,7 @@
  * - Data Completeness: How many fields were successfully extracted?
  */
 
-import { createLogger } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import type { Lead, EnrichmentResult } from '../types.js';
 
 const hunterLogger = createLogger({ name: 'hunter-training', level: 'info' });
@@ -452,13 +452,20 @@ export class LeadScoringModel {
         this.trees = [];
         const losses: number[] = [];
 
+        // Limit effective sample size for stump fitting to keep training tractable.
+        // The full dataset is still used for prediction updates and loss calculation.
+        const maxStumpSamples = Math.min(X.length, 500);
+        const stumpX = X.length > maxStumpSamples ? X.slice(0, maxStumpSamples) : X;
+        const stumpResidualSlice = (residuals: number[]) =>
+            X.length > maxStumpSamples ? residuals.slice(0, maxStumpSamples) : residuals;
+
         // Gradient boosting iteration
         for (let i = 0; i < this.numTrees; i++) {
             // Compute residuals (negative gradient for squared loss)
             const residuals = y.map((yi, j) => yi - (predictions[j] ?? 0));
 
-            // Fit a decision stump to residuals
-            const stump = this.fitDecisionStump(X, residuals, samples[0]?.features);
+            // Fit a decision stump to residuals (on capped subset for performance)
+            const stump = this.fitDecisionStump(stumpX, stumpResidualSlice(residuals), samples[0]?.features);
             this.trees.push(stump);
 
             // Update predictions
@@ -568,6 +575,7 @@ export class LeadScoringModel {
         _sampleFeatures?: LeadFeatures
     ): DecisionStump {
         const numFeatures = X[0]?.length || 0;
+        const n = X.length;
         let bestSplit: DecisionStump = {
             featureIndex: 0,
             threshold: 0,
@@ -577,44 +585,62 @@ export class LeadScoringModel {
         };
         let bestGain = -Infinity;
 
+        // Pre-compute total variance ONCE (not per split point)
+        const residualMean = residuals.reduce((a, b) => a + b, 0) / n;
+        const totalVar = residuals.reduce((a, b) => a + (b - residualMean) ** 2, 0);
+
         // Try each feature
         for (let f = 0; f < numFeatures; f++) {
-            // Get unique values for this feature
-            const values = [...new Set(X.map(x => x[f] ?? 0))].sort((a, b) => a - b);
+            // Get unique values for this feature, subsample if too many
+            let values = [...new Set(X.map(x => x[f] ?? 0))].sort((a, b) => a - b);
+            const maxSplits = 20;
+            if (values.length > maxSplits + 1) {
+                // Evenly subsample split candidates for continuous features
+                const step = (values.length - 1) / maxSplits;
+                const sampled = [values[0]!];
+                for (let s = 1; s < maxSplits; s++) {
+                    sampled.push(values[Math.round(s * step)]!);
+                }
+                sampled.push(values[values.length - 1]!);
+                values = sampled;
+            }
 
             // Try each split point
             for (let i = 0; i < values.length - 1; i++) {
                 const threshold = ((values[i] ?? 0) + (values[i + 1] ?? 0)) / 2;
 
-                // Split data
-                const leftIndices: number[] = [];
-                const rightIndices: number[] = [];
+                // Split data and compute means in one pass
+                let leftSum = 0, leftCount = 0;
+                let rightSum = 0, rightCount = 0;
 
-                for (let j = 0; j < X.length; j++) {
+                for (let j = 0; j < n; j++) {
                     const featureValue = X[j]?.[f] ?? 0;
+                    const r = residuals[j] ?? 0;
                     if (featureValue <= threshold) {
-                        leftIndices.push(j);
+                        leftSum += r;
+                        leftCount++;
                     } else {
-                        rightIndices.push(j);
+                        rightSum += r;
+                        rightCount++;
                     }
                 }
 
-                if (leftIndices.length === 0 || rightIndices.length === 0) continue;
+                if (leftCount === 0 || rightCount === 0) continue;
 
-                // Calculate gain
-                const leftResiduals = leftIndices.map(i => residuals[i] ?? 0);
-                const rightResiduals = rightIndices.map(i => residuals[i] ?? 0);
+                const leftMean = leftSum / leftCount;
+                const rightMean = rightSum / rightCount;
 
-                const leftMean = leftResiduals.reduce((a, b) => a + b, 0) / leftResiduals.length;
-                const rightMean = rightResiduals.reduce((a, b) => a + b, 0) / rightResiduals.length;
-
-                const leftVar = leftResiduals.reduce((a, b) => a + (b - leftMean) ** 2, 0);
-                const rightVar = rightResiduals.reduce((a, b) => a + (b - rightMean) ** 2, 0);
-
-                const totalVar = residuals.reduce((a, b) => {
-                    const mean = residuals.reduce((x, y) => x + y, 0) / residuals.length;
-                    return a + (b - mean) ** 2;
-                }, 0);
+                // Compute variance reduction in one pass
+                let leftVar = 0, rightVar = 0;
+                for (let j = 0; j < n; j++) {
+                    const featureValue = X[j]?.[f] ?? 0;
+                    const r = residuals[j] ?? 0;
+                    if (featureValue <= threshold) {
+                        leftVar += (r - leftMean) ** 2;
+                    } else {
+                        rightVar += (r - rightMean) ** 2;
+                    }
+                }
 
                 const gain = totalVar - (leftVar + rightVar);
 

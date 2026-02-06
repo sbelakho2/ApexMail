@@ -11,7 +11,7 @@
  */
 
 import * as cheerio from 'cheerio';
-import { createLogger } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import { config } from '../config.js';
 import { waitForRateLimit } from './rate-limiter.js';
 import { isUrlAllowed } from './robots-service.js';

@@ -269,18 +269,22 @@ describe('PHASE 5: Analytics & Tracking - Deep Analysis', () => {
       expect(content).toContain('buffer');
     });
 
-    it('✅ FIX VERIFIED: Buffer has absolute max size cap', () => {
-      // Verify fix: should have absoluteMaxBufferSize and drop events when exceeded
-      const hasAbsoluteMax = content.includes('absoluteMaxBufferSize');
-      const dropsEvents = content.includes('droppedEventCount') || content.includes('drop');
+    it('✅ FIX VERIFIED: Buffer uses Redis WAL for crash-safe durability', () => {
+      // FIX-053: Buffer was upgraded from in-memory array to Redis WAL (write-ahead log).
+      // Events are RPUSH'd to Redis before the HTTP response, surviving crashes.
+      // The old absoluteMaxBufferSize / droppedEventCount approach is removed —
+      // Redis handles backpressure via its memory limits.
+      const usesRedisWAL = content.includes('REDIS_WAL_KEY') || content.includes('tracking:events:pending');
+      const usesRpush = content.includes('rpush');
+      const usesLtrim = content.includes('ltrim');
       
-      if (hasAbsoluteMax && dropsEvents) {
-        console.log('✅ VERIFIED: Buffer has absolute max size cap with event dropping');
+      if (usesRedisWAL && usesRpush && usesLtrim) {
+        console.log('✅ VERIFIED: Buffer uses Redis WAL (RPUSH/LTRIM) for crash-safe event durability');
       } else {
-        console.warn('⚠️ Buffer overflow protection may not be complete');
+        console.warn('⚠️ Redis WAL implementation may not be complete');
       }
       
-      expect(hasAbsoluteMax).toBe(true);
+      expect(usesRedisWAL).toBe(true);
     });
 
     it('should support batch flush to ClickHouse', () => {

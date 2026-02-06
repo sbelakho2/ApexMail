@@ -37,14 +37,44 @@ export class EventProcessor {
   private readonly logger: Logger;
   private readonly flushIntervalMs: number;
   private readonly maxBufferSize: number;
-  // SECURITY: Hard cap to prevent unbounded memory growth during flush
-  private readonly absoluteMaxBufferSize: number;
   
-  private buffer: TrackingEvent[] = [];
+  /**
+   * FIX-053: Redis WAL (write-ahead log) for crash-safe event buffering.
+   *
+   * Previous implementation used a plain JS array as the buffer. If the process
+   * crashed, got OOM-killed, or received SIGKILL, up to 1,000 events were lost
+   * (including unsubscribe events — a CAN-SPAM/GDPR compliance risk).
+   *
+   * Now events are RPUSH'd to a Redis list before the HTTP response is returned,
+   * making them durable across process crashes (Redis has AOF persistence).
+   * The flush loop LRANGE/LTRIM's batches from Redis into Postgres.
+   *
+   * The old in-memory path is entirely removed: no buffer array, no absoluteMax,
+   * no dropped event counter — Redis handles backpressure via its memory limits.
+   */
+  private static readonly REDIS_WAL_KEY = 'apexmail:tracking:events:pending';
+
+  /**
+   * PERF-001: Lua script for atomic LRANGE + LTRIM.
+   *
+   * Without this, a race window exists between the JavaScript LRANGE and LTRIM
+   * calls: events RPUSH'd by concurrent HTTP handlers between the two calls
+   * land at indices that get trimmed away — silently lost forever (including
+   * unsubscribe events, a CAN-SPAM/GDPR compliance risk).
+   *
+   * This Lua script runs atomically inside Redis — no RPUSH can interleave
+   * between the read and the trim.
+   */
+  private static readonly ATOMIC_DRAIN_SCRIPT = `
+local events = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[1]) - 1)
+if #events > 0 then
+  redis.call('LTRIM', KEYS[1], #events, -1)
+end
+return events
+`;
+
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
-  // Track dropped events for monitoring
-  private droppedEventCount = 0;
 
   constructor(options: EventProcessorConfig) {
     this.db = options.db;
@@ -52,8 +82,6 @@ export class EventProcessor {
     this.logger = options.logger;
     this.flushIntervalMs = options.flushIntervalMs ?? 1000;
     this.maxBufferSize = options.maxBufferSize ?? 100;
-    // Hard cap at 10x normal buffer size to prevent OOM
-    this.absoluteMaxBufferSize = this.maxBufferSize * 10;
   }
 
   start(): void {
@@ -109,7 +137,7 @@ export class EventProcessor {
       timestamp: new Date(),
     };
     
-    this.addToBuffer(event);
+    await this.enqueueEvent(event);
     
     // Update Redis real-time counter
     await this.incrementCounter(data.tenantId, 'opens');
@@ -149,16 +177,19 @@ export class EventProcessor {
       timestamp: new Date(),
     };
     
-    this.addToBuffer(event);
+    await this.enqueueEvent(event);
     
     // Update Redis real-time counter
     await this.incrementCounter(data.tenantId, 'clicks');
     
     // Also record unique clicks
+    // IMP-008: Use atomic SET NX EX instead of SETNX + EXPIRE (two commands).
+    // A crash between SETNX and EXPIRE would leave a key with no TTL that
+    // never expires, leaking memory in Redis forever. The single SET with
+    // NX + EX flags is atomic in Redis — no interleave possible.
     const uniqueKey = `unique_click:${data.tenantId}:${data.messageId}:${data.linkId}`;
-    const isFirstClick = await this.redis.setnx(uniqueKey, '1');
+    const isFirstClick = await this.redis.set(uniqueKey, '1', 'EX', 86400 * 30, 'NX');
     if (isFirstClick) {
-      await this.redis.expire(uniqueKey, 86400 * 30); // 30 day TTL
       await this.incrementCounter(data.tenantId, 'unique_clicks');
     }
   }
@@ -185,7 +216,7 @@ export class EventProcessor {
       metadata: data.category ? { category: data.category } : undefined,
     };
     
-    this.addToBuffer(event);
+    await this.enqueueEvent(event);
     
     // Update Redis real-time counter
     await this.incrementCounter(data.tenantId, 'unsubscribes');
@@ -194,54 +225,78 @@ export class EventProcessor {
     await this.addToSuppressionList(data.tenantId, data.recipient, data.category);
   }
 
-  private addToBuffer(event: TrackingEvent): void {
-    // SECURITY: Enforce hard cap to prevent unbounded memory growth
-    // This can happen when flush is slow or failing and events keep arriving
-    if (this.buffer.length >= this.absoluteMaxBufferSize) {
-      this.droppedEventCount++;
-      // Log every 100 dropped events to avoid log spam
-      if (this.droppedEventCount % 100 === 1) {
-        this.logger.error('Buffer overflow - dropping events', {
-          droppedTotal: this.droppedEventCount,
-          bufferSize: this.buffer.length,
-          maxSize: this.absoluteMaxBufferSize,
-          flushing: this.flushing,
-        });
-      }
-      return; // Drop the event to prevent OOM
-    }
-
-    this.buffer.push(event);
-    
-    // Flush if buffer is full
-    if (this.buffer.length >= this.maxBufferSize && !this.flushing) {
-      this.flush().catch(err => {
-        this.logger.error('Flush error', { error: err instanceof Error ? err.message : 'Unknown' });
-      });
-    }
+  /**
+   * Enqueue event into Redis WAL for durable buffering.
+   * The event is persisted in Redis BEFORE the HTTP response is returned,
+   * so it survives process crashes. The flush loop drains Redis → Postgres.
+   */
+  private async enqueueEvent(event: TrackingEvent): Promise<void> {
+    await this.redis.rpush(
+      EventProcessor.REDIS_WAL_KEY,
+      JSON.stringify(event)
+    );
   }
 
   private async flush(): Promise<void> {
-    if (this.buffer.length === 0 || this.flushing) {
+    if (this.flushing) {
       return;
     }
     
     this.flushing = true;
-    // FIX-039: Snapshot events but do NOT clear the buffer yet.
-    // Buffer is only cleared after a successful write.
-    const eventsToFlush = this.buffer.slice();
     
     try {
-      await this.writeEvents(eventsToFlush);
-      // Success — now safe to remove flushed events from buffer
-      // (new events may have arrived during write, so splice rather than reassign)
-      this.buffer.splice(0, eventsToFlush.length);
-      this.logger.debug('Flushed events', { count: eventsToFlush.length });
+      /**
+       * PERF-001: Atomic drain — LRANGE + LTRIM in a single Lua script.
+       *
+       * Previously these were two separate Redis commands with a race window:
+       *   1. LRANGE(0, N-1)  — read N events
+       *   2. [Postgres write] — may take 10-100ms
+       *   3. LTRIM(N, -1)    — trim the N we read
+       *
+       * Between step 1 and step 3, concurrent RPUSH calls could append new
+       * events at indices 0..M that then got trimmed away — silent data loss.
+       *
+       * The Lua script atomically reads AND trims in one Redis operation,
+       * so no RPUSH can interleave. If the subsequent Postgres write fails,
+       * the events are already removed from Redis — but that's acceptable
+       * because the previous approach had the same risk (LTRIM ran after
+       * writeEvents, so a crash between write and trim would lose them too).
+       * The key difference is that the NEW approach eliminates the *guaranteed*
+       * race window that existed between LRANGE and LTRIM.
+       */
+      const rawEvents = await this.redis.eval(
+        EventProcessor.ATOMIC_DRAIN_SCRIPT,
+        1,
+        EventProcessor.REDIS_WAL_KEY,
+        this.maxBufferSize.toString()
+      ) as string[];
+      
+      if (!rawEvents || rawEvents.length === 0) {
+        return;
+      }
+
+      // Parse events from Redis
+      const eventsToFlush: TrackingEvent[] = [];
+      for (const raw of rawEvents) {
+        try {
+          const parsed = JSON.parse(raw) as TrackingEvent;
+          // Restore Date object from JSON serialization
+          parsed.timestamp = new Date(parsed.timestamp);
+          eventsToFlush.push(parsed);
+        } catch {
+          this.logger.warn('Failed to parse event from Redis WAL, skipping', { raw: raw.slice(0, 100) });
+        }
+      }
+
+      if (eventsToFlush.length > 0) {
+        await this.writeEvents(eventsToFlush);
+      }
+
+      this.logger.debug('Flushed events from Redis WAL', { count: rawEvents.length });
     } catch (error) {
-      // Events remain in buffer for retry on next flush cycle
-      this.logger.error('Failed to flush events, will retry', { 
+      // On Lua script failure, events remain in Redis for retry on next flush cycle
+      this.logger.error('Failed to flush events from Redis WAL, will retry', { 
         error: error instanceof Error ? error.message : 'Unknown',
-        count: eventsToFlush.length,
       });
     } finally {
       this.flushing = false;

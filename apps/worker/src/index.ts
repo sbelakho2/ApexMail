@@ -19,6 +19,8 @@ let isShuttingDown = false;
 const processors: Array<{ stop: () => Promise<void> }> = [];
 let metricsServer: MetricsServer | null = null;
 let queueNotifier: QueueNotifier | null = null;
+let redisClient: Redis | null = null;
+let dbPool: ReturnType<typeof getDatabase> | null = null;
 
 async function main(): Promise<void> {
   logger.info('Starting ApexMail Worker', {
@@ -27,7 +29,7 @@ async function main(): Promise<void> {
   });
 
   // Get database pool (worker gets 30 connections)
-  const dbPool = getDatabase('worker');
+  dbPool = getDatabase('worker');
   await dbPool.connect();
   const db = dbPool.getPool();
 
@@ -43,7 +45,7 @@ async function main(): Promise<void> {
   }
 
   // Create Redis client
-  const redis = new Redis(config.redis.url, {
+  redisClient = new Redis(config.redis.url, {
     keyPrefix: config.redis.keyPrefix,
     maxRetriesPerRequest: 3,
     retryStrategy: (times: number) => {
@@ -54,7 +56,7 @@ async function main(): Promise<void> {
   });
 
   try {
-    await redis.connect();
+    await redisClient.connect();
     logger.info('Redis connected');
   } catch (error) {
     logger.fatal('Failed to connect to Redis', { error });
@@ -78,7 +80,7 @@ async function main(): Promise<void> {
   const emailProcessor = new EmailProcessor({
     db,
     dbPool,
-    redis,
+    redis: redisClient,
     notifier: queueNotifier,
     config: config.queues.email,
     smtp: config.smtp,
@@ -91,7 +93,7 @@ async function main(): Promise<void> {
 
   const webhookProcessor = new WebhookProcessor({
     db,
-    redis,
+    redis: redisClient,
     notifier: queueNotifier,
     config: config.queues.webhook,
     logger: logger.child({ processor: 'webhook' }),
@@ -99,7 +101,7 @@ async function main(): Promise<void> {
 
   const analyticsProcessor = new AnalyticsProcessor({
     db,
-    redis,
+    redis: redisClient,
     notifier: queueNotifier,
     config: config.queues.analytics,
     logger: logger.child({ processor: 'analytics' }),
@@ -189,16 +191,20 @@ async function shutdown(signal: string): Promise<void> {
 
     // Close Redis connection
     try {
-      await redis.quit();
-      logger.info('Redis connection closed');
+      if (redisClient) {
+        await redisClient.quit();
+        logger.info('Redis connection closed');
+      }
     } catch (err) {
       logger.error('Failed to close Redis connection', { error: err });
     }
 
     // Close database pool
     try {
-      await db.end();
-      logger.info('Database pool closed');
+      if (dbPool) {
+        await dbPool.disconnect();
+        logger.info('Database pool closed');
+      }
     } catch (err) {
       logger.error('Failed to close database pool', { error: err });
     }
