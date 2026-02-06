@@ -1,5 +1,10 @@
 /**
  * Analytics Routes - Reporting and statistics endpoints
+ *
+ * Uses Redis cache-aside to avoid repeatedly hitting PostgreSQL for
+ * expensive aggregation queries. Each endpoint caches its JSON response
+ * per tenant with a short TTL (30-60 s). Cache misses fall through to the
+ * database transparently.
  */
 
 import { Hono } from 'hono';
@@ -8,15 +13,50 @@ import type { AppEnv, AppContext } from '../app.js';
 import { EventsRepository, MessagesRepository, DomainsRepository, SuppressionsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
+import { createHash } from 'crypto';
 
 const intervalSchema = z.enum(['minute', 'hour', 'day', 'week', 'month']);
 
+/** Short hash of query params to partition cache per unique request. */
+function cacheKey(tenantId: string, endpoint: string, params: Record<string, string | undefined>): string {
+  const sorted = Object.entries(params)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&');
+  const hash = createHash('sha256').update(sorted).digest('hex').slice(0, 12);
+  return `cache:analytics:${tenantId}:${endpoint}:${hash}`;
+}
+
 export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
+  const redis = ctx.redis;
   const eventsRepo = new EventsRepository(ctx.db);
   const messagesRepo = new MessagesRepository(ctx.db);
   const domainsRepo = new DomainsRepository(ctx.db);
   const suppressionsRepo = new SuppressionsRepository(ctx.db);
+
+  /**
+   * Cache-aside helper. Returns cached JSON string if available,
+   * otherwise calls `compute`, caches the result, and returns it.
+   * Degrades gracefully: if Redis is down, falls through to DB every time.
+   */
+  async function cached<T>(key: string, ttlSeconds: number, compute: () => Promise<T>): Promise<T> {
+    // Try reading from cache
+    try {
+      const hit = await redis.get(key);
+      if (hit) return JSON.parse(hit) as T;
+    } catch {
+      // Redis error — fall through to DB
+    }
+
+    const value = await compute();
+
+    // Write-behind: don't block the response on cache write
+    redis.setex(key, ttlSeconds, JSON.stringify(value)).catch(() => {});
+
+    return value;
+  }
 
   // Dashboard overview
   router.get('/dashboard', requireScopes('analytics:read'), async (c) => {
@@ -29,38 +69,40 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
-    // Fetch all stats in parallel
-    const [
-      eventStatsResult,
-      messageStatsResult,
-      domainStatsResult,
-      suppressionStatsResult,
-    ] = await Promise.all([
-      eventsRepo.getStats(tenantId, period),
-      messagesRepo.getStats(tenantId, period),
-      domainsRepo.getStats(tenantId),
-      suppressionsRepo.getStats(tenantId, period),
-    ]);
+    const key = cacheKey(tenantId, 'dashboard', { since: period.since.toISOString(), until: period.until.toISOString() });
 
-    if (!eventStatsResult.ok || !messageStatsResult.ok || !domainStatsResult.ok || !suppressionStatsResult.ok) {
-      throw ApiError.internal('Failed to fetch dashboard stats');
-    }
+    const dashboard = await cached(key, 30, async () => {
+      // Fetch all stats in parallel
+      const [
+        eventStatsResult,
+        messageStatsResult,
+        domainStatsResult,
+        suppressionStatsResult,
+      ] = await Promise.all([
+        eventsRepo.getStats(tenantId, period),
+        messagesRepo.getStats(tenantId, period),
+        domainsRepo.getStats(tenantId),
+        suppressionsRepo.getStats(tenantId, period),
+      ]);
 
-    const eventStats = eventStatsResult.value;
-    const messageStats = messageStatsResult.value;
-    const domainStats = domainStatsResult.value;
-    const suppressionStats = suppressionStatsResult.value;
+      if (!eventStatsResult.ok || !messageStatsResult.ok || !domainStatsResult.ok || !suppressionStatsResult.ok) {
+        throw ApiError.internal('Failed to fetch dashboard stats');
+      }
 
-    // Calculate rates
-    const sent = eventStats.sent ?? 0;
-    const delivered = eventStats.delivered ?? 0;
-    const opened = eventStats.opened ?? 0;
-    const clicked = eventStats.clicked ?? 0;
-    const bounced = eventStats.bounced ?? 0;
-    const complained = eventStats.complained ?? 0;
+      const eventStats = eventStatsResult.value;
+      const messageStats = messageStatsResult.value;
+      const domainStats = domainStatsResult.value;
+      const suppressionStats = suppressionStatsResult.value;
 
-    return c.json({
-      dashboard: {
+      // Calculate rates
+      const sent = eventStats.sent ?? 0;
+      const delivered = eventStats.delivered ?? 0;
+      const opened = eventStats.opened ?? 0;
+      const clicked = eventStats.clicked ?? 0;
+      const bounced = eventStats.bounced ?? 0;
+      const complained = eventStats.complained ?? 0;
+
+      return {
         period: {
           since: period.since.toISOString(),
           until: period.until.toISOString(),
@@ -105,8 +147,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
           bounceRate: sent > 0 ? bounced / sent : 0,
           complaintRate: delivered > 0 ? complained / delivered : 0,
         }),
-      },
+      };
     });
+
+    return c.json({ dashboard });
   });
 
   // Sending volume over time
@@ -128,30 +172,36 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
-    const result = await messagesRepo.getVolumeTimeSeries(tenantId, {
-      ...period,
-      interval,
-      domainId,
+    const key = cacheKey(tenantId, 'volume', { interval, since: period.since.toISOString(), until: period.until.toISOString(), domainId });
+
+    const body = await cached(key, 30, async () => {
+      const result = await messagesRepo.getVolumeTimeSeries(tenantId, {
+        ...period,
+        interval,
+        domainId,
+      });
+
+      if (!result.ok) {
+        throw ApiError.internal('Failed to fetch volume data');
+      }
+
+      return {
+        volume: result.value.map((point) => ({
+          timestamp: point.timestamp,
+          sent: point.sent,
+          delivered: point.delivered,
+          bounced: point.bounced,
+          failed: point.failed,
+        })),
+        interval,
+        period: {
+          since: period.since.toISOString(),
+          until: period.until.toISOString(),
+        },
+      };
     });
 
-    if (!result.ok) {
-      throw ApiError.internal('Failed to fetch volume data');
-    }
-
-    return c.json({
-      volume: result.value.map((point) => ({
-        timestamp: point.timestamp,
-        sent: point.sent,
-        delivered: point.delivered,
-        bounced: point.bounced,
-        failed: point.failed,
-      })),
-      interval,
-      period: {
-        since: period.since.toISOString(),
-        until: period.until.toISOString(),
-      },
-    });
+    return c.json(body);
   });
 
   // Engagement metrics over time
@@ -173,36 +223,42 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
-    const result = await eventsRepo.getTimeSeries(tenantId, {
-      ...period,
-      interval,
-      domainId,
-      campaignId,
-    });
+    const key = cacheKey(tenantId, 'engagement', { interval, since: period.since.toISOString(), until: period.until.toISOString(), domainId, campaignId });
 
-    if (!result.ok) {
-      throw ApiError.internal('Failed to fetch engagement data');
-    }
+    const body = await cached(key, 30, async () => {
+      const result = await eventsRepo.getTimeSeries(tenantId, {
+        ...period,
+        interval,
+        domainId,
+        campaignId,
+      });
 
-    return c.json({
-      engagement: result.value.map((point) => ({
-        timestamp: point.timestamp,
-        delivered: point.delivered ?? 0,
-        opened: point.opened ?? 0,
-        clicked: point.clicked ?? 0,
-        unsubscribed: point.unsubscribed ?? 0,
-        complained: point.complained ?? 0,
-        rates: {
-          open: point.delivered ? ((point.opened ?? 0) / point.delivered * 100).toFixed(2) : '0.00',
-          click: point.opened ? ((point.clicked ?? 0) / point.opened * 100).toFixed(2) : '0.00',
+      if (!result.ok) {
+        throw ApiError.internal('Failed to fetch engagement data');
+      }
+
+      return {
+        engagement: result.value.map((point) => ({
+          timestamp: point.timestamp,
+          delivered: point.delivered ?? 0,
+          opened: point.opened ?? 0,
+          clicked: point.clicked ?? 0,
+          unsubscribed: point.unsubscribed ?? 0,
+          complained: point.complained ?? 0,
+          rates: {
+            open: point.delivered ? ((point.opened ?? 0) / point.delivered * 100).toFixed(2) : '0.00',
+            click: point.opened ? ((point.clicked ?? 0) / point.opened * 100).toFixed(2) : '0.00',
+          },
+        })),
+        interval,
+        period: {
+          since: period.since.toISOString(),
+          until: period.until.toISOString(),
         },
-      })),
-      interval,
-      period: {
-        since: period.since.toISOString(),
-        until: period.until.toISOString(),
-      },
+      };
     });
+
+    return c.json(body);
   });
 
   // Domain performance comparison
@@ -218,61 +274,67 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
-    const result = await eventsRepo.getStatsByDomain(tenantId, period);
+    const key = cacheKey(tenantId, 'domains', { since: period.since.toISOString(), until: period.until.toISOString(), sortBy, limit: String(limit) });
 
-    if (!result.ok) {
-      throw ApiError.internal('Failed to fetch domain stats');
-    }
+    const body = await cached(key, 60, async () => {
+      const result = await eventsRepo.getStatsByDomain(tenantId, period);
 
-    // Sort and limit
-    let domains = result.value;
-    if (sortBy === 'sent') {
-      domains.sort((a, b) => b.sent - a.sent);
-    } else if (sortBy === 'delivered') {
-      domains.sort((a, b) => b.delivered - a.delivered);
-    } else if (sortBy === 'openRate') {
-      domains.sort((a, b) => {
-        const rateA = a.delivered > 0 ? a.opened / a.delivered : 0;
-        const rateB = b.delivered > 0 ? b.opened / b.delivered : 0;
-        return rateB - rateA;
-      });
-    } else if (sortBy === 'bounceRate') {
-      domains.sort((a, b) => {
-        const rateA = a.sent > 0 ? a.bounced / a.sent : 0;
-        const rateB = b.sent > 0 ? b.bounced / b.sent : 0;
-        return rateB - rateA;
-      });
-    }
+      if (!result.ok) {
+        throw ApiError.internal('Failed to fetch domain stats');
+      }
 
-    domains = domains.slice(0, Math.min(limit, 50));
+      // Sort and limit
+      let domains = result.value;
+      if (sortBy === 'sent') {
+        domains.sort((a, b) => b.sent - a.sent);
+      } else if (sortBy === 'delivered') {
+        domains.sort((a, b) => b.delivered - a.delivered);
+      } else if (sortBy === 'openRate') {
+        domains.sort((a, b) => {
+          const rateA = a.delivered > 0 ? a.opened / a.delivered : 0;
+          const rateB = b.delivered > 0 ? b.opened / b.delivered : 0;
+          return rateB - rateA;
+        });
+      } else if (sortBy === 'bounceRate') {
+        domains.sort((a, b) => {
+          const rateA = a.sent > 0 ? a.bounced / a.sent : 0;
+          const rateB = b.sent > 0 ? b.bounced / b.sent : 0;
+          return rateB - rateA;
+        });
+      }
 
-    return c.json({
-      domains: domains.map((d) => ({
-        domainId: d.domainId,
-        domainName: d.domainName,
-        metrics: {
-          sent: d.sent,
-          delivered: d.delivered,
-          opened: d.opened,
-          clicked: d.clicked,
-          bounced: d.bounced,
-          complained: d.complained,
+      domains = domains.slice(0, Math.min(limit, 50));
+
+      return {
+        domains: domains.map((d) => ({
+          domainId: d.domainId,
+          domainName: d.domainName,
+          metrics: {
+            sent: d.sent,
+            delivered: d.delivered,
+            opened: d.opened,
+            clicked: d.clicked,
+            bounced: d.bounced,
+            complained: d.complained,
+          },
+          rates: {
+            delivery: d.sent > 0 ? ((d.delivered / d.sent) * 100).toFixed(2) : '0.00',
+            open: d.delivered > 0 ? ((d.opened / d.delivered) * 100).toFixed(2) : '0.00',
+            click: d.opened > 0 ? ((d.clicked / d.opened) * 100).toFixed(2) : '0.00',
+            bounce: d.sent > 0 ? ((d.bounced / d.sent) * 100).toFixed(2) : '0.00',
+            complaint: d.delivered > 0 ? ((d.complained / d.delivered) * 100).toFixed(4) : '0.0000',
+          },
+          health: calculateDomainHealth(d),
+        })),
+        period: {
+          since: period.since.toISOString(),
+          until: period.until.toISOString(),
         },
-        rates: {
-          delivery: d.sent > 0 ? ((d.delivered / d.sent) * 100).toFixed(2) : '0.00',
-          open: d.delivered > 0 ? ((d.opened / d.delivered) * 100).toFixed(2) : '0.00',
-          click: d.opened > 0 ? ((d.clicked / d.opened) * 100).toFixed(2) : '0.00',
-          bounce: d.sent > 0 ? ((d.bounced / d.sent) * 100).toFixed(2) : '0.00',
-          complaint: d.delivered > 0 ? ((d.complained / d.delivered) * 100).toFixed(4) : '0.0000',
-        },
-        health: calculateDomainHealth(d),
-      })),
-      period: {
-        since: period.since.toISOString(),
-        until: period.until.toISOString(),
-      },
-      sortBy,
+        sortBy,
+      };
     });
+
+    return c.json(body);
   });
 
   // Campaign performance
@@ -450,76 +512,82 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       until: until ? new Date(until) : new Date(),
     };
 
-    // Fetch data in parallel
-    const [eventStats, bounceBreakdown, domainStats] = await Promise.all([
-      eventsRepo.getStats(tenantId, period),
-      eventsRepo.getBounceBreakdown(tenantId, period),
-      eventsRepo.getStatsByDomain(tenantId, period),
-    ]);
+    const key = cacheKey(tenantId, 'deliverability', { since: period.since.toISOString(), until: period.until.toISOString() });
 
-    if (!eventStats.ok || !bounceBreakdown.ok || !domainStats.ok) {
-      throw ApiError.internal('Failed to fetch deliverability data');
-    }
+    const body = await cached(key, 60, async () => {
+      // Fetch data in parallel
+      const [eventStats, bounceBreakdown, domainStats] = await Promise.all([
+        eventsRepo.getStats(tenantId, period),
+        eventsRepo.getBounceBreakdown(tenantId, period),
+        eventsRepo.getStatsByDomain(tenantId, period),
+      ]);
 
-    const stats = eventStats.value;
-    const bounces = bounceBreakdown.value;
-    const domains = domainStats.value;
+      if (!eventStats.ok || !bounceBreakdown.ok || !domainStats.ok) {
+        throw ApiError.internal('Failed to fetch deliverability data');
+      }
 
-    const sent = stats.sent ?? 0;
-    const delivered = stats.delivered ?? 0;
-    const bounced = stats.bounced ?? 0;
-    const complained = stats.complained ?? 0;
+      const stats = eventStats.value;
+      const bounces = bounceBreakdown.value;
+      const domains = domainStats.value;
 
-    // Calculate ISP breakdown from bounce data
-    const ispBreakdown = analyzeISPPerformance(bounces);
+      const sent = stats.sent ?? 0;
+      const delivered = stats.delivered ?? 0;
+      const bounced = stats.bounced ?? 0;
+      const complained = stats.complained ?? 0;
 
-    return c.json({
-      deliverability: {
-        overview: {
-          sent,
-          delivered,
-          bounced,
-          complained,
-          deliveryRate: sent > 0 ? ((delivered / sent) * 100).toFixed(2) : '0.00',
-          bounceRate: sent > 0 ? ((bounced / sent) * 100).toFixed(2) : '0.00',
-          complaintRate: delivered > 0 ? ((complained / delivered) * 100).toFixed(4) : '0.0000',
+      // Calculate ISP breakdown from bounce data
+      const ispBreakdown = analyzeISPPerformance(bounces);
+
+      return {
+        deliverability: {
+          overview: {
+            sent,
+            delivered,
+            bounced,
+            complained,
+            deliveryRate: sent > 0 ? ((delivered / sent) * 100).toFixed(2) : '0.00',
+            bounceRate: sent > 0 ? ((bounced / sent) * 100).toFixed(2) : '0.00',
+            complaintRate: delivered > 0 ? ((complained / delivered) * 100).toFixed(4) : '0.0000',
+          },
+          bounceAnalysis: {
+            hard: bounces.filter(b => b.bounceType === 'hard').reduce((s, b) => s + b.count, 0),
+            soft: bounces.filter(b => b.bounceType === 'soft').reduce((s, b) => s + b.count, 0),
+            topReasons: bounces
+              .sort((a, b) => b.count - a.count)
+              .slice(0, 5)
+              .map(b => ({
+                type: b.bounceType,
+                subtype: b.bounceSubtype,
+                count: b.count,
+              })),
+          },
+          domainPerformance: domains.slice(0, 5).map(d => ({
+            domain: d.domainName,
+            deliveryRate: d.sent > 0 ? ((d.delivered / d.sent) * 100).toFixed(2) : '0.00',
+            bounceRate: d.sent > 0 ? ((d.bounced / d.sent) * 100).toFixed(2) : '0.00',
+          })),
+          ispBreakdown,
+          score: calculateDeliverabilityScore({
+            deliveryRate: sent > 0 ? delivered / sent : 1,
+            bounceRate: sent > 0 ? bounced / sent : 0,
+            complaintRate: delivered > 0 ? complained / delivered : 0,
+            hardBounceRate: sent > 0 ? bounces.filter(b => b.bounceType === 'hard').reduce((s, b) => s + b.count, 0) / sent : 0,
+          }),
+          recommendations: generateDeliverabilityRecommendations({
+            deliveryRate: sent > 0 ? delivered / sent : 1,
+            bounceRate: sent > 0 ? bounced / sent : 0,
+            complaintRate: delivered > 0 ? complained / delivered : 0,
+            hardBounceRatio: bounced > 0 ? bounces.filter(b => b.bounceType === 'hard').reduce((s, b) => s + b.count, 0) / bounced : 0,
+          }),
         },
-        bounceAnalysis: {
-          hard: bounces.filter(b => b.bounceType === 'hard').reduce((s, b) => s + b.count, 0),
-          soft: bounces.filter(b => b.bounceType === 'soft').reduce((s, b) => s + b.count, 0),
-          topReasons: bounces
-            .sort((a, b) => b.count - a.count)
-            .slice(0, 5)
-            .map(b => ({
-              type: b.bounceType,
-              subtype: b.bounceSubtype,
-              count: b.count,
-            })),
+        period: {
+          since: period.since.toISOString(),
+          until: period.until.toISOString(),
         },
-        domainPerformance: domains.slice(0, 5).map(d => ({
-          domain: d.domainName,
-          deliveryRate: d.sent > 0 ? ((d.delivered / d.sent) * 100).toFixed(2) : '0.00',
-          bounceRate: d.sent > 0 ? ((d.bounced / d.sent) * 100).toFixed(2) : '0.00',
-        })),
-        ispBreakdown,
-        score: calculateDeliverabilityScore({
-          deliveryRate: sent > 0 ? delivered / sent : 1,
-          bounceRate: sent > 0 ? bounced / sent : 0,
-          complaintRate: delivered > 0 ? complained / delivered : 0,
-          hardBounceRate: sent > 0 ? bounces.filter(b => b.bounceType === 'hard').reduce((s, b) => s + b.count, 0) / sent : 0,
-        }),
-        recommendations: generateDeliverabilityRecommendations({
-          deliveryRate: sent > 0 ? delivered / sent : 1,
-          bounceRate: sent > 0 ? bounced / sent : 0,
-          complaintRate: delivered > 0 ? complained / delivered : 0,
-          hardBounceRatio: bounced > 0 ? bounces.filter(b => b.bounceType === 'hard').reduce((s, b) => s + b.count, 0) / bounced : 0,
-        }),
-      },
-      period: {
-        since: period.since.toISOString(),
-        until: period.until.toISOString(),
-      },
+      };
     });
+
+    return c.json(body);
   });
 
   // Export report

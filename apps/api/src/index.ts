@@ -23,8 +23,31 @@ async function main(): Promise<void> {
   // Initialize database pool (uses service-specific config for 'api' = 20 connections)
   const db = getDatabase('api');
 
+  // Initialize Redis for cache-aside
+  const redis = new Redis({
+    host: config.redis.host,
+    port: config.redis.port,
+    password: config.redis.password || undefined,
+    db: config.redis.db ?? 0,
+    keyPrefix: 'apexmail:',
+    maxRetriesPerRequest: 3,
+    retryStrategy: (times: number) => {
+      if (times > 10) return null;
+      return Math.min(times * 100, 3000);
+    },
+    lazyConnect: true,
+  });
+
+  try {
+    await redis.connect();
+    logger.info('Redis connected');
+  } catch (error) {
+    // Redis is optional for the API — analytics caching degrades gracefully
+    logger.warn('Redis connection failed, analytics caching disabled', { error });
+  }
+
   // Create the application
-  const app = createApp({ db, config, logger });
+  const app = createApp({ db, redis, config, logger });
 
   // Start the server
   const server = serve({
@@ -45,6 +68,7 @@ async function main(): Promise<void> {
       logger.info('HTTP server closed');
       
       await disconnectTokenBlacklist();
+      await redis.quit().catch(() => {});
       await db.disconnect();
       
       logger.info('Shutdown complete');
