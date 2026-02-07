@@ -10,8 +10,10 @@
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'observability:alerting' });
 
 export enum AlertSeverity {
   INFO = 'info',
@@ -117,7 +119,7 @@ export class AlertingService {
    */
   async initialize(): Promise<void> {
     if (!config.alerting.enabled) {
-      console.log('[Alerting] Alerting is disabled');
+      logger.info('[Alerting] Alerting is disabled');
       return;
     }
 
@@ -130,17 +132,25 @@ export class AlertingService {
     // Start evaluation loop with proper error handling
     this.evaluationInterval = setInterval(() => {
       this.evaluateRules().catch(err => {
-        console.error('[Alerting] Rule evaluation failed:', err instanceof Error ? err.message : err);
+        logger.error('[Alerting] Rule evaluation failed:', { error: err instanceof Error ? err.message : String(err) });
       });
     }, 60000);
 
-    console.log('[Alerting] Service initialized');
+    logger.info('[Alerting] Service initialized');
   }
 
   /**
    * Create an alert rule
+   *
+   * G-219: Validates alert thresholds and durations before persisting.
    */
   async createRule(rule: Omit<AlertRule, 'id' | 'createdAt' | 'updatedAt'>): Promise<Result<AlertRule>> {
+    // G-219: Validate alert rule parameters
+    const validationError = this.validateRuleParams(rule);
+    if (validationError) {
+      return { ok: false, error: new Error(validationError) };
+    }
+
     const id = `rule_${Date.now()}`;
     const now = new Date();
 
@@ -176,7 +186,7 @@ export class AlertingService {
 
       this.rules.set(id, fullRule);
 
-      console.log(`[Alerting] Created rule: ${rule.name}`);
+      logger.info(`[Alerting] Created rule: ${rule.name}`);
 
       return { ok: true, value: fullRule };
     } catch (error) {
@@ -186,6 +196,8 @@ export class AlertingService {
 
   /**
    * Update an alert rule
+   *
+   * G-219: Validates updated thresholds and durations before persisting.
    */
   async updateRule(id: string, updates: Partial<AlertRule>): Promise<Result<AlertRule>> {
     const rule = this.rules.get(id);
@@ -200,6 +212,12 @@ export class AlertingService {
       createdAt: rule.createdAt,
       updatedAt: new Date(),
     };
+
+    // G-219: Re-validate merged rule before persisting
+    const validationError = this.validateRuleParams(updatedRule);
+    if (validationError) {
+      return { ok: false, error: new Error(validationError) };
+    }
 
     try {
       await this.db.query(`
@@ -264,7 +282,7 @@ export class AlertingService {
 
       this.channels.set(id, fullChannel);
 
-      console.log(`[Alerting] Created channel: ${channel.name}`);
+      logger.info(`[Alerting] Created channel: ${channel.name}`);
 
       return { ok: true, value: fullChannel };
     } catch (error) {
@@ -274,6 +292,8 @@ export class AlertingService {
 
   /**
    * Fire an alert manually
+   *
+   * G-219: Validates threshold/value when provided.
    */
   async fireAlert(options: {
     ruleId?: string;
@@ -285,6 +305,21 @@ export class AlertingService {
     value?: number;
     threshold?: number;
   }): Promise<Result<Alert>> {
+    // G-219: Validate threshold and value if provided
+    if (options.threshold !== undefined) {
+      if (typeof options.threshold !== 'number' || !isFinite(options.threshold) || options.threshold < 0) {
+        return { ok: false, error: new Error('G-219: Alert threshold must be a finite non-negative number') };
+      }
+      if (options.threshold > 1_000_000_000) {
+        return { ok: false, error: new Error('G-219: Alert threshold exceeds maximum allowed value (1,000,000,000)') };
+      }
+    }
+    if (options.value !== undefined) {
+      if (typeof options.value !== 'number' || !isFinite(options.value)) {
+        return { ok: false, error: new Error('G-219: Alert value must be a finite number') };
+      }
+    }
+
     const id = `alert_${Date.now()}`;
 
     const alert: Alert = {
@@ -325,7 +360,7 @@ export class AlertingService {
       // Publish event
       await this.redis.publish('alerts:fired', JSON.stringify(alert));
 
-      console.log(`[Alerting] Alert fired: ${alert.summary}`);
+      logger.info(`[Alerting] Alert fired: ${alert.summary}`);
 
       return { ok: true, value: alert };
     } catch (error) {
@@ -354,7 +389,7 @@ export class AlertingService {
       // Publish event
       await this.redis.publish('alerts:resolved', JSON.stringify(alert));
 
-      console.log(`[Alerting] Alert resolved: ${alert.summary}`);
+      logger.info(`[Alerting] Alert resolved: ${alert.summary}`);
 
       return { ok: true, value: alert };
     } catch (error) {
@@ -381,7 +416,7 @@ export class AlertingService {
       // Publish event
       await this.redis.publish('alerts:acknowledged', JSON.stringify(alert));
 
-      console.log(`[Alerting] Alert acknowledged by ${userId}: ${alert.summary}`);
+      logger.info(`[Alerting] Alert acknowledged by ${userId}: ${alert.summary}`);
 
       return { ok: true, value: alert };
     } catch (error) {
@@ -424,7 +459,7 @@ export class AlertingService {
         }
       }
 
-      console.log(`[Alerting] Created silence: ${silence.comment}`);
+      logger.info(`[Alerting] Created silence: ${silence.comment}`);
 
       return { ok: true, value: fullSilence };
     } catch (error) {
@@ -589,6 +624,44 @@ export class AlertingService {
 
   // Private methods
 
+  /**
+   * G-219: Validate alert rule parameters — duration and expression thresholds.
+   * Returns an error message string if invalid, or null if valid.
+   */
+  private validateRuleParams(rule: Partial<AlertRule>): string | null {
+    // Duration must be a positive integer (seconds)
+    if (rule.duration !== undefined) {
+      if (typeof rule.duration !== 'number' || !isFinite(rule.duration) || rule.duration < 0) {
+        return 'G-219: Alert rule duration must be a finite non-negative number (seconds)';
+      }
+      // Cap at 7 days — longer durations are almost certainly a misconfiguration
+      if (rule.duration > 604800) {
+        return 'G-219: Alert rule duration exceeds maximum of 604800 seconds (7 days)';
+      }
+    }
+
+    // Validate expression threshold if present
+    if (rule.expression) {
+      const match = rule.expression.match(/(>|<|>=|<=|==)\s*([\d.]+)/);
+      if (match) {
+        const threshold = parseFloat(match[2] ?? '');
+        if (!isFinite(threshold) || threshold < 0) {
+          return 'G-219: Alert expression threshold must be a finite non-negative number';
+        }
+        if (threshold > 1_000_000_000) {
+          return 'G-219: Alert expression threshold exceeds maximum allowed value (1,000,000,000)';
+        }
+      }
+    }
+
+    // Name must not be empty
+    if (rule.name !== undefined && (!rule.name || rule.name.trim().length === 0)) {
+      return 'G-219: Alert rule name must not be empty';
+    }
+
+    return null;
+  }
+
   private async loadRules(): Promise<void> {
     try {
       const result = await this.db.query('SELECT * FROM obs_alert_rules WHERE enabled = true');
@@ -611,7 +684,7 @@ export class AlertingService {
         this.rules.set(rule.id, rule);
       }
     } catch (error) {
-      console.warn('[Alerting] Could not load rules:', error);
+      logger.warn('[Alerting] Could not load rules:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -630,7 +703,7 @@ export class AlertingService {
         this.channels.set(channel.id, channel);
       }
     } catch (error) {
-      console.warn('[Alerting] Could not load channels:', error);
+      logger.warn('[Alerting] Could not load channels:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -651,7 +724,7 @@ export class AlertingService {
         this.silences.set(silence.id, silence);
       }
     } catch (error) {
-      console.warn('[Alerting] Could not load silences:', error);
+      logger.warn('[Alerting] Could not load silences:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -665,7 +738,7 @@ export class AlertingService {
         this.activeAlerts.set(alert.id, alert);
       }
     } catch (error) {
-      console.warn('[Alerting] Could not load active alerts:', error);
+      logger.warn('[Alerting] Could not load active alerts:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -702,7 +775,7 @@ export class AlertingService {
           }
         }
       } catch (error) {
-        console.error(`[Alerting] Failed to evaluate rule ${rule.name}:`, error);
+        logger.error(`[Alerting] Failed to evaluate rule ${rule.name}:`, { error: error instanceof Error ? error.message : String(error) });
       }
     }
   }
@@ -780,7 +853,7 @@ export class AlertingService {
         alert.notificationsSent++;
         alert.lastNotificationAt = new Date();
       } catch (error) {
-        console.error(`[Alerting] Failed to send to channel ${channel.name}:`, error);
+        logger.error(`[Alerting] Failed to send to channel ${channel.name}:`, { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -823,7 +896,7 @@ export class AlertingService {
 
   private async sendEmailNotification(_channelConfig: Record<string, unknown>, alert: Alert, type: string): Promise<void> {
     // In production, would send via email service
-    console.log(`[Alerting] Email notification: ${alert.summary} (${type})`);
+    logger.info(`[Alerting] Email notification: ${alert.summary} (${type})`);
   }
 
   private async sendWebhookNotification(config: Record<string, unknown>, alert: Alert): Promise<void> {
@@ -1016,6 +1089,6 @@ export class AlertingService {
     if (this.evaluationInterval) {
       clearInterval(this.evaluationInterval);
     }
-    console.log('[Alerting] Service shut down');
+    logger.info('[Alerting] Service shut down');
   }
 }

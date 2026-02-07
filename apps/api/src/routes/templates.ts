@@ -1,5 +1,8 @@
 /**
  * Templates Routes - Email template management
+ *
+ * F-213: Response envelope standard — see messages.ts header for full spec.
+ * Single: { template: T }   List: { templates: T[], pagination: {...} }
  */
 
 import { Hono } from 'hono';
@@ -30,6 +33,12 @@ const updateTemplateSchema = createTemplateSchema.partial().extend({
 const renderTemplateSchema = z.object({
   data: z.record(z.unknown()),
 });
+
+/**
+ * F-227: UUID format regex for route parameter validation.
+ * Prevents malformed IDs from reaching DB queries.
+ */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
@@ -110,6 +119,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id', requireScopes('templates:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
 
     // SECURITY: Filter by tenant_id in query to prevent fetch-before-check vulnerability
     const result = await templatesRepo.findById(templateId, tenantId);
@@ -240,6 +254,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const templateId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
+
     // Verify ownership
     const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
@@ -312,13 +331,19 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const templateId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
+
     // Verify ownership
     const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
 
-    const result = await templatesRepo.publish(templateId);
+    // A-007: Pass tenantId for database-level tenant isolation
+    const result = await templatesRepo.publish(templateId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to publish template');
@@ -352,6 +377,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
+
     // Verify ownership
     const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
@@ -364,8 +394,10 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to fetch versions');
     }
 
+    const { versions, total } = result.value;
+
     return c.json({
-      versions: result.value.map((v) => ({
+      versions: versions.map((v: any) => ({
         version: v.version,
         subject: v.subject,
         variables: v.variables,
@@ -373,6 +405,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
         createdAt: v.createdAt,
         createdBy: v.createdBy,
       })),
+      total,
     });
   });
 
@@ -381,6 +414,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
     const version = parseInt(c.req.param('version'), 10);
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
 
     if (isNaN(version) || version < 1) {
       throw ApiError.badRequest('Invalid version number');
@@ -426,6 +464,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const version = parseInt(c.req.param('version'), 10);
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
+
     if (isNaN(version) || version < 1) {
       throw ApiError.badRequest('Invalid version number');
     }
@@ -470,6 +513,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const templateId = c.req.param('id');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
+
     // Verify ownership
     const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
@@ -485,6 +533,15 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
 
     try {
       const rendered = await renderTemplate(template, mergedData);
+
+      // F-216: Set strict CSP and X-Content-Type-Options headers on preview
+      // responses. Even though this returns JSON (not raw HTML), consumers
+      // may inject rendered.html into an iframe or document. The CSP ensures
+      // that if the HTML is rendered, inline scripts and external resources
+      // are blocked, mitigating stored XSS via template content.
+      c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:; frame-ancestors 'none'");
+      c.header('X-Content-Type-Options', 'nosniff');
+
       return c.json({
         rendered: {
           subject: rendered.subject,
@@ -506,6 +563,11 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const userId = c.get('userId');
     const templateId = c.req.param('id');
     const logger = c.get('logger');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
 
     // Verify ownership
     const existing = await templatesRepo.findById(templateId, tenantId);
@@ -553,13 +615,19 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const templateId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(templateId)) {
+      throw ApiError.badRequest('Invalid template ID format', 'INVALID_ID');
+    }
+
     // Verify ownership
     const existing = await templatesRepo.findById(templateId, tenantId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
 
-    const result = await templatesRepo.delete(templateId);
+    // A-008: Pass tenantId for database-level tenant isolation
+    const result = await templatesRepo.delete(templateId, tenantId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to delete template');
@@ -596,15 +664,72 @@ interface RenderedTemplate {
   text: string | null;
 }
 
+// C-089: Compile variable replacement regex once at module level
+const TEMPLATE_VARIABLE_RE = /\{\{([^}]+)\}\}/g;
+
+/**
+ * F-224: Extract all variable names referenced in template content.
+ * Scans subject, HTML and text bodies for {{variableName}} patterns.
+ */
+function extractTemplateVariables(template: TemplateData): string[] {
+  const variables = new Set<string>();
+  const scan = (content: string | null) => {
+    if (!content) return;
+    let match: RegExpExecArray | null;
+    // Use a fresh regex instance for each scan (stateful with /g)
+    const re = /\{\{([^}]+)\}\}/g;
+    while ((match = re.exec(content)) !== null) {
+      if (match[1]) variables.add(match[1].trim());
+    }
+  };
+  scan(template.subject);
+  scan(template.htmlContent);
+  scan(template.textContent);
+  return Array.from(variables);
+}
+
+/**
+ * F-224: Validate that all template variables are present in the provided data.
+ * Returns a list of missing variable names.
+ */
+function validateTemplateVariables(
+  template: TemplateData,
+  data: Record<string, unknown>,
+): { missing: string[]; warnings: string[] } {
+  const variables = extractTemplateVariables(template);
+  const missing: string[] = [];
+  const warnings: string[] = [];
+
+  for (const varName of variables) {
+    const value = getNestedValue(data, varName);
+    if (value === undefined) {
+      missing.push(varName);
+    } else if (value === null || value === '') {
+      warnings.push(`Variable "${varName}" is ${value === null ? 'null' : 'empty'}`);
+    }
+  }
+
+  return { missing, warnings };
+}
+
 async function renderTemplate(
   template: TemplateData,
   data: Record<string, unknown>
 ): Promise<RenderedTemplate> {
+  // F-224: Validate all template variables are present before rendering
+  const validation = validateTemplateVariables(template, data);
+  if (validation.missing.length > 0) {
+    throw new Error(
+      `Missing required template variables: ${validation.missing.join(', ')}. ` +
+      `Provide these in the data object or set defaults via defaultData.`
+    );
+  }
+
   // Simple variable replacement for now
   // In production, you'd use the actual template engine
   
   const replaceVariables = (content: string): string => {
-    return content.replace(/\{\{([^}]+)\}\}/g, (match, key) => {
+    return content.replace(TEMPLATE_VARIABLE_RE, (match, key) => {
       const trimmedKey = key.trim();
       const value = getNestedValue(data, trimmedKey);
       return value !== undefined ? String(value) : match;

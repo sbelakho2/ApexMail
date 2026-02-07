@@ -144,174 +144,153 @@ export class MessagesRepository {
       checksum: '', // Will be computed during upload
     }));
 
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
-      `INSERT INTO messages (
-        id, tenant_id, user_id, idempotency_key, message_id, status,
-        from_email, from_name, reply_to, recipients, subject,
-        html_body, text_body, headers, attachments, template_id,
-        template_data, campaign_id, tags, priority, scheduled_at,
-        sending_domain, max_attempts, next_attempt_at, metadata,
-        created_at, updated_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
-      )
-      ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
-      DO UPDATE SET updated_at = NOW()
-      RETURNING *`,
-      [
-        id,
-        input.tenantId,
-        input.userId ?? null,
-        input.idempotencyKey ?? null,
-        messageIdResult,
-        input.scheduledAt ? 'pending' : 'queued',
-        input.fromEmail,
-        input.fromName ?? null,
-        input.replyTo ?? null,
-        JSON.stringify(input.recipients),
-        input.subject,
-        input.htmlBody ?? null,
-        input.textBody ?? null,
-        JSON.stringify(headers),
-        JSON.stringify(attachments),
-        input.templateId ?? null,
-        input.templateData ? JSON.stringify(input.templateData) : null,
-        input.campaignId ?? null,
-        input.tags ?? [],
-        input.priority ?? 'normal',
-        input.scheduledAt ?? null,
-        sendingDomain,
-        5,
-        input.scheduledAt ?? now,
-        JSON.stringify(input.metadata ?? {}),
-        now,
-        now,
-      ]
-    );
+    /**
+     * G-200 / B-046: Wrap message INSERT + email_queue INSERT in a transaction.
+     * Previously the two inserts were independent; a crash after the message
+     * INSERT but before the queue INSERT would leave an orphaned message that
+     * never gets delivered.
+     */
+    const client = await this.db.getClient();
+    try {
+      await client.query('BEGIN');
 
-    if (!result.ok) return result;
+      const result = await client.query(
+        `INSERT INTO messages (
+          id, tenant_id, user_id, idempotency_key, message_id, status,
+          from_email, from_name, reply_to, recipients, subject,
+          html_body, text_body, headers, attachments, template_id,
+          template_data, campaign_id, tags, priority, scheduled_at,
+          sending_domain, max_attempts, next_attempt_at, metadata,
+          created_at, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+          $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
+        )
+        ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+        DO UPDATE SET updated_at = NOW()
+        RETURNING *`,
+        [
+          id,
+          input.tenantId,
+          input.userId ?? null,
+          input.idempotencyKey ?? null,
+          messageIdResult,
+          input.scheduledAt ? 'pending' : 'queued',
+          input.fromEmail,
+          input.fromName ?? null,
+          input.replyTo ?? null,
+          JSON.stringify(input.recipients),
+          input.subject,
+          input.htmlBody ?? null,
+          input.textBody ?? null,
+          JSON.stringify(headers),
+          JSON.stringify(attachments),
+          input.templateId ?? null,
+          input.templateData ? JSON.stringify(input.templateData) : null,
+          input.campaignId ?? null,
+          input.tags ?? [],
+          input.priority ?? 'normal',
+          input.scheduledAt ?? null,
+          sendingDomain,
+          5,
+          input.scheduledAt ?? now,
+          JSON.stringify(input.metadata ?? {}),
+          now,
+          now,
+        ]
+      );
 
-    const row = result.value.rows[0];
-    if (!row) {
-      return Result.err(new Error('Failed to create message'));
-    }
+      const row = result.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return Result.err(new Error('Failed to create message'));
+      }
 
-    const message = this.mapRow(row);
+      const message = this.mapRow(row);
 
-    // Insert into email_queue for each recipient (denormalized for worker performance)
-    // Only queue if not scheduled in the future
-    const shouldQueue = !input.scheduledAt || input.scheduledAt <= now;
-    
-    if (shouldQueue && input.domainId) {
-      const priorityValue = input.priority === 'high' ? 10 : input.priority === 'low' ? 1 : 5;
-      
-      /**
-       * FIX-054: Multi-row INSERT for email_queue instead of per-recipient loop.
-       *
-       * Previous implementation ran a separate INSERT per 'to' recipient inside
-       * a for loop with await. For a message with 50 'to' recipients, that was
-       * 50 sequential DB round-trips. For a /batch of 1,000 such messages,
-       * it was 50,000 round-trips (~250s in production).
-       *
-       * This builds a single multi-row INSERT VALUES (...), (...), (...) and
-       * executes it in one round-trip, matching the pattern already used in
-       * EventsRepository.writeEvents and AnalyticsRepository.aggregateBatch.
-       */
-      const fromFormatted = input.fromName ? `${input.fromName} <${input.fromEmail}>` : input.fromEmail;
-      const headersJson = JSON.stringify(headers);
-      const attachmentsJson = JSON.stringify(attachments);
-      const tagsJson = JSON.stringify(input.tags ?? []);
-      const metadataJson = JSON.stringify(input.metadata ?? {});
+      // Insert into email_queue for each recipient (denormalized for worker performance)
+      // Only queue if not scheduled in the future
+      const shouldQueue = !input.scheduledAt || input.scheduledAt <= now;
 
-      const toRecipients = input.recipients.filter(r => r.type === 'to');
-      
-      if (toRecipients.length > 0) {
-        const queueValues: unknown[] = [];
-        const queuePlaceholders: string[] = [];
-        let paramIdx = 1;
+      if (shouldQueue && input.domainId) {
+        const priorityValue = input.priority === 'high' ? 10 : input.priority === 'low' ? 1 : 5;
 
-        for (const recipient of toRecipients) {
-          const queueId = generateUuid();
-          const toFormatted = recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
+        /**
+         * FIX-054: Multi-row INSERT for email_queue instead of per-recipient loop.
+         *
+         * Previous implementation ran a separate INSERT per 'to' recipient inside
+         * a for loop with await. For a message with 50 'to' recipients, that was
+         * 50 sequential DB round-trips. For a /batch of 1,000 such messages,
+         * it was 50,000 round-trips (~250s in production).
+         *
+         * This builds a single multi-row INSERT VALUES (...), (...), (...) and
+         * executes it in one round-trip, matching the pattern already used in
+         * EventsRepository.writeEvents and AnalyticsRepository.aggregateBatch.
+         */
+        const fromFormatted = input.fromName ? `${input.fromName} <${input.fromEmail}>` : input.fromEmail;
+        const headersJson = JSON.stringify(headers);
+        const attachmentsJson = JSON.stringify(attachments);
+        const tagsJson = JSON.stringify(input.tags ?? []);
+        const metadataJson = JSON.stringify(input.metadata ?? {});
 
-          queuePlaceholders.push(
-            `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`
-          );
-          queueValues.push(
-            queueId,
-            message.id,
-            input.tenantId,
-            input.domainId,
-            fromFormatted,
-            toFormatted,
-            input.subject,
-            input.htmlBody ?? null,
-            input.textBody ?? null,
-            headersJson,
-            attachmentsJson,
-            input.campaignId ?? null,
-            tagsJson,
-            metadataJson,
-            input.scheduledAt ?? null,
-            priorityValue,
-            'pending',
-            0,
-            5,
-            now,
-            now,
+        const toRecipients = input.recipients.filter(r => r.type === 'to');
+
+        if (toRecipients.length > 0) {
+          const queueValues: unknown[] = [];
+          const queuePlaceholders: string[] = [];
+          let paramIdx = 1;
+
+          for (const recipient of toRecipients) {
+            const queueId = generateUuid();
+            const toFormatted = recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
+
+            queuePlaceholders.push(
+              `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`
+            );
+            queueValues.push(
+              queueId,
+              message.id,
+              input.tenantId,
+              input.domainId,
+              fromFormatted,
+              toFormatted,
+              input.subject,
+              input.htmlBody ?? null,
+              input.textBody ?? null,
+              headersJson,
+              attachmentsJson,
+              input.campaignId ?? null,
+              tagsJson,
+              metadataJson,
+              input.scheduledAt ?? null,
+              priorityValue,
+              'pending',
+              0,
+              5,
+              now,
+              now,
+            );
+          }
+
+          await client.query(
+            `INSERT INTO email_queue (
+              id, message_id, tenant_id, domain_id, "from", "to", subject,
+              html, text, headers, attachments, campaign_id, tags, metadata,
+              scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
+            ) VALUES ${queuePlaceholders.join(', ')}`,
+            queueValues
           );
         }
-
-        await this.db.query(
-          `INSERT INTO email_queue (
-            id, message_id, tenant_id, domain_id, "from", "to", subject,
-            html, text, headers, attachments, campaign_id, tags, metadata,
-            scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
-          ) VALUES ${queuePlaceholders.join(', ')}`,
-          queueValues
-        );
       }
-    }
 
-    return Result.ok(message);
+      await client.query('COMMIT');
+      return Result.ok(message);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      client.release();
+    }
   }
 
   async findById(id: string, tenantId?: string): Promise<Result<Message | null, Error>> {
@@ -416,7 +395,12 @@ export class MessagesRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async findByMtaMessageId(mtaId: string): Promise<Result<Message | null, Error>> {
+  // A-005: Add optional tenantId for database-level tenant isolation
+  async findByMtaMessageId(mtaId: string, tenantId?: string): Promise<Result<Message | null, Error>> {
+    const sql = tenantId
+      ? 'SELECT * FROM messages WHERE mta_message_id = $1 AND tenant_id = $2'
+      : 'SELECT * FROM messages WHERE mta_message_id = $1';
+    const params = tenantId ? [mtaId, tenantId] : [mtaId];
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -454,10 +438,7 @@ export class MessagesRepository {
       metadata: string;
       created_at: Date;
       updated_at: Date;
-    }>(
-      'SELECT * FROM messages WHERE mta_message_id = $1',
-      [mtaId]
-    );
+    }>(sql, params);
 
     if (!result.ok) return result;
 
@@ -465,7 +446,39 @@ export class MessagesRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async update(id: string, input: UpdateMessageInput): Promise<Result<Message, Error>> {
+  /**
+   * C-105: Valid message status transitions (state machine).
+   * Prevents illegal transitions like 'sent' → 'queued' or 'delivered' → 'sending'.
+   * Map key = current status, value = set of allowed next statuses.
+   */
+  private static readonly VALID_TRANSITIONS: Record<Message['status'], Set<Message['status']>> = {
+    pending:   new Set(['queued', 'failed']),
+    queued:    new Set(['sending', 'failed']),
+    sending:   new Set(['sent', 'bounced', 'deferred', 'failed']),
+    sent:      new Set(['delivered', 'bounced']),
+    delivered: new Set(['bounced', 'complained'] as Message['status'][]),
+    bounced:   new Set(),       // terminal
+    deferred:  new Set(['sending', 'failed']),
+    failed:    new Set(),       // terminal
+  };
+
+  // A-024: Add optional tenantId for database-level tenant isolation
+  async update(id: string, input: UpdateMessageInput, tenantId?: string): Promise<Result<Message, Error>> {
+    // C-105: Validate status transition if a new status is being set.
+    // Look up current status and check against the state machine.
+    if (input.status !== undefined) {
+      const currentResult = await this.findById(id, tenantId);
+      if (currentResult.ok && currentResult.value) {
+        const currentStatus = currentResult.value.status;
+        const allowed = MessagesRepository.VALID_TRANSITIONS[currentStatus];
+        if (allowed && !allowed.has(input.status)) {
+          return Result.err(
+            new Error(`C-105: Invalid status transition '${currentStatus}' → '${input.status}'`)
+          );
+        }
+      }
+    }
+
     const updates: string[] = [];
     const values: unknown[] = [];
     let paramIndex = 1;
@@ -524,6 +537,14 @@ export class MessagesRepository {
 
     values.push(id);
 
+    // A-024: Build WHERE clause with optional tenantId
+    let whereClause = `WHERE id = $${paramIndex}`;
+    if (tenantId) {
+      paramIndex++;
+      whereClause += ` AND tenant_id = $${paramIndex}`;
+      values.push(tenantId);
+    }
+
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -562,7 +583,7 @@ export class MessagesRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE messages SET ${updates.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      `UPDATE messages SET ${updates.join(', ')} ${whereClause} RETURNING *`,
       values
     );
 
@@ -611,18 +632,66 @@ export class MessagesRepository {
     });
   }
 
+  /**
+   * F-180 / B-038: Atomic markDeferred using SQL increment instead of read-then-update.
+   * Avoids TOCTOU race on attempt count.
+   */
   async markDeferred(id: string, reason: string, nextAttempt: Date): Promise<Result<Message, Error>> {
-    const msg = await this.findById(id);
-    if (!msg.ok) return msg;
-    if (!msg.value) return Result.err(new Error('Message not found'));
+    const now = new Date();
+    const result = await this.db.query<{
+      id: string;
+      tenant_id: string;
+      user_id: string | null;
+      idempotency_key: string | null;
+      message_id: string;
+      status: Message['status'];
+      from_email: string;
+      from_name: string | null;
+      reply_to: string | null;
+      recipients: string;
+      subject: string;
+      html_body: string | null;
+      text_body: string | null;
+      headers: string;
+      attachments: string;
+      template_id: string | null;
+      template_data: string | null;
+      campaign_id: string | null;
+      tags: string[];
+      priority: Message['priority'];
+      scheduled_at: Date | null;
+      sent_at: Date | null;
+      delivered_at: Date | null;
+      bounced_at: Date | null;
+      bounce_type: Message['bounceType'];
+      bounce_reason: string | null;
+      mta_message_id: string | null;
+      ip_address: string | null;
+      sending_domain: string;
+      attempts: number;
+      max_attempts: number;
+      last_attempt_at: Date | null;
+      next_attempt_at: Date | null;
+      metadata: string;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `UPDATE messages 
+       SET status = 'deferred', 
+           attempts = attempts + 1, 
+           last_attempt_at = $2, 
+           next_attempt_at = $3, 
+           metadata = metadata || $4::jsonb,
+           updated_at = $2
+       WHERE id = $1 
+       RETURNING *`,
+      [id, now, nextAttempt, JSON.stringify({ lastDeferReason: reason })]
+    );
 
-    return this.update(id, {
-      status: 'deferred',
-      attempts: msg.value.attempts + 1,
-      lastAttemptAt: new Date(),
-      nextAttemptAt: nextAttempt,
-      metadata: { lastDeferReason: reason },
-    });
+    if (!result.ok) return result;
+    const row = result.value.rows[0];
+    if (!row) return Result.err(new Error('Message not found'));
+    return Result.ok(this.mapRow(row));
   }
 
   async markFailed(id: string, reason: string): Promise<Result<Message, Error>> {
@@ -633,6 +702,25 @@ export class MessagesRepository {
     });
   }
 
+  /**
+   * C-121: Required composite index for email queue claim performance:
+   *   CREATE INDEX idx_messages_queue_claim
+   *     ON messages (status, priority, created_at)
+   *     WHERE status IN ('queued', 'deferred')
+   *       AND attempts < max_attempts;
+   *
+   * The partial index limits its size to only claimable rows (typically <1%
+   * of the table). Without this index, every worker poll triggers a
+   * sequential scan of the entire messages table — O(n) per claim.
+   *
+   * Additional index for the scheduled_at / next_attempt_at filters:
+   *   CREATE INDEX idx_messages_next_attempt
+   *     ON messages (next_attempt_at)
+   *     WHERE status IN ('queued', 'deferred');
+   *
+   * The FOR UPDATE SKIP LOCKED clause requires the rows to be found
+   * efficiently first; the index drives the inner SELECT.
+   */
   async claimForSending(limit: number, ipAddress: string): Promise<Result<Message[], Error>> {
     const now = new Date();
     
@@ -726,6 +814,26 @@ export class MessagesRepository {
     return Result.ok(counts as Record<Message['status'], number>);
   }
 
+  /**
+   * F-218: This method currently uses OFFSET-based pagination which degrades
+   * on large tables (Postgres must scan and discard `offset` rows).
+   *
+   * For tenants with >100K messages, consider adding cursor-based (keyset)
+   * pagination using `WHERE created_at < $cursor ORDER BY created_at DESC`.
+   * The cursor should be the `created_at` (or `id`) of the last item in the
+   * previous page. This gives O(1) seek performance regardless of page depth.
+   *
+   * Example API: `GET /v1/messages?cursor=<last_created_at>&limit=50`
+   * The response should include a `nextCursor` field when more pages exist.
+   *
+   * C-116: Text search query optimization.
+   * The optional `search` parameter uses PostgreSQL full-text search via
+   * `to_tsvector / to_tsquery` instead of `LIKE '%term%'`.
+   * IMPORTANT: Requires a GIN index on the messages table for performance:
+   *   CREATE INDEX idx_messages_search ON messages
+   *     USING GIN (to_tsvector('english', subject || ' ' || from_email));
+   * Without this index, full-text queries will fall back to a sequential scan.
+   */
   async listByTenant(
     tenantId: string,
     options: {
@@ -733,6 +841,7 @@ export class MessagesRepository {
       campaignId?: string;
       startDate?: Date;
       endDate?: Date;
+      search?: string;
       limit?: number;
       offset?: number;
     } = {}
@@ -756,6 +865,14 @@ export class MessagesRepository {
     if (options.endDate) {
       conditions.push(`created_at <= $${paramIndex++}`);
       values.push(options.endDate);
+    }
+    // C-116: Use to_tsvector/plainto_tsquery for efficient full-text search
+    // instead of LIKE '%term%' which cannot use indexes.
+    if (options.search) {
+      conditions.push(
+        `to_tsvector('english', coalesce(subject, '') || ' ' || coalesce(from_email, '')) @@ plainto_tsquery('english', $${paramIndex++})`
+      );
+      values.push(options.search);
     }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
@@ -1098,6 +1215,70 @@ export class MessagesRepository {
     }
 
     return Result.ok(stats);
+  }
+
+  /**
+   * C-130: Purge old email_queue entries that have been processed.
+   *
+   * Completed/failed queue entries are retained for debugging but grow
+   * unboundedly.  This method deletes entries in terminal states
+   * (delivered, bounced, failed) older than `olderThanDays`, in batches
+   * to avoid long lock contention — same pattern as audit-log cleanup
+   * (C-081).
+   */
+  async purgeOldQueueEntries(
+    olderThanDays: number,
+    options: { batchSize?: number; tenantId?: string } = {}
+  ): Promise<Result<number, Error>> {
+    const batchSize = options.batchSize ?? 1000;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+
+    let totalDeleted = 0;
+
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const conditions = [
+          "status IN ('delivered', 'bounced', 'failed')",
+          'updated_at < $1',
+        ];
+        const values: unknown[] = [cutoffDate];
+        let paramIndex = 2;
+
+        if (options.tenantId) {
+          conditions.push(`tenant_id = $${paramIndex++}`);
+          values.push(options.tenantId);
+        }
+
+        values.push(batchSize);
+
+        const result = await this.db.query<{ count: string }>(
+          `WITH deleted AS (
+            DELETE FROM email_queue
+            WHERE id IN (
+              SELECT id FROM email_queue
+              WHERE ${conditions.join(' AND ')}
+              LIMIT $${paramIndex}
+            )
+            RETURNING 1
+          ) SELECT COUNT(*) as count FROM deleted`,
+          values
+        );
+
+        if (!result.ok) return result;
+
+        const deletedCount = parseInt(result.value.rows[0]?.count ?? '0', 10);
+        totalDeleted += deletedCount;
+
+        // If we deleted fewer rows than the batch size, we're done
+        if (deletedCount < batchSize) break;
+      }
+
+      return Result.ok(totalDeleted);
+    } catch (error) {
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   /**

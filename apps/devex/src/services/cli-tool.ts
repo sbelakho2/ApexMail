@@ -415,7 +415,7 @@ program.configureOutput({
 });
 
 program.parseAsync(process.argv).catch((error) => {
-  console.error(chalk.red('Error:'), error.message);
+  console.error(chalk.red('Error:'), error);
   process.exit(1);
 });
 `;

@@ -8,7 +8,10 @@ import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { randomToken } from '@apexmail/lib/crypto';
+import { createLogger } from '@apexmail/lib';
 // import { config } from '../config.js';
+
+const logger = createLogger({ name: 'enterprise:private-deploy' });
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -902,12 +905,12 @@ export class PrivateDeploymentService {
 
   private async provisionDedicatedInfrastructure(deployment: PrivateDeployment): Promise<void> {
     // In production, this would use Terraform/CloudFormation
-    console.log(`Provisioning dedicated infrastructure for ${deployment.id}`);
+    logger.info(`Provisioning dedicated infrastructure for ${deployment.id}`);
   }
 
   private async provisionPrivateCloud(deployment: PrivateDeployment): Promise<void> {
     // In production, this would set up isolated VPC, private endpoints, etc.
-    console.log(`Provisioning private cloud for ${deployment.id}`);
+    logger.info(`Provisioning private cloud for ${deployment.id}`);
   }
 
   private async provisionIPPool(deployment: PrivateDeployment): Promise<void> {

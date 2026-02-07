@@ -103,8 +103,21 @@ return events
       this.flushTimer = null;
     }
     
-    // Final flush
-    await this.flush();
+    // C-093: Drain ALL remaining events from Redis WAL, not just one batch.
+    // flush() only drains up to maxBufferSize events per call, so we loop
+    // until the WAL is empty to avoid leaving events behind on shutdown.
+    let remaining = await this.redis.llen(EventProcessor.REDIS_WAL_KEY);
+    while (remaining > 0) {
+      this.logger.info('Draining Redis WAL on shutdown', { remaining });
+      await this.flush();
+      const newRemaining = await this.redis.llen(EventProcessor.REDIS_WAL_KEY);
+      if (newRemaining >= remaining) {
+        // No progress — avoid infinite loop (e.g. persistent parse errors)
+        this.logger.warn('WAL drain stalled, exiting flush loop', { remaining: newRemaining });
+        break;
+      }
+      remaining = newRemaining;
+    }
     
     this.logger.info('Event processor stopped');
   }
@@ -120,7 +133,11 @@ return events
     const dedupeKey = this.generateDedupeKey('open', data.messageId, data.recipient);
     
     // Atomic check-and-set: returns null if key already exists (duplicate)
-    const isNew = await this.redis.set(`dedupe:${dedupeKey}`, '1', 'EX', 86400 * 30, 'NX');
+    // C-109: TTL reduced from 30 days to 24 hours. A 30-day window wastes
+    // Redis memory (~100 bytes × millions of messages) and provides minimal
+    // dedup benefit — email clients that re-fetch tracking pixels do so
+    // within a single session, not weeks later.
+    const isNew = await this.redis.set(`dedupe:${dedupeKey}`, '1', 'EX', 86400, 'NX');
     if (isNew === null) {
       this.logger.debug('Duplicate open event, skipping', { messageId: data.messageId });
       return;
@@ -137,10 +154,28 @@ return events
       timestamp: new Date(),
     };
     
-    await this.enqueueEvent(event);
-    
-    // Update Redis real-time counter
-    await this.incrementCounter(data.tenantId, 'opens');
+    // C-090: Pipeline enqueue + counter increment — they are independent and
+    // can be batched into a single Redis round-trip.
+    // E-174: Wrap in versioned envelope with checksum for integrity checking.
+    const date = new Date().toISOString().split('T')[0];
+    const hour = new Date().getUTCHours();
+    const hourlyKey = `stats:${data.tenantId}:${date}:${hour}:opens`;
+    const dailyKey = `stats:${data.tenantId}:${date}:opens`;
+
+    const payload = JSON.stringify(event);
+    const envelope = JSON.stringify({
+      v: EventProcessor.WAL_VERSION,
+      cs: sha256(payload).slice(0, 8),
+      d: event,
+    });
+
+    const pipeline = this.redis.pipeline();
+    pipeline.rpush(EventProcessor.REDIS_WAL_KEY, envelope);
+    pipeline.incr(hourlyKey);
+    pipeline.expire(hourlyKey, 86400 * 7);
+    pipeline.incr(dailyKey);
+    pipeline.expire(dailyKey, 86400 * 90);
+    await pipeline.exec();
   }
 
   async recordClick(data: {
@@ -226,14 +261,30 @@ return events
   }
 
   /**
+   * E-174: WAL envelope version for forward-compatible integrity checking.
+   * Every entry written to Redis is wrapped with a version tag so the
+   * flush loop can detect and skip entries from incompatible formats.
+   */
+  private static readonly WAL_VERSION = 1;
+
+  /**
    * Enqueue event into Redis WAL for durable buffering.
    * The event is persisted in Redis BEFORE the HTTP response is returned,
    * so it survives process crashes. The flush loop drains Redis → Postgres.
+   *
+   * E-174: Events are wrapped in a versioned envelope with a checksum
+   * so the flush loop can detect corrupted or incompatible entries.
    */
   private async enqueueEvent(event: TrackingEvent): Promise<void> {
+    const payload = JSON.stringify(event);
+    const envelope = JSON.stringify({
+      v: EventProcessor.WAL_VERSION,
+      cs: sha256(payload).slice(0, 8), // 8-char checksum prefix (collision-resistant enough for corruption detection)
+      d: event,
+    });
     await this.redis.rpush(
       EventProcessor.REDIS_WAL_KEY,
-      JSON.stringify(event)
+      envelope
     );
   }
 
@@ -276,13 +327,36 @@ return events
       }
 
       // Parse events from Redis
+      // E-174: Support both versioned envelopes (v1+) and legacy bare events
       const eventsToFlush: TrackingEvent[] = [];
       for (const raw of rawEvents) {
         try {
-          const parsed = JSON.parse(raw) as TrackingEvent;
+          const outer = JSON.parse(raw);
+
+          let event: TrackingEvent;
+          if (outer.v !== undefined && outer.d !== undefined) {
+            // Versioned envelope — verify checksum
+            if (outer.v !== EventProcessor.WAL_VERSION) {
+              this.logger.warn('Skipping WAL entry with unsupported version', { version: outer.v });
+              continue;
+            }
+            const expectedCs = sha256(JSON.stringify(outer.d)).slice(0, 8);
+            if (outer.cs !== expectedCs) {
+              this.logger.warn('WAL entry checksum mismatch — data may be corrupted, skipping', {
+                expected: expectedCs,
+                actual: outer.cs,
+              });
+              continue;
+            }
+            event = outer.d as TrackingEvent;
+          } else {
+            // Legacy bare event (written before E-174) — accept as-is
+            event = outer as TrackingEvent;
+          }
+
           // Restore Date object from JSON serialization
-          parsed.timestamp = new Date(parsed.timestamp);
-          eventsToFlush.push(parsed);
+          event.timestamp = new Date(event.timestamp);
+          eventsToFlush.push(event);
         } catch {
           this.logger.warn('Failed to parse event from Redis WAL, skipping', { raw: raw.slice(0, 100) });
         }

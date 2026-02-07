@@ -308,13 +308,21 @@ export class StripeService {
 
     let event: Stripe.Event;
     try {
+      /**
+       * G-226: Replay protection — constructEvent verifies both signature
+       * and timestamp. The tolerance parameter (in seconds) rejects events
+       * older than 5 minutes, preventing replay attacks where an attacker
+       * captures and re-sends a valid webhook payload after the fact.
+       */
+      const WEBHOOK_TOLERANCE_SECONDS = 300; // 5 minutes
       event = this.stripe.webhooks.constructEvent(
         payload,
         signature,
-        config.STRIPE_WEBHOOK_SECRET
+        config.STRIPE_WEBHOOK_SECRET,
+        WEBHOOK_TOLERANCE_SECONDS
       );
     } catch (error) {
-      logger.warn('Invalid webhook signature', { error });
+      logger.warn('Invalid webhook signature or replayed event', { error });
       return Result.err(new Error('Invalid webhook signature'));
     }
 
@@ -425,11 +433,52 @@ export class StripeService {
     );
   }
 
+  /**
+   * E-184: Valid subscription status transitions.
+   * Prevents invalid jumps (e.g. active → expired directly) by only
+   * allowing transitions that match Stripe's subscription lifecycle.
+   */
+  private static readonly VALID_STATUS_TRANSITIONS: Record<string, SubscriptionStatus[]> = {
+    incomplete:          ['active', 'incomplete_expired'],
+    incomplete_expired:  [],
+    trialing:            ['active', 'past_due', 'canceled', 'unpaid', 'paused'],
+    active:              ['past_due', 'canceled', 'unpaid', 'paused'],
+    past_due:            ['active', 'canceled', 'unpaid'],
+    unpaid:              ['active', 'canceled'],
+    canceled:            [],
+    paused:              ['active', 'canceled'],
+  };
+
   private async handleSubscriptionChange(subscription: Stripe.Subscription): Promise<void> {
     const tenantId = subscription.metadata?.tenant_id;
     if (!tenantId) {
       logger.warn('No tenant_id in subscription', { subscriptionId: subscription.id });
       return;
+    }
+
+    // E-184: Validate status transition before applying
+    const newStatus = subscription.status as SubscriptionStatus;
+    const currentResult = await this.db.query<{ status: string }>(
+      'SELECT status FROM subscriptions WHERE stripe_subscription_id = $1',
+      [subscription.id]
+    );
+
+    if (currentResult.ok && currentResult.value.rows.length > 0) {
+      const currentStatus = currentResult.value.rows[0]!.status as SubscriptionStatus;
+      if (currentStatus !== newStatus) {
+        const allowed = StripeService.VALID_STATUS_TRANSITIONS[currentStatus];
+        if (allowed && !allowed.includes(newStatus)) {
+          logger.error('E-184: Invalid subscription status transition', {
+            tenantId,
+            subscriptionId: subscription.id,
+            currentStatus,
+            newStatus,
+          });
+          throw new Error(
+            `Invalid subscription status transition: ${currentStatus} → ${newStatus}`
+          );
+        }
+      }
     }
 
     const priceId = subscription.items.data[0]?.price.id;
@@ -539,6 +588,43 @@ export class StripeService {
       const tenantId = invoice.subscription_details?.metadata?.tenant_id;
       if (!tenantId) return;
 
+      // E-163: Record failed payment in dunning system for retry scheduling.
+      // The dunning_records table tracks failure count, calculates next retry
+      // date based on an exponential schedule (1, 3, 7, 14 days), and
+      // escalates to soft/hard suspension after thresholds.
+      // DunningService.recordFailedPayment() handles this in a single atomic
+      // CTE (see dunning.ts). We record directly here so webhook processing
+      // has a single code path for payment failures.
+      const dunningResult = await this.db.query(
+        `INSERT INTO dunning_records (
+           id, tenant_id, status, failed_payment_count, first_failed_at,
+           last_failed_at, next_retry_at, created_at, updated_at
+         )
+         VALUES (
+           gen_random_uuid(), $1, 'warning', 1, NOW(),
+           NOW(), NOW() + INTERVAL '1 day', NOW(), NOW()
+         )
+         ON CONFLICT (tenant_id) DO UPDATE SET
+           failed_payment_count = dunning_records.failed_payment_count + 1,
+           last_failed_at = NOW(),
+           next_retry_at = CASE
+             WHEN dunning_records.failed_payment_count + 1 <= 1 THEN NOW() + INTERVAL '1 day'
+             WHEN dunning_records.failed_payment_count + 1 <= 2 THEN NOW() + INTERVAL '3 days'
+             WHEN dunning_records.failed_payment_count + 1 <= 3 THEN NOW() + INTERVAL '7 days'
+             ELSE NOW() + INTERVAL '14 days'
+           END,
+           status = CASE
+             WHEN EXTRACT(DAY FROM NOW() - dunning_records.first_failed_at) >= 21 THEN 'hard_suspended'
+             WHEN EXTRACT(DAY FROM NOW() - dunning_records.first_failed_at) >= 7 THEN 'soft_suspended'
+             ELSE 'warning'
+           END,
+           updated_at = NOW()
+         RETURNING status, failed_payment_count, next_retry_at`,
+        [tenantId]
+      );
+
+      const dunningState = dunningResult.ok ? dunningResult.value.rows[0] : null;
+
       // Queue dunning notification
       await this.db.query(
         `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
@@ -547,10 +633,19 @@ export class StripeService {
           invoiceId: invoice.id,
           amount: invoice.amount_due,
           attemptCount: invoice.attempt_count,
+          dunningStatus: dunningState?.status ?? 'unknown',
+          nextRetryAt: dunningState?.next_retry_at ?? null,
         })]
       );
 
-      logger.warn('Payment failed', { tenantId, invoiceId: invoice.id, attemptCount: invoice.attempt_count });
+      logger.warn('Payment failed — dunning updated', {
+        tenantId,
+        invoiceId: invoice.id,
+        attemptCount: invoice.attempt_count,
+        dunningStatus: dunningState?.status,
+        failedPaymentCount: dunningState?.failed_payment_count,
+        nextRetryAt: dunningState?.next_retry_at,
+      });
     } catch (error) {
       logger.error('Failed to handle payment failed event', { error, invoiceId: invoice.id });
       throw error; // Re-throw so webhook handler can retry

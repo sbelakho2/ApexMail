@@ -6,13 +6,16 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
+import { logger as honoLogger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
+import { createLogger } from '@apexmail/lib';
 import { createEnterpriseRoutes } from './routes/enterprise.js';
 import { config } from './config.js';
+
+const logger = createLogger({ name: 'enterprise:app' });
 
 // Service imports for background jobs
 import { LogStreamingService } from './services/log-streaming.js';
@@ -50,7 +53,7 @@ export function createApp(deps: AppDependencies) {
     credentials: true,
   }));
 
-  app.use('*', logger());
+  app.use('*', honoLogger());
   app.use('*', prettyJSON());
   app.use('*', secureHeaders());
 
@@ -143,7 +146,7 @@ export function createApp(deps: AppDependencies) {
 
   // Error handler
   app.onError((err, c) => {
-    console.error('Enterprise service error:', err);
+    logger.error('Enterprise service error:', { error: err instanceof Error ? err.message : String(err) });
     
     const requestId = c.get('requestId');
     
@@ -223,13 +226,13 @@ export class BackgroundJobScheduler {
       setInterval(() => this.processAutoApprovals(), 60 * 1000)
     );
 
-    console.log('Background job scheduler started');
+    logger.info('Background job scheduler started');
   }
 
   stop() {
     this.intervals.forEach(interval => clearInterval(interval));
     this.intervals = [];
-    console.log('Background job scheduler stopped');
+    logger.info('Background job scheduler stopped');
   }
 
   private async processLogStreams() {
@@ -242,7 +245,7 @@ export class BackgroundJobScheduler {
         await this.logStreamingService.processBatch(row.id);
       }
     } catch (error) {
-      console.error('Error processing log streams:', error);
+      logger.error('Error processing log streams:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -280,7 +283,7 @@ export class BackgroundJobScheduler {
         }
       }
     } catch (error) {
-      console.error('Error checking SLA breaches:', error);
+      logger.error('Error checking SLA breaches:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -338,7 +341,7 @@ export class BackgroundJobScheduler {
         await this.supportService.escalateTicket(ticket.id, 'Auto-escalation due to response delay');
       }
     } catch (error) {
-      console.error('Error auto-escalating tickets:', error);
+      logger.error('Error auto-escalating tickets:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -350,7 +353,7 @@ export class BackgroundJobScheduler {
         WHERE expires_at < NOW() - INTERVAL '1 day'
       `);
     } catch (error) {
-      console.error('Error cleaning up sessions:', error);
+      logger.error('Error cleaning up sessions:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -386,7 +389,7 @@ export class BackgroundJobScheduler {
         }
       }
     } catch (error) {
-      console.error('Error processing auto-approvals:', error);
+      logger.error('Error processing auto-approvals:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 

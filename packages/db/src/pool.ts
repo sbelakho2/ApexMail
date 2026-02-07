@@ -78,6 +78,18 @@ class DatabasePool {
   private readonly config: DatabaseConfig;
   private readonly logger: Logger;
   private isShuttingDown = false;
+  private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * G-210: Connection leak detection.
+   * Tracks when each client was checked out. A periodic scan warns about
+   * connections held longer than LEAK_THRESHOLD_MS, helping identify code
+   * that forgets to call client.release().
+   */
+  private readonly checkedOutClients = new Map<PoolClient, { acquiredAt: number; stack: string }>();
+  private leakDetectionTimer: ReturnType<typeof setInterval> | null = null;
+  private static readonly LEAK_THRESHOLD_MS = 30_000; // 30 seconds
+  private static readonly LEAK_CHECK_INTERVAL_MS = 15_000; // check every 15 seconds
 
   constructor(config: Partial<DatabaseConfig> = {}) {
     // Parse and validate port
@@ -173,6 +185,74 @@ class DatabasePool {
       });
       throw error;
     }
+
+    // C-075: Start periodic health check to verify pool connectivity
+    // and keep idle connections alive through PgBouncer / firewalls.
+    this.startHealthCheck();
+
+    // G-210: Start connection leak detection
+    this.startLeakDetection();
+  }
+
+  /**
+   * C-075: Periodic health check — runs SELECT 1 every 30 s to detect
+   * stale connections early and keep the pool warm.
+   */
+  private startHealthCheck(): void {
+    if (this.healthCheckTimer) return;
+
+    const HEALTH_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+
+    this.healthCheckTimer = setInterval(async () => {
+      if (!this.pool || this.isShuttingDown) return;
+
+      try {
+        const start = Date.now();
+        const client = await this.pool.connect();
+        await client.query('SELECT 1');
+        client.release();
+        const duration = Date.now() - start;
+
+        this.logger.debug('Pool health check passed', {
+          durationMs: duration,
+          ...this.getStats(),
+        });
+      } catch (error) {
+        this.logger.error('Pool health check failed', {
+          error: error instanceof Error ? error.message : String(error),
+          ...this.getStats(),
+        });
+      }
+    }, HEALTH_CHECK_INTERVAL_MS);
+
+    // Allow process to exit even if timer is still active
+    this.healthCheckTimer.unref();
+  }
+
+  /**
+   * G-210: Periodically scan for connections held longer than LEAK_THRESHOLD_MS.
+   */
+  private startLeakDetection(): void {
+    if (this.leakDetectionTimer) return;
+
+    this.leakDetectionTimer = setInterval(() => {
+      if (this.isShuttingDown) return;
+
+      const now = Date.now();
+      for (const [_client, info] of this.checkedOutClients) {
+        const heldMs = now - info.acquiredAt;
+        if (heldMs > DatabasePool.LEAK_THRESHOLD_MS) {
+          this.logger.warn('Possible connection leak detected', {
+            heldMs,
+            acquiredAt: new Date(info.acquiredAt).toISOString(),
+            stack: info.stack,
+            ...this.getStats(),
+          });
+        }
+      }
+    }, DatabasePool.LEAK_CHECK_INTERVAL_MS);
+
+    this.leakDetectionTimer.unref();
   }
 
   async disconnect(): Promise<void> {
@@ -181,6 +261,18 @@ class DatabasePool {
     }
 
     this.isShuttingDown = true;
+
+    // G-210: Stop leak detection before closing pool
+    if (this.leakDetectionTimer) {
+      clearInterval(this.leakDetectionTimer);
+      this.leakDetectionTimer = null;
+    }
+
+    // C-075: Stop health check before closing pool
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
     
     try {
       await this.pool.end();
@@ -218,7 +310,8 @@ class DatabasePool {
 
       const duration = Date.now() - start;
       
-      if (duration > 1000) {
+      // C-066: Lower slow query threshold from 1000ms to 500ms for earlier detection
+      if (duration > 500) {
         this.logger.warn('Slow query detected', {
           duration,
           query: text.slice(0, 100),
@@ -242,7 +335,20 @@ class DatabasePool {
     if (!this.pool) {
       throw new Error('Database pool not initialized');
     }
-    return this.pool.connect();
+    const client = await this.pool.connect();
+
+    // G-210: Track checkout for leak detection
+    const stack = new Error('Connection acquired here').stack ?? '';
+    this.checkedOutClients.set(client, { acquiredAt: Date.now(), stack });
+
+    // Monkey-patch release so we can clean up tracking
+    const originalRelease = client.release.bind(client);
+    client.release = (err?: boolean | Error) => {
+      this.checkedOutClients.delete(client);
+      return originalRelease(err);
+    };
+
+    return client;
   }
 
   getStats(): {

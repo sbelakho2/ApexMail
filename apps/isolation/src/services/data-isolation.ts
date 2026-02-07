@@ -10,8 +10,10 @@
 
 import { Pool, PoolClient } from 'pg';
 import type { Redis } from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { IsolationLevel } from '../config.js';
+
+const logger = createLogger({ name: 'isolation:data-isolation' });
 
 export interface IsolationContext {
   organizationId: string;
@@ -105,7 +107,7 @@ export class DataIsolationService {
     // Force release any leaked connections
     for (const [connId, tracked] of this.activeConnections) {
       if (!tracked.released) {
-        console.warn(`[DataIsolation] Force releasing leaked connection ${connId}`);
+        logger.warn(`[DataIsolation] Force releasing leaked connection ${connId}`);
         tracked.client.release();
         tracked.released = true;
       }
@@ -122,7 +124,7 @@ export class DataIsolationService {
       if (!tracked.released) {
         const heldMs = now - tracked.acquiredAt.getTime();
         if (heldMs > this.CONNECTION_LEAK_THRESHOLD_MS) {
-          console.error(`[DataIsolation] POTENTIAL CONNECTION LEAK detected!`, {
+          logger.error(`[DataIsolation] POTENTIAL CONNECTION LEAK detected!`, {
             connectionId: connId,
             heldForMs: heldMs,
             context: {
@@ -410,7 +412,7 @@ export class DataIsolationService {
         )
       `);
 
-      console.log(`[Isolation] Set up RLS for ${safeSchemaName}.${safeTableName}`);
+      logger.info(`[Isolation] Set up RLS for ${safeSchemaName}.${safeTableName}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -426,7 +428,7 @@ export class DataIsolationService {
     currentLevel: IsolationLevel,
     targetLevel: IsolationLevel
   ): Promise<Result<void>> {
-    console.log(`[Isolation] Migrating workspace ${workspaceId} from ${currentLevel} to ${targetLevel}`);
+    logger.info(`[Isolation] Migrating workspace ${workspaceId} from ${currentLevel} to ${targetLevel}`);
 
     try {
       await this.db.query('BEGIN');
@@ -439,7 +441,7 @@ export class DataIsolationService {
 
       await this.db.query('COMMIT');
 
-      console.log(`[Isolation] Migration complete for workspace ${workspaceId}`);
+      logger.info(`[Isolation] Migration complete for workspace ${workspaceId}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -516,7 +518,7 @@ export class DataIsolationService {
         this.policies.get(policy.resource)!.push(policy);
       }
     } catch (error) {
-      console.warn('[Isolation] Could not load policies:', error);
+      logger.warn('[Isolation] Could not load policies:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 

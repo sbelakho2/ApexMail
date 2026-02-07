@@ -1,5 +1,8 @@
 /**
  * Suppressions Routes - Manage email suppression lists
+ *
+ * F-213: Response envelope standard — see messages.ts header for full spec.
+ * Single: { suppression: T }   List: { suppressions: T[], pagination: {...} }
  */
 
 import { Hono } from 'hono';
@@ -12,7 +15,7 @@ import { sha256 } from '@apexmail/lib/crypto';
 
 const addSuppressionSchema = z.object({
   email: z.string().email().max(254), // RFC 5321 max email length
-  reason: z.enum(['bounce', 'complaint', 'unsubscribe', 'manual']),
+  reason: z.enum(['bounce', 'complaint', 'unsubscribe', 'manual', 'list-unsubscribe']),
   bounceType: z.enum(['hard', 'soft', 'undetermined']).optional(),
   bounceSubtype: z.string().max(50).optional(),
   source: z.string().max(100).optional(),
@@ -64,10 +67,13 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       });
     }
 
+    // F-210: Map API reason value to DB SuppressionType (list-unsubscribe → list_unsubscribe)
+    const suppressionType: SuppressionType = input.reason === 'list-unsubscribe' ? 'list_unsubscribe' : input.reason;
+
     const result = await suppressionsRepo.create({
       tenantId,
       email: input.email,
-      type: input.reason, // route's 'reason' maps to repo's 'type'
+      type: suppressionType, // route's 'reason' maps to repo's 'type'
       reason: input.notes, // route's notes maps to repo's reason
       bounceType: input.bounceType as 'hard' | 'soft' | undefined,
       bounceCode: input.bounceSubtype,
@@ -126,7 +132,8 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const items = suppressions.map((s) => ({
       tenantId,
       email: s.email,
-      type: s.reason as SuppressionType, // route's reason = repo's type
+      // F-210: Map API reason value to DB SuppressionType (list-unsubscribe → list_unsubscribe)
+      type: (s.reason === 'list-unsubscribe' ? 'list_unsubscribe' : s.reason) as SuppressionType, // route's reason = repo's type
       bounceType: s.bounceType as 'hard' | 'soft' | undefined,
       bounceCode: s.bounceSubtype,
       source: s.source ?? 'api',
@@ -355,7 +362,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.notFound('Suppression');
     }
 
-    const result = await suppressionsRepo.remove(suppressionId);
+    const result = await suppressionsRepo.remove(suppressionId, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to remove suppression');
@@ -400,7 +407,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     const firstSuppression = existing.value[0]!;
-    const result = await suppressionsRepo.remove(firstSuppression.id);
+    const result = await suppressionsRepo.remove(firstSuppression.id, tenantId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to remove suppression');
@@ -433,20 +440,28 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const { emails } = bulkRemoveSuppressionSchema.parse(body);
 
-    // Use removeByEmail for each email since bulkDelete doesn't exist
+    // C-070: Process in parallel chunks instead of sequential loop
+    // Previously each email was removed one at a time; for 10,000 emails that
+    // was 10,000 sequential DB round-trips.
+    const CHUNK_SIZE = 100;
     let deleted = 0;
     let notFound = 0;
 
-    for (const email of emails) {
-      const result = await suppressionsRepo.removeByEmail(email, tenantId);
-      if (result.ok) {
-        if (result.value > 0) {
-          deleted += result.value;
+    for (let i = 0; i < emails.length; i += CHUNK_SIZE) {
+      const chunk = emails.slice(i, i + CHUNK_SIZE);
+      const results = await Promise.allSettled(
+        chunk.map(email => suppressionsRepo.removeByEmail(email, tenantId))
+      );
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value.ok) {
+          if (result.value.value > 0) {
+            deleted += result.value.value;
+          } else {
+            notFound++;
+          }
         } else {
           notFound++;
         }
-      } else {
-        notFound++;
       }
     }
 
@@ -478,6 +493,9 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Export suppressions
+  // F-199: TODO — add dedicated export rate limiting (e.g., max 5 exports per hour per tenant)
+  // to prevent abuse. Bulk exports are expensive queries and should be throttled
+  // independently from the normal API rate limiter.
   router.get('/export', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const format = c.req.query('format') ?? 'json';
@@ -487,10 +505,15 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Format must be json or csv');
     }
 
-    // Use listByTenant with high limit for export
+    // F-199: Enforce pagination on exports to prevent unbounded queries.
+    // Clients should paginate through the list endpoint for large datasets.
+    const limit = Math.min(parseInt(c.req.query('limit') ?? '10000', 10), 10000);
+    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+
     const result = await suppressionsRepo.listByTenant(tenantId, {
       type,
-      limit: 100000,
+      limit,
+      offset,
     });
 
     if (!result.ok) {
@@ -515,7 +538,12 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         source: s.source,
         createdAt: s.createdAt,
       })),
-      total: suppressions.length,
+      total: result.value.total,
+      pagination: {
+        limit,
+        offset,
+        hasMore: offset + suppressions.length < result.value.total,
+      },
       exportedAt: new Date().toISOString(),
     });
   });
@@ -539,7 +567,20 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         })).min(1).max(100000),
       });
       const parsed = schema.parse(body);
-      emails = parsed.suppressions;
+
+      // F-229: Deduplicate within the batch — the downstream importBulk
+      // handles DB-level duplicates, but sending 100k rows with 50k
+      // duplicates wastes DB round-trips and bloats the audit log count.
+      const seen = new Set<string>();
+      const deduped: typeof parsed.suppressions = [];
+      for (const entry of parsed.suppressions) {
+        const normalised = entry.email.toLowerCase().trim();
+        if (!seen.has(normalised)) {
+          seen.add(normalised);
+          deduped.push(entry);
+        }
+      }
+      emails = deduped;
     } else if (contentType.includes('text/csv')) {
       const text = await c.req.text();
       const lines = text.split('\n').filter(line => line.trim());
@@ -547,12 +588,17 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       // Skip header if present
       const startIndex = lines[0]?.toLowerCase().includes('email') ? 1 : 0;
       
+      // F-229: Track seen emails for deduplication within the CSV batch
+      const seen = new Set<string>();
       for (let i = startIndex; i < lines.length; i++) {
         const line = lines[i];
         if (!line) continue;
         const parts = line.split(',').map(p => p.trim().replace(/^["']|["']$/g, ''));
         // Validate email with RFC 5321 max length
         if (parts[0] && parts[0].length <= 254 && z.string().email().safeParse(parts[0]).success) {
+          const normalised = parts[0].toLowerCase().trim();
+          if (seen.has(normalised)) continue; // skip duplicate
+          seen.add(normalised);
           const reason = (['bounce', 'complaint', 'unsubscribe', 'manual'].includes(parts[1] ?? ''))
             ? parts[1] as 'bounce' | 'complaint' | 'unsubscribe' | 'manual'
             : 'manual';

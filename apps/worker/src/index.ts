@@ -4,16 +4,42 @@
 
 import { createLogger } from '@apexmail/lib';
 import { getDatabase } from '@apexmail/db';
+import { totalmem } from 'os';
 import { loadConfig } from './config.js';
 import { EmailProcessor } from './processors/email.js';
 import { WebhookProcessor } from './processors/webhook.js';
 import { AnalyticsProcessor } from './processors/analytics.js';
-import { MetricsServer } from './metrics.js';
+import { MetricsServer, setMetricsInstance } from './metrics.js';
 import { QueueNotifier } from './queue-notifier.js';
 import { Redis } from 'ioredis';
 
 const logger = createLogger({ name: 'worker' });
 const config = loadConfig();
+
+/**
+ * G-223: Cluster mode safety.
+ *
+ * Multiple worker instances can run concurrently (e.g. Kubernetes replicas,
+ * PM2 cluster mode) without conflicts because:
+ *
+ *   1. **Job claiming** — all three processors (email, webhook, analytics)
+ *      use `SELECT ... FOR UPDATE SKIP LOCKED` in their `fetchJobs()` queries.
+ *      This ensures each job is claimed by exactly one worker instance.
+ *
+ *   2. **Unique worker ID** — each instance gets a unique `workerId` composed
+ *      of `WORKER_ID` env var (if set) or `worker-${process.pid}`. In
+ *      containerised deployments every pod has a distinct PID namespace,
+ *      guaranteeing uniqueness.
+ *
+ *   3. **No shared mutable global state** — each instance holds its own
+ *      in-memory caches (suppression cache, DKIM keys, circuit breakers).
+ *      Redis-backed state (rate limits, dedup keys, circuit breaker counters)
+ *      is inherently multi-instance safe via atomic commands.
+ *
+ *   4. **Stale job recovery** — the G-205 periodic sweep resets jobs stuck in
+ *      'processing' for >30 min, handling cases where an instance crashes
+ *      mid-processing.
+ */
 
 let isShuttingDown = false;
 const processors: Array<{ stop: () => Promise<void> }> = [];
@@ -21,6 +47,8 @@ let metricsServer: MetricsServer | null = null;
 let queueNotifier: QueueNotifier | null = null;
 let redisClient: Redis | null = null;
 let dbPool: ReturnType<typeof getDatabase> | null = null;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let staleJobRecoveryTimer: ReturnType<typeof setInterval> | null = null;
 
 async function main(): Promise<void> {
   logger.info('Starting ApexMail Worker', {
@@ -55,6 +83,11 @@ async function main(): Promise<void> {
     lazyConnect: true,
   });
 
+  // C-078: Handle Redis connection errors to prevent uncaught exceptions
+  redisClient.on('error', (err: Error) => {
+    logger.error('Redis connection error', { error: err.message });
+  });
+
   try {
     await redisClient.connect();
     logger.info('Redis connected');
@@ -66,6 +99,8 @@ async function main(): Promise<void> {
   // Start metrics server
   if (config.metrics.enabled) {
     metricsServer = new MetricsServer(config.metrics.port, logger);
+    // C-063 / G-196: Wire metrics instance so processors can record metrics
+    setMetricsInstance(metricsServer);
     await metricsServer.start();
   }
 
@@ -147,6 +182,92 @@ async function main(): Promise<void> {
     webhookConcurrency: config.queues.webhook.concurrency,
     analyticsConcurrency: config.queues.analytics.concurrency,
   });
+
+  // G-203 + E-164: Periodic heartbeat with resource monitoring.
+  // Logs worker liveness every 30s AND warns when resource usage
+  // exceeds safe thresholds. Uses .unref() so the timer does not
+  // prevent graceful shutdown.
+  //
+  // E-164 thresholds:
+  //   - Memory usage > 80% of total system memory → warning
+  //   - Event loop lag > 100ms → warning (indicates CPU saturation)
+  let lastLoopCheck = Date.now();
+  heartbeatTimer = setInterval(() => {
+    const mem = process.memoryUsage();
+    const totalMemBytes = totalmem();
+    const memUsagePercent = (mem.rss / totalMemBytes) * 100;
+
+    // E-164: Measure event loop lag — the difference between expected
+    // and actual firing time of setInterval gives a good approximation.
+    const now = Date.now();
+    const expectedInterval = 30_000;
+    const loopLagMs = Math.max(0, (now - lastLoopCheck) - expectedInterval);
+    lastLoopCheck = now;
+
+    const memoryMB = Math.round(mem.rss / 1024 / 1024);
+    const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
+    const heapTotalMB = Math.round(mem.heapTotal / 1024 / 1024);
+
+    logger.info('Worker heartbeat', {
+      workerId: config.workerId,
+      uptimeSeconds: Math.floor(process.uptime()),
+      memoryMB,
+      heapUsedMB,
+      heapTotalMB,
+      memUsagePercent: Math.round(memUsagePercent * 100) / 100,
+      eventLoopLagMs: loopLagMs,
+      activeProcessors: successes.length,
+    });
+
+    // E-164: Warn when memory usage exceeds 80% of available system memory
+    if (memUsagePercent > 80) {
+      logger.warn('E-164: High memory usage detected', {
+        memoryMB,
+        totalMemoryMB: Math.round(totalMemBytes / 1024 / 1024),
+        memUsagePercent: Math.round(memUsagePercent * 100) / 100,
+        threshold: '80%',
+      });
+    }
+
+    // E-164: Warn when event loop lag exceeds 100ms
+    if (loopLagMs > 100) {
+      logger.warn('E-164: High event loop lag detected', {
+        eventLoopLagMs: loopLagMs,
+        threshold: '100ms',
+        possibleCause: 'CPU-bound work or too many synchronous operations',
+      });
+    }
+  }, 30_000);
+  heartbeatTimer.unref();
+
+  // G-205: Periodic stale job recovery — resets jobs stuck in 'processing' state
+  // for longer than 30 minutes (e.g., worker crashed mid-processing).
+  // Runs every 5 minutes. Uses .unref() so timer doesn't prevent graceful shutdown.
+  staleJobRecoveryTimer = setInterval(async () => {
+    try {
+      const tables = ['email_queue', 'webhook_queue'];
+      for (const table of tables) {
+        const result = await db.query(
+          `UPDATE ${table}
+           SET status = 'pending', locked_until = NULL, updated_at = NOW()
+           WHERE status = 'processing'
+             AND locked_until IS NOT NULL
+             AND locked_until < NOW() - INTERVAL '30 minutes'
+           RETURNING id`,
+        );
+        if (result.rowCount && result.rowCount > 0) {
+          logger.warn('G-205: Recovered stale jobs', {
+            table,
+            count: result.rowCount,
+            jobIds: result.rows.map((r: { id: string }) => r.id).slice(0, 10),
+          });
+        }
+      }
+    } catch (error) {
+      logger.error('G-205: Failed to recover stale jobs', { error });
+    }
+  }, 5 * 60_000);
+  staleJobRecoveryTimer.unref();
 }
 
 async function shutdown(signal: string): Promise<void> {
@@ -164,6 +285,18 @@ async function shutdown(signal: string): Promise<void> {
   }, config.gracefulShutdownTimeout);
 
   try {
+    // G-203: Stop heartbeat timer
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+
+    // G-205: Stop stale job recovery timer
+    if (staleJobRecoveryTimer) {
+      clearInterval(staleJobRecoveryTimer);
+      staleJobRecoveryTimer = null;
+    }
+
     // Stop metrics server
     if (metricsServer) {
       await metricsServer.stop();

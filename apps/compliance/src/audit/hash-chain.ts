@@ -78,6 +78,9 @@ export class AuditLogger {
         const previousHash = await this.getLastHash(chainKey);
 
         // Create the entry data for hashing
+        // E-160: Include ipAddress and userAgent so they are covered by the
+        // hash chain — without them an attacker could modify these fields in
+        // the database without breaking chain integrity verification.
         const entryData = {
             id,
             tenantId: context.tenantId || null,
@@ -87,6 +90,8 @@ export class AuditLogger {
             resource,
             resourceId,
             details,
+            ipAddress: context.ipAddress || null,
+            userAgent: context.userAgent || null,
             outcome,
             errorMessage,
             timestamp: timestamp.toISOString(),
@@ -355,6 +360,7 @@ export class AuditLogger {
             }
 
             // Verify the hash is correct
+            // E-160: Include ipAddress and userAgent to match the updated log() hashing
             const calculatedHash = this.calculateHash({
                 id: entry.id,
                 tenantId: entry.tenantId,
@@ -364,6 +370,8 @@ export class AuditLogger {
                 resource: entry.resource,
                 resourceId: entry.resourceId,
                 details: entry.details,
+                ipAddress: entry.ipAddress,
+                userAgent: entry.userAgent,
                 outcome: entry.outcome,
                 errorMessage: entry.errorMessage,
                 timestamp: entry.timestamp.toISOString(),
@@ -593,8 +601,14 @@ export class AuditLogger {
      * Load last hashes from Redis or database
      */
     private async loadLastHashes(): Promise<void> {
-        // Try to load from Redis first
-        const keys = await this.redis.keys('audit:lasthash:*');
+        // C-062: Use SCAN instead of KEYS to avoid blocking Redis
+        let cursor = '0';
+        const keys: string[] = [];
+        do {
+            const [nextCursor, batchKeys] = await this.redis.scan(cursor, 'MATCH', 'audit:lasthash:*', 'COUNT', 200);
+            cursor = nextCursor;
+            keys.push(...batchKeys);
+        } while (cursor !== '0');
 
         for (const key of keys) {
             const hash = await this.redis.get(key);

@@ -1,5 +1,8 @@
 /**
  * Domains Routes - Domain management and verification
+ *
+ * F-213: Response envelope standard — see messages.ts header for full spec.
+ * Single: { domain: T }   List: { domains: T[], pagination: {...} }
  * 
  * Includes advanced authentication verification:
  * - SPF, DKIM, DMARC (basic)
@@ -18,11 +21,20 @@ import { generateDKIMKeyPair } from '@apexmail/lib/crypto';
 import { verifyMTASTS, generateMTASTSPolicy, generateMTASTSDNSRecord, verifyTLSRPT, generateTLSRPTRecord } from '../../../mta/dist/auth/mta-sts.js';
 import { verifyBIMI, getBIMISetupInstructions, validateBIMILogo } from '../../../mta/dist/auth/bimi.js';
 
+/**
+ * F-227: UUID format regex for route parameter validation.
+ * Prevents malformed IDs from reaching DB queries.
+ */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const addDomainSchema = z.object({
+  // F-225: Domain name max 253 per DNS specification (RFC 1035)
   domain: z.string()
     .min(1)
-    .max(255)
+    .max(253, 'Domain name cannot exceed 253 characters (DNS limit)')
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$/, 'Invalid domain format'),
+  // F-225: Input length limits on all string fields
+  description: z.string().max(500, 'Description cannot exceed 500 characters').optional(),
   verificationMethod: z.enum(['dns_txt', 'dns_cname', 'meta_tag']).default('dns_txt'),
 });
 
@@ -66,6 +78,19 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // Generate DKIM keys for the domain
     const selector = `apexmail${new Date().getFullYear()}`;
+
+    /**
+     * F-226: Validate DKIM selector format.
+     * RFC 6376 §3.1: Selectors must be DNS labels — alphanumeric + hyphens,
+     * max 63 characters, must not start or end with a hyphen.
+     */
+    if (!/^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(selector)) {
+      throw ApiError.badRequest(
+        'Invalid DKIM selector: must be alphanumeric with hyphens, max 63 characters',
+        'INVALID_DKIM_SELECTOR'
+      );
+    }
+
     const dkimKeyPair = generateDKIMKeyPair(selector, domain);
     
     // Update domain with DNS records
@@ -103,8 +128,8 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     logger.info('Domain added', { domainId: domainRecord.id, domain });
 
-    // Get the updated domain with DNS records
-    const updated = await domainsRepo.findById(domainRecord.id);
+    // Get the updated domain with DNS records (A-009: pass tenantId)
+    const updated = await domainsRepo.findById(domainRecord.id, tenantId);
     const finalDomain = updated.ok && updated.value ? updated.value : domainRecord;
 
     return c.json({
@@ -126,6 +151,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
 
     // Use tenant-scoped query for database-level isolation
     const result = await domainsRepo.findById(domainId, tenantId);
@@ -200,6 +230,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domainId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
+
     // Use tenant-scoped query for database-level isolation
     const result = await domainsRepo.findById(domainId, tenantId);
     
@@ -228,8 +263,8 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const verificationResult = await verifyDomain(domain);
 
     if (verificationResult.verified) {
-      // Mark as verified
-      await domainsRepo.verify(domainId);
+      // Mark as verified (A-010: pass tenantId)
+      await domainsRepo.verify(domainId, tenantId);
 
       // Audit log
       await auditRepo.create({
@@ -261,6 +296,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
+
     // Use tenant-scoped query for database-level isolation
     const result = await domainsRepo.findById(domainId, tenantId);
     
@@ -275,6 +315,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domain = result.value;
 
     // Perform health check
+    // E-176: Currently domain health (DNS/DKIM/SPF/DMARC) is only checked on-demand
+    // via this endpoint. A scheduled background job should periodically verify all
+    // verified domains (e.g., every 6 hours via cron) to detect DNS misconfigurations
+    // proactively and alert tenants before deliverability is impacted.
+    // TODO: Implement scheduled domain health verification in a background worker.
     const healthCheck = await checkDnsHealth(domain);
 
     // Update health status in database (with tenant scope)
@@ -296,6 +341,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domainId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
+
     // Use tenant-scoped query for database-level isolation
     const result = await domainsRepo.findById(domainId, tenantId);
     
@@ -309,8 +359,8 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const domain = result.value;
 
-    // Delete the domain
-    const deleteResult = await domainsRepo.delete(domainId);
+    // Delete the domain (A-009: pass tenantId for database-level isolation)
+    const deleteResult = await domainsRepo.delete(domainId, tenantId);
     
     if (!deleteResult.ok) {
       throw ApiError.internal('Failed to delete domain');
@@ -335,6 +385,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id/dns-records', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
 
     // Use tenant-scoped query for database-level isolation
     const result = await domainsRepo.findById(domainId, tenantId);
@@ -368,6 +423,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id/mta-sts', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
 
     const result = await domainsRepo.findById(domainId, tenantId);
     if (!result.ok || !result.value) {
@@ -416,6 +476,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
+
     const result = await domainsRepo.findById(domainId, tenantId);
     if (!result.ok || !result.value) {
       throw ApiError.notFound('Domain');
@@ -451,6 +516,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
+
     const result = await domainsRepo.findById(domainId, tenantId);
     if (!result.ok || !result.value) {
       throw ApiError.notFound('Domain');
@@ -483,6 +553,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id/tlsrpt', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
 
     const result = await domainsRepo.findById(domainId, tenantId);
     if (!result.ok || !result.value) {
@@ -517,6 +592,11 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id/auth-status', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const domainId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(domainId)) {
+      throw ApiError.badRequest('Invalid domain ID format', 'INVALID_ID');
+    }
 
     const result = await domainsRepo.findById(domainId, tenantId);
     if (!result.ok || !result.value) {
@@ -727,26 +807,96 @@ function generateDnsRecordInstructions(domain: DomainData): Array<{
   return records;
 }
 
+/**
+ * C-131: Short-lived DNS result cache to avoid redundant lookups when the
+ * same domain is verified multiple times in quick succession.  Entries
+ * expire after 5 minutes so stale results don't persist.
+ */
+const dnsCache = new Map<string, { result: unknown; expiresAt: number }>();
+const DNS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function getCachedDns<T>(key: string): T | undefined {
+  const entry = dnsCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    dnsCache.delete(key);
+    return undefined;
+  }
+  return entry.result as T;
+}
+
+function setCachedDns(key: string, result: unknown): void {
+  // Cap cache size to prevent unbounded growth
+  if (dnsCache.size > 500) {
+    const firstKey = dnsCache.keys().next().value;
+    if (firstKey !== undefined) dnsCache.delete(firstKey);
+  }
+  dnsCache.set(key, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
+}
+
 async function verifyDomain(domain: DomainData): Promise<{ verified: boolean; details?: string }> {
   // In production, this would perform actual DNS lookups
   // For now, we'll simulate the verification process
   
+  // C-071: DNS lookup timeout helper — prevents hanging on unresponsive nameservers
+  const DNS_TIMEOUT_MS = 10_000;
+  function withDnsTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error('DNS lookup timed out')), DNS_TIMEOUT_MS)
+      ),
+    ]).catch(() => fallback);
+  }
+
   try {
     const dns = await import('dns').then(m => m.promises);
     
     switch (domain.verificationMethod) {
       case 'dns_txt': {
-        const txtRecords = await dns.resolveTxt(`_apexmail.${domain.domain}`).catch(() => []);
+        // C-131: Check DNS cache first
+        const txtCacheKey = `txt:_apexmail.${domain.domain}`;
+        let txtRecords = getCachedDns<string[][]>(txtCacheKey);
+        if (!txtRecords) {
+          txtRecords = await withDnsTimeout(dns.resolveTxt(`_apexmail.${domain.domain}`), []);
+          setCachedDns(txtCacheKey, txtRecords);
+        }
         const flatRecords = txtRecords.flat();
-        const found = flatRecords.some(record => record.includes(domain.verificationToken));
+
+        // F-205: Validate TXT record format before matching.
+        // ApexMail verification tokens must start with "v=" prefix
+        // (e.g. "v=apexmail1 ...") to avoid false positives from
+        // unrelated TXT records at the same name.
+        const validRecords = flatRecords.filter(record => {
+          // Must start with a version tag (v=)
+          if (!record.startsWith('v=')) return false;
+          // Must not be unreasonably long (DNS TXT max ≈ 255 per string)
+          if (record.length > 512) return false;
+          // Must contain only printable ASCII
+          if (!/^[\x20-\x7E]+$/.test(record)) return false;
+          return true;
+        });
+
+        const found = validRecords.some(record => record.includes(domain.verificationToken));
+        const hasInvalidFormat = flatRecords.length > 0 && validRecords.length === 0;
         return {
           verified: found,
-          details: found ? undefined : 'TXT record not found or does not match verification token',
+          details: found
+            ? undefined
+            : hasInvalidFormat
+              ? 'TXT record found but has invalid format (must start with "v=" and contain printable ASCII)'
+              : 'TXT record not found or does not match verification token',
         };
       }
       
       case 'dns_cname': {
-        const cnameRecords = await dns.resolveCname(`_apexmail.${domain.domain}`).catch(() => []);
+        // C-131: Check DNS cache first
+        const cnameCacheKey = `cname:_apexmail.${domain.domain}`;
+        let cnameRecords = getCachedDns<string[]>(cnameCacheKey);
+        if (!cnameRecords) {
+          cnameRecords = await withDnsTimeout(dns.resolveCname(`_apexmail.${domain.domain}`), []);
+          setCachedDns(cnameCacheKey, cnameRecords);
+        }
         const found = cnameRecords.some(record => record === 'verify.apexmail.ee');
         return {
           verified: found,
@@ -778,20 +928,55 @@ async function checkDnsHealth(domain: DomainData): Promise<{
 }> {
   const issues: string[] = [];
 
+  // C-071: DNS lookup timeout helper — prevents hanging on unresponsive nameservers
+  const DNS_TIMEOUT_MS = 10_000;
+  function withDnsTimeout<T>(promise: Promise<T>): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error('DNS lookup timed out')), DNS_TIMEOUT_MS)
+      ),
+    ]);
+  }
+
   try {
     const dns = await import('dns').then(m => m.promises);
 
-    // Check SPF
+    // Check SPF (F-223: Full SPF record format validation)
     if (domain.dnsRecords.spf) {
       try {
-        const txtRecords = await dns.resolveTxt(domain.domain);
+        const txtRecords = await withDnsTimeout(dns.resolveTxt(domain.domain));
         const spfRecords = txtRecords.flat().filter(r => r.startsWith('v=spf1'));
         if (spfRecords.length === 0) {
           issues.push('SPF record not found');
         } else if (spfRecords.length > 1) {
           issues.push('Multiple SPF records found (should have exactly one)');
-        } else if (spfRecords[0] && !spfRecords[0].includes('apexmail')) {
-          issues.push('SPF record does not include ApexMail');
+        } else {
+          const spf = spfRecords[0]!;
+          // F-223: Validate SPF starts with proper version tag
+          if (!spf.startsWith('v=spf1 ') && spf !== 'v=spf1') {
+            issues.push('SPF record has invalid format — must start with "v=spf1"');
+          }
+          // F-223: Check for ApexMail include mechanism
+          if (!spf.includes('include:_spf.apexmail.ee')) {
+            if (spf.includes('apexmail')) {
+              issues.push('SPF record references ApexMail but is missing the required include:_spf.apexmail.ee mechanism');
+            } else {
+              issues.push('SPF record does not include ApexMail (expected include:_spf.apexmail.ee)');
+            }
+          }
+          // F-223: Count DNS lookup mechanisms (include, a, mx, ptr, exists, redirect)
+          // RFC 7208 limits SPF to 10 DNS lookups to prevent abuse
+          const dnsLookupMechanisms = spf.match(/\b(include:|a:|a$|mx:|mx$|ptr:|ptr$|exists:|redirect=)/gi) ?? [];
+          if (dnsLookupMechanisms.length > 10) {
+            issues.push(`SPF record exceeds 10 DNS lookup limit (found ${dnsLookupMechanisms.length}) — this may cause SPF permerror`);
+          } else if (dnsLookupMechanisms.length > 8) {
+            issues.push(`SPF record is approaching the 10 DNS lookup limit (${dnsLookupMechanisms.length}/10) — consider consolidating`);
+          }
+          // F-223: Warn if missing a terminating 'all' mechanism
+          if (!spf.match(/[~\-+?]all\s*$/)) {
+            issues.push('SPF record is missing a terminating "all" mechanism (e.g., ~all or -all)');
+          }
         }
       } catch {
         issues.push('Could not verify SPF record');
@@ -802,7 +987,7 @@ async function checkDnsHealth(domain: DomainData): Promise<{
     if (domain.dnsRecords.dkim) {
       try {
         const dkimHost = `${domain.dnsRecords.dkim.selector}._domainkey.${domain.domain}`;
-        await dns.resolveTxt(dkimHost);
+        await withDnsTimeout(dns.resolveTxt(dkimHost));
       } catch {
         issues.push('DKIM record not found');
       }
@@ -811,7 +996,7 @@ async function checkDnsHealth(domain: DomainData): Promise<{
     // Check DMARC
     if (domain.dnsRecords.dmarc) {
       try {
-        const dmarcRecords = await dns.resolveTxt(`_dmarc.${domain.domain}`);
+        const dmarcRecords = await withDnsTimeout(dns.resolveTxt(`_dmarc.${domain.domain}`));
         const dmarc = dmarcRecords.flat().find(r => r.startsWith('v=DMARC1'));
         if (!dmarc) {
           issues.push('DMARC record not found');

@@ -2,10 +2,12 @@
  * Users Repository
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { generateUserId } from '@apexmail/lib/id';
 import { hashPassword, verifyPassword } from '@apexmail/lib/crypto';
 import type { DatabasePool } from '../pool.js';
+
+const logger = createLogger({ name: 'users-repository' });
 
 export interface User {
   id: string;
@@ -67,6 +69,7 @@ export class UsersRepository {
       `INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, 
                           email_verified, mfa_enabled, metadata, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (email, tenant_id) DO NOTHING
        RETURNING id, tenant_id, email, name, role, status, email_verified, 
                  last_login_at, mfa_enabled, metadata, created_at, updated_at`,
       [
@@ -89,13 +92,22 @@ export class UsersRepository {
 
     const row = result.value.rows[0];
     if (!row) {
-      return Result.err(new Error('Failed to create user'));
+      // B-048: ON CONFLICT (email, tenant_id) DO NOTHING produces no rows
+      return Result.err(new Error(`User with email '${input.email.toLowerCase()}' already exists in this tenant`));
     }
 
     return Result.ok(this.mapRow(row));
   }
 
-  async findById(id: string): Promise<Result<User | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<User | null, Error>> {
+    const sql = tenantId
+      ? `SELECT id, tenant_id, email, name, role, status, email_verified,
+              last_login_at, mfa_enabled, metadata, created_at, updated_at
+         FROM users WHERE id = $1 AND tenant_id = $2`
+      : `SELECT id, tenant_id, email, name, role, status, email_verified,
+              last_login_at, mfa_enabled, metadata, created_at, updated_at
+         FROM users WHERE id = $1`;
+    const params = tenantId ? [id, tenantId] : [id];
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -109,12 +121,7 @@ export class UsersRepository {
       metadata: string;
       created_at: Date;
       updated_at: Date;
-    }>(
-      `SELECT id, tenant_id, email, name, role, status, email_verified,
-              last_login_at, mfa_enabled, metadata, created_at, updated_at
-       FROM users WHERE id = $1`,
-      [id]
-    );
+    }>(sql, params);
 
     if (!result.ok) return result;
 
@@ -153,7 +160,12 @@ export class UsersRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async verifyCredentials(email: string, password: string): Promise<Result<User | null, Error>> {
+  async verifyCredentials(email: string, password: string, tenantId?: string): Promise<Result<User | null, Error>> {
+    // A-002: When tenantId is provided, scope the query to prevent cross-tenant login
+    const sql = tenantId
+      ? `SELECT * FROM users WHERE email = $1 AND status = 'active' AND tenant_id = $2`
+      : `SELECT * FROM users WHERE email = $1 AND status = 'active'`;
+    const params = tenantId ? [email.toLowerCase(), tenantId] : [email.toLowerCase()];
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -168,10 +180,7 @@ export class UsersRepository {
       metadata: string;
       created_at: Date;
       updated_at: Date;
-    }>(
-      `SELECT * FROM users WHERE email = $1 AND status = 'active'`,
-      [email.toLowerCase()]
-    );
+    }>(sql, params);
 
     if (!result.ok) return result;
 
@@ -185,16 +194,22 @@ export class UsersRepository {
       return Result.ok(null);
     }
 
-    // Update last login
-    await this.db.query(
+    // Update last login (fire-and-forget but log errors — E-139)
+    this.db.query(
       'UPDATE users SET last_login_at = NOW() WHERE id = $1',
       [row.id]
-    );
+    ).then((res) => {
+      if (!res.ok) {
+        logger.error('Failed to update last login', { error: (res.error as Error).message, userId: row.id });
+      }
+    }).catch((err: unknown) => {
+      logger.error('Failed to update last login', { error: err instanceof Error ? err.message : String(err), userId: row.id });
+    });
 
     return Result.ok(this.mapRow(row));
   }
 
-  async update(id: string, input: UpdateUserInput): Promise<Result<User, Error>> {
+  async update(id: string, input: UpdateUserInput, tenantId?: string): Promise<Result<User, Error>> {
     const updates: string[] = [];
     const values: unknown[] = [];
     let paramIndex = 1;
@@ -237,6 +252,10 @@ export class UsersRepository {
     values.push(new Date());
 
     values.push(id);
+    const whereClause = tenantId
+      ? `WHERE id = $${paramIndex++} AND tenant_id = $${paramIndex}`
+      : `WHERE id = $${paramIndex}`;
+    if (tenantId) values.push(tenantId);
 
     const result = await this.db.query<{
       id: string;
@@ -252,7 +271,7 @@ export class UsersRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramIndex}
+      `UPDATE users SET ${updates.join(', ')} ${whereClause}
        RETURNING id, tenant_id, email, name, role, status, email_verified,
                  last_login_at, mfa_enabled, metadata, created_at, updated_at`,
       values
@@ -268,12 +287,13 @@ export class UsersRepository {
     return Result.ok(this.mapRow(row));
   }
 
-  async updatePassword(id: string, newPassword: string): Promise<Result<void, Error>> {
+  async updatePassword(id: string, newPassword: string, tenantId?: string): Promise<Result<void, Error>> {
     const passwordHash = await hashPassword(newPassword);
-    const result = await this.db.query(
-      'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
-      [passwordHash, id]
-    );
+    const sql = tenantId
+      ? 'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3'
+      : 'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2';
+    const params = tenantId ? [passwordHash, id, tenantId] : [passwordHash, id];
+    const result = await this.db.query(sql, params);
     return result.ok ? Result.ok(undefined) : result;
   }
 

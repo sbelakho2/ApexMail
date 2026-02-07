@@ -18,6 +18,8 @@ import httpx
 from .exceptions import (
     ApexMailError,
     AuthenticationError,
+    ConflictError,
+    ForbiddenError,
     NotFoundError,
     RateLimitError,
     ServerError,
@@ -117,8 +119,12 @@ class BaseClient:
             raise ValidationError(message=message, code=code, errors=errors)
         elif response.status_code == 401:
             raise AuthenticationError(message=message, code=code)
+        elif response.status_code == 403:
+            raise ForbiddenError(message=message, code=code)
         elif response.status_code == 404:
             raise NotFoundError(message=message, code=code)
+        elif response.status_code == 409:
+            raise ConflictError(message=message, code=code)
         elif response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
             raise RateLimitError(

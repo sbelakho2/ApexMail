@@ -18,6 +18,58 @@ interface JwtPayload {
   scopes?: string[]; // Permission scopes
 }
 
+/**
+ * C-101: In-memory TTL cache for verified API key results.
+ * Avoids hitting the database on every request for the same key.
+ * Cache entries expire after 60 seconds.
+ */
+interface CachedApiKeyResult {
+  result: ApiKeyVerifyResult;
+  expiresAt: number;
+}
+
+const API_KEY_CACHE = new Map<string, CachedApiKeyResult>();
+const API_KEY_CACHE_TTL_MS = 60_000; // 60 seconds
+const API_KEY_CACHE_MAX_SIZE = 10_000; // Prevent unbounded growth
+
+function getCachedApiKeyResult(cacheKey: string): ApiKeyVerifyResult | null {
+  const entry = API_KEY_CACHE.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    API_KEY_CACHE.delete(cacheKey);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCachedApiKeyResult(cacheKey: string, result: ApiKeyVerifyResult): void {
+  // Evict oldest entries if cache is too large
+  if (API_KEY_CACHE.size >= API_KEY_CACHE_MAX_SIZE) {
+    const firstKey = API_KEY_CACHE.keys().next().value;
+    if (firstKey) API_KEY_CACHE.delete(firstKey);
+  }
+  // Only cache valid results (don't cache failures — they should re-check)
+  if (result.valid) {
+    API_KEY_CACHE.set(cacheKey, {
+      result,
+      expiresAt: Date.now() + API_KEY_CACHE_TTL_MS,
+    });
+  }
+}
+
+/**
+ * C-117: Invalidate all cached entries for a specific API key.
+ * Must be called when a key is revoked, rotated, or updated to prevent
+ * stale cache entries from allowing access for up to API_KEY_CACHE_TTL_MS.
+ */
+export function invalidateApiKeyCacheByKeyId(apiKeyId: string): void {
+  for (const [cacheKey, entry] of API_KEY_CACHE.entries()) {
+    if (entry.result.apiKeyId === apiKeyId) {
+      API_KEY_CACHE.delete(cacheKey);
+    }
+  }
+}
+
 export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
   const apiKeysRepo = new ApiKeysRepository(ctx.db);
 
@@ -28,7 +80,14 @@ export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
 
     // Try API Key first
     if (apiKey) {
-      const result = await verifyApiKey(apiKey, apiKeysRepo, getClientIp(c));
+      // C-101: Check TTL cache before hitting the database
+      const clientIp = getClientIp(c);
+      const cacheKey = `${apiKey}:${clientIp}`;
+      let result = getCachedApiKeyResult(cacheKey);
+      if (!result) {
+        result = await verifyApiKey(apiKey, apiKeysRepo, clientIp);
+        setCachedApiKeyResult(cacheKey, result);
+      }
       
       if (!result.valid) {
         logger.warn('API key authentication failed', { reason: result.reason });
@@ -182,9 +241,12 @@ async function verifyJwt(token: string, secret: string): Promise<JwtVerifyResult
       return { valid: false, reason: 'invalid_payload' };
     }
 
-    // Check expiration
+    // F-212: Check expiration with clock skew tolerance.
+    // Allow 30 seconds of clock drift between API servers to avoid
+    // rejecting tokens that are only barely expired due to NTP skew.
+    const CLOCK_SKEW_TOLERANCE_S = 30;
     const now = Math.floor(Date.now() / 1000);
-    if (payload.exp && payload.exp < now) {
+    if (payload.exp && payload.exp + CLOCK_SKEW_TOLERANCE_S < now) {
       return { valid: false, reason: 'token_expired' };
     }
 
@@ -261,7 +323,31 @@ function getClientIp(c: { req: { header: (name: string) => string | undefined } 
 }
 
 /**
+ * Canonical set of allowed scopes – any scope not in this set is rejected.
+ * Keep in sync with ALLOWED_SCOPES in routes/auth.ts.
+ */
+const VALID_SCOPES = new Set([
+  'messages:send',
+  'messages:read',
+  'messages:write',
+  'domains:read',
+  'domains:write',
+  'suppressions:read',
+  'suppressions:write',
+  'events:read',
+  'templates:read',
+  'templates:write',
+  'analytics:read',
+  'webhooks:read',
+  'webhooks:write',
+  'admin',
+  '*',
+]);
+
+/**
  * Require specific scopes for an endpoint
+ * F-202: Strict scope enforcement – deny when scopes are missing or contain
+ * unrecognised values, and perform a proper intersection check.
  */
 export function requireScopes(...requiredScopes: string[]): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
@@ -273,11 +359,23 @@ export function requireScopes(...requiredScopes: string[]): MiddlewareHandler<Ap
       return next();
     }
 
-    // For API keys, check scopes from context
+    // For API keys, scopes MUST be present in context
     const userScopes = c.get('scopes');
-    
-    if (userScopes && requiredScopes.length > 0) {
-      // Check if user has wildcard scope or all required scopes
+
+    if (!userScopes || !Array.isArray(userScopes) || userScopes.length === 0) {
+      logger.warn('API key has no scopes set', { apiKeyId });
+      throw ApiError.forbidden('Insufficient permissions', 'INSUFFICIENT_SCOPE');
+    }
+
+    // F-202: Reject any unrecognised scopes to prevent scope-injection attacks
+    const invalidScopes = userScopes.filter(s => !VALID_SCOPES.has(s));
+    if (invalidScopes.length > 0) {
+      logger.warn('API key contains invalid scopes', { apiKeyId, invalidScopes });
+      throw ApiError.forbidden('Insufficient permissions', 'INVALID_SCOPE');
+    }
+
+    if (requiredScopes.length > 0) {
+      // Check if user has wildcard scope or ALL required scopes (intersection)
       const hasWildcard = userScopes.includes('*');
       const hasAllScopes = requiredScopes.every(scope => userScopes.includes(scope));
       

@@ -6,9 +6,9 @@
 
 import { ServiceHealth, HealthCheckResult, HealthStatus } from '../types.js';
 import { EventEmitter } from 'events';
-import pino from 'pino';
+import { createLogger } from '@apexmail/lib';
 
-const logger = pino({ name: 'health-checker' });
+const logger = createLogger({ name: 'health-checker' });
 
 export interface HealthCheckConfig {
     interval: number;
@@ -326,15 +326,12 @@ export class HealthChecker extends EventEmitter {
                 newStatus: checkState.status,
             });
 
-            logger.warn(
-                {
+            logger.warn('Health check status changed', {
                     checkId,
                     previousStatus,
                     newStatus: checkState.status,
                     error: checkState.error,
-                },
-                'Health check status changed'
-            );
+                });
         }
     }
 

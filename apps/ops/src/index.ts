@@ -13,7 +13,7 @@
  */
 
 import { serve } from '@hono/node-server';
-import pino from 'pino';
+import { createLogger } from '@apexmail/lib';
 
 // Export all modules
 export * from './types.js';
@@ -38,7 +38,7 @@ import { HealthChecker } from './health/checker.js';
 import { TracingService } from './tracing/tracer.js';
 import { createOpsRoutes, OpsServices } from './routes.js';
 
-const logger = pino({ name: 'apexmail-ops' });
+const logger = createLogger({ name: 'apexmail-ops' });
 
 export interface OpsConfig {
     serviceName: string;
@@ -241,7 +241,7 @@ export function startOpsServer(
         port,
     });
 
-    logger.info({ port }, 'Ops server started');
+    logger.info('Ops server started', { port });
 }
 
 /**
@@ -263,7 +263,7 @@ export async function main(): Promise<void> {
         dpoEmail: process.env.DPO_EMAIL || 'dpo@apexmail.ee',
     };
 
-    logger.info({ config: { ...config, tracingEndpoint: '***' } }, 'Starting ops services');
+    logger.info('Starting ops services', { config: { ...config, tracingEndpoint: '***' } });
 
     const services = createOpsServices(config);
     startOpsServer(services, config.port);
@@ -289,7 +289,7 @@ export async function main(): Promise<void> {
 // Run if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
     main().catch((error) => {
-        logger.error({ error }, 'Failed to start ops services');
+        logger.error('Failed to start ops services', { error });
         process.exit(1);
     });
 }

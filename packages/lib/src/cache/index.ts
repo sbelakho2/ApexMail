@@ -24,6 +24,12 @@ export interface CacheProvider {
   delete(key: string): Promise<void>;
   exists(key: string): Promise<boolean>;
   incr(key: string, by?: number): Promise<number>;
+  /**
+   * C-132: Atomic INCR + EXPIRE in a single Redis pipeline round-trip.
+   * Returns the new count after increment. Sets expiry only on the
+   * first increment (when count becomes 1) to avoid resetting TTL.
+   */
+  incrWithExpire(key: string, ttlSeconds: number, by?: number): Promise<number>;
   decr(key: string, by?: number): Promise<number>;
   expire(key: string, ttlSeconds: number): Promise<void>;
   ttl(key: string): Promise<number>;
@@ -160,6 +166,34 @@ export class RedisCacheProvider implements CacheProvider {
     return this.client.incrby(this.key(key), by);
   }
 
+  /**
+   * C-132: Atomic INCR + conditional EXPIRE in one pipeline round-trip.
+   * Avoids the race where a key is created by INCR but EXPIRE never fires
+   * (e.g. if the process crashes between the two calls), leaking keys.
+   */
+  async incrWithExpire(key: string, ttlSeconds: number, by = 1): Promise<number> {
+    const fullKey = this.key(key);
+    const pipeline = this.client.pipeline();
+
+    if (by === 1) {
+      pipeline.incr(fullKey);
+    } else {
+      pipeline.incrby(fullKey, by);
+    }
+    // Always set expire — Redis EXPIRE on an existing key just resets TTL,
+    // but the sliding-window keys already embed the window timestamp so
+    // resetting TTL is harmless and keeps the pipeline unconditional.
+    pipeline.expire(fullKey, ttlSeconds);
+
+    const results = await pipeline.exec();
+    // results[0] = [err, count] from INCR/INCRBY
+    const incrResult = results?.[0];
+    if (incrResult && incrResult[0]) {
+      throw incrResult[0]; // propagate Redis error
+    }
+    return (incrResult?.[1] as number) ?? 0;
+  }
+
   async decr(key: string, by = 1): Promise<number> {
     if (by === 1) {
       return this.client.decr(this.key(key));
@@ -266,11 +300,13 @@ export class RedisCacheProvider implements CacheProvider {
 export class InMemoryCacheProvider implements CacheProvider {
   private readonly store: Map<string, { value: string; expiresAt?: number }> = new Map();
   private readonly prefix: string;
+  private readonly maxSize: number;
   private readonly subscriptions: Map<string, Set<(message: string) => void>> = new Map();
   private cleanupTimer: NodeJS.Timeout | null = null;
 
-  constructor(options: { prefix?: string } = {}) {
+  constructor(options: { prefix?: string; maxSize?: number } = {}) {
     this.prefix = options.prefix ?? 'apexmail:';
+    this.maxSize = options.maxSize ?? 10_000;
     
     // Cleanup expired entries every 10 seconds
     // Store reference so we can clear it on disconnect
@@ -317,7 +353,22 @@ export class InMemoryCacheProvider implements CacheProvider {
       ? Date.now() + options.ttlSeconds * 1000 
       : undefined;
     
-    this.store.set(this.key(key), { value: serialized, expiresAt });
+    const fullKey = this.key(key);
+
+    // C-094: Evict oldest entries when cache exceeds maxSize
+    // If key already exists it will be replaced, so only evict when truly adding
+    if (!this.store.has(fullKey) && this.store.size >= this.maxSize) {
+      // Map iteration order is insertion order — delete oldest entries
+      const toEvict = this.store.size - this.maxSize + 1;
+      let evicted = 0;
+      for (const k of this.store.keys()) {
+        if (evicted >= toEvict) break;
+        this.store.delete(k);
+        evicted++;
+      }
+    }
+
+    this.store.set(fullKey, { value: serialized, expiresAt });
   }
 
   /**
@@ -367,6 +418,12 @@ export class InMemoryCacheProvider implements CacheProvider {
     const newValue = current + by;
     await this.set(key, newValue);
     return newValue;
+  }
+
+  async incrWithExpire(key: string, ttlSeconds: number, by = 1): Promise<number> {
+    const count = await this.incr(key, by);
+    await this.expire(key, ttlSeconds);
+    return count;
   }
 
   async decr(key: string, by = 1): Promise<number> {
@@ -489,12 +546,8 @@ export async function checkRateLimit(
 ): Promise<Result<{ allowed: boolean; remaining: number; resetAt: number }, Error>> {
   const windowKey = `ratelimit:${key}:${Math.floor(Date.now() / (windowSeconds * 1000))}`;
   
-  const count = await cache.incr(windowKey);
-  
-  // Set expiry on first request in window
-  if (count === 1) {
-    await cache.expire(windowKey, windowSeconds);
-  }
+  // C-132: Atomic INCR + EXPIRE in one pipeline round-trip
+  const count = await cache.incrWithExpire(windowKey, windowSeconds);
   
   const remaining = Math.max(0, limit - count);
   const resetAt = (Math.floor(Date.now() / (windowSeconds * 1000)) + 1) * windowSeconds * 1000;

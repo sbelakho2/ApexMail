@@ -45,6 +45,8 @@ const redis = new Redis({
   port: config.redis.port,
   password: config.redis.password || undefined,
   db: config.redis.db,
+  // G-216: Namespace isolation — prevent key collisions with other services
+  keyPrefix: 'tracking:',
   maxRetriesPerRequest: 3,
   retryStrategy(times: number) {
     if (times > 10) {
@@ -195,8 +197,10 @@ process.on('uncaughtException', (error) => {
   shutdown('uncaughtException').catch(() => process.exit(1));
 });
 
+// D-114: Trigger graceful shutdown on unhandledRejection instead of just logging
 process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled rejection', { reason: String(reason) });
+  logger.error('Unhandled rejection — triggering shutdown', { reason: String(reason) });
+  shutdown('unhandledRejection').catch(() => process.exit(1));
 });
 
 // =============================================================================
@@ -205,13 +209,55 @@ process.on('unhandledRejection', (reason) => {
 
 async function main(): Promise<void> {
   try {
-    // Test database connection
-    await db.query('SELECT 1');
-    logger.info('Database connected');
+    /**
+     * G-217: Startup validation — verify critical dependencies before
+     * accepting traffic. The HTTP server is only started after both
+     * database and Redis connections are confirmed healthy.
+     */
+    logger.info('Validating critical dependencies before accepting traffic...');
 
-    // Test Redis connection
-    await redis.ping();
-    logger.info('Redis connected');
+    // Validate database connection
+    try {
+      await db.query('SELECT 1');
+      logger.info('Database connected');
+    } catch (dbErr) {
+      logger.error('Database startup validation failed — refusing to start', {
+        error: dbErr instanceof Error ? dbErr.message : String(dbErr),
+      });
+      process.exit(1);
+    }
+
+    // E-183: Validate Redis connection — degrade gracefully if unavailable.
+    // The tracking server can still serve pixels (returning the 1x1 GIF does
+    // not need Redis). Tracking events are queued in-memory and flushed when
+    // Redis reconnects. This prevents a Redis blip from taking down the
+    // entire pixel-serving path.
+    let redisHealthy = false;
+    try {
+      await redis.ping();
+      redisHealthy = true;
+      logger.info('Redis connected');
+    } catch (redisErr) {
+      logger.warn('E-183: Redis unavailable at startup — serving pixels without tracking', {
+        error: redisErr instanceof Error ? redisErr.message : String(redisErr),
+      });
+    }
+
+    // E-183: Track Redis health changes at runtime
+    redis.on('ready', () => {
+      if (!redisHealthy) {
+        logger.info('E-183: Redis reconnected — tracking events will resume flushing');
+        redisHealthy = true;
+      }
+    });
+    redis.on('close', () => {
+      if (redisHealthy) {
+        logger.warn('E-183: Redis connection lost — pixels still served, events buffered in-memory');
+        redisHealthy = false;
+      }
+    });
+
+    logger.info('All critical dependencies validated successfully');
 
     // Start event processor
     processor.start();

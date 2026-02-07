@@ -51,11 +51,12 @@ export class CampaignRepository {
         return this.rowToCampaign(result.rows[0]);
     }
 
-    async getCampaign(campaignId: string): Promise<DripCampaign | null> {
-        const result = await this.db.query(
-            'SELECT * FROM drip_campaigns WHERE id = $1',
-            [campaignId]
-        );
+    async getCampaign(campaignId: string, tenantId?: string): Promise<DripCampaign | null> {
+        const sql = tenantId
+            ? 'SELECT * FROM drip_campaigns WHERE id = $1 AND tenant_id = $2'
+            : 'SELECT * FROM drip_campaigns WHERE id = $1';
+        const params = tenantId ? [campaignId, tenantId] : [campaignId];
+        const result = await this.db.query(sql, params);
 
         if (result.rows.length === 0) {
             return null;
@@ -73,10 +74,12 @@ export class CampaignRepository {
         return result.rows.map(row => this.rowToCampaign(row));
     }
 
-    async getActiveCampaigns(): Promise<DripCampaign[]> {
-        const result = await this.db.query(
-            "SELECT * FROM drip_campaigns WHERE status = 'active'"
-        );
+    async getActiveCampaigns(tenantId?: string): Promise<DripCampaign[]> {
+        const sql = tenantId
+            ? "SELECT * FROM drip_campaigns WHERE status = 'active' AND tenant_id = $1"
+            : "SELECT * FROM drip_campaigns WHERE status = 'active'";
+        const params = tenantId ? [tenantId] : [];
+        const result = await this.db.query(sql, params);
 
         return result.rows.map(row => this.rowToCampaign(row));
     }
@@ -105,7 +108,8 @@ export class CampaignRepository {
 
     async updateCampaign(
         campaignId: string,
-        updates: Partial<Pick<DripCampaign, 'name' | 'description' | 'status' | 'stats' | 'startedAt' | 'pausedAt'>>
+        updates: Partial<Pick<DripCampaign, 'name' | 'description' | 'status' | 'stats' | 'startedAt' | 'pausedAt' | 'sequence' | 'updatedAt'>>,
+        tenantId?: string
     ): Promise<DripCampaign | null> {
         const setClauses: string[] = [];
         const values: unknown[] = [campaignId];
@@ -135,13 +139,29 @@ export class CampaignRepository {
             setClauses.push(`paused_at = $${paramIndex++}`);
             values.push(updates.pausedAt);
         }
+        // B-034: Support persisting sequence changes
+        if (updates.sequence !== undefined) {
+            setClauses.push(`sequence = $${paramIndex++}`);
+            values.push(JSON.stringify(updates.sequence));
+        }
+        if (updates.updatedAt !== undefined) {
+            setClauses.push(`updated_at = $${paramIndex++}`);
+            values.push(updates.updatedAt);
+        }
 
         if (setClauses.length === 0) {
-            return this.getCampaign(campaignId);
+            return this.getCampaign(campaignId, tenantId);
+        }
+
+        // A-019: Scope update to tenant when tenantId is provided
+        let whereClause = 'WHERE id = $1';
+        if (tenantId) {
+            whereClause += ` AND tenant_id = $${paramIndex++}`;
+            values.push(tenantId);
         }
 
         const result = await this.db.query(
-            `UPDATE drip_campaigns SET ${setClauses.join(', ')}, updated_at = NOW() WHERE id = $1 RETURNING *`,
+            `UPDATE drip_campaigns SET ${setClauses.join(', ')}, updated_at = NOW() ${whereClause} RETURNING *`,
             values
         );
 
@@ -152,11 +172,12 @@ export class CampaignRepository {
         return this.rowToCampaign(result.rows[0]);
     }
 
-    async deleteCampaign(campaignId: string): Promise<boolean> {
-        const result = await this.db.query(
-            'DELETE FROM drip_campaigns WHERE id = $1',
-            [campaignId]
-        );
+    async deleteCampaign(campaignId: string, tenantId?: string): Promise<boolean> {
+        const sql = tenantId
+            ? 'DELETE FROM drip_campaigns WHERE id = $1 AND tenant_id = $2'
+            : 'DELETE FROM drip_campaigns WHERE id = $1';
+        const params = tenantId ? [campaignId, tenantId] : [campaignId];
+        const result = await this.db.query(sql, params);
 
         return (result.rowCount ?? 0) > 0;
     }
@@ -165,6 +186,12 @@ export class CampaignRepository {
     // ENROLLMENTS
     // =========================================================================
 
+    /**
+     * B-042: Idempotent enrollment — the unique partial index
+     * idx_enrollments_unique(campaign_id, lead_id) WHERE status NOT IN ('completed','exited')
+     * prevents duplicate active enrollments.  ON CONFLICT returns the existing
+     * row unchanged so callers always get a valid CampaignEnrollment back.
+     */
     async createEnrollment(enrollment: CampaignEnrollment): Promise<CampaignEnrollment> {
         const result = await this.db.query(
             `INSERT INTO campaign_enrollments (
@@ -173,6 +200,8 @@ export class CampaignRepository {
                 emails_clicked, replied, exit_reason, enrolled_at,
                 completed_at, paused_at, metadata
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT (campaign_id, lead_id) WHERE status NOT IN ('completed', 'exited')
+            DO UPDATE SET id = campaign_enrollments.id  -- no-op update to trigger RETURNING
             RETURNING *`,
             [
                 enrollment.id,
@@ -197,11 +226,15 @@ export class CampaignRepository {
         return this.rowToEnrollment(result.rows[0]);
     }
 
-    async getEnrollment(enrollmentId: string): Promise<CampaignEnrollment | null> {
-        const result = await this.db.query(
-            'SELECT * FROM campaign_enrollments WHERE id = $1',
-            [enrollmentId]
-        );
+    async getEnrollment(enrollmentId: string, tenantId?: string): Promise<CampaignEnrollment | null> {
+        // A-019: Join against campaigns to enforce tenant scoping for enrollments
+        const sql = tenantId
+            ? `SELECT e.* FROM campaign_enrollments e
+               JOIN drip_campaigns c ON e.campaign_id = c.id
+               WHERE e.id = $1 AND c.tenant_id = $2`
+            : 'SELECT * FROM campaign_enrollments WHERE id = $1';
+        const params = tenantId ? [enrollmentId, tenantId] : [enrollmentId];
+        const result = await this.db.query(sql, params);
 
         if (result.rows.length === 0) {
             return null;
@@ -250,7 +283,8 @@ export class CampaignRepository {
         updates: Partial<Pick<CampaignEnrollment, 
             'status' | 'currentStepId' | 'nextStepAt' | 
             'completedSteps' | 'emailsSent' | 'emailsOpened' |
-            'emailsClicked' | 'replied' | 'exitReason' | 'completedAt' | 'pausedAt'>>
+            'emailsClicked' | 'replied' | 'exitReason' | 'completedAt' | 'pausedAt' | 'metadata'>>,
+        tenantId?: string
     ): Promise<CampaignEnrollment | null> {
         const setClauses: string[] = [];
         const values: unknown[] = [enrollmentId];
@@ -300,15 +334,29 @@ export class CampaignRepository {
             setClauses.push(`paused_at = $${paramIndex++}`);
             values.push(updates.pausedAt);
         }
-
-        if (setClauses.length === 0) {
-            return this.getEnrollment(enrollmentId);
+        // E-165: Persist enrollment metadata (includes step failure tracking)
+        if (updates.metadata !== undefined) {
+            setClauses.push(`metadata = $${paramIndex++}`);
+            values.push(JSON.stringify(updates.metadata));
         }
 
-        const result = await this.db.query(
-            `UPDATE campaign_enrollments SET ${setClauses.join(', ')} WHERE id = $1 RETURNING *`,
-            values
-        );
+        if (setClauses.length === 0) {
+            return this.getEnrollment(enrollmentId, tenantId);
+        }
+
+        // A-019: Scope update to tenant via campaign join when tenantId is provided
+        let sql: string;
+        if (tenantId) {
+            sql = `UPDATE campaign_enrollments SET ${setClauses.join(', ')}
+                   WHERE id = $1 AND campaign_id IN (
+                       SELECT id FROM drip_campaigns WHERE tenant_id = $${paramIndex}
+                   ) RETURNING *`;
+            values.push(tenantId);
+        } else {
+            sql = `UPDATE campaign_enrollments SET ${setClauses.join(', ')} WHERE id = $1 RETURNING *`;
+        }
+
+        const result = await this.db.query(sql, values);
 
         if (result.rows.length === 0) {
             return null;
@@ -317,11 +365,14 @@ export class CampaignRepository {
         return this.rowToEnrollment(result.rows[0]);
     }
 
-    async deleteEnrollment(enrollmentId: string): Promise<boolean> {
-        const result = await this.db.query(
-            'DELETE FROM campaign_enrollments WHERE id = $1',
-            [enrollmentId]
-        );
+    async deleteEnrollment(enrollmentId: string, tenantId?: string): Promise<boolean> {
+        // A-019: Scope deletion to tenant via campaign join when tenantId is provided
+        const sql = tenantId
+            ? `DELETE FROM campaign_enrollments WHERE id = $1
+               AND campaign_id IN (SELECT id FROM drip_campaigns WHERE tenant_id = $2)`
+            : 'DELETE FROM campaign_enrollments WHERE id = $1';
+        const params = tenantId ? [enrollmentId, tenantId] : [enrollmentId];
+        const result = await this.db.query(sql, params);
 
         return (result.rowCount ?? 0) > 0;
     }

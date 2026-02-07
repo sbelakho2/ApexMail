@@ -10,6 +10,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import { createLogger } from '@apexmail/lib';
 
 import { RiskScoringEngine } from './risk';
 import { ContentScanner } from './content';
@@ -18,6 +19,8 @@ import { SecretManager } from './secrets';
 import { GDPRAutomation } from './gdpr';
 import { complianceConfig } from './config';
 import type { RiskFlagType, ConsentType, AuditAction, AuditResource } from './types';
+
+const routeLogger = createLogger({ name: 'compliance-routes' });
 
 // Type validation helpers
 const RISK_FLAG_TYPES: readonly RiskFlagType[] = [
@@ -138,10 +141,19 @@ app.use('*', async (c, next) => {
         return c.json({ error: 'Unauthorized: empty bearer token' }, 401);
     }
 
-    // Extract tenant context from the token (service-to-service or API key)
-    // In production, validate JWT or API key against the auth service.
-    // For now, we require a non-empty Bearer token and pass through.
-    // The individual route handlers already require tenantId from the URL.
+    // A-020: Validate bearer token value against expected service token.
+    // Previously only checked for presence, not correctness.
+    const expectedToken = process.env['COMPLIANCE_AUTH_TOKEN'];
+    if (!expectedToken) {
+        routeLogger.error('COMPLIANCE_AUTH_TOKEN environment variable is not set — rejecting all requests');
+        return c.json({ error: 'Internal server error: auth not configured' }, 500);
+    }
+
+    if (token !== expectedToken) {
+        routeLogger.warn('Invalid bearer token presented', { path });
+        return c.json({ error: 'Unauthorized: invalid bearer token' }, 401);
+    }
+
     await next();
 });
 
@@ -224,7 +236,14 @@ app.get('/api/risk/critical', async (c) => {
 });
 
 app.get('/api/risk/stats', async (c) => {
+    // C-123: Cache expensive aggregate risk stats for 5 minutes
+    const cacheKey = 'compliance:cache:risk_stats';
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+        return c.json(JSON.parse(cached));
+    }
     const stats = await riskEngine.getRiskStats();
+    await redis.setex(cacheKey, 300, JSON.stringify(stats));
     return c.json(stats);
 });
 
@@ -264,12 +283,20 @@ app.get('/api/scan/stats', async (c) => {
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
 
+    // C-123: Cache scan stats for 5 minutes (keyed by query params)
+    const cacheKey = `compliance:cache:scan_stats:${tenantId ?? 'all'}:${startDate ?? ''}:${endDate ?? ''}`;
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+        return c.json(JSON.parse(cached));
+    }
+
     const stats = await contentScanner.getStats(
         tenantId,
         startDate ? new Date(startDate) : undefined,
         endDate ? new Date(endDate) : undefined
     );
 
+    await redis.setex(cacheKey, 300, JSON.stringify(stats));
     return c.json(stats);
 });
 
@@ -336,12 +363,20 @@ app.get('/api/audit/stats', async (c) => {
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
 
+    // C-123: Cache audit stats for 5 minutes (keyed by query params)
+    const cacheKey = `compliance:cache:audit_stats:${tenantId ?? 'all'}:${startDate ?? ''}:${endDate ?? ''}`;
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+        return c.json(JSON.parse(cached));
+    }
+
     const stats = await auditLogger.getStats(
         tenantId,
         startDate ? new Date(startDate) : undefined,
         endDate ? new Date(endDate) : undefined
     );
 
+    await redis.setex(cacheKey, 300, JSON.stringify(stats));
     return c.json(stats);
 });
 
@@ -733,7 +768,7 @@ app.get('/health', async (c) => {
 // ==================== Error Handler ====================
 
 app.onError((err, c) => {
-    console.error('Compliance API Error:', err);
+    routeLogger.error('Compliance API error', { error: err.message, stack: err.stack });
 
     return c.json(
         {

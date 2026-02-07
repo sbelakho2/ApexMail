@@ -16,7 +16,7 @@ import { createReadStream, createWriteStream, promises as fs } from 'fs';
 import { join } from 'path';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import {
   createAES256GCMCipher,
   encryptBufferAES256GCM,
@@ -24,6 +24,8 @@ import {
   createSHA256Hash,
 } from '@apexmail/lib/crypto';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'ha-backup' });
 
 export enum BackupType {
   FULL = 'full',
@@ -114,7 +116,7 @@ export class BackupService {
     await fs.mkdir(join(this.backupDir, 'wal'), { recursive: true });
     await fs.mkdir(join(this.backupDir, 'temp'), { recursive: true });
 
-    console.log('[Backup] Service initialized');
+    logger.info('[Backup] Service initialized');
   }
 
   /**
@@ -146,7 +148,7 @@ export class BackupService {
     this.activeBackup = backup;
     await this.recordBackupStart(backup);
 
-    console.log(`[Backup] Starting full backup: ${backupId}`);
+    logger.info(`[Backup] Starting full backup: ${backupId}`);
 
     try {
       // Get WAL position before backup
@@ -199,9 +201,26 @@ export class BackupService {
       backup.completedAt = new Date();
 
       await this.recordBackupComplete(backup);
+
+      // E-175: Verify backup immediately after creation by re-computing
+      // the directory checksum and comparing against the stored value.
+      const verifyChecksum = await this.calculateDirectoryChecksum(backupPath);
+      if (verifyChecksum !== backup.checksum) {
+        logger.error(`[Backup] Post-creation verification FAILED for ${backupId}: checksum mismatch`, {
+          expected: backup.checksum,
+          actual: verifyChecksum,
+        });
+        backup.status = BackupStatus.FAILED;
+        backup.metadata.verificationError = 'Checksum mismatch after creation';
+        await this.recordBackupComplete(backup);
+        this.activeBackup = null;
+        return { ok: false, error: new Error('Backup verification failed: checksum mismatch after creation') };
+      }
+      backup.status = BackupStatus.VERIFIED;
+      await this.recordBackupComplete(backup);
       this.activeBackup = null;
 
-      console.log(`[Backup] Full backup completed: ${backupId} (${this.formatBytes(backup.compressedSizeBytes)})`);
+      logger.info(`[Backup] Full backup completed and verified: ${backupId} (${this.formatBytes(backup.compressedSizeBytes)})`);
 
       return { ok: true, value: backup };
     } catch (error) {
@@ -212,7 +231,7 @@ export class BackupService {
       await this.recordBackupComplete(backup);
       this.activeBackup = null;
 
-      console.error(`[Backup] Full backup failed:`, error);
+      logger.error(`[Backup] Full backup failed:`, { error: error instanceof Error ? error.message : String(error) });
       return { ok: false, error: error as Error };
     }
   }
@@ -257,7 +276,7 @@ export class BackupService {
     this.activeBackup = backup;
     await this.recordBackupStart(backup);
 
-    console.log(`[Backup] Starting incremental backup: ${backupId} (base: ${base.id})`);
+    logger.info(`[Backup] Starting incremental backup: ${backupId} (base: ${base.id})`);
 
     try {
       const backupPath = join(this.backupDir, 'incremental', backupId);
@@ -312,7 +331,7 @@ export class BackupService {
       await this.recordBackupComplete(backup);
       this.activeBackup = null;
 
-      console.log(`[Backup] Incremental backup completed: ${backupId}`);
+      logger.info(`[Backup] Incremental backup completed: ${backupId}`);
 
       return { ok: true, value: backup };
     } catch (error) {
@@ -356,7 +375,7 @@ export class BackupService {
         `${walFileName}:${archivePath}`
       );
 
-      console.log(`[Backup] WAL archived: ${walFileName}`);
+      logger.info(`[Backup] WAL archived: ${walFileName}`);
       return { ok: true, value: undefined };
     } catch (error) {
       return { ok: false, error: error as Error };
@@ -394,7 +413,7 @@ export class BackupService {
         backup = latestResult.value;
       }
 
-      console.log(`[Backup] Starting restore from: ${backup.id}`);
+      logger.info(`[Backup] Starting restore from: ${backup.id}`);
 
       // If verify only, just validate the backup
       if (options.verifyOnly) {
@@ -437,7 +456,7 @@ export class BackupService {
       // DR-004 FIX: Verify database state after restore to detect corruption
       const verificationResult = await this.verifyDatabaseState(backup, options.targetDatabase);
       if (!verificationResult.ok) {
-        console.error('[Backup] Post-restore verification failed:', verificationResult.issues);
+        logger.error('[Backup] Post-restore verification failed:', { details: verificationResult.issues });
         return {
           ok: true,
           value: {
@@ -459,7 +478,7 @@ export class BackupService {
         walFilesApplied,
       };
 
-      console.log(`[Backup] Restore completed and verified in ${result.duration}ms`);
+      logger.info(`[Backup] Restore completed and verified in ${result.duration}ms`);
 
       return { ok: true, value: result };
     } catch (error) {
@@ -552,7 +571,7 @@ export class BackupService {
     const issues: string[] = [];
     const dbToCheck = targetDatabase ?? this.db;
     
-    console.log('[Backup] Verifying database state after restore...');
+    logger.info('[Backup] Verifying database state after restore...');
     
     try {
       // 1. Check all tables exist
@@ -644,7 +663,7 @@ export class BackupService {
         }
       }
       
-      console.log(`[Backup] Verification complete: ${issues.length} issues found`);
+      logger.info(`[Backup] Verification complete: ${issues.length} issues found`);
       
       return { ok: issues.length === 0, issues };
     } catch (error) {
@@ -736,7 +755,7 @@ export class BackupService {
         );
         
         if (parseInt(dependents.rows[0]?.count ?? '0', 10) > 0) {
-          console.log(`[Backup] Skipping ${backup.id} - has dependent incrementals`);
+          logger.info(`[Backup] Skipping ${backup.id} - has dependent incrementals`);
           continue;
         }
 
@@ -744,7 +763,7 @@ export class BackupService {
         try {
           await fs.rm(backup.location, { recursive: true, force: true });
         } catch (error) {
-          console.error(`[Backup] Failed to delete files for ${backup.id}:`, error);
+          logger.error(`[Backup] Failed to delete files for ${backup.id}:`, { error: error instanceof Error ? error.message : String(error) });
         }
 
         // Mark as expired
@@ -756,7 +775,7 @@ export class BackupService {
         deleted++;
       }
 
-      console.log(`[Backup] Retention enforcement: deleted ${deleted} backups`);
+      logger.info(`[Backup] Retention enforcement: deleted ${deleted} backups`);
 
       return { ok: true, value: { deleted } };
     } catch (error) {
@@ -851,7 +870,7 @@ export class BackupService {
         
         // Log progress for large tables
         if (totalCount > 100000 && totalRows % 100000 === 0) {
-          console.log(`[Backup] ${schema}.${table}: ${totalRows}/${totalCount} rows (${Math.round(totalRows/totalCount*100)}%)`);
+          logger.info(`[Backup] ${schema}.${table}: ${totalRows}/${totalCount} rows (${Math.round(totalRows/totalCount*100)}%)`);
         }
       }
       
@@ -874,7 +893,7 @@ export class BackupService {
         await fs.rename(outputPath + '.tmp', outputPath);
       }
       
-      console.log(`[Backup] Backed up ${schema}.${table}: ${totalRows} rows`);
+      logger.info(`[Backup] Backed up ${schema}.${table}: ${totalRows} rows`);
       return totalSize;
     } finally {
       client.release();
@@ -949,7 +968,7 @@ export class BackupService {
         const data = JSON.parse(content.toString());
         
         // In production, would properly restore the data
-        console.log(`[Backup] Restored ${file} (${data.length} rows)`);
+        logger.info(`[Backup] Restored ${file} (${data.length} rows)`);
       }
     }
   }
@@ -970,7 +989,7 @@ export class BackupService {
         .sort();
       
       if (walFiles.length === 0) {
-        console.log('[Backup] No WAL files in archive for PITR');
+        logger.info('[Backup] No WAL files in archive for PITR');
         return 0;
       }
       
@@ -987,7 +1006,7 @@ export class BackupService {
         
         // Stop if this WAL file is after our target time
         if (stat.mtime > toTime) {
-          console.log(`[Backup] Reached target time at WAL file ${walFile}`);
+          logger.info(`[Backup] Reached target time at WAL file ${walFile}`);
           break;
         }
         
@@ -1004,13 +1023,13 @@ export class BackupService {
         `, [walFile, toTime]);
         
         walFilesApplied++;
-        console.log(`[Backup] Applied WAL file: ${walFile}`);
+        logger.info(`[Backup] Applied WAL file: ${walFile}`);
       }
       
-      console.log(`[Backup] PITR: Applied ${walFilesApplied} WAL files up to ${toTime.toISOString()}`);
+      logger.info(`[Backup] PITR: Applied ${walFilesApplied} WAL files up to ${toTime.toISOString()}`);
       return walFilesApplied;
     } catch (error) {
-      console.error('[Backup] WAL replay failed:', error);
+      logger.error('[Backup] WAL replay failed:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -1247,7 +1266,7 @@ export class BackupService {
     const nextRun = this.parseNextCronRun(cronExpression);
     const delay = Math.max(0, nextRun.getTime() - Date.now());
     
-    console.log(`[Backup] Scheduling ${name} job: ${cronExpression}, next run in ${Math.round(delay/1000/60)} minutes`);
+    logger.info(`[Backup] Scheduling ${name} job: ${cronExpression}, next run in ${Math.round(delay/1000/60)} minutes`);
     
     // Schedule the job
     const scheduleNext = () => {
@@ -1255,12 +1274,12 @@ export class BackupService {
       const nextDelay = Math.max(0, next.getTime() - Date.now());
       
       const timeout = setTimeout(async () => {
-        console.log(`[Backup] Running scheduled ${name} job`);
+        logger.info(`[Backup] Running scheduled ${name} job`);
         try {
           await job();
-          console.log(`[Backup] Scheduled ${name} job completed`);
+          logger.info(`[Backup] Scheduled ${name} job completed`);
         } catch (error) {
-          console.error(`[Backup] Scheduled ${name} job failed:`, error);
+          logger.error(`[Backup] Scheduled ${name} job failed:`, { error: error instanceof Error ? error.message : String(error) });
         }
         // Schedule next run
         scheduleNext();
@@ -1273,12 +1292,12 @@ export class BackupService {
     
     // Initial schedule
     const initialTimeout = setTimeout(async () => {
-      console.log(`[Backup] Running scheduled ${name} job`);
+      logger.info(`[Backup] Running scheduled ${name} job`);
       try {
         await job();
-        console.log(`[Backup] Scheduled ${name} job completed`);
+        logger.info(`[Backup] Scheduled ${name} job completed`);
       } catch (error) {
-        console.error(`[Backup] Scheduled ${name} job failed:`, error);
+        logger.error(`[Backup] Scheduled ${name} job failed:`, { error: error instanceof Error ? error.message : String(error) });
       }
       // Schedule subsequent runs
       scheduleNext();
@@ -1296,7 +1315,7 @@ export class BackupService {
     const parts = cronExpression.split(/\s+/);
     if (parts.length !== 5) {
       // Default to daily at 3am
-      console.warn(`[Backup] Invalid cron: ${cronExpression}, using daily 3am`);
+      logger.warn(`[Backup] Invalid cron: ${cronExpression}, using daily 3am`);
       const next = new Date();
       next.setHours(3, 0, 0, 0);
       if (next.getTime() <= Date.now()) {
@@ -1347,7 +1366,7 @@ export class BackupService {
   stopScheduledBackups(): void {
     for (const [name, timeout] of this.schedules) {
       clearTimeout(timeout);
-      console.log(`[Backup] Stopped scheduled ${name} job`);
+      logger.info(`[Backup] Stopped scheduled ${name} job`);
     }
     this.schedules.clear();
   }

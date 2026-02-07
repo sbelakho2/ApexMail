@@ -28,8 +28,10 @@ import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions'
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'observability:tracing' });
 
 export interface TraceContextData {
   traceId: string;
@@ -112,7 +114,7 @@ export class TracingService {
    */
   async initialize(): Promise<void> {
     if (!config.tracing.enabled) {
-      console.log('[Tracing] Tracing is disabled');
+      logger.info('[Tracing] Tracing is disabled');
       return;
     }
 
@@ -183,7 +185,7 @@ export class TracingService {
       }
     }, 60_000);
 
-    console.log('[Tracing] Service initialized');
+    logger.info('[Tracing] Service initialized');
   }
 
   /**
@@ -639,7 +641,7 @@ export class TracingService {
         [cutoff]
       );
 
-      console.log(`[Tracing] Deleted ${result.rowCount} old spans`);
+      logger.info(`[Tracing] Deleted ${result.rowCount} old spans`);
 
       return { ok: true, value: result.rowCount || 0 };
     } catch (error) {
@@ -721,7 +723,7 @@ export class TracingService {
         ]);
       }
     } catch (error) {
-      console.error('[Tracing] Failed to flush span buffer:', error);
+      logger.error('[Tracing] Failed to flush span buffer:', { error: error instanceof Error ? error.message : String(error) });
       // Re-add failed spans to buffer
       this.spanBuffer.push(...spansToFlush);
     }
@@ -778,6 +780,6 @@ export class TracingService {
       await this.provider.shutdown();
     }
 
-    console.log('[Tracing] Service shut down');
+    logger.info('[Tracing] Service shut down');
   }
 }

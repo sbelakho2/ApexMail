@@ -17,9 +17,26 @@ const loginSchema = z.object({
   tenantId: z.string().uuid().optional(),
 });
 
+const ALLOWED_SCOPES = [
+  'messages:send',
+  'messages:read',
+  'messages:write',
+  'domains:read',
+  'domains:write',
+  'suppressions:read',
+  'suppressions:write',
+  'events:read',
+  'templates:read',
+  'templates:write',
+  'analytics:read',
+  'webhooks:read',
+  'webhooks:write',
+  'admin',
+] as const;
+
 const createApiKeySchema = z.object({
-  name: z.string().min(1).max(100),
-  scopes: z.array(z.string().max(100)).min(1).max(50), // Limit scope count and length
+  name: z.string().min(1, 'Name is required').max(255),
+  scopes: z.array(z.enum(ALLOWED_SCOPES)).min(1, 'At least one scope is required').max(ALLOWED_SCOPES.length),
   rateLimit: z.number().int().positive().optional(),
   allowedIps: z.array(z.string().max(45)).max(100).optional(), // IPv6 max is 45 chars, limit count
   expiresAt: z.string().datetime().optional(),
@@ -92,8 +109,8 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
       ctx.config.auth.jwtExpiry
     );
 
-    // Update last login
-    await usersRepo.update(user.id, { lastLoginAt: new Date() });
+    // Update last login (A-004: pass tenantId for tenant isolation)
+    await usersRepo.update(user.id, { lastLoginAt: new Date() }, user.tenantId);
 
     // Audit log
     await auditRepo.create({
@@ -136,7 +153,8 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
       });
     }
 
-    const userResult = await usersRepo.findById(userId);
+    // A-001: Pass tenantId for database-level tenant isolation
+    const userResult = await usersRepo.findById(userId, tenantId);
     if (!userResult.ok || !userResult.value) {
       throw ApiError.notFound('User');
     }
@@ -310,6 +328,11 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to revoke API key');
     }
 
+    // C-117: Invalidate cached API key lookup so revocation takes effect immediately
+    //        instead of waiting up to 60s for cache TTL expiry.
+    const { invalidateApiKeyCacheByKeyId } = await import('../middleware/auth.js');
+    invalidateApiKeyCacheByKeyId(apiKeyId);
+
     // Audit log
     await auditRepo.create({
       tenantId,
@@ -380,6 +403,74 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     logger.info('User logged out, token blacklisted', { userId, ttlSeconds });
 
     return c.json({ success: true, message: 'Logged out successfully' });
+  });
+
+  // F-236: Refresh JWT token
+  // Allows authenticated users to obtain a new JWT before the current one
+  // expires, avoiding forced re-login. The existing JWT must still be valid
+  // (not expired, not blacklisted). The old token is NOT blacklisted so that
+  // in-flight requests using it can still complete within its remaining TTL.
+  router.post('/refresh', async (c) => {
+    const userId = c.get('userId');
+    const tenantId = c.get('tenantId');
+    const logger = c.get('logger');
+
+    if (!userId) {
+      // API key sessions cannot be refreshed — they don't use JWTs
+      throw ApiError.badRequest(
+        'Token refresh is only available for JWT-authenticated sessions',
+        'REFRESH_NOT_APPLICABLE'
+      );
+    }
+
+    // Re-fetch the user to ensure they are still active and pick up any
+    // role or permission changes since the original token was issued.
+    const userResult = await usersRepo.findById(userId, tenantId);
+    if (!userResult.ok || !userResult.value) {
+      throw ApiError.unauthorized('User not found', 'USER_NOT_FOUND');
+    }
+
+    const user = userResult.value;
+
+    if (user.status !== 'active') {
+      throw ApiError.unauthorized('Account is not active', 'ACCOUNT_INACTIVE');
+    }
+
+    // Issue a fresh JWT with updated claims
+    const token = createJwt(
+      {
+        sub: user.id,
+        tid: user.tenantId,
+        scopes: [user.role],
+      },
+      ctx.config.auth.jwtSecret,
+      ctx.config.auth.jwtExpiry
+    );
+
+    // Audit log
+    await auditRepo.create({
+      tenantId: user.tenantId,
+      userId: user.id,
+      action: 'user.token_refreshed',
+      resourceType: 'user',
+      resourceId: user.id,
+      ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+      userAgent: c.req.header('User-Agent') ?? undefined,
+    });
+
+    logger.info('JWT refreshed', { userId: user.id });
+
+    return c.json({
+      token,
+      expiresIn: ctx.config.auth.jwtExpiry,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        tenantId: user.tenantId,
+      },
+    });
   });
 
   // Generate CSRF token for the current session

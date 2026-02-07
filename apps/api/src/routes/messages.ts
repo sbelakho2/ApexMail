@@ -1,5 +1,15 @@
 /**
  * Messages Routes - Core email sending API
+ *
+ * F-213: Response envelope standard
+ * ---------------------------------
+ * Single-item responses : { <resource>: T }              e.g. { message: {...} }
+ * List responses         : { <resources>: T[], pagination: { total, limit, offset, hasMore } }
+ * Action responses       : { success: boolean, message?: string }
+ * Batch responses        : { results: T[], summary: { total, success, failed } }
+ *
+ * NOTE: The codebase uses resource-named keys ("message", "messages")
+ * rather than generic "data". All new endpoints MUST follow this pattern.
  */
 
 import { Hono } from 'hono';
@@ -26,17 +36,17 @@ const stripHeaderChars = (str: string): string =>
   str.replace(/[\r\n\x00]/g, '').trim();
 
 const recipientSchema = z.object({
-  email: z.string().email().max(254), // RFC 5321 max email length
+  email: z.string().email().max(254).trim().toLowerCase(), // RFC 5321 max email length; F-184: normalize
   name: z.string().max(200).transform(stripHeaderChars).optional(), // Sanitize to prevent header injection
   type: z.enum(['to', 'cc', 'bcc']).default('to'),
 });
 
 const sendMessageSchema = z.object({
   from: z.object({
-    email: z.string().email().max(254), // RFC 5321 max email length
+    email: z.string().email().max(254).trim().toLowerCase(), // RFC 5321 max email length; F-184: normalize
     name: z.string().max(200).transform(stripHeaderChars).optional(), // Sanitize to prevent header injection
   }),
-  replyTo: z.string().email().max(254).optional(),
+  replyTo: z.string().email().max(254).trim().toLowerCase().optional(), // F-184: normalize
   to: z.array(recipientSchema).min(1).max(50),
   cc: z.array(recipientSchema).max(50).optional(),
   bcc: z.array(recipientSchema).max(50).optional(),
@@ -50,14 +60,42 @@ const sendMessageSchema = z.object({
   priority: z.enum(['high', 'normal', 'low']).default('normal'),
   scheduledAt: z.string().datetime().optional(),
   metadata: z.record(z.unknown()).optional(),
+  /**
+   * C-110: Email attachments with size validation.
+   * Individual attachments: max 25 MB (base64-encoded size).
+   * content is expected as a base64-encoded string.
+   */
+  attachments: z.array(z.object({
+    filename: z.string().min(1).max(255),
+    content: z.string().max(25 * 1024 * 1024), // 25 MB max per attachment (base64)
+    contentType: z.string().max(255),
+    encoding: z.enum(['base64', 'utf-8', 'binary']).default('base64'),
+  })).max(20).optional(), // Max 20 attachments
 }).refine(
   (data) => data.html || data.text || data.templateId,
   { message: 'Either html, text, or templateId must be provided' }
+).refine(
+  /**
+   * C-110: Total attachment size must not exceed 50 MB.
+   * Prevents oversized payloads from being queued.
+   */
+  (data) => {
+    if (!data.attachments || data.attachments.length === 0) return true;
+    const totalSize = data.attachments.reduce((sum, a) => sum + a.content.length, 0);
+    return totalSize <= 50 * 1024 * 1024; // 50 MB total
+  },
+  { message: 'Total attachment size exceeds the 50MB limit' }
 );
 
 const batchSendSchema = z.object({
   messages: z.array(sendMessageSchema).min(1).max(1000),
 });
+
+/**
+ * F-194: UUID format regex for route parameter validation.
+ * Prevents malformed IDs from reaching DB queries.
+ */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
@@ -379,6 +417,11 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('id');
 
+    // F-194: Validate ID format before passing to DB query
+    if (!uuidRegex.test(messageId)) {
+      throw ApiError.badRequest('Invalid message ID format', 'INVALID_ID');
+    }
+
     // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
     // Previously used fetch-then-check pattern which could leak timing information
     const result = await messagesRepo.findById(messageId, tenantId);
@@ -444,15 +487,16 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const campaignId = c.req.query('campaignId');
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    // F-185: Pagination defaults and limits — default 20, max 100, offset >= 0
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '20', 10) || 20, 100));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
     const result = await messagesRepo.listByTenant(tenantId, {
       status,
       campaignId,
       startDate: startDate ? new Date(startDate) : undefined,
       endDate: endDate ? new Date(endDate) : undefined,
-      limit: Math.min(limit, 100),
+      limit,
       offset,
     });
 
@@ -501,6 +545,11 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const userId = c.get('userId');
     const messageId = c.req.param('id');
     const logger = c.get('logger');
+
+    // F-194: Validate ID format before passing to DB query
+    if (!uuidRegex.test(messageId)) {
+      throw ApiError.badRequest('Invalid message ID format', 'INVALID_ID');
+    }
 
     // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
     const result = await messagesRepo.findById(messageId, tenantId);

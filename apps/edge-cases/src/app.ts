@@ -13,8 +13,11 @@ import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
 
+import { createLogger } from '@apexmail/lib';
 import { config } from './config.js';
 import { EAIService } from './services/eai.js';
+
+const edgeLogger = createLogger({ name: 'edge-cases' });
 import { AttachmentService } from './services/attachment.js';
 import { CalendarService } from './services/calendar.js';
 import { DeliveryService } from './services/delivery.js';
@@ -49,7 +52,7 @@ async function initializeServices(): Promise<void> {
 
   // Test database connection
   await pool.query('SELECT 1');
-  console.log('[EdgeCases] Database connection established');
+  edgeLogger.info('[EdgeCases] Database connection established');
 
   // Create Redis connection
   redis = new Redis({
@@ -62,11 +65,11 @@ async function initializeServices(): Promise<void> {
   });
 
   redis.on('connect', () => {
-    console.log('[EdgeCases] Redis connection established');
+    edgeLogger.info('[EdgeCases] Redis connection established');
   });
 
   redis.on('error', (error: Error) => {
-    console.error('[EdgeCases] Redis error:', error.message);
+    edgeLogger.error('[EdgeCases] Redis error:', { error: error instanceof Error ? error.message : String(error) });
   });
 
   // Initialize services
@@ -75,7 +78,7 @@ async function initializeServices(): Promise<void> {
   calendarService = new CalendarService(pool, redis);
   deliveryService = new DeliveryService(pool, redis);
 
-  console.log('[EdgeCases] All services initialized');
+  edgeLogger.info('[EdgeCases] All services initialized');
 }
 
 /**
@@ -182,7 +185,7 @@ export function createApp(): Hono {
 
   // Error handling
   app.onError((error, c) => {
-    console.error('[EdgeCases] Unhandled error:', error);
+    edgeLogger.error('[EdgeCases] Unhandled error:', { error: error instanceof Error ? error.message : String(error) });
     
     return c.json({
       error: 'Internal server error',
@@ -205,21 +208,21 @@ export function createApp(): Hono {
  * Shutdown services gracefully
  */
 export async function shutdown(): Promise<void> {
-  console.log('[EdgeCases] Shutting down services...');
+  edgeLogger.info('[EdgeCases] Shutting down services...');
   
   // Close Redis connection
   if (redis) {
     await redis.quit();
-    console.log('[EdgeCases] Redis connection closed');
+    edgeLogger.info('[EdgeCases] Redis connection closed');
   }
   
   // Close database pool
   if (pool) {
     await pool.end();
-    console.log('[EdgeCases] Database connection closed');
+    edgeLogger.info('[EdgeCases] Database connection closed');
   }
   
-  console.log('[EdgeCases] Shutdown complete');
+  edgeLogger.info('[EdgeCases] Shutdown complete');
 }
 
 /**

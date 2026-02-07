@@ -10,7 +10,9 @@
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
+
+const logger = createLogger({ name: 'observability:dashboards' });
 
 export interface Dashboard {
   id: string;
@@ -221,7 +223,7 @@ export class DashboardService {
 
       this.dashboards.set(id, fullDashboard);
 
-      console.log(`[Dashboards] Created dashboard: ${dashboard.name}`);
+      logger.info(`[Dashboards] Created dashboard: ${dashboard.name}`);
 
       return { ok: true, value: fullDashboard };
     } catch (error) {

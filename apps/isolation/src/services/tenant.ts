@@ -11,8 +11,10 @@
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config, IsolationLevel, QuotaConfig } from '../config.js';
+
+const logger = createLogger({ name: 'isolation:tenant' });
 
 export enum TenantStatus {
   PENDING = 'pending',
@@ -202,7 +204,7 @@ export class TenantService {
 
       this.orgCache.set(id, org);
 
-      console.log(`[Tenant] Created organization: ${data.name} (${id})`);
+      logger.info(`[Tenant] Created organization: ${data.name} (${id})`);
 
       return { ok: true, value: org };
     } catch (error) {
@@ -309,7 +311,7 @@ export class TenantService {
         details: { reason },
       });
 
-      console.log(`[Tenant] Suspended organization: ${id}`);
+      logger.info(`[Tenant] Suspended organization: ${id}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -448,7 +450,7 @@ export class TenantService {
 
       this.workspaceCache.set(id, workspace);
 
-      console.log(`[Tenant] Created workspace: ${data.name} (${id})`);
+      logger.info(`[Tenant] Created workspace: ${data.name} (${id})`);
 
       return { ok: true, value: workspace };
     } catch (error) {
@@ -556,7 +558,7 @@ export class TenantService {
         details: {},
       });
 
-      console.log(`[Tenant] Deleted workspace: ${id}`);
+      logger.info(`[Tenant] Deleted workspace: ${id}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -828,7 +830,7 @@ export class TenantService {
         new Date(),
       ]);
     } catch (error) {
-      console.error('[Tenant] Failed to log audit event:', error);
+      logger.error('[Tenant] Failed to log audit event:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 

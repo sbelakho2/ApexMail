@@ -10,8 +10,11 @@ import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import { createLogger } from '@apexmail/lib';
 import { config } from './config.js';
 import { haRoutes } from './routes/ha.js';
+
+const haLogger = createLogger({ name: 'ha' });
 import { HealthCheckService } from './services/health-check.js';
 import { FailoverService } from './services/failover.js';
 import { BackupService } from './services/backup.js';
@@ -143,13 +146,13 @@ app.get('/internal/state', async (c) => {
 app.post('/internal/sync', async (c) => {
   // Receive state updates from other regions
   const body = await c.req.json();
-  console.log('[HA] Received sync from region:', body.sourceRegion);
+  haLogger.info('[HA] Received sync from region:', body.sourceRegion);
   return c.json({ received: true });
 });
 
 // Error handling
 app.onError((err, c) => {
-  console.error('[HA] Unhandled error:', err);
+  haLogger.error('[HA] Unhandled error:', { error: err instanceof Error ? err.message : String(err) });
   
   // Check if it's a chaos-induced error
   if (err.name === 'ChaosError') {
@@ -175,7 +178,7 @@ app.notFound((c) => {
 
 // Initialize services
 async function initializeServices(): Promise<void> {
-  console.log('[HA] Initializing services...');
+  haLogger.info('[HA] Initializing services...');
   
   // Initialize circuit breakers first
   await circuitBreaker.initialize();
@@ -202,12 +205,12 @@ async function initializeServices(): Promise<void> {
   // Initialize chaos engineering
   await chaos.initialize();
   
-  console.log('[HA] All services initialized');
+  haLogger.info('[HA] All services initialized');
 }
 
 // Graceful shutdown
 async function shutdown(): Promise<void> {
-  console.log('[HA] Shutting down...');
+  haLogger.info('[HA] Shutting down...');
   
   // Stop all services
   healthCheck.stopMonitoring();
@@ -222,7 +225,7 @@ async function shutdown(): Promise<void> {
   // Close Redis connections
   await redis.quit();
   
-  console.log('[HA] Shutdown complete');
+  haLogger.info('[HA] Shutdown complete');
   process.exit(0);
 }
 

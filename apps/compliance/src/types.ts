@@ -275,6 +275,8 @@ export interface DataSubjectRequestResult {
     exportUrl?: string;
     exportExpiresAt?: Date;
     deletedRecords?: number;
+    /** E-167: Detailed confirmation receipt for data deletion requests. */
+    deletionConfirmation?: Record<string, unknown>;
     modifiedRecords?: number;
     rejectionReason?: string;
 }

@@ -11,8 +11,10 @@
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'observability:logging' });
 
 export enum LogLevel {
   TRACE = 0,
@@ -84,11 +86,11 @@ export class LoggingService {
     // Start flush interval with error handling
     this.flushInterval = setInterval(() => {
       this.flushBuffer().catch(err => {
-        console.error('[Logging] Buffer flush failed:', err instanceof Error ? err.message : err);
+        logger.error('[Logging] Buffer flush failed:', { error: err instanceof Error ? err.message : String(err) });
       });
     }, 5000);
 
-    console.log('[Logging] Service initialized');
+    logger.info('[Logging] Service initialized');
   }
 
   /**
@@ -430,7 +432,7 @@ export class LoggingService {
         
         callback(log);
       } catch (error) {
-        console.error('[Logging] Failed to parse streamed log:', error);
+        logger.error('[Logging] Failed to parse streamed log:', { error: error instanceof Error ? error.message : String(error) });
       }
     });
 
@@ -455,7 +457,7 @@ export class LoggingService {
         [cutoff]
       );
 
-      console.log(`[Logging] Deleted ${result.rowCount} old log entries`);
+      logger.info(`[Logging] Deleted ${result.rowCount} old log entries`);
 
       return { ok: true, value: result.rowCount || 0 };
     } catch (error) {
@@ -506,7 +508,7 @@ export class LoggingService {
 
   private outputToConsole(entry: LogEntry): void {
     if (config.logging.format === 'json') {
-      console.log(JSON.stringify(entry));
+      logger.info(JSON.stringify(entry));
     } else {
       const timestamp = entry.timestamp.toISOString();
       const level = entry.levelName.padEnd(5);
@@ -524,7 +526,7 @@ export class LoggingService {
         }
       }
 
-      console.log(message);
+      logger.info(message);
     }
   }
 
@@ -566,7 +568,7 @@ export class LoggingService {
         ]);
       }
     } catch (error) {
-      console.error('[Logging] Failed to flush log buffer:', error);
+      logger.error('[Logging] Failed to flush log buffer:', { error: error instanceof Error ? error.message : String(error) });
       // Re-add failed logs to buffer
       this.buffer.push(...logsToFlush);
     }
@@ -629,6 +631,6 @@ export class LoggingService {
       clearInterval(this.flushInterval);
     }
     await this.flushBuffer();
-    console.log('[Logging] Service shut down');
+    logger.info('[Logging] Service shut down');
   }
 }

@@ -319,31 +319,58 @@ export class BounceServer {
       status: '5.0.0',
     };
 
-    // Check for DSN (multipart/report)
-    const attachments = parsed.attachments ?? [];
-    for (const attachment of attachments) {
-      if (attachment.contentType === 'message/delivery-status') {
-        const dsn = attachment.content.toString('utf-8');
-        this.parseDSN(dsn, result);
-      } else if (attachment.contentType === 'message/rfc822') {
-        // Original message headers
-        const originalHeaders = attachment.content.toString('utf-8');
-        this.extractOriginalMessageId(originalHeaders, result);
+    // G-212: Wrap each parsing step in try/catch so a malformed attachment
+    // or header doesn't crash the entire bounce processor.
+    try {
+      // Check for DSN (multipart/report)
+      const attachments = parsed.attachments ?? [];
+      for (const attachment of attachments) {
+        try {
+          if (attachment.contentType === 'message/delivery-status') {
+            const dsn = attachment.content.toString('utf-8');
+            this.parseDSN(dsn, result);
+          } else if (attachment.contentType === 'message/rfc822') {
+            // Original message headers
+            const originalHeaders = attachment.content.toString('utf-8');
+            this.extractOriginalMessageId(originalHeaders, result);
+          }
+        } catch (attachErr) {
+          this.logger.warn('G-212: Failed to parse bounce attachment, skipping', {
+            contentType: attachment.contentType,
+            error: attachErr instanceof Error ? attachErr.message : 'Unknown',
+          });
+        }
       }
+    } catch (err) {
+      this.logger.warn('G-212: Failed to iterate bounce attachments', {
+        error: err instanceof Error ? err.message : 'Unknown',
+      });
     }
 
     // Fallback: Try to extract from headers
-    if (!result.originalMessageId) {
-      // Check In-Reply-To or References headers
-      const inReplyTo = parsed.inReplyTo;
-      if (inReplyTo) {
-        result.originalMessageId = inReplyTo;
+    try {
+      if (!result.originalMessageId) {
+        // Check In-Reply-To or References headers
+        const inReplyTo = parsed.inReplyTo;
+        if (inReplyTo) {
+          result.originalMessageId = inReplyTo;
+        }
       }
+    } catch (err) {
+      this.logger.warn('G-212: Failed to extract In-Reply-To header', {
+        error: err instanceof Error ? err.message : 'Unknown',
+      });
     }
 
     // Analyze bounce type from diagnostic code or text
-    if (!result.diagnosticCode && parsed.text) {
-      result.diagnosticCode = this.extractDiagnosticFromText(parsed.text);
+    try {
+      if (!result.diagnosticCode && parsed.text) {
+        result.diagnosticCode = this.extractDiagnosticFromText(parsed.text);
+      }
+    } catch (err) {
+      this.logger.warn('G-212: Failed to extract diagnostic from bounce text', {
+        error: err instanceof Error ? err.message : 'Unknown',
+      });
     }
 
     // Classify bounce type
@@ -421,56 +448,130 @@ export class BounceServer {
     return '';
   }
 
+  /**
+   * E-142: Comprehensive SMTP bounce classification.
+   *
+   * Maps RFC 3463 enhanced status codes and common diagnostic strings to
+   * hard/soft bounce types with granular subtypes.  The ordering is
+   * intentional: more specific codes are matched first so they take
+   * precedence over the broader class-level fallbacks.
+   */
   private classifyBounce(result: BounceInfo): void {
     const status = result.status;
     const diagnostic = result.diagnosticCode.toLowerCase();
 
-    // Check status code first
-    if (status.startsWith('5.1.') || status.startsWith('5.0.')) {
+    // ------------------------------------------------------------------
+    // Step 1 — determine hard vs soft from the status class
+    // ------------------------------------------------------------------
+    if (status.startsWith('5.')) {
       result.bounceType = 'hard';
     } else if (status.startsWith('4.')) {
       result.bounceType = 'soft';
-    } else if (status.startsWith('5.')) {
-      result.bounceType = 'hard';
     }
 
-    // Determine subtype
-    const statusCode = status;
-    
-    // Hard bounce subtypes
-    if (/5\.1\.[1-6]/.test(statusCode) || 
-        /user unknown|no such user|mailbox not found|does not exist/i.test(diagnostic)) {
+    // ------------------------------------------------------------------
+    // Step 2 — determine subtype from specific status codes + diagnostics
+    // ------------------------------------------------------------------
+
+    // --- Hard bounce subtypes ---
+
+    // 5.1.x — Addressing errors
+    if (/5\.1\.[1-6]/.test(status) ||
+        /user unknown|no such user|mailbox not found|does not exist|address rejected|recipient rejected/i.test(diagnostic)) {
       result.bounceType = 'hard';
       result.bounceSubtype = 'no-mailbox';
-    } else if (/5\.1\.0/.test(statusCode) || /invalid address/i.test(diagnostic)) {
+    } else if (/5\.1\.0/.test(status) || /invalid address|bad destination/i.test(diagnostic)) {
       result.bounceType = 'hard';
       result.bounceSubtype = 'syntax-error';
-    } else if (/5\.7\.[0-9]/.test(statusCode) || 
-               /blocked|rejected|spam|policy/i.test(diagnostic)) {
+    } else if (/5\.1\.[7-9]/.test(status) || /sender.*rejected|null sender/i.test(diagnostic)) {
       result.bounceType = 'hard';
-      result.bounceSubtype = 'policy';
-    } else if (/5\.2\.1/.test(statusCode) || /disabled|inactive/i.test(diagnostic)) {
+      result.bounceSubtype = 'bad-sender';
+    }
+
+    // 5.2.x — Mailbox status
+    else if (/5\.2\.1/.test(status) || /disabled|inactive|account.*disabled/i.test(diagnostic)) {
       result.bounceType = 'hard';
       result.bounceSubtype = 'disabled';
+    } else if (/5\.2\.2/.test(status) || /over quota|mailbox full|storage exceeded/i.test(diagnostic)) {
+      // Permanent quota — treat as hard (RFC 3463 5.2.2)
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'mailbox-full';
+    } else if (/5\.2\.[034]/.test(status) || /message.*too large|size limit/i.test(diagnostic)) {
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'message-too-large';
     }
-    
-    // Soft bounce subtypes
-    else if (/4\.2\.[12]/.test(statusCode) || /over quota|mailbox full/i.test(diagnostic)) {
+
+    // 5.3.x — System status (destination)
+    else if (/5\.3\.[0-5]/.test(status) || /system.*not accepting|not capable/i.test(diagnostic)) {
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'system-error';
+    }
+
+    // 5.5.x — Protocol errors
+    else if (/5\.5\.[0-5]/.test(status) || /protocol error|command.*not recognized/i.test(diagnostic)) {
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'protocol-error';
+    }
+
+    // 5.6.x — Media/content errors
+    else if (/5\.6\.[0-6]/.test(status) || /content.*rejected|media.*not supported/i.test(diagnostic)) {
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'content-error';
+    }
+
+    // 5.7.x — Policy / security
+    else if (/5\.7\.[0-9]/.test(status) ||
+             /blocked|rejected|spam|policy|blacklist|dmarc|spf.*fail|dkim.*fail|authentication.*required/i.test(diagnostic)) {
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'policy';
+    }
+
+    // 5.4.x — Network / routing (persistent)
+    else if (/5\.4\.[0-7]/.test(status) || /no route|host not found|domain not found|dns.*error/i.test(diagnostic)) {
+      result.bounceType = 'hard';
+      result.bounceSubtype = 'domain-error';
+    }
+
+    // --- Soft bounce subtypes ---
+
+    // 4.2.x — Mailbox issues (temporary)
+    else if (/4\.2\.[12]/.test(status) || /over quota|mailbox full|insufficient.*storage/i.test(diagnostic)) {
       result.bounceType = 'soft';
       result.bounceSubtype = 'mailbox-full';
-    } else if (/4\.4\.[1-7]/.test(statusCode) || 
-               /connection|network|timeout/i.test(diagnostic)) {
+    }
+
+    // 4.4.x — Network / connection issues
+    else if (/4\.4\.[1-7]/.test(status) ||
+             /connection|network|timeout|timed out|could not connect/i.test(diagnostic)) {
       result.bounceType = 'soft';
       result.bounceSubtype = 'network-error';
-    } else if (/4\.7\.[0-9]/.test(statusCode) || /rate limit|too many/i.test(diagnostic)) {
+    }
+
+    // 4.7.x — Rate limiting / greylisting
+    else if (/4\.7\.[0-9]/.test(status) || /rate limit|too many|try.*later|greylisted/i.test(diagnostic)) {
       result.bounceType = 'soft';
       result.bounceSubtype = 'rate-limited';
-    } else if (/4\.3\.[0-5]/.test(statusCode) || /system|temporary/i.test(diagnostic)) {
+    }
+
+    // 4.3.x — System issues (temporary)
+    else if (/4\.3\.[0-5]/.test(status) || /system|temporary|service.*unavailable/i.test(diagnostic)) {
       result.bounceType = 'soft';
       result.bounceSubtype = 'system-error';
     }
-    
-    // Default subtype
+
+    // 4.1.x — Addressing (temporary — e.g. relay denied temporarily)
+    else if (/4\.1\.[0-9]/.test(status)) {
+      result.bounceType = 'soft';
+      result.bounceSubtype = 'address-temporary';
+    }
+
+    // 4.5.x — Protocol issues (temporary)
+    else if (/4\.5\.[0-5]/.test(status)) {
+      result.bounceType = 'soft';
+      result.bounceSubtype = 'protocol-error';
+    }
+
+    // --- Default subtypes ---
     else if (result.bounceType === 'hard') {
       result.bounceSubtype = 'other';
     } else {

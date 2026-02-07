@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ApexMail, ValidationError, AuthenticationError, RateLimitError, ApexMailError } from './index.js';
+import { ApexMail, ValidationError, AuthenticationError, RateLimitError, ApexMailError, NotFoundError, ForbiddenError, ConflictError } from './index.js';
 
 // Mock fetch
 const mockFetch = vi.fn();
@@ -349,6 +349,41 @@ describe('ApexMail SDK', () => {
                 subject: 'Test',
                 html: '<p>Hi</p>',
             })).rejects.toThrow(AuthenticationError);
+        });
+
+        it('should throw ForbiddenError on 403', async () => {
+            mockFetch.mockResolvedValueOnce({
+                ok: false,
+                status: 403,
+                json: async () => ({ message: 'Forbidden' }),
+            });
+
+            await expect(client.emails.send({
+                from: 'a@example.com',
+                to: 'b@example.com',
+                subject: 'Test',
+                html: '<p>Hi</p>',
+            })).rejects.toThrow(ForbiddenError);
+        });
+
+        it('should throw NotFoundError on 404', async () => {
+            mockFetch.mockResolvedValueOnce({
+                ok: false,
+                status: 404,
+                json: async () => ({ message: 'Not found' }),
+            });
+
+            await expect(client.emails.get('nonexistent')).rejects.toThrow(NotFoundError);
+        });
+
+        it('should throw ConflictError on 409', async () => {
+            mockFetch.mockResolvedValueOnce({
+                ok: false,
+                status: 409,
+                json: async () => ({ message: 'Conflict' }),
+            });
+
+            await expect(client.domains.create({ domain: 'existing.com' })).rejects.toThrow(ConflictError);
         });
 
         it('should throw RateLimitError on 429 with retryAfter', async () => {

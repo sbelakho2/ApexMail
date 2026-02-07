@@ -11,8 +11,10 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'ha-multi-region' });
 
 export enum RegionStatus {
   HEALTHY = 'healthy',
@@ -137,7 +139,7 @@ export class MultiRegionService {
     // Load routing rules from database
     await this.loadRoutingRules();
 
-    console.log('[MultiRegion] Service initialized with', this.regions.size, 'regions');
+    logger.info(`[MultiRegion] Service initialized with ${this.regions.size} regions`);
   }
 
   /**
@@ -147,7 +149,7 @@ export class MultiRegionService {
     // Start health checking with error handling
     this.healthCheckInterval = setInterval(() => {
       this.checkAllRegions().catch(err => {
-        console.error('[MultiRegion] Health check failed:', err instanceof Error ? err.message : err);
+        logger.error('[MultiRegion] Health check failed', { error: err instanceof Error ? err.message : String(err) });
       });
     }, config.regionHealthCheckIntervalMs ?? 10000);
 
@@ -155,12 +157,12 @@ export class MultiRegionService {
     if (this.routingMode === RoutingMode.ACTIVE_ACTIVE) {
       this.syncInterval = setInterval(() => {
         this.synchronizeRegions().catch(err => {
-          console.error('[MultiRegion] Region sync failed:', err instanceof Error ? err.message : err);
+          logger.error('[MultiRegion] Region sync failed', { error: err instanceof Error ? err.message : String(err) });
         });
       }, config.crossRegionSyncIntervalMs ?? 5000);
     }
 
-    console.log('[MultiRegion] Services started');
+    logger.info('[MultiRegion] Services started');
   }
 
   /**
@@ -269,7 +271,7 @@ export class MultiRegionService {
       timestamp: new Date().toISOString(),
     }));
 
-    console.log(`[MultiRegion] Region ${regionId} status: ${previousStatus} -> ${status}`);
+    logger.info(`[MultiRegion] Region ${regionId} status: ${previousStatus} -> ${status}`);
 
     return { ok: true, value: undefined };
   }
@@ -305,7 +307,7 @@ export class MultiRegionService {
       timestamp: new Date().toISOString(),
     }));
 
-    console.log(`[MultiRegion] Region ${regionId} role: ${previousRole} -> ${role}`);
+    logger.info(`[MultiRegion] Region ${regionId} role: ${previousRole} -> ${role}`);
 
     return { ok: true, value: undefined };
   }
@@ -343,8 +345,8 @@ export class MultiRegionService {
       };
     }
 
-    console.log(`[MultiRegion] Starting failover: ${currentPrimary.id} -> ${targetRegionId}`);
-    console.log(`[MultiRegion] Target region replication lag: ${targetRegion.replicationLagMs}ms`);
+    logger.info(`[MultiRegion] Starting failover: ${currentPrimary.id} -> ${targetRegionId}`);
+    logger.info(`[MultiRegion] Target region replication lag: ${targetRegion.replicationLagMs}ms`);
 
     try {
       // HA-003 FIX: STONITH - Fence the old primary BEFORE promoting the new one
@@ -360,7 +362,7 @@ export class MultiRegionService {
         };
       }
       
-      console.log(`[MultiRegion] STONITH: Successfully fenced old primary ${currentPrimary.id}`);
+      logger.info(`[MultiRegion] STONITH: Successfully fenced old primary ${currentPrimary.id}`);
 
       // Mark current primary as degraded (already fenced)
       await this.setRegionStatus(currentPrimary.id, RegionStatus.DEGRADED);
@@ -386,12 +388,12 @@ export class MultiRegionService {
         fencedRegion: currentPrimary.id
       })]);
 
-      console.log(`[MultiRegion] Failover completed to ${targetRegionId}`);
+      logger.info(`[MultiRegion] Failover completed to ${targetRegionId}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
       // HA-003 FIX: On failure, attempt to unfence the old primary to restore service
-      console.error(`[MultiRegion] Failover failed, attempting to restore old primary...`);
+      logger.error('[MultiRegion] Failover failed, attempting to restore old primary...');
       await this.unfenceRegion(currentPrimary.id, 'Failover failed - restoring previous primary');
       return { ok: false, error: error as Error };
     }
@@ -449,7 +451,7 @@ export class MultiRegionService {
         // Even if the API call fails (region might be down), we proceed
         // The key is to ensure the region is marked as fenced in our state
         if (fenceResponse && !fenceResponse.ok) {
-          console.warn(`[STONITH] API fence call to ${regionId} returned non-OK, but proceeding with state fence`);
+          logger.warn(`[STONITH] API fence call to ${regionId} returned non-OK, but proceeding with state fence`);
         }
 
         // Step 3: Block the region at the routing level
@@ -473,7 +475,7 @@ export class MultiRegionService {
           VALUES ($1, 'fence', $2, $3, NOW())
         `, [regionId, reason, this.currentRegion]);
 
-        console.log(`[STONITH] Successfully fenced region ${regionId}: ${reason}`);
+        logger.info(`[STONITH] Successfully fenced region ${regionId}: ${reason}`);
         return { ok: true, value: undefined };
 
       } finally {
@@ -536,7 +538,7 @@ export class MultiRegionService {
         VALUES ($1, 'unfence', $2, $3, NOW())
       `, [regionId, reason, this.currentRegion]);
 
-      console.log(`[STONITH] Successfully unfenced region ${regionId}: ${reason}`);
+      logger.info(`[STONITH] Successfully unfenced region ${regionId}: ${reason}`);
       return { ok: true, value: undefined };
 
     } catch (error) {
@@ -576,7 +578,7 @@ export class MultiRegionService {
 
       this.routingRules.set(id, fullRule);
 
-      console.log(`[MultiRegion] Added geo-routing rule: ${rule.name}`);
+      logger.info(`[MultiRegion] Added geo-routing rule: ${rule.name}`);
 
       return { ok: true, value: fullRule };
     } catch (error) {
@@ -636,7 +638,7 @@ export class MultiRegionService {
     if (mode === RoutingMode.ACTIVE_ACTIVE && previousMode !== RoutingMode.ACTIVE_ACTIVE) {
       this.syncInterval = setInterval(() => {
         this.synchronizeRegions().catch(err => {
-          console.error('[MultiRegion] Region sync failed:', err instanceof Error ? err.message : err);
+          logger.error('[MultiRegion] Region sync failed', { error: err instanceof Error ? err.message : String(err) });
         });
       }, config.crossRegionSyncIntervalMs ?? 5000);
     } else if (mode !== RoutingMode.ACTIVE_ACTIVE && this.syncInterval) {
@@ -644,7 +646,7 @@ export class MultiRegionService {
       this.syncInterval = null;
     }
 
-    console.log(`[MultiRegion] Routing mode: ${previousMode} -> ${mode}`);
+    logger.info(`[MultiRegion] Routing mode: ${previousMode} -> ${mode}`);
   }
 
   /**
@@ -660,7 +662,7 @@ export class MultiRegionService {
 
     await this.redis.hset('multiregion:weights', weights);
 
-    console.log('[MultiRegion] Updated region weights:', weights);
+    logger.info('[MultiRegion] Updated region weights:', weights);
 
     return { ok: true, value: undefined };
   }
@@ -708,7 +710,7 @@ export class MultiRegionService {
         this.routingRules.set(rule.id, rule);
       }
     } catch (error) {
-      console.warn('[MultiRegion] Could not load routing rules:', error);
+      logger.warn('[MultiRegion] Could not load routing rules', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -760,7 +762,7 @@ export class MultiRegionService {
         region.status = RegionStatus.OFFLINE;
         region.healthScore = 0;
         region.lastCheck = new Date();
-        console.warn(`[MultiRegion] Health check failed for ${region.id}:`, error);
+        logger.warn(`[MultiRegion] Health check failed for ${region.id}`, { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -884,7 +886,7 @@ export class MultiRegionService {
         await this.applyRemoteState(state);
       }
     } catch (error) {
-      console.warn('[MultiRegion] Cross-region sync failed:', error);
+      logger.warn('[MultiRegion] Cross-region sync failed', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -895,7 +897,7 @@ export class MultiRegionService {
 
   private async updateGlobalRouting(_primaryRegionId: string): Promise<void> {
     // In production, would update DNS records, load balancer configuration, etc.
-    console.log('[MultiRegion] Updated global routing');
+    logger.info('[MultiRegion] Updated global routing');
   }
 
   private async recordRoleChange(regionId: string, role: RegionRole): Promise<void> {
@@ -910,6 +912,6 @@ export class MultiRegionService {
    */
   async shutdown(): Promise<void> {
     this.stopServices();
-    console.log('[MultiRegion] Service shut down');
+    logger.info('[MultiRegion] Service shut down');
   }
 }

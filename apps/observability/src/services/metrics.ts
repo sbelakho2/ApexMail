@@ -10,8 +10,10 @@
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import * as promClient from 'prom-client';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'observability:metrics' });
 
 export enum MetricType {
   COUNTER = 'counter',
@@ -67,7 +69,7 @@ export class MetricsService {
    */
   async initialize(): Promise<void> {
     if (!config.metrics.enabled) {
-      console.log('[Metrics] Metrics collection is disabled');
+      logger.info('[Metrics] Metrics collection is disabled');
       return;
     }
 
@@ -83,18 +85,18 @@ export class MetricsService {
     // Start collection interval with error handling
     this.collectInterval = setInterval(() => {
       this.collectSystemMetrics().catch(err => {
-        console.error('[Metrics] System metrics collection failed:', err instanceof Error ? err.message : err);
+        logger.error('[Metrics] System metrics collection failed:', { error: err instanceof Error ? err.message : String(err) });
       });
     }, config.metrics.aggregationInterval);
 
     // Start aggregation interval with error handling
     this.aggregateInterval = setInterval(() => {
       this.aggregateMetrics().catch(err => {
-        console.error('[Metrics] Metrics aggregation failed:', err instanceof Error ? err.message : err);
+        logger.error('[Metrics] Metrics aggregation failed:', { error: err instanceof Error ? err.message : String(err) });
       });
     }, 60000);
 
-    console.log('[Metrics] Service initialized');
+    logger.info('[Metrics] Service initialized');
   }
 
   /**
@@ -262,6 +264,42 @@ export class MetricsService {
 
       return { ok: true, value: undefined };
     } catch (error) {
+      return { ok: false, error: error as Error };
+    }
+  }
+
+  /**
+   * C-092: Record multiple metrics in a single batched INSERT for efficiency.
+   * Avoids per-metric round-trips to the database.
+   */
+  private async recordMetricsBatch(values: MetricValue[]): Promise<Result<void>> {
+    if (values.length === 0) return { ok: true, value: undefined };
+
+    try {
+      // Build a batched INSERT with parameterized values
+      const params: unknown[] = [];
+      const placeholders: string[] = [];
+      for (let i = 0; i < values.length; i++) {
+        const v = values[i]!;
+        const offset = i * 5;
+        placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`);
+        params.push(
+          v.name,
+          v.type,
+          v.value,
+          JSON.stringify(v.labels),
+          v.timestamp
+        );
+      }
+
+      await this.db.query(
+        `INSERT INTO obs_metrics (name, type, value, labels, recorded_at) VALUES ${placeholders.join(', ')}`,
+        params
+      );
+
+      return { ok: true, value: undefined };
+    } catch (error) {
+      logger.error('[Metrics] Batch insert failed:', { error: error instanceof Error ? error.message : String(error), count: values.length });
       return { ok: false, error: error as Error };
     }
   }
@@ -497,7 +535,7 @@ export class MetricsService {
         [cutoff]
       );
 
-      console.log(`[Metrics] Deleted ${result.rowCount} old metric records`);
+      logger.info(`[Metrics] Deleted ${result.rowCount} old metric records`);
 
       return { ok: true, value: result.rowCount || 0 };
     } catch (error) {
@@ -640,8 +678,11 @@ export class MetricsService {
       const queueSizes = await this.redis.llen('email:queue:high');
       this.setGauge('apexmail_queue_size', queueSizes, { queue: 'email', priority: 'high' });
 
-      // Store metrics in database for persistence
+      // C-092: Store metrics in database in batches for efficiency
       const metricsJson = await this.registry.getMetricsAsJSON();
+      const batch: MetricValue[] = [];
+      const now = new Date();
+
       for (const metric of metricsJson as promClient.MetricObject[]) {
         const metricWithValues = metric as promClient.MetricObjectWithValues<promClient.MetricValue<string>>;
         if (metricWithValues.values) {
@@ -654,18 +695,23 @@ export class MetricsService {
                 }
               }
             }
-            await this.recordMetric({
+            batch.push({
               name: metric.name,
               type: this.metricTypeFromString(String(metric.type)),
               value: typeof value.value === 'number' ? value.value : 0,
               labels,
-              timestamp: new Date(),
+              timestamp: now,
             });
           }
         }
       }
+
+      // Write all collected metrics in a single batched INSERT
+      if (batch.length > 0) {
+        await this.recordMetricsBatch(batch);
+      }
     } catch (error) {
-      console.error('[Metrics] Failed to collect system metrics:', error);
+      logger.error('[Metrics] Failed to collect system metrics:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -697,7 +743,7 @@ export class MetricsService {
           count = EXCLUDED.count
       `, [oneHourAgo]);
     } catch (error) {
-      console.error('[Metrics] Failed to aggregate metrics:', error);
+      logger.error('[Metrics] Failed to aggregate metrics:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -721,6 +767,6 @@ export class MetricsService {
     if (this.aggregateInterval) {
       clearInterval(this.aggregateInterval);
     }
-    console.log('[Metrics] Service shut down');
+    logger.info('[Metrics] Service shut down');
   }
 }

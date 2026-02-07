@@ -11,8 +11,10 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'ha-chaos' });
 
 export enum ExperimentType {
   LATENCY = 'latency',
@@ -118,7 +120,7 @@ export class ChaosEngineeringService {
     // SAFETY: Never allow chaos in production unless explicitly overridden
     if (process.env.NODE_ENV === 'production' && !process.env.CHAOS_FORCE_ENABLE) {
       this.enabled = false;
-      console.warn('[Chaos] DISABLED in production. Set CHAOS_FORCE_ENABLE=true to override (dangerous).');
+      logger.warn('[Chaos] DISABLED in production. Set CHAOS_FORCE_ENABLE=true to override (dangerous).');
     } else {
       this.enabled = config.chaosEnabled ?? false;
     }
@@ -129,14 +131,14 @@ export class ChaosEngineeringService {
    */
   async initialize(): Promise<void> {
     if (!this.enabled) {
-      console.log('[Chaos] Service disabled - set CHAOS_ENABLED=true to enable');
+      logger.info('[Chaos] Service disabled - set CHAOS_ENABLED=true to enable');
       return;
     }
 
     // Load scheduled experiments
     await this.loadScheduledExperiments();
 
-    console.log('[Chaos] Service initialized');
+    logger.info('[Chaos] Service initialized');
   }
 
   /**
@@ -144,7 +146,7 @@ export class ChaosEngineeringService {
    */
   enable(): void {
     this.enabled = true;
-    console.log('[Chaos] Service enabled');
+    logger.info('[Chaos] Service enabled');
   }
 
   /**
@@ -156,7 +158,7 @@ export class ChaosEngineeringService {
     for (const experiment of this.activeExperiments.values()) {
       this.abortExperiment(experiment.id, 'Service disabled');
     }
-    console.log('[Chaos] Service disabled');
+    logger.info('[Chaos] Service disabled');
   }
 
   /**
@@ -199,7 +201,7 @@ export class ChaosEngineeringService {
 
     this.activeExperiments.set(id, experiment);
 
-    console.log(`[Chaos] Created experiment: ${config.name} (${id})`);
+    logger.info(`[Chaos] Created experiment: ${config.name} (${id})`);
 
     return { ok: true, value: experiment };
   }
@@ -221,7 +223,7 @@ export class ChaosEngineeringService {
       return { ok: false, error: new Error(`Experiment not in pending state: ${experiment.status}`) };
     }
 
-    console.log(`[Chaos] Starting experiment: ${experiment.config.name}`);
+    logger.info(`[Chaos] Starting experiment: ${experiment.config.name}`);
 
     try {
       // Capture pre-experiment metrics
@@ -274,7 +276,7 @@ export class ChaosEngineeringService {
       return { ok: false, error: new Error(`Experiment not found: ${experimentId}`) };
     }
 
-    console.log(`[Chaos] Ending experiment: ${experiment.config.name}`);
+    logger.info(`[Chaos] Ending experiment: ${experiment.config.name}`);
 
     try {
       // Remove injected faults
@@ -321,7 +323,7 @@ export class ChaosEngineeringService {
       return { ok: false, error: new Error(`Experiment not found: ${experimentId}`) };
     }
 
-    console.log(`[Chaos] Aborting experiment: ${experiment.config.name} - ${reason}`);
+    logger.info(`[Chaos] Aborting experiment: ${experiment.config.name} - ${reason}`);
 
     try {
       // Remove injected faults immediately
@@ -372,7 +374,7 @@ export class ChaosEngineeringService {
 
     this.scheduledExperiments.set(experimentId, timeout);
 
-    console.log(`[Chaos] Scheduled experiment: ${experiment.config.name} for ${scheduledAt.toISOString()}`);
+    logger.info(`[Chaos] Scheduled experiment: ${experiment.config.name} for ${scheduledAt.toISOString()}`);
 
     return { ok: true, value: undefined };
   }
@@ -596,7 +598,7 @@ export class ChaosEngineeringService {
       workers.forEach(w => clearInterval(w));
     });
 
-    console.log(`[Chaos] Injected CPU stress: ${_targetPercent}%`);
+    logger.info(`[Chaos] Injected CPU stress: ${_targetPercent}%`);
   }
 
   private injectMemoryPressure(faultId: string, targetMb: number): void {
@@ -613,7 +615,7 @@ export class ChaosEngineeringService {
       global.gc?.();
     });
 
-    console.log(`[Chaos] Injected memory pressure: ${targetMb}MB`);
+    logger.info(`[Chaos] Injected memory pressure: ${targetMb}MB`);
   }
 
   private startSafetyMonitoring(experiment: Experiment): void {
@@ -641,7 +643,7 @@ export class ChaosEngineeringService {
         }
 
         if (triggered) {
-          console.log(`[Chaos] Safety check triggered: ${check.type}`);
+          logger.info(`[Chaos] Safety check triggered: ${check.type}`);
           experiment.results.safetyCheckTriggered = true;
 
           switch (check.action) {
@@ -750,7 +752,7 @@ export class ChaosEngineeringService {
         }
       }
     } catch (error) {
-      console.warn('[Chaos] Could not load scheduled experiments:', error);
+      logger.warn('[Chaos] Could not load scheduled experiments', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -816,7 +818,7 @@ export class ChaosEngineeringService {
     }
     this.injectedFaults.clear();
 
-    console.log('[Chaos] Service shut down');
+    logger.info('[Chaos] Service shut down');
   }
 }
 

@@ -48,10 +48,26 @@ interface WebhookDeliveryResult {
   responseTime: number;
   error?: string;
   responseBody?: string;
+  /** F-234: Parsed Retry-After value from the target server (in milliseconds). */
+  retryAfterMs?: number;
 }
+
+/**
+ * C-114: Maximum concurrent webhook deliveries per tenant.
+ * Prevents a single tenant from monopolizing all worker slots.
+ */
+const MAX_CONCURRENT_PER_TENANT = 5;
+
+/**
+ * C-119: Maximum webhook payload size in bytes (1 MB).
+ * Prevents arbitrarily large payloads from consuming excessive
+ * bandwidth and memory during delivery.
+ */
+const MAX_WEBHOOK_PAYLOAD_BYTES = 1 * 1024 * 1024; // 1 MB
 
 export class WebhookProcessor {
   private readonly db: Pool;
+  private readonly redis: Redis;
   private readonly config: WebhookProcessorConfig['config'];
   private readonly logger: Logger;
   private readonly circuitBreakers: CircuitBreakerFactory;
@@ -59,9 +75,12 @@ export class WebhookProcessor {
   
   private isRunning = false;
   private activeJobs = 0;
+  /** C-114: Track active jobs per tenant to enforce per-tenant concurrency. */
+  private readonly tenantActiveJobs = new Map<string, number>();
 
   constructor(options: WebhookProcessorConfig) {
     this.db = options.db;
+    this.redis = options.redis;
     this.config = options.config;
     this.logger = options.logger;
     this.notifier = options.notifier;
@@ -184,7 +203,25 @@ export class WebhookProcessor {
   }
 
   private async processJob(job: WebhookJob): Promise<void> {
+    // C-114: Enforce per-tenant concurrency limit
+    const tenantCurrent = this.tenantActiveJobs.get(job.tenantId) ?? 0;
+    if (tenantCurrent >= MAX_CONCURRENT_PER_TENANT) {
+      this.logger.warn('C-114: Per-tenant webhook concurrency limit reached, rescheduling', {
+        tenantId: job.tenantId,
+        tenantActiveJobs: tenantCurrent,
+        limit: MAX_CONCURRENT_PER_TENANT,
+        jobId: job.id,
+      });
+      // Release the job back to pending so it can be picked up later
+      await this.db.query(
+        `UPDATE webhook_queue SET status = 'pending', locked_until = NULL, updated_at = NOW() WHERE id = $1`,
+        [job.id],
+      );
+      return;
+    }
+
     this.activeJobs++;
+    this.tenantActiveJobs.set(job.tenantId, tenantCurrent + 1);
     const startTime = Date.now();
 
     try {
@@ -194,6 +231,30 @@ export class WebhookProcessor {
         eventType: job.eventType,
         attempt: job.attempt,
       });
+
+      /**
+       * C-086: Webhook delivery deduplication.
+       *
+       * If the process crashes after a successful HTTP delivery but before
+       * the transactional completion (INSERT delivery + DELETE from queue),
+       * the job stays in the queue and would be re-delivered on next poll.
+       *
+       * We set a Redis key BEFORE delivery and check it here. If the key
+       * exists from a previous attempt, skip re-delivery and just clean up.
+       * The key has a 24h TTL to prevent unbounded growth.
+       */
+      const dedupKey = `webhook:dedup:${job.id}:${job.attempt}`;
+      const previouslyDelivered = await this.redis.get(dedupKey);
+      if (previouslyDelivered) {
+        this.logger.warn('Webhook already delivered (dedup), cleaning up', {
+          jobId: job.id,
+          webhookId: job.webhookId,
+          attempt: job.attempt,
+        });
+        // Remove the orphaned queue entry
+        await this.db.query('DELETE FROM webhook_queue WHERE id = $1', [job.id]);
+        return;
+      }
 
       // Get circuit breaker for this webhook endpoint (keyed by webhook ID)
       const circuitBreaker = this.circuitBreakers.get(`webhook:${job.webhookId}`);
@@ -219,7 +280,33 @@ export class WebhookProcessor {
         return;
       }
 
-      const result = await this.deliverWebhook(job);
+      // C-119: Enforce payload size limit before delivery.
+      // Truncate large fields (e.g. full HTML body) to prevent oversized payloads.
+      const rawPayload = JSON.stringify(job.payload);
+      if (rawPayload.length > MAX_WEBHOOK_PAYLOAD_BYTES) {
+        this.logger.warn('C-119: Webhook payload exceeds size limit, truncating large fields', {
+          jobId: job.id,
+          webhookId: job.webhookId,
+          originalSize: rawPayload.length,
+          limit: MAX_WEBHOOK_PAYLOAD_BYTES,
+        });
+        job.payload = this.truncatePayload(job.payload, MAX_WEBHOOK_PAYLOAD_BYTES);
+      }
+
+      /**
+       * C-128: Cache the serialized payload to avoid redundant JSON.stringify calls.
+       * The same serialized form is used for:
+       *   1. HMAC signature computation (signPayload)
+       *   2. HTTP request body (fetch)
+       * Previously, JSON.stringify was called separately in signPayload() and
+       * in the fetch body, doubling serialization cost for every delivery.
+       */
+      const serializedPayload = JSON.stringify(job.payload);
+
+      // Mark as in-flight before delivery (24h TTL)
+      await this.redis.set(dedupKey, '1', 'EX', 86400);
+
+      const result = await this.deliverWebhook(job, serializedPayload);
 
       // Update circuit breaker state based on result
       if (result.success) {
@@ -227,6 +314,8 @@ export class WebhookProcessor {
         await this.handleSuccess(job, result);
       } else {
         await circuitBreaker.recordFailure();
+        // Remove dedup key on failure so retries aren't blocked
+        await this.redis.del(dedupKey).catch(() => {});
         await this.handleFailure(job, result);
       }
 
@@ -234,20 +323,86 @@ export class WebhookProcessor {
       // Record failure in circuit breaker for unexpected errors
       const circuitBreaker = this.circuitBreakers.get(`webhook:${job.webhookId}`);
       await circuitBreaker.recordFailure();
+      // Remove dedup key on error so retries aren't blocked
+      await this.redis.del(`webhook:dedup:${job.id}:${job.attempt}`).catch(() => {});
       await this.handleError(job, error as Error);
     } finally {
       this.activeJobs--;
+      // C-114: Decrement per-tenant counter
+      const tenantCount = (this.tenantActiveJobs.get(job.tenantId) ?? 1) - 1;
+      if (tenantCount <= 0) {
+        this.tenantActiveJobs.delete(job.tenantId);
+      } else {
+        this.tenantActiveJobs.set(job.tenantId, tenantCount);
+      }
       
       const duration = Date.now() - startTime;
       this.logger.debug('Webhook job completed', {
         jobId: job.id,
         duration,
         activeJobs: this.activeJobs,
+        tenantActiveJobs: this.tenantActiveJobs.get(job.tenantId) ?? 0,
       });
     }
   }
 
-  private async deliverWebhook(job: WebhookJob): Promise<WebhookDeliveryResult> {
+  /**
+   * C-119: Truncate oversized webhook payloads by removing or shortening
+   * large string fields (e.g. html, text, content) to stay within the
+   * size limit. Preserves structure and metadata.
+   */
+  private truncatePayload(
+    payload: Record<string, unknown>,
+    maxBytes: number,
+  ): Record<string, unknown> {
+    const TRUNCATION_NOTICE = '[truncated — payload exceeded size limit]';
+    // Fields commonly containing large content that can be safely truncated
+    const largeFieldKeys = new Set(['html', 'htmlBody', 'textBody', 'text', 'content', 'body', 'raw_message', 'rawMessage']);
+
+    const truncateObj = (obj: Record<string, unknown>): Record<string, unknown> => {
+      const result: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(obj)) {
+        if (typeof value === 'string' && largeFieldKeys.has(key) && value.length > 1024) {
+          result[key] = value.substring(0, 512) + TRUNCATION_NOTICE;
+        } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+          result[key] = truncateObj(value as Record<string, unknown>);
+        } else {
+          result[key] = value;
+        }
+      }
+      return result;
+    };
+
+    let truncated = truncateObj(payload);
+
+    // If still over limit after field truncation, aggressively truncate any large string
+    let serialized = JSON.stringify(truncated);
+    if (serialized.length > maxBytes) {
+      const aggressiveTruncate = (obj: Record<string, unknown>): Record<string, unknown> => {
+        const res: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(obj)) {
+          if (typeof value === 'string' && value.length > 256) {
+            res[key] = value.substring(0, 256) + TRUNCATION_NOTICE;
+          } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+            res[key] = aggressiveTruncate(value as Record<string, unknown>);
+          } else {
+            res[key] = value;
+          }
+        }
+        return res;
+      };
+      truncated = aggressiveTruncate(truncated);
+    }
+
+    return truncated;
+  }
+
+  /**
+   * C-128: Accepts an optional pre-serialized payload to avoid redundant
+   * JSON.stringify calls. When provided, the same string is used for both
+   * HMAC signature computation and the HTTP request body.
+   */
+  private async deliverWebhook(job: WebhookJob, cachedBody?: string): Promise<WebhookDeliveryResult> {
     // SECURITY FIX (FIX-032): Re-validate URL at delivery time to prevent DNS rebinding
     // DNS may have changed since registration to point to internal/private IPs
     try {
@@ -262,9 +417,12 @@ export class WebhookProcessor {
 
     const timestamp = Date.now();
     const deliveryId = generateId('dlv');
+
+    // C-128: Use pre-serialized payload if available, otherwise serialize once here
+    const body = cachedBody ?? JSON.stringify(job.payload);
     
-    // Sign payload
-    const signature = this.signPayload(job.secret, timestamp, job.payload);
+    // Sign payload using the same serialized body
+    const signature = this.signPayloadRaw(job.secret, timestamp, body);
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -283,7 +441,7 @@ export class WebhookProcessor {
       const response = await fetch(job.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(job.payload),
+        body,
         signal: AbortSignal.timeout(30000), // 30 second timeout
       });
 
@@ -309,15 +467,41 @@ export class WebhookProcessor {
         };
       }
 
-      // Note: isRetryableStatusCode check is done by the caller
-      // when deciding whether to retry the job
-      
+      // F-234: Parse Retry-After header when present (429 or 503 responses).
+      // The header value can be seconds (integer) or an HTTP-date string.
+      let retryAfterMs: number | undefined;
+      const retryAfterHeader = response.headers.get('retry-after');
+      if (retryAfterHeader && (response.status === 429 || response.status === 503)) {
+        const parsed = parseInt(retryAfterHeader, 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          // Value is in seconds — cap at 1 hour to prevent abuse
+          retryAfterMs = Math.min(parsed, 3600) * 1000;
+        } else {
+          // Try parsing as HTTP-date (RFC 7231)
+          const date = new Date(retryAfterHeader);
+          if (!isNaN(date.getTime())) {
+            const delayMs = date.getTime() - Date.now();
+            if (delayMs > 0) {
+              retryAfterMs = Math.min(delayMs, 3600_000); // cap at 1 hour
+            }
+          }
+        }
+        this.logger.info('F-234: Retry-After header received from webhook endpoint', {
+          url: job.url,
+          webhookId: job.webhookId,
+          statusCode: response.status,
+          retryAfterHeader,
+          retryAfterMs,
+        });
+      }
+
       return {
         success: false,
         statusCode: response.status,
         responseTime,
         error: `HTTP ${response.status}: ${response.statusText}`,
         responseBody,
+        retryAfterMs,
       };
 
     } catch (error) {
@@ -330,9 +514,22 @@ export class WebhookProcessor {
     }
   }
 
-  private signPayload(secret: string, timestamp: number, payload: Record<string, unknown>): string {
-    const message = `${timestamp}.${JSON.stringify(payload)}`;
+  /**
+   * C-128: Unified signing method that accepts either a pre-serialized
+   * payload string or a Record object. When a string is provided, it
+   * avoids the redundant JSON.stringify call.
+   */
+  private signPayload(secret: string, timestamp: number, payload: Record<string, unknown> | string): string {
+    const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    const message = `${timestamp}.${body}`;
     return 'sha256=' + hmacSign(secret, message, 'sha256');
+  }
+
+  /**
+   * C-128: Alias that makes the pre-serialized intent explicit in calling code.
+   */
+  private signPayloadRaw(secret: string, timestamp: number, serializedPayload: string): string {
+    return this.signPayload(secret, timestamp, serializedPayload);
   }
 
   private isRetryableStatusCode(statusCode: number): boolean {
@@ -465,7 +662,7 @@ export class WebhookProcessor {
     const canRetry = isRetryable && job.attempt < job.maxRetries;
 
     if (canRetry) {
-      await this.retryJob(job, result.error ?? 'Unknown error');
+      await this.retryJob(job, result.error ?? 'Unknown error', result.retryAfterMs);
     } else {
       await this.failJob(job, result);
     }
@@ -485,9 +682,16 @@ export class WebhookProcessor {
     }
   }
 
-  private async retryJob(job: WebhookJob, error: string): Promise<void> {
+  /**
+   * F-234: retryAfterMs — when the target server sends a Retry-After header,
+   * we honour it instead of using our own exponential backoff, capped at 1 hour.
+   */
+  private async retryJob(job: WebhookJob, error: string, retryAfterMs?: number): Promise<void> {
     const nextAttempt = job.attempt + 1;
-    const delay = job.retryDelay * Math.pow(job.backoffMultiplier, job.attempt - 1);
+    const MAX_RETRY_DELAY = 60000; // 60 seconds cap (for computed backoff)
+    const computedDelay = Math.min(job.retryDelay * Math.pow(job.backoffMultiplier, job.attempt - 1), MAX_RETRY_DELAY);
+    // F-234: Prefer server-requested delay over computed backoff
+    const delay = retryAfterMs ?? computedDelay;
     const scheduledAt = new Date(Date.now() + delay);
 
     await this.db.query(`
@@ -654,6 +858,28 @@ export async function dispatchWebhookEvent(
   eventType: string,
   data: Record<string, unknown>
 ): Promise<void> {
+  // C-099: Suppress duplicate webhook events.
+  // If the same (tenant, event type, message ID) combination is already
+  // queued and still pending, skip insertion to prevent duplicate deliveries.
+  // This guards against callers that may fire the same event more than once
+  // (e.g. retries, concurrent handlers processing the same message).
+  const messageId = (data.messageId as string) || '';
+  if (messageId) {
+    const existing = await db.query(
+      `SELECT 1 FROM webhook_queue
+       WHERE tenant_id = $1
+         AND event_type = $2
+         AND payload->>'type' = $2
+         AND payload->'data'->>'messageId' = $3
+         AND status IN ('pending', 'processing')
+       LIMIT 1`,
+      [tenantId, eventType, messageId]
+    );
+    if (existing.rows.length > 0) {
+      return; // C-099: duplicate event suppressed
+    }
+  }
+
   // Find all enabled webhooks for this tenant that subscribe to this event
   const result = await db.query<{ id: string }>(`
     SELECT id

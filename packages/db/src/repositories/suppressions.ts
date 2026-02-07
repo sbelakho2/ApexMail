@@ -327,11 +327,12 @@ export class SuppressionsRepository {
     return Result.ok(result.value.rows.map((row) => this.mapRow(row)));
   }
 
-  async remove(id: string): Promise<Result<void, Error>> {
-    const result = await this.db.query(
-      'DELETE FROM suppressions WHERE id = $1',
-      [id]
-    );
+  async remove(id: string, tenantId?: string): Promise<Result<void, Error>> {
+    const sql = tenantId
+      ? 'DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2'
+      : 'DELETE FROM suppressions WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
+    const result = await this.db.query(sql, params);
     return result.ok ? Result.ok(undefined) : result;
   }
 
@@ -397,13 +398,10 @@ export class SuppressionsRepository {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-    const countResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM suppressions ${whereClause}`,
-      values
-    );
-
-    if (!countResult.ok) return countResult;
-
+    /**
+     * C-082: Single-pass COUNT(*) OVER() instead of a separate COUNT query.
+     * Eliminates a redundant full table scan for the total count.
+     */
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
     values.push(limit, offset);
@@ -426,8 +424,9 @@ export class SuppressionsRepository {
       metadata: string;
       created_at: Date;
       updated_at: Date;
+      total_count: string;
     }>(
-      `SELECT * FROM suppressions ${whereClause}
+      `SELECT *, COUNT(*) OVER() AS total_count FROM suppressions ${whereClause}
        ORDER BY created_at DESC
        LIMIT $${paramIndex++} OFFSET $${paramIndex}`,
       values
@@ -435,9 +434,11 @@ export class SuppressionsRepository {
 
     if (!result.ok) return result;
 
+    const total = parseInt(result.value.rows[0]?.total_count ?? '0', 10);
+
     return Result.ok({
       suppressions: result.value.rows.map((row) => this.mapRow(row)),
-      total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
+      total,
     });
   }
 
@@ -520,38 +521,59 @@ export class SuppressionsRepository {
         );
       }
 
-      const result = await this.db.query<{ inserted: string }>(
-        `WITH inserted AS (
-          INSERT INTO suppressions (
-            id, tenant_id, email, email_hash, type, scope, scope_id,
-            reason, source, original_message_id, bounce_type, bounce_code,
-            feedback_type, expires_at, metadata, created_at, updated_at
-          ) VALUES ${placeholders.join(', ')}
-          ON CONFLICT (email_hash, tenant_id, scope, scope_id) 
-            WHERE tenant_id IS NOT NULL
-          DO NOTHING
-          RETURNING 1
-        ) SELECT COUNT(*) as inserted FROM inserted`,
-        values
-      );
+      // B-039: Wrap each batch in a transaction for atomicity
+      const client = await this.db.getClient();
+      try {
+        await client.query('BEGIN');
 
-      if (!result.ok) return result;
+        const result = await client.query<{ inserted: string }>(
+          `WITH inserted AS (
+            INSERT INTO suppressions (
+              id, tenant_id, email, email_hash, type, scope, scope_id,
+              reason, source, original_message_id, bounce_type, bounce_code,
+              feedback_type, expires_at, metadata, created_at, updated_at
+            ) VALUES ${placeholders.join(', ')}
+            ON CONFLICT (email_hash, tenant_id, scope, scope_id) 
+              WHERE tenant_id IS NOT NULL
+            DO NOTHING
+            RETURNING 1
+          ) SELECT COUNT(*) as inserted FROM inserted`,
+          values
+        );
 
-      const batchImported = parseInt(result.value.rows[0]?.inserted ?? '0', 10);
-      imported += batchImported;
-      duplicates += batch.length - batchImported;
+        await client.query('COMMIT');
+
+        const batchImported = parseInt(result.rows[0]?.inserted ?? '0', 10);
+        imported += batchImported;
+        duplicates += batch.length - batchImported;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        return Result.err(error instanceof Error ? error : new Error(String(error)));
+      } finally {
+        client.release();
+      }
     }
 
     return Result.ok({ imported, duplicates });
   }
 
-  async cleanupExpired(): Promise<Result<number, Error>> {
+  /**
+   * A-013 + F-181: Cleanup expired suppressions with LIMIT to avoid long lock contention.
+   * Uses a subquery with LIMIT to batch-delete in manageable chunks.
+   */
+  async cleanupExpired(limit: number = 10000): Promise<Result<number, Error>> {
     const result = await this.db.query<{ count: string }>(
       `WITH deleted AS (
         DELETE FROM suppressions 
-        WHERE expires_at IS NOT NULL AND expires_at < NOW()
+        WHERE id IN (
+          SELECT id FROM suppressions
+          WHERE expires_at IS NOT NULL AND expires_at < NOW()
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED
+        )
         RETURNING 1
-      ) SELECT COUNT(*) as count FROM deleted`
+      ) SELECT COUNT(*) as count FROM deleted`,
+      [limit]
     );
 
     if (!result.ok) return result;

@@ -246,6 +246,27 @@ export class AuthenticationError extends ApexMailError {
     }
 }
 
+export class NotFoundError extends ApexMailError {
+    constructor(message = 'Resource not found', details?: Record<string, unknown>) {
+        super(message, 404, 'NOT_FOUND', details);
+        this.name = 'NotFoundError';
+    }
+}
+
+export class ForbiddenError extends ApexMailError {
+    constructor(message = 'Forbidden', details?: Record<string, unknown>) {
+        super(message, 403, 'FORBIDDEN', details);
+        this.name = 'ForbiddenError';
+    }
+}
+
+export class ConflictError extends ApexMailError {
+    constructor(message = 'Conflict', details?: Record<string, unknown>) {
+        super(message, 409, 'CONFLICT', details);
+        this.name = 'ConflictError';
+    }
+}
+
 export class RateLimitError extends ApexMailError {
     public readonly retryAfter: number;
 
@@ -286,6 +307,9 @@ class HttpClient {
         this.baseUrl = config.baseUrl || 'https://api.apexmail.ee';
         this.apiKey = config.apiKey;
         this.timeout = config.timeout || 30000;
+        // C-135: Node.js 18+ global fetch (undici) uses HTTP keep-alive by
+        // default, so connections are reused across requests automatically.
+        // Custom fetch implementations should enable keep-alive similarly.
         this.fetchFn = config.fetch || fetch;
         this.retryConfig = DEFAULT_RETRY_CONFIG;
     }
@@ -301,6 +325,10 @@ class HttpClient {
     /**
      * SECURITY FIX: Implement retry logic with exponential backoff
      * Handles transient network errors and rate limits properly
+     *
+     * C-134: Request body cloning is inherently safe here — `body` is the
+     * original JS object and `JSON.stringify(body)` is called fresh on each
+     * attempt, so the body is never "consumed" across retries.
      */
     private async requestWithRetry<T>(
         method: string,
@@ -339,9 +367,25 @@ class HttpClient {
                 throw new RateLimitError(retryAfter);
             }
 
-            // Retry on server errors
+            // Retry on server errors, respecting Retry-After header if present
             if (this.retryConfig.retryableStatuses.has(response.status) && attempt < this.retryConfig.maxRetries) {
-                const delay = this.calculateBackoff(attempt);
+                const retryAfterHeader = response.headers.get('Retry-After');
+                let delay: number;
+                if (retryAfterHeader) {
+                    // Retry-After can be seconds (integer) or an HTTP-date
+                    const parsed = parseInt(retryAfterHeader, 10);
+                    if (!isNaN(parsed)) {
+                        delay = Math.min(parsed * 1000, this.retryConfig.maxDelayMs);
+                    } else {
+                        // Try parsing as HTTP-date
+                        const date = new Date(retryAfterHeader).getTime();
+                        delay = !isNaN(date)
+                            ? Math.min(Math.max(0, date - Date.now()), this.retryConfig.maxDelayMs)
+                            : this.calculateBackoff(attempt);
+                    }
+                } else {
+                    delay = this.calculateBackoff(attempt);
+                }
                 await this.sleep(delay);
                 return this.requestWithRetry<T>(method, path, body, attempt + 1);
             }
@@ -405,26 +449,54 @@ class HttpClient {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    /**
+     * E-188: Build actionable error messages that include:
+     *   1. What went wrong (human-readable message)
+     *   2. HTTP status code
+     *   3. Truncated response body for debugging
+     *   4. Suggestion for how to fix
+     */
     private handleError(response: Response, data: Record<string, unknown>): never {
-        const message = (data.message as string) || 'Request failed';
+        const serverMessage = (data.message as string) || 'Request failed';
         const code = (data.code as string) || 'UNKNOWN_ERROR';
+        const bodyPreview = JSON.stringify(data).slice(0, 200);
 
         switch (response.status) {
             case 400:
-                throw new ValidationError(message, data.details as Record<string, unknown>);
+                throw new ValidationError(
+                    `Validation failed (400): ${serverMessage}. Check your request parameters. Response: ${bodyPreview}`,
+                    data.details as Record<string, unknown>,
+                );
             case 401:
-                throw new AuthenticationError(message);
+                throw new AuthenticationError(
+                    `Authentication failed (401): ${serverMessage}. Verify your API key is correct and not expired.`,
+                );
             case 403:
-                throw new ApexMailError(message, 403, 'FORBIDDEN', data.details as Record<string, unknown>);
+                throw new ForbiddenError(
+                    `Forbidden (403): ${serverMessage}. Your API key may lack the required scopes for this operation.`,
+                    data.details as Record<string, unknown>,
+                );
             case 404:
-                throw new ApexMailError(message, 404, 'NOT_FOUND', data.details as Record<string, unknown>);
+                throw new NotFoundError(
+                    `Not found (404): ${serverMessage}. Verify the resource ID exists and belongs to your account.`,
+                    data.details as Record<string, unknown>,
+                );
             case 409:
-                throw new ApexMailError(message, 409, 'CONFLICT', data.details as Record<string, unknown>);
-            case 429:
+                throw new ConflictError(
+                    `Conflict (409): ${serverMessage}. The resource may already exist or was modified concurrently.`,
+                    data.details as Record<string, unknown>,
+                );
+            case 429: {
                 const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
                 throw new RateLimitError(retryAfter);
+            }
             default:
-                throw new ApexMailError(message, response.status, code, data.details as Record<string, unknown>);
+                throw new ApexMailError(
+                    `Request failed (${response.status}): ${serverMessage}. Response: ${bodyPreview}`,
+                    response.status,
+                    code,
+                    data.details as Record<string, unknown>,
+                );
         }
     }
 
@@ -456,6 +528,62 @@ class EmailsApi {
     constructor(private client: HttpClient) {}
 
     /**
+     * F-246: Basic email format validation.
+     * Checks that a string looks like a valid email address before making
+     * the API call, saving a round-trip for obviously malformed input.
+     */
+    private static readonly EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    /**
+     * F-246: Validate send options before making the API call.
+     * Catches common mistakes client-side for faster feedback.
+     */
+    private validateSendOptions(options: SendEmailOptions): void {
+        // Required fields
+        if (!options.from) {
+            throw new ValidationError('"from" is required');
+        }
+        if (!options.to) {
+            throw new ValidationError('"to" is required');
+        }
+        if (!options.subject) {
+            throw new ValidationError('"subject" is required');
+        }
+        if (!options.html && !options.text) {
+            throw new ValidationError('Either "html" or "text" body is required');
+        }
+
+        // Email format: from
+        const fromEmail = typeof options.from === 'string' ? options.from : options.from.email;
+        if (!EmailsApi.EMAIL_REGEX.test(fromEmail)) {
+            throw new ValidationError(`Invalid "from" email format: ${fromEmail}`);
+        }
+
+        // Email format: to (validate each recipient)
+        const toList = Array.isArray(options.to) ? options.to : [options.to];
+        if (toList.length === 0) {
+            throw new ValidationError('"to" must contain at least one recipient');
+        }
+        for (const recipient of toList) {
+            const email = typeof recipient === 'string' ? recipient : recipient.email;
+            if (!EmailsApi.EMAIL_REGEX.test(email)) {
+                throw new ValidationError(`Invalid "to" email format: ${email}`);
+            }
+        }
+
+        // String length limits
+        if (options.subject.length > 998) {
+            throw new ValidationError('"subject" exceeds maximum length of 998 characters (RFC 2822)');
+        }
+        if (options.html && options.html.length > 10 * 1024 * 1024) {
+            throw new ValidationError('"html" body exceeds maximum size of 10MB');
+        }
+        if (options.text && options.text.length > 10 * 1024 * 1024) {
+            throw new ValidationError('"text" body exceeds maximum size of 10MB');
+        }
+    }
+
+    /**
      * Send a single email
      * 
      * @example
@@ -469,6 +597,8 @@ class EmailsApi {
      * ```
      */
     async send(options: SendEmailOptions): Promise<SendEmailResponse> {
+        // F-246: Validate inputs before making the API call
+        this.validateSendOptions(options);
         return this.client.post<SendEmailResponse>('/v1/emails', this.normalizeEmail(options));
     }
 
@@ -486,8 +616,22 @@ class EmailsApi {
      * ```
      */
     async batch(options: BatchSendOptions): Promise<BatchSendResponse> {
+        if (!options.emails || options.emails.length === 0) {
+            throw new ValidationError('"emails" array must not be empty');
+        }
         if (options.emails.length > 1000) {
             throw new ValidationError('Maximum 1000 emails per batch');
+        }
+        // F-246: Validate each email in the batch
+        for (let i = 0; i < options.emails.length; i++) {
+            try {
+                this.validateSendOptions(options.emails[i]!);
+            } catch (err) {
+                if (err instanceof ValidationError) {
+                    throw new ValidationError(`Email at index ${i}: ${err.message}`);
+                }
+                throw err;
+            }
         }
         return this.client.post<BatchSendResponse>('/v1/emails/batch', {
             emails: options.emails.map(e => this.normalizeEmail(e))

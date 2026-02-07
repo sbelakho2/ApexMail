@@ -49,7 +49,12 @@ async function fetchPage(url: string): Promise<string | null> {
         }
 
         return await response.text();
-    } catch {
+    } catch (error) {
+        // E-140: Log enrichment fetch errors instead of swallowing silently
+        logger.warn('Failed to fetch page for enrichment', {
+            url,
+            error: error instanceof Error ? error.message : String(error),
+        });
         return null;
     }
 }
@@ -180,6 +185,7 @@ function detectTechnologies(html: string): TechnologyStack[] {
 
 /**
  * Parses employee count ranges
+ * F-177: Also handle exact numbers like "500 employees"
  */
 function parseEmployeeRange(text: string): EmployeeRange | null {
     const patterns = [
@@ -196,6 +202,33 @@ function parseEmployeeRange(text: string): EmployeeRange | null {
     for (const { pattern, min, max, label } of patterns) {
         if (pattern.test(text)) {
             return { min, max, label };
+        }
+    }
+
+    // F-177: Handle exact numbers like "500 employees" or "500"
+    const exactMatch = text.match(/(\d[\d,]*)\s*(?:employees?)?/i);
+    if (exactMatch?.[1]) {
+        const count = parseInt(exactMatch[1].replace(/,/g, ''), 10);
+        if (!isNaN(count) && count > 0) {
+            // Map exact number to the appropriate range
+            const ranges = [
+                { min: 1, max: 10, label: '1-10' },
+                { min: 11, max: 50, label: '11-50' },
+                { min: 51, max: 200, label: '51-200' },
+                { min: 201, max: 500, label: '201-500' },
+                { min: 501, max: 1000, label: '501-1000' },
+                { min: 1001, max: 5000, label: '1001-5000' },
+                { min: 5001, max: 10000, label: '5001-10000' },
+                { min: 10001, max: 100000, label: '10000+' },
+            ];
+            for (const range of ranges) {
+                if (count >= range.min && count <= range.max) {
+                    return range;
+                }
+            }
+            if (count > 100000) {
+                return { min: 10001, max: 100000, label: '10000+' };
+            }
         }
     }
 
@@ -326,7 +359,12 @@ async function enrichFromClearbit(
         }
 
         return result;
-    } catch {
+    } catch (error) {
+        // E-140: Log Clearbit enrichment errors instead of swallowing silently
+        logger.warn('Clearbit enrichment failed', {
+            domain,
+            error: error instanceof Error ? error.message : String(error),
+        });
         return {};
     }
 }
@@ -402,8 +440,16 @@ function mergeEnrichmentResults(
         }
     }
 
-    // Calculate confidence based on sources
-    merged.confidence = Math.min(1, merged.sources.length * 0.25);
+    // F-178: Calculate confidence weighted by source quality, not just count
+    const sourceWeights: Record<string, number> = {
+        clearbit: 0.4,
+        website: 0.3,
+        linkedin: 0.25,
+    };
+    const totalWeight = merged.sources.reduce((sum, s) => {
+        return sum + (sourceWeights[s.name] ?? 0.15);
+    }, 0);
+    merged.confidence = Math.min(1, totalWeight);
 
     return merged;
 }

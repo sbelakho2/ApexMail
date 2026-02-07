@@ -24,7 +24,7 @@ interface DataExport {
     subscriber: Record<string, unknown>;
     messages: Array<Record<string, unknown>>;
     events: Array<Record<string, unknown>>;
-    consents: ConsentRecord[];
+    consents: Array<Record<string, unknown>>;
     preferences: Record<string, unknown>;
     [key: string]: unknown;
 }
@@ -330,11 +330,28 @@ export class GDPRAutomation {
             await this.redis.del(key);
         }
 
+        // E-167: Generate detailed deletion confirmation receipt
+        const deletionConfirmation = await this.createDeletionConfirmation(
+            request,
+            deletedRecords,
+            {
+                subscribers: subscriberResult.rowCount || 0,
+                messages: messagesResult.rowCount || 0,
+                events: eventsResult.rowCount || 0,
+                consents: consentsResult.rowCount || 0,
+                campaignEnrollments: enrollmentsResult.rowCount || 0,
+                backups: backupsResult.rowCount || 0,
+                activityLogs: logsResult.rowCount || 0,
+                cacheKeys: cacheKeys.length,
+            },
+        );
+
         // Log the deletion
         await this.logDeletion(request.tenantId, request.email, deletedRecords);
 
         return {
             deletedRecords,
+            deletionConfirmation,
         };
     }
 
@@ -480,11 +497,27 @@ export class GDPRAutomation {
         );
 
         return {
-            subscriber: subscriberResult.rows[0] || {},
-            messages: messagesResult.rows,
-            events: eventsResult.rows,
-            consents: consentsResult.rows.map(this.mapRowToConsent),
-            preferences: preferencesResult.rows[0] || {},
+            subscriber: this.sanitizeForExport(subscriberResult.rows[0] || {}, [
+                'id', 'tenant_id', 'created_by', 'updated_by',
+                'password_hash', 'api_key', 'internal_notes',
+                'rectification_request_id', 'restriction_request_id',
+            ]),
+            messages: messagesResult.rows.map(row => this.sanitizeForExport(row, [
+                'tenant_id', 'internal_id', 'worker_id', 'queue_id',
+                'smtp_response', 'server_ip', 'mta_id',
+            ])),
+            events: eventsResult.rows.map(row => this.sanitizeForExport(row, [
+                'tenant_id', 'internal_id', 'server_id', 'worker_id',
+                'ip_address', 'raw_headers',
+            ])),
+            consents: consentsResult.rows.map(this.mapRowToConsent).map(c =>
+                this.sanitizeForExport(c as unknown as Record<string, unknown>, [
+                    'tenantId', 'subscriberId', 'proofDocument',
+                ])
+            ),
+            preferences: this.sanitizeForExport(preferencesResult.rows[0] || {}, [
+                'id', 'tenant_id', 'subscriber_id',
+            ]),
         };
     }
 
@@ -695,6 +728,22 @@ export class GDPRAutomation {
     // ==================== Helper Methods ====================
 
     /**
+     * F-201: Sanitize a record for data export by stripping internal fields.
+     * Ensures no internal IDs, credentials, or infrastructure details
+     * are leaked in GDPR data exports.
+     */
+    private sanitizeForExport(
+        record: Record<string, unknown>,
+        fieldsToRemove: string[]
+    ): Record<string, unknown> {
+        const sanitized = { ...record };
+        for (const field of fieldsToRemove) {
+            delete sanitized[field];
+        }
+        return sanitized;
+    }
+
+    /**
      * Hash a token for secure storage
      */
     private hashToken(token: string): string {
@@ -826,6 +875,51 @@ export class GDPRAutomation {
                 timestamp: new Date().toISOString(),
             })
         );
+    }
+
+    /**
+     * E-167: Create a detailed deletion confirmation receipt.
+     * Records what was deleted, when, and who requested it for GDPR compliance.
+     */
+    private async createDeletionConfirmation(
+        request: DataSubjectRequest,
+        totalRecords: number,
+        breakdown: Record<string, number>,
+    ): Promise<Record<string, unknown>> {
+        const confirmationId = generateUUID();
+        const deletedAt = new Date();
+
+        const confirmation = {
+            confirmationId,
+            requestId: request.id,
+            tenantId: request.tenantId,
+            dataSubjectEmail: request.email,
+            requestedAt: request.requestedAt.toISOString(),
+            deletedAt: deletedAt.toISOString(),
+            totalRecordsDeleted: totalRecords,
+            breakdown,
+            requestType: request.requestType,
+            legalBasis: 'GDPR Article 17 — Right to Erasure',
+        };
+
+        // Persist the confirmation receipt for auditability
+        await this.db.query(
+            `INSERT INTO gdpr_deletion_confirmations (
+                id, request_id, tenant_id, email, deleted_at,
+                total_records, breakdown, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+            [
+                confirmationId,
+                request.id,
+                request.tenantId,
+                request.email,
+                deletedAt,
+                totalRecords,
+                JSON.stringify(breakdown),
+            ],
+        );
+
+        return confirmation;
     }
 
     /**

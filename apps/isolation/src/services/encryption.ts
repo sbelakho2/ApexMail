@@ -17,8 +17,10 @@ import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'isolation:encryption' });
 
 // AES-256-GCM constants
 const ALGORITHM = 'aes-256-gcm';
@@ -96,7 +98,7 @@ export class EncryptionService {
     // Check for key rotation needs
     await this.checkKeyRotation();
 
-    console.log('[Encryption] Service initialized with AES-256-GCM');
+    logger.info('[Encryption] Service initialized with AES-256-GCM');
   }
 
   /**
@@ -200,7 +202,7 @@ export class EncryptionService {
 
       this.activeKeys.set(id, key);
 
-      console.log(`[Encryption] Generated new data key for org ${organizationId}`);
+      logger.info(`[Encryption] Generated new data key for org ${organizationId}`);
 
       return { ok: true, value: key };
     } catch (error) {
@@ -388,7 +390,7 @@ export class EncryptionService {
       await this.reencryptData(organizationId, oldKeyId, newKey.id);
     }
 
-    console.log(`[Encryption] Rotated key for org ${organizationId}`);
+    logger.info(`[Encryption] Rotated key for org ${organizationId}`);
 
     return { ok: true, value: newKey };
   }
@@ -408,7 +410,7 @@ export class EncryptionService {
         for (const field of policy.fields) {
           // Validate field name to prevent SQL injection
           if (!/^[a-z_][a-z0-9_]*$/i.test(field)) {
-            console.error(`[Encryption] Invalid field name: ${field}`);
+            logger.error(`[Encryption] Invalid field name: ${field}`);
             continue;
           }
           
@@ -438,7 +440,7 @@ export class EncryptionService {
           }
         }
       } catch (error) {
-        console.error(`[Encryption] Re-encryption error for ${policy.resource}:`, error);
+        logger.error(`[Encryption] Re-encryption error for ${policy.resource}:`, { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -507,7 +509,7 @@ export class EncryptionService {
         this.activeKeys.set(row.organization_id, key);
       }
     } catch (error) {
-      console.warn('[Encryption] Could not load keys:', error);
+      logger.warn('[Encryption] Could not load keys:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -527,7 +529,7 @@ export class EncryptionService {
         this.policies.set(policy.resource, policy);
       }
     } catch (error) {
-      console.warn('[Encryption] Could not load policies:', error);
+      logger.warn('[Encryption] Could not load policies:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -540,7 +542,7 @@ export class EncryptionService {
     `);
 
     for (const row of result.rows) {
-      console.log(`[Encryption] Key rotation needed for org ${row.organization_id}`);
+      logger.info(`[Encryption] Key rotation needed for org ${row.organization_id}`);
       // In production, would trigger rotation workflow
     }
   }

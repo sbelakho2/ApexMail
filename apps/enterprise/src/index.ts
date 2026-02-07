@@ -9,6 +9,9 @@ import { Pool } from 'pg';
 import IORedis from 'ioredis';
 import { createApp, BackgroundJobScheduler } from './app.js';
 import { config } from './config.js';
+import { createLogger } from '@apexmail/lib';
+
+const logger = createLogger({ name: 'enterprise' });
 
 // Initialize database connection pool
 const pool = new Pool({
@@ -41,11 +44,11 @@ async function gracefulShutdown(signal: string) {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
-  console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
+  logger.info('Received shutdown signal', { signal });
 
   // Stop accepting new connections
   server.close(() => {
-    console.log('HTTP server closed');
+    logger.info('HTTP server closed');
   });
 
   // Stop background jobs
@@ -53,20 +56,20 @@ async function gracefulShutdown(signal: string) {
 
   // Close existing connections with timeout
   const closeTimeout = setTimeout(() => {
-    console.log('Forcing remaining connections closed');
+    logger.warn('Forcing remaining connections closed');
     connections.forEach((conn) => conn.destroy());
   }, 10000);
 
   // Wait for connections to close
   await Promise.all([
     // Close database pool
-    pool.end().then(() => console.log('Database pool closed')),
+    pool.end().then(() => logger.info('Database pool closed')),
     // Close Redis connection
-    redis.quit().then(() => console.log('Redis connection closed')),
+    redis.quit().then(() => logger.info('Redis connection closed')),
   ]);
 
   clearTimeout(closeTimeout);
-  console.log('Graceful shutdown complete');
+  logger.info('Graceful shutdown complete');
   process.exit(0);
 }
 
@@ -76,12 +79,12 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Handle uncaught errors
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
+  logger.error('Uncaught exception', { error: error.message, stack: error.stack });
   gracefulShutdown('uncaughtException');
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection', { reason: reason instanceof Error ? reason.message : String(reason) });
 });
 
 // Create application
@@ -95,14 +98,14 @@ const server = serve({
   fetch: app.fetch,
   port: config.server.port,
 }, async (info) => {
-  console.log(`Enterprise service starting on port ${info.port}...`);
+  logger.info('Enterprise service starting', { port: info.port });
   
   // Test database connection
   try {
     await pool.query('SELECT 1');
-    console.log('✓ Database connection established');
+    logger.info('Database connection established');
   } catch (error) {
-    console.error('✗ Database connection failed:', error);
+    logger.error('Database connection failed', { error: error instanceof Error ? error.message : String(error) });
     process.exit(1);
   }
 
@@ -110,28 +113,20 @@ const server = serve({
   try {
     await redis.connect();
     await redis.ping();
-    console.log('✓ Redis connection established');
+    logger.info('Redis connection established');
   } catch (error) {
-    console.error('✗ Redis connection failed:', error);
+    logger.error('Redis connection failed', { error: error instanceof Error ? error.message : String(error) });
     process.exit(1);
   }
 
   // Start background jobs
   backgroundScheduler.start();
-  console.log('✓ Background job scheduler started');
+  logger.info('Background job scheduler started');
 
-  console.log(`\n🚀 Enterprise service is running at http://localhost:${info.port}`);
-  console.log('\nAvailable endpoints:');
-  console.log('  SSO:              /api/sso/*');
-  console.log('  Sub-Accounts:     /api/sub-accounts/*');
-  console.log('  White-Label:      /api/whitelabel/*');
-  console.log('  Templates:        /api/templates/*');
-  console.log('  Log Streaming:    /api/log-streams/*');
-  console.log('  Compliance:       /api/compliance/*');
-  console.log('  Deployments:      /api/deployments/*');
-  console.log('  Support:          /api/support/*');
-  console.log('  QBR:              /api/qbr/*');
-  console.log('  Health:           /api/health');
+  logger.info('Enterprise service is running', {
+    port: info.port,
+    endpoints: ['SSO', 'Sub-Accounts', 'White-Label', 'Templates', 'Log Streaming', 'Compliance', 'Deployments', 'Support', 'QBR', 'Health'],
+  });
 });
 
 // Track connections for graceful shutdown

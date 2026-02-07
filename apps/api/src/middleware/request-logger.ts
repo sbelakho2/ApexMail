@@ -39,12 +39,27 @@ export function requestLogger(baseLogger: Logger): MiddlewareHandler<AppEnv> {
       const duration = Date.now() - startTime;
       const status = c.res.status;
 
+      // C-115: Log full request processing details for observability
       const logFn = status >= 500 ? logger.error : status >= 400 ? logger.warn : logger.info;
       logFn.call(logger, 'Request completed', {
+        method: c.req.method,
+        path: c.req.path,
         status,
-        duration,
+        durationMs: duration,
         tenantId: c.get('tenantId'),
+        contentLength: c.res.headers.get('content-length'),
       });
+
+      // C-115: Warn on slow requests (>3s)
+      if (duration > 3000) {
+        logger.warn('C-115: Slow request detected', {
+          method: c.req.method,
+          path: c.req.path,
+          durationMs: duration,
+          status,
+          tenantId: c.get('tenantId'),
+        });
+      }
     }
   };
 }

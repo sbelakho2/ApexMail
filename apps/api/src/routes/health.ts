@@ -11,6 +11,7 @@
 
 import { Hono } from 'hono';
 import type { AppEnv, AppContext } from '../app.js';
+import { isReady } from '../index.js';
 
 export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
@@ -35,6 +36,15 @@ export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
 
   // Detailed readiness probe - checks all dependencies
   router.get('/ready', async (c) => {
+    // G-221: If the process is shutting down, immediately return 503
+    // so Kubernetes stops routing new traffic to this pod.
+    if (!isReady) {
+      return c.json({
+        status: 'shutting_down',
+        timestamp: new Date().toISOString(),
+      }, 503);
+    }
+
     const checks: Record<string, { status: string; latency?: number; error?: string }> = {};
     let healthy = true;
 
@@ -79,6 +89,30 @@ export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
         // Non-critical check
         checks.database_pool = { status: 'unknown', latency: 0 };
       }
+    }
+
+    // G-213: Check Redis connectivity — a superficial health check that
+    // only verifies the database can mask Redis outages, causing cache
+    // misses, rate-limiter failures, and degraded API performance.
+    const redisStart = Date.now();
+    try {
+      const pong = await ctx.redis.ping();
+      checks.redis = {
+        status: pong === 'PONG' ? 'healthy' : 'unhealthy',
+        latency: Date.now() - redisStart,
+      };
+      if (pong !== 'PONG') {
+        healthy = false;
+        checks.redis.error = `Unexpected ping response: ${pong}`;
+      }
+    } catch (err) {
+      // Redis is degraded but not critical — API can still serve requests
+      // without cache. Mark as warning rather than failing readiness.
+      checks.redis = {
+        status: 'unhealthy',
+        latency: Date.now() - redisStart,
+        error: err instanceof Error ? err.message : 'Unknown error',
+      };
     }
 
     return c.json({

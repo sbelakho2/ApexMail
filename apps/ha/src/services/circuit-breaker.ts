@@ -10,7 +10,9 @@
  */
 
 import Redis from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
+
+const logger = createLogger({ name: 'ha-circuit-breaker' });
 
 export enum CircuitState {
   CLOSED = 'closed',     // Normal operation
@@ -82,7 +84,7 @@ export class CircuitBreakerService {
       this.cleanupOldFailures();
     }, 60000);
 
-    console.log('[CircuitBreaker] Service initialized');
+    logger.info('[CircuitBreaker] Service initialized');
   }
 
   /**
@@ -107,7 +109,7 @@ export class CircuitBreakerService {
     };
 
     this.circuits.set(config.name, circuit);
-    console.log(`[CircuitBreaker] Registered circuit: ${config.name}`);
+    logger.info(`[CircuitBreaker] Registered circuit: ${config.name}`);
   }
 
   /**
@@ -222,7 +224,7 @@ export class CircuitBreakerService {
     }
 
     this.transitionTo(circuit, CircuitState.OPEN);
-    console.log(`[CircuitBreaker] Force opened: ${circuitName}`);
+    logger.info(`[CircuitBreaker] Force opened: ${circuitName}`);
     return { ok: true, value: undefined };
   }
 
@@ -238,7 +240,7 @@ export class CircuitBreakerService {
     this.transitionTo(circuit, CircuitState.CLOSED);
     circuit.failures = 0;
     circuit.failureTimestamps = [];
-    console.log(`[CircuitBreaker] Force closed: ${circuitName}`);
+    logger.info(`[CircuitBreaker] Force closed: ${circuitName}`);
     return { ok: true, value: undefined };
   }
 
@@ -265,7 +267,7 @@ export class CircuitBreakerService {
     circuit.closedAt = new Date();
     circuit.failureTimestamps = [];
 
-    console.log(`[CircuitBreaker] Reset: ${circuitName}`);
+    logger.info(`[CircuitBreaker] Reset: ${circuitName}`);
     return { ok: true, value: undefined };
   }
 
@@ -401,7 +403,7 @@ export class CircuitBreakerService {
     // Publish state change event
     this.publishStateChange(circuit.config.name, oldState, newState);
 
-    console.log(`[CircuitBreaker] ${circuit.config.name}: ${oldState} -> ${newState}`);
+    logger.info(`[CircuitBreaker] ${circuit.config.name}: ${oldState} -> ${newState}`);
   }
 
   private async publishStateChange(
@@ -560,5 +562,5 @@ export function createDefaultCircuits(service: CircuitBreakerService): void {
     requestVolumeThreshold: 10,
   });
 
-  console.log('[CircuitBreaker] Default circuits registered');
+  logger.info('[CircuitBreaker] Default circuits registered');
 }

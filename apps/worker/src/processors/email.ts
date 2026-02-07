@@ -104,9 +104,31 @@ export class EmailProcessor {
   private transporter: Transporter | null = null;
   private isRunning = false;
   private activeJobs = 0;
+
+  /**
+   * E-172: Worker-level error rate circuit breaker.
+   * Tracks recent send outcomes in a sliding window. If the error rate
+   * exceeds the threshold (e.g., 10 of last 20 fail), the worker pauses
+   * for a cooldown period to avoid flooding a degraded downstream.
+   */
+  private readonly recentOutcomes: Array<{ success: boolean; timestamp: number }> = [];
+  private static readonly ERROR_WINDOW_SIZE = 20;
+  private static readonly ERROR_THRESHOLD = 10; // 10 failures out of 20 = 50%
+  private static readonly ERROR_COOLDOWN_MS = 60_000; // 1 minute pause
+  private errorCooldownUntil = 0;
   private readonly dkimKeys = new Map<string, { privateKey: string; publicKey: string }>();
   private readonly rateLimiter: TokenBucketRateLimiter;
   private dkimRefreshTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * C-118: In-memory suppression check cache with 5-minute TTL.
+   * Avoids redundant DB lookups when the same recipient appears multiple
+   * times across consecutive poll cycles within a short window.
+   * Key = "tenantId:email", Value = { suppressed: boolean, reason?: string, expiresAt: number }
+   */
+  private readonly suppressionCache = new Map<string, { suppressed: boolean; reason?: string; expiresAt: number }>();
+  private static readonly SUPPRESSION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly SUPPRESSION_CACHE_MAX_SIZE = 10_000;
 
   constructor(options: EmailProcessorConfig) {
     this.db = options.db;
@@ -190,11 +212,13 @@ export class EmailProcessor {
     // Load DKIM keys if enabled
     if (this.dkimConfig.enabled) {
       await this.loadDkimKeys();
+      // C-065 / D-111: Add .unref() so timer doesn't prevent process exit
       this.dkimRefreshTimer = setInterval(() => {
         this.loadDkimKeys().catch((error) => {
           this.logger.error('Failed to refresh DKIM keys', { error });
         });
       }, 5 * 60 * 1000); // refresh every 5 minutes
+      this.dkimRefreshTimer.unref();
     }
 
     this.isRunning = true;
@@ -235,9 +259,60 @@ export class EmailProcessor {
     this.logger.info('Email processor stopped');
   }
 
+  /**
+   * C-098 / E-180: Configurable queue claim batch size via QUEUE_BATCH_SIZE env var.
+   *
+   * Controls how many jobs are claimed from the email_queue per poll cycle,
+   * independent of the `concurrency` setting which governs how many jobs
+   * may be *processed* in parallel.
+   *
+   * ## How to tune
+   *
+   * | Scale            | QUEUE_BATCH_SIZE | concurrency | Notes                            |
+   * |------------------|------------------|-------------|----------------------------------|
+   * | Low  (< 1K/hr)   | 5                | 5           | Minimal memory, quick feedback   |
+   * | Med  (1K–50K/hr) | 20               | 20          | Good balance of throughput/mem   |
+   * | High (> 50K/hr)  | 50–100           | 50          | Max throughput, needs ≥1 GB RAM  |
+   *
+   * ## Trade-offs
+   *
+   * - **Larger batches** → fewer DB round-trips, higher throughput, but each
+   *   poll cycle locks more rows (longer lock hold) and uses more memory
+   *   because all fetched jobs are buffered before processing.
+   *
+   * - **Smaller batches** → lower memory footprint, shorter lock windows,
+   *   but more frequent DB queries and potentially higher end-to-end latency
+   *   under load.
+   *
+   * - Setting the value higher than `concurrency` is wasteful — extra jobs
+   *   sit in memory waiting for a processing slot.
+   *
+   * ## Default behaviour
+   *
+   * When QUEUE_BATCH_SIZE is unset or 0 the batch size equals the number of
+   * available concurrency slots (i.e. no artificial cap). Set an explicit
+   * value only when you need to limit the per-cycle claim.
+   */
+  private readonly queueBatchSize: number = Math.max(
+    0,
+    parseInt(process.env.QUEUE_BATCH_SIZE || '0', 10) || 0
+  );
+
   private async poll(): Promise<void> {
     while (this.isRunning) {
       try {
+        // E-172: Worker-level error rate circuit breaker — pause when error rate is too high
+        if (Date.now() < this.errorCooldownUntil) {
+          const remainingMs = this.errorCooldownUntil - Date.now();
+          this.logger.warn('E-172: Worker paused due to high error rate', {
+            resumesInMs: remainingMs,
+            recentFailures: this.recentOutcomes.filter(o => !o.success).length,
+            windowSize: this.recentOutcomes.length,
+          });
+          await new Promise(resolve => setTimeout(resolve, Math.min(remainingMs, 5000)));
+          continue;
+        }
+
         // Check if we have capacity
         const availableSlots = this.config.concurrency - this.activeJobs;
         if (availableSlots <= 0) {
@@ -245,8 +320,13 @@ export class EmailProcessor {
           continue;
         }
 
+        // C-098: Respect configurable batch size when set, otherwise use available slots
+        const claimLimit = this.queueBatchSize > 0
+          ? Math.min(availableSlots, this.queueBatchSize)
+          : availableSlots;
+
         // Fetch jobs from queue
-        const jobs = await this.fetchJobs(availableSlots);
+        const jobs = await this.fetchJobs(claimLimit);
         
         if (jobs.length === 0) {
           // LISTEN/NOTIFY wakeup: sleep until notified or fallback timeout
@@ -258,20 +338,131 @@ export class EmailProcessor {
           continue;
         }
 
+        // C-100: Collect completed job IDs for batch queue cleanup.
+        // Individual processJob calls handle their own transactions for
+        // message status + event recording, but we can batch-delete
+        // successfully processed queue entries in a single round-trip
+        // when jobs share the same outcome.
+
+        // C-104: Batch suppression pre-check — collect all recipient emails
+        // and check suppression status in a single DB query instead of
+        // N individual findByEmail calls inside each processJob.
+        const recipientEmails = [...new Set(jobs.map(j => j.to))];
+        const batchSuppressionMap = new Map<string, string>();
+        try {
+          const suppResult = await this.suppressionsRepo.checkBulkSuppression(
+            recipientEmails,
+            jobs[0]?.tenantId ?? ''
+          );
+          if (suppResult.ok) {
+            const tenantId = jobs[0]?.tenantId ?? '';
+            const now = Date.now();
+            for (const [email, data] of suppResult.value.entries()) {
+              if (data) {
+                batchSuppressionMap.set(email, data.reason ?? 'unknown');
+              }
+              // C-118: Populate suppression cache for future poll cycles
+              const cacheKey = `${tenantId}:${email}`;
+              this.suppressionCache.set(cacheKey, {
+                suppressed: !!data,
+                reason: data?.reason ?? undefined,
+                expiresAt: now + EmailProcessor.SUPPRESSION_CACHE_TTL_MS,
+              });
+            }
+            // C-118: Evict oldest entries if cache exceeds max size
+            if (this.suppressionCache.size > EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE) {
+              const entries = [...this.suppressionCache.entries()]
+                .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+              const toRemove = entries.slice(0, this.suppressionCache.size - EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE);
+              for (const [key] of toRemove) {
+                this.suppressionCache.delete(key);
+              }
+            }
+          }
+        } catch (err) {
+          // Non-fatal: fall back to per-job suppression check
+          this.logger.warn('C-104: Batch suppression pre-check failed, falling back to per-job checks', { error: err });
+        }
+
         // Process jobs concurrently - use allSettled to prevent single failure from failing batch
         // This ensures all jobs are processed even if some fail
-        const results = await Promise.allSettled(jobs.map(job => this.processJob(job)));
+        const results = await Promise.allSettled(jobs.map(job => this.processJob(job, batchSuppressionMap)));
         
-        // Log any unexpected rejections (processJob should handle its own errors)
+        // E-166: Track batch progress — count successes, failures, and per-campaign breakdown
+        let batchSucceeded = 0;
+        let batchFailed = 0;
+        const campaignProgress = new Map<string, { succeeded: number; failed: number }>();
+
         for (let i = 0; i < results.length; i++) {
           const result = results[i];
+          const job = jobs[i];
+          const campaignId = job?.campaignId ?? '__none__';
+
+          if (!campaignProgress.has(campaignId)) {
+            campaignProgress.set(campaignId, { succeeded: 0, failed: 0 });
+          }
+          const cp = campaignProgress.get(campaignId)!;
+
           if (result && result.status === 'rejected') {
+            batchFailed++;
+            cp.failed++;
             this.logger.error('Unexpected job processing error', {
-              jobId: jobs[i]?.id,
+              jobId: job?.id,
               error: result.reason,
+            });
+          } else {
+            batchSucceeded++;
+            cp.succeeded++;
+          }
+        }
+
+        // E-172: Record outcomes in the sliding window for error rate tracking
+        const now = Date.now();
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          this.recentOutcomes.push({
+            success: result?.status === 'fulfilled',
+            timestamp: now,
+          });
+        }
+        // Trim window to max size
+        while (this.recentOutcomes.length > EmailProcessor.ERROR_WINDOW_SIZE) {
+          this.recentOutcomes.shift();
+        }
+        // E-172: Check if error rate exceeds threshold → activate cooldown
+        if (this.recentOutcomes.length >= EmailProcessor.ERROR_WINDOW_SIZE) {
+          const failureCount = this.recentOutcomes.filter(o => !o.success).length;
+          if (failureCount >= EmailProcessor.ERROR_THRESHOLD) {
+            this.errorCooldownUntil = Date.now() + EmailProcessor.ERROR_COOLDOWN_MS;
+            this.logger.error('E-172: Error rate circuit breaker activated — worker pausing', {
+              failures: failureCount,
+              windowSize: this.recentOutcomes.length,
+              threshold: EmailProcessor.ERROR_THRESHOLD,
+              cooldownMs: EmailProcessor.ERROR_COOLDOWN_MS,
             });
           }
         }
+
+        // E-166: Emit batch progress metric for monitoring dashboards
+        this.logger.info('email.batch.progress', {
+          metric: 'email_batch_progress',
+          batchSize: jobs.length,
+          succeeded: batchSucceeded,
+          failed: batchFailed,
+          activeJobs: this.activeJobs,
+          campaignBreakdown: Object.fromEntries(
+            [...campaignProgress.entries()]
+              .filter(([k]) => k !== '__none__')
+              .map(([k, v]) => [k, v])
+          ),
+        });
+
+        // C-108: Adaptive polling — when we just processed jobs there are
+        // likely more waiting. Use a short 100ms delay instead of the full
+        // LISTEN/NOTIFY wait so we drain the queue quickly, reducing
+        // end-to-end latency while still yielding the event loop.
+        await new Promise(resolve => setTimeout(resolve, 100));
+        continue;
       } catch (error) {
         this.logger.error('Poll error', { error });
         await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
@@ -317,7 +508,7 @@ export class EmailProcessor {
     return result.rows;
   }
 
-  private async processJob(job: EmailJob): Promise<void> {
+  private async processJob(job: EmailJob, batchSuppressions?: Map<string, string>): Promise<void> {
     this.activeJobs++;
     const startTime = Date.now();
 
@@ -329,13 +520,42 @@ export class EmailProcessor {
         attempt: job.attempt,
       });
 
-      // Check suppression - findByEmail returns array, check first match
-      const suppressionResult = await this.suppressionsRepo.findByEmail(job.to, job.tenantId);
-      if (suppressionResult.ok && suppressionResult.value && suppressionResult.value.length > 0) {
-        const firstSuppression = suppressionResult.value[0];
-        if (firstSuppression) {
-          await this.handleSuppressed(job, firstSuppression.reason ?? 'unknown');
-          return;
+      // C-104: Use pre-computed batch suppression map when available,
+      // falling back to per-job DB lookup only if batch check was not done.
+      if (batchSuppressions && batchSuppressions.has(job.to)) {
+        await this.handleSuppressed(job, batchSuppressions.get(job.to)!);
+        return;
+      } else if (!batchSuppressions) {
+        // C-118: Check in-memory suppression cache before hitting the DB.
+        const cacheKey = `${job.tenantId}:${job.to}`;
+        const cached = this.suppressionCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+          if (cached.suppressed) {
+            await this.handleSuppressed(job, cached.reason ?? 'unknown');
+            return;
+          }
+          // Cached as not-suppressed — skip DB lookup
+        } else {
+          // Cache miss or expired — do individual suppression check
+          const suppressionResult = await this.suppressionsRepo.findByEmail(job.to, job.tenantId);
+          if (suppressionResult.ok && suppressionResult.value && suppressionResult.value.length > 0) {
+            const firstSuppression = suppressionResult.value[0];
+            if (firstSuppression) {
+              // C-118: Cache the positive suppression result
+              this.suppressionCache.set(cacheKey, {
+                suppressed: true,
+                reason: firstSuppression.reason ?? 'unknown',
+                expiresAt: Date.now() + EmailProcessor.SUPPRESSION_CACHE_TTL_MS,
+              });
+              await this.handleSuppressed(job, firstSuppression.reason ?? 'unknown');
+              return;
+            }
+          }
+          // C-118: Cache the negative (not suppressed) result
+          this.suppressionCache.set(cacheKey, {
+            suppressed: false,
+            expiresAt: Date.now() + EmailProcessor.SUPPRESSION_CACHE_TTL_MS,
+          });
         }
       }
 
@@ -397,10 +617,19 @@ export class EmailProcessor {
       this.activeJobs--;
       
       const duration = Date.now() - startTime;
-      this.logger.debug('Job completed', {
+
+      // E-158: Record email processing duration as a structured metric.
+      // Emitted at info level so log-based metric systems (Loki, CloudWatch,
+      // Datadog) can build histograms from the `metric` + `durationMs` fields.
+      this.logger.info('email.processing.duration', {
+        metric: 'email_processing_duration_ms',
         jobId: job.id,
-        duration,
+        messageId: job.messageId,
+        durationMs: duration,
+        attempt: job.attempt,
         activeJobs: this.activeJobs,
+        // Bucket label for quick dashboarding
+        durationBucket: duration < 500 ? 'fast' : duration < 2000 ? 'normal' : duration < 10000 ? 'slow' : 'very_slow',
       });
     }
   }
@@ -441,6 +670,21 @@ export class EmailProcessor {
         keySelector: this.dkimConfig.selector,
         privateKey: dkimKey.privateKey,
       };
+
+      // F-233: DMARC alignment check — the From header domain must match
+      // the DKIM d= domain (domainData.domain). If they don't align,
+      // DMARC will fail even if SPF and DKIM individually pass.
+      const fromDomain = (job.from.split('@')[1] ?? '').toLowerCase();
+      const dkimDomain = domainData.domain.toLowerCase();
+      if (fromDomain && dkimDomain && fromDomain !== dkimDomain) {
+        this.logger.warn('F-233: DMARC alignment failure — From domain does not match DKIM d= domain', {
+          jobId: job.id,
+          messageId: job.messageId,
+          fromDomain,
+          dkimDomain,
+          impact: 'DMARC will likely fail for this message even if SPF and DKIM individually pass',
+        });
+      }
     }
 
     return {
@@ -503,6 +747,19 @@ export class EmailProcessor {
     return `<${unsubscribeUrl}>, <mailto:unsubscribe@${domain}?subject=Unsubscribe>`;
   }
 
+  /**
+   * C-129: Email content MIME type detection.
+   *
+   * Nodemailer automatically sets the correct MIME type based on which
+   * fields are provided in `mailOptions`:
+   *   - `text` only         → Content-Type: text/plain
+   *   - `html` only         → Content-Type: text/html
+   *   - `text` AND `html`   → multipart/alternative with both parts
+   *
+   * No manual Content-Type or multipart handling is needed. Nodemailer's
+   * internal MimeNode builder handles boundary generation, encoding, and
+   * part ordering (text/plain first, text/html second) per RFC 2046 §5.1.4.
+   */
   private async sendEmail(email: PreparedEmail): Promise<SentMessageInfo> {
     if (!this.transporter) {
       throw new Error('SMTP transporter not initialized');
@@ -628,23 +885,86 @@ export class EmailProcessor {
   }
 
   private async handleError(job: EmailJob, error: Error): Promise<void> {
+    // E-154: Categorise errors as transient vs permanent for better observability
+    // and to prevent wasteful retries on permanent failures.
+    const category = this.categorizeError(error);
+
+    // E-162: Include comprehensive context for error triage.
+    // Missing tenantId, maxRetries, and recipient domain made it hard to
+    // correlate failures with specific tenants or ISPs in production logs.
     this.logger.error('Email send failed', {
       jobId: job.id,
       messageId: job.messageId,
+      tenantId: job.tenantId,
+      to: job.to,
       error: error.message,
+      errorCategory: category,
       attempt: job.attempt,
+      maxRetries: this.config.maxRetries,
+      willRetry: category !== 'permanent' && job.attempt < this.config.maxRetries,
+      recipientDomain: job.to.split('@')[1] ?? 'unknown',
+      campaignId: job.campaignId ?? null,
+      activeJobs: this.activeJobs,
     });
 
     const isBounce = this.isBounceError(error);
-    const isRetryable = this.isRetryableError(error) && job.attempt < this.config.maxRetries;
 
     if (isBounce) {
       await this.handleBounce(job, error);
-    } else if (isRetryable) {
+    } else if (category === 'permanent') {
+      // E-154: Permanent errors should never retry — fail immediately
+      await this.failJob(job, error);
+    } else if (category === 'transient' && job.attempt < this.config.maxRetries) {
       await this.retryJob(job, error);
     } else {
       await this.failJob(job, error);
     }
+  }
+
+  /**
+   * E-154: Categorise send errors as transient (worth retrying) or permanent
+   * (no point retrying — authentication, policy, or configuration issues).
+   */
+  private categorizeError(error: Error): 'transient' | 'permanent' | 'unknown' {
+    const msg = error.message.toLowerCase();
+
+    // Permanent: authentication / policy / config errors
+    const permanentPatterns = [
+      /\b(535)\b/,              // 535 Authentication failed
+      /\b(530)\b/,              // 530 Authentication required
+      /\b(523)\b/,              // 523 Message length exceeds limit
+      /\b(556)\b/,              // 556 Domain does not accept mail
+      /invalid.*credential/,
+      /authentication.*failed/,
+      /relay.*denied/,
+      /not.*permitted/,
+      /certificate.*invalid/,
+      /self.signed/,
+    ];
+
+    // Transient: temporary server-side or network issues
+    const transientPatterns = [
+      /\b(421|450|451|452)\b/,  // 4xx temporary SMTP errors
+      /timeout/,
+      /econnreset/,
+      /econnrefused/,
+      /enetunreach/,
+      /enotfound/,
+      /temporary/,
+      /try.*again/,
+      /too.*many.*connections/,
+      /rate.*limit/,
+      /greylist/,
+      /circuit.*breaker/,
+    ];
+
+    for (const pattern of permanentPatterns) {
+      if (pattern.test(msg)) return 'permanent';
+    }
+    for (const pattern of transientPatterns) {
+      if (pattern.test(msg)) return 'transient';
+    }
+    return 'unknown';
   }
 
   /**
@@ -762,10 +1082,37 @@ export class EmailProcessor {
    * Matches the IMP-001 pattern used by handleSuccess/handleBounce/
    * handleSuppressed/failJob.
    */
+  /**
+   * E-189: Retry delay constants for exponential backoff.
+   * Formula: locked_until = NOW() + min(baseDelay * 2^retryCount, maxDelay)
+   * This prevents retries from firing immediately and gives downstream
+   * services time to recover.
+   */
+  private static readonly RETRY_BASE_DELAY_MS = 30_000;      // 30 seconds
+  private static readonly RETRY_MAX_DELAY_MS  = 30 * 60_000; // 30 minutes
+
   private async retryJob(job: EmailJob, error: Error): Promise<void> {
     const nextAttempt = job.attempt + 1;
-    const delay = this.config.retryDelay * Math.pow(2, job.attempt - 1); // Exponential backoff
+    // E-189: Exponential backoff with capped max delay
+    const delay = Math.min(
+      EmailProcessor.RETRY_BASE_DELAY_MS * Math.pow(2, job.attempt - 1),
+      EmailProcessor.RETRY_MAX_DELAY_MS
+    );
     const scheduledAt = new Date(Date.now() + delay);
+    // E-189: Set locked_until to prevent other workers from picking up the
+    // job before the backoff period expires. This is the authoritative
+    // backoff mechanism — scheduledAt filters in fetchJobs, while
+    // locked_until provides a secondary guard against premature claims.
+    const lockedUntil = new Date(Date.now() + delay);
+
+    this.logger.info('E-189: Scheduling retry with exponential backoff', {
+      jobId: job.id,
+      messageId: job.messageId,
+      attempt: nextAttempt,
+      delayMs: delay,
+      scheduledAt: scheduledAt.toISOString(),
+      lockedUntil: lockedUntil.toISOString(),
+    });
 
     const client = await this.db.connect();
     try {
@@ -778,10 +1125,10 @@ export class EmailProcessor {
           attempt = $1,
           scheduled_at = $2,
           last_error = $3,
-          locked_until = NULL,
+          locked_until = $5,
           updated_at = NOW()
         WHERE id = $4
-      `, [nextAttempt, scheduledAt, error.message, job.id]);
+      `, [nextAttempt, scheduledAt, error.message, job.id, lockedUntil]);
 
       // Record deferred event inside the same transaction
       await client.query(
@@ -879,14 +1226,8 @@ export class EmailProcessor {
     return bouncePattern.test(message);
   }
 
-  private isRetryableError(error: Error): boolean {
-    const message = error.message.toLowerCase();
-    const retryableCodePattern = /\b(421|45[0-2])\b/;
-    const retryablePatterns = ['timeout', 'econnreset', 'econnrefused', 'temporary'];
-    
-    return retryableCodePattern.test(message) ||
-           retryablePatterns.some(pattern => message.includes(pattern));
-  }
+  // E-154: isRetryableError replaced by categorizeError() which provides
+  // richer transient/permanent/unknown classification.
 
   private classifyBounce(error: Error): { type: 'hard' | 'soft'; subtype: string } {
     const message = error.message.toLowerCase();
@@ -928,6 +1269,30 @@ export class EmailProcessor {
     `);
 
     for (const row of result.rows) {
+      // F-204: Validate DKIM key length — 2048-bit RSA minimum recommended.
+      // RSA key length in bits ≈ (base64-decoded byte length) * 8.
+      // A PEM private key's base64 body is roughly proportional to key size.
+      try {
+        const pemBody = row.private_key
+          .replace(/-----[A-Z ]+-----/g, '')
+          .replace(/\s/g, '');
+        const keyBytes = Buffer.from(pemBody, 'base64').length;
+        const estimatedBits = keyBytes * 8;
+        // RSA-2048 private keys are ~1200 bytes → ~9600 bits in raw DER.
+        // A threshold of 2048 raw bits safely catches 1024-bit keys (~600 bytes → ~4800 bits).
+        if (estimatedBits < 2048) {
+          this.logger.warn('F-204: DKIM key shorter than 2048-bit RSA minimum', {
+            domainId: row.domain_id,
+            estimatedBits,
+            recommendation: 'Generate a 2048-bit or 4096-bit RSA key pair',
+          });
+        }
+      } catch {
+        this.logger.warn('F-204: Could not determine DKIM key length', {
+          domainId: row.domain_id,
+        });
+      }
+
       this.dkimKeys.set(row.domain_id, {
         privateKey: row.private_key,
         publicKey: '', // Not needed for signing

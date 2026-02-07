@@ -6,12 +6,15 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
+import { logger as honoLogger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import { createLogger } from '@apexmail/lib';
 
 import { config } from './config.js';
+
+const logger = createLogger({ name: 'observability:app' });
 import { TracingService } from './services/tracing.js';
 import { MetricsService } from './services/metrics.js';
 import { LoggingService } from './services/logging.js';
@@ -84,7 +87,7 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
     maxAge: 86400,
   }));
 
-  app.use('*', logger());
+  app.use('*', honoLogger());
   app.use('*', prettyJSON());
 
   // Request ID middleware
@@ -207,7 +210,7 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
     // @ts-expect-error - Hono context extension for request ID
     const requestId = c.get('requestId') || 'unknown';
     
-    console.error(`[${requestId}] Error:`, err);
+    logger.error(`[${requestId}] Error:`, { error: err instanceof Error ? err.message : String(err) });
 
     // Log error
     logging.error('Request error', err, {
@@ -247,7 +250,7 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
  * Graceful shutdown
  */
 export async function shutdown(context: AppContext): Promise<void> {
-  console.log('[App] Shutting down...');
+  logger.info('[App] Shutting down...');
 
   // Shutdown services
   context.tracing.shutdown();
@@ -259,5 +262,5 @@ export async function shutdown(context: AppContext): Promise<void> {
   await context.redis.quit();
   await context.db.end();
 
-  console.log('[App] Shutdown complete');
+  logger.info('[App] Shutdown complete');
 }

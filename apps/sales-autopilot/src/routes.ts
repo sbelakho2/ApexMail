@@ -486,7 +486,7 @@ app.post('/api/v1/inbox/process', async (c) => {
                 (e) => e.campaignId === message.campaignId
             );
             if (relevantEnrollment) {
-                campaigns.recordEngagement(relevantEnrollment.id, 'replied');
+                await campaigns.recordEngagement(relevantEnrollment.id, 'replied');
             }
         }
     }
@@ -558,9 +558,30 @@ app.get('/api/v1/leads/detail/:leadId', async (c) => {
     });
 });
 
+/**
+ * A-018: Whitelist updatable fields to prevent arbitrary property injection
+ */
+const ALLOWED_LEAD_UPDATE_FIELDS = new Set([
+    'email', 'firstName', 'lastName', 'company', 'title', 'phone',
+    'website', 'industry', 'source', 'score', 'tags', 'customFields',
+    'notes', 'status',
+]);
+
 app.patch('/api/v1/leads/:leadId', async (c) => {
     const leadId = c.req.param('leadId');
-    const updates = await c.req.json();
+    const rawUpdates = await c.req.json();
+
+    // Filter to only allowed fields
+    const updates: Record<string, unknown> = {};
+    for (const key of Object.keys(rawUpdates)) {
+        if (ALLOWED_LEAD_UPDATE_FIELDS.has(key)) {
+            updates[key] = rawUpdates[key];
+        }
+    }
+
+    if (Object.keys(updates).length === 0) {
+        return c.json({ success: false, error: 'No valid fields to update' }, 400);
+    }
 
     const lead = await crm.updateLead(leadId, updates);
 

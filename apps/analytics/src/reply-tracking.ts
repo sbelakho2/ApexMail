@@ -91,6 +91,11 @@ const AUTO_REPLY_HEADERS = [
 
 export class ReplyTrackingService {
   private replyCache: Map<string, ReplyEvent[]> = new Map();
+  /**
+   * C-095: Maximum number of message keys in the reply cache before eviction.
+   * Without a cap the map grows without bound → eventual OOM.
+   */
+  private static readonly MAX_REPLY_CACHE_SIZE = 50_000;
 
   /**
    * Process an incoming reply and extract metadata
@@ -225,6 +230,17 @@ export class ReplyTrackingService {
     const existing = this.replyCache.get(reply.originalMessageId) || [];
     existing.push(reply);
     this.replyCache.set(reply.originalMessageId, existing);
+
+    // C-095: Evict oldest entries when cache exceeds cap to prevent OOM
+    if (this.replyCache.size > ReplyTrackingService.MAX_REPLY_CACHE_SIZE) {
+      const excess = this.replyCache.size - ReplyTrackingService.MAX_REPLY_CACHE_SIZE;
+      let removed = 0;
+      for (const k of this.replyCache.keys()) {
+        if (removed >= excess) break;
+        this.replyCache.delete(k);
+        removed++;
+      }
+    }
   }
 
   /**

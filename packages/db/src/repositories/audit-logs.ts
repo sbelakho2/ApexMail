@@ -22,6 +22,7 @@ export type AuditAction =
   | 'user.password_changed'
   | 'user.mfa_enabled'
   | 'user.mfa_disabled'
+  | 'user.token_refreshed'
   | 'domain.created'
   | 'domain.verified'
   | 'domain.deleted'
@@ -174,6 +175,7 @@ export class AuditLogsRepository {
           id, tenant_id, user_id, action, resource_type, resource_id,
           ip_address, user_agent, changes, metadata, previous_hash, hash, timestamp
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (id) DO NOTHING
         RETURNING *`,
         [
           id,
@@ -196,7 +198,9 @@ export class AuditLogsRepository {
 
       const row = result.rows[0];
       if (!row) {
-        return Result.err(new Error('Failed to create audit log'));
+        // B-041: ON CONFLICT (id) DO NOTHING — duplicate audit log id, skip silently.
+        // Audit logs are append-only and should never be updated.
+        return Result.err(new Error('Audit log already exists with this id'));
       }
 
       return Result.ok(this.mapRow(row));
@@ -307,7 +311,8 @@ export class AuditLogsRepository {
         `INSERT INTO audit_logs (
           id, tenant_id, user_id, action, resource_type, resource_id,
           ip_address, user_agent, changes, metadata, previous_hash, hash, timestamp
-        ) VALUES ${placeholders.join(', ')}`,
+        ) VALUES ${placeholders.join(', ')}
+        ON CONFLICT (id) DO NOTHING`,
         values
       );
 
@@ -321,7 +326,11 @@ export class AuditLogsRepository {
     }
   }
 
-  async findById(id: string): Promise<Result<AuditLog | null, Error>> {
+  async findById(id: string, tenantId?: string): Promise<Result<AuditLog | null, Error>> {
+    const sql = tenantId
+      ? 'SELECT * FROM audit_logs WHERE id = $1 AND tenant_id = $2'
+      : 'SELECT * FROM audit_logs WHERE id = $1';
+    const params = tenantId ? [id, tenantId] : [id];
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -336,10 +345,7 @@ export class AuditLogsRepository {
       previous_hash: string | null;
       hash: string;
       timestamp: Date;
-    }>(
-      'SELECT * FROM audit_logs WHERE id = $1',
-      [id]
-    );
+    }>(sql, params);
 
     if (!result.ok) return result;
 
@@ -695,6 +701,65 @@ export class AuditLogsRepository {
       archived: count,
       archivePath,
     });
+  }
+
+  /**
+   * C-081: Batched deletion of audit logs older than N days.
+   *
+   * Deletes in batches of `batchSize` (default 1000) to avoid long-running
+   * transactions and excessive lock hold times. Returns the total number
+   * of rows deleted across all batches.
+   */
+  async cleanupOld(
+    olderThanDays: number,
+    options: { batchSize?: number; tenantId?: string } = {}
+  ): Promise<Result<number, Error>> {
+    const batchSize = options.batchSize ?? 1000;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+
+    let totalDeleted = 0;
+
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const conditions = ['timestamp < $1'];
+        const values: unknown[] = [cutoffDate];
+        let paramIndex = 2;
+
+        if (options.tenantId) {
+          conditions.push(`tenant_id = $${paramIndex++}`);
+          values.push(options.tenantId);
+        }
+
+        values.push(batchSize);
+
+        const result = await this.db.query<{ count: string }>(
+          `WITH deleted AS (
+            DELETE FROM audit_logs
+            WHERE id IN (
+              SELECT id FROM audit_logs
+              WHERE ${conditions.join(' AND ')}
+              LIMIT $${paramIndex}
+            )
+            RETURNING 1
+          ) SELECT COUNT(*) as count FROM deleted`,
+          values
+        );
+
+        if (!result.ok) return result;
+
+        const deletedCount = parseInt(result.value.rows[0]?.count ?? '0', 10);
+        totalDeleted += deletedCount;
+
+        // If we deleted fewer rows than the batch size, we're done
+        if (deletedCount < batchSize) break;
+      }
+
+      return Result.ok(totalDeleted);
+    } catch (error) {
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   private mapRow(row: {

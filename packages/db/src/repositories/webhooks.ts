@@ -90,6 +90,7 @@ export class WebhooksRepository {
             const result = await this.pool.query<Record<string, unknown>>(
                 `INSERT INTO webhooks (id, tenant_id, name, url, secret, events, headers)
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (tenant_id, url) DO NOTHING
                  RETURNING *`,
                 [
                     id,
@@ -104,7 +105,8 @@ export class WebhooksRepository {
 
             const row = result.rows[0];
             if (!row) {
-                return err(new Error('Failed to create webhook'));
+                // B-050: ON CONFLICT (tenant_id, url) DO NOTHING produces no rows on duplicate
+                return err(new Error('Webhook URL already exists for this tenant'));
             }
             return ok(this.mapRow(row));
         } catch (error) {
@@ -210,6 +212,37 @@ export class WebhooksRepository {
         );
         
         return (result.rowCount ?? 0) > 0;
+    }
+
+    /**
+     * F-200: Rotate the signing secret for a webhook.
+     * Generates a new cryptographically-random secret, persists it, and returns
+     * the updated webhook so the caller can distribute the new secret.
+     */
+    async rotateSecret(id: string, tenantId: string): Promise<Result<Webhook, Error>> {
+        const newSecret = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+
+        try {
+            const result = await this.pool.query<Record<string, unknown>>(
+                `UPDATE webhooks
+                 SET secret = $1, updated_at = NOW()
+                 WHERE id = $2 AND tenant_id = $3
+                 RETURNING *`,
+                [newSecret, id, tenantId]
+            );
+
+            if (result.rows.length === 0) {
+                return err(new Error('Webhook not found'));
+            }
+
+            const row = result.rows[0];
+            if (!row) {
+                return err(new Error('Webhook not found'));
+            }
+            return ok(this.mapRow(row));
+        } catch (error) {
+            return err(error instanceof Error ? error : new Error(String(error)));
+        }
     }
 
     async recordTrigger(id: string, success: boolean, errorMessage?: string): Promise<void> {

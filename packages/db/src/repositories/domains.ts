@@ -75,6 +75,7 @@ export class DomainsRepository {
                             verification_method, expires_at, dns_records, health_status,
                             created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (tenant_id, domain) DO NOTHING
        RETURNING *`,
       [
         id,
@@ -95,7 +96,8 @@ export class DomainsRepository {
 
     const row = result.value.rows[0];
     if (!row) {
-      return Result.err(new Error('Failed to create domain'));
+      // B-049: ON CONFLICT (tenant_id, domain) DO NOTHING produces no rows
+      return Result.err(new Error(`Domain '${input.domain.toLowerCase()}' already exists for this tenant`));
     }
 
     return Result.ok(this.mapRow(row));
@@ -214,18 +216,21 @@ export class DomainsRepository {
     return Result.ok(this.mapRow(row));
   }
 
-  async verify(id: string): Promise<Result<Domain, Error>> {
+  // A-010: Add optional tenantId for database-level tenant isolation
+  async verify(id: string, tenantId?: string): Promise<Result<Domain, Error>> {
     return this.update(id, {
       status: 'verified',
       verifiedAt: new Date(),
-    });
+    }, tenantId);
   }
 
-  async markExpired(id: string): Promise<Result<void, Error>> {
-    const result = await this.db.query(
-      `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1`,
-      [id]
-    );
+  // A-011: Add optional tenantId for database-level tenant isolation
+  async markExpired(id: string, tenantId?: string): Promise<Result<void, Error>> {
+    const sql = tenantId
+      ? `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1 AND tenant_id = $2`
+      : `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1`;
+    const params = tenantId ? [id, tenantId] : [id];
+    const result = await this.db.query(sql, params);
     return result.ok ? Result.ok(undefined) : result;
   }
 

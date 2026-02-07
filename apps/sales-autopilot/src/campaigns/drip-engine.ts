@@ -180,12 +180,13 @@ export async function updateCampaignStatus(
 }
 
 /**
- * Adds a step to a campaign sequence
+ * B-034: Adds a step to a campaign sequence.
+ * Made async to persist to DB when repository is available.
  */
-export function addSequenceStep(
+export async function addSequenceStep(
     campaignId: string,
     step: Omit<DripSequenceStep, 'id' | 'order'>
-): DripSequenceStep | null {
+): Promise<DripSequenceStep | null> {
     const campaign = campaigns.get(campaignId);
     if (!campaign || campaign.status !== 'draft') {
         return null;
@@ -199,6 +200,14 @@ export function addSequenceStep(
 
     campaign.sequence.push(newStep);
     campaign.updatedAt = new Date();
+
+    // Persist campaign update to DB
+    if (repo) {
+        await repo.updateCampaign(campaignId, {
+            sequence: campaign.sequence,
+            updatedAt: campaign.updatedAt,
+        });
+    }
 
     return newStep;
 }
@@ -476,10 +485,16 @@ export async function processEnrollmentStep(
         campaign.stats.activeCount--;
         campaign.stats.completedCount++;
 
-        // FIX-009: Persist enrollment state transition + campaign stats
+        // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
         if (repo) {
-            repo.updateEnrollment(enrollment.id, { status: 'completed', completedAt: enrollment.completedAt }).catch(err => logger.error('Failed to persist enrollment completion', { error: err }));
-            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+            try {
+                await Promise.all([
+                    repo.updateEnrollment(enrollment.id, { status: 'completed', completedAt: enrollment.completedAt }),
+                    repo.updateCampaign(campaign.id, { stats: campaign.stats }),
+                ]);
+            } catch (err) {
+                logger.error('Failed to persist enrollment completion', { error: err });
+            }
         }
 
         return { success: true, action: 'completed', nextStepAt: null };
@@ -510,10 +525,16 @@ export async function processEnrollmentStep(
             campaign.stats.activeCount--;
             campaign.stats.exitedCount++;
 
-            // FIX-009: Persist enrollment exit + campaign stats
+            // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
             if (repo) {
-                repo.updateEnrollment(enrollment.id, { status: 'exited', exitReason: exitCondition.type }).catch(err => logger.error('Failed to persist enrollment exit', { error: err }));
-                repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+                try {
+                    await Promise.all([
+                        repo.updateEnrollment(enrollment.id, { status: 'exited', exitReason: exitCondition.type }),
+                        repo.updateCampaign(campaign.id, { stats: campaign.stats }),
+                    ]);
+                } catch (err) {
+                    logger.error('Failed to persist enrollment exit', { error: err });
+                }
             }
 
             logger.info('Lead exited campaign', {
@@ -591,17 +612,73 @@ export async function processEnrollmentStep(
                     enrollment.emailsSent++;
                     campaign.stats.emailsSent++;
 
+                    // E-165: Clear failure tracking on success
+                    if (enrollment.metadata._stepFailures) {
+                        delete (enrollment.metadata._stepFailures as Record<string, unknown>)[currentStep.id];
+                    }
+
                     logger.info('Sent drip email', {
                         enrollmentId,
                         stepId: currentStep.id,
                         to: lead.email,
                     });
                 } catch (error) {
-                    logger.error('Failed to send drip email', {
+                    // E-165: Error recovery for failed drip campaign steps.
+                    // 1. Record the failure with attempt count
+                    // 2. Retry after exponential backoff (up to MAX_STEP_RETRIES)
+                    // 3. Skip to next step after max retries exhausted
+                    const MAX_STEP_RETRIES = 3;
+                    const BASE_RETRY_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+
+                    if (!enrollment.metadata._stepFailures) {
+                        enrollment.metadata._stepFailures = {};
+                    }
+                    const failures = enrollment.metadata._stepFailures as Record<string, { count: number; lastError: string; lastFailedAt: string }>;
+                    const prev = failures[currentStep.id];
+                    const failCount = (prev?.count ?? 0) + 1;
+                    failures[currentStep.id] = {
+                        count: failCount,
+                        lastError: error instanceof Error ? error.message : String(error),
+                        lastFailedAt: new Date().toISOString(),
+                    };
+
+                    if (failCount < MAX_STEP_RETRIES) {
+                        // Schedule retry with exponential backoff
+                        const backoffMs = BASE_RETRY_DELAY_MS * Math.pow(2, failCount - 1);
+                        enrollment.nextStepAt = new Date(Date.now() + backoffMs);
+
+                        logger.warn('E-165: Drip email failed, scheduling retry', {
+                            enrollmentId,
+                            stepId: currentStep.id,
+                            attempt: failCount,
+                            maxRetries: MAX_STEP_RETRIES,
+                            retryAt: enrollment.nextStepAt,
+                            error: error instanceof Error ? error.message : String(error),
+                        });
+
+                        if (repo) {
+                            try {
+                                await repo.updateEnrollment(enrollment.id, {
+                                    nextStepAt: enrollment.nextStepAt,
+                                    metadata: enrollment.metadata,
+                                });
+                            } catch (err) {
+                                logger.error('Failed to persist retry state', { error: err });
+                            }
+                        }
+
+                        return { success: false, action: 'skipped', nextStepAt: enrollment.nextStepAt };
+                    }
+
+                    // Max retries exhausted — log and skip to next step
+                    logger.error('E-165: Drip email failed after max retries, skipping step', {
                         enrollmentId,
-                        error,
+                        stepId: currentStep.id,
+                        totalAttempts: failCount,
+                        error: error instanceof Error ? error.message : String(error),
                     });
-                    return { success: false, action: 'skipped', nextStepAt: enrollment.nextStepAt };
+
+                    // Fall through to advance to next step below
                 }
             }
             break;
@@ -631,15 +708,21 @@ export async function processEnrollmentStep(
         enrollment.currentStepId = nextStep.id;
         enrollment.nextStepAt = calculateNextStepTime(nextStep.delay);
 
-        // FIX-009: Persist step advancement
+        // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
         if (repo) {
-            repo.updateEnrollment(enrollment.id, {
-                currentStepId: enrollment.currentStepId,
-                nextStepAt: enrollment.nextStepAt,
-                completedSteps: enrollment.completedSteps,
-                emailsSent: enrollment.emailsSent,
-            }).catch(err => logger.error('Failed to persist enrollment step', { error: err }));
-            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+            try {
+                await Promise.all([
+                    repo.updateEnrollment(enrollment.id, {
+                        currentStepId: enrollment.currentStepId,
+                        nextStepAt: enrollment.nextStepAt,
+                        completedSteps: enrollment.completedSteps,
+                        emailsSent: enrollment.emailsSent,
+                    }),
+                    repo.updateCampaign(campaign.id, { stats: campaign.stats }),
+                ]);
+            } catch (err) {
+                logger.error('Failed to persist enrollment step', { error: err });
+            }
         }
 
         return {
@@ -656,22 +739,39 @@ export async function processEnrollmentStep(
         campaign.stats.activeCount--;
         campaign.stats.completedCount++;
 
-        // FIX-009: Persist completion
+        // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
         if (repo) {
-            repo.updateEnrollment(enrollment.id, {
-                status: 'completed',
-                completedAt: enrollment.completedAt,
-                currentStepId: null,
-                nextStepAt: null,
-                completedSteps: enrollment.completedSteps,
-                emailsSent: enrollment.emailsSent,
-            }).catch(err => logger.error('Failed to persist enrollment completion', { error: err }));
-            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+            try {
+                await Promise.all([
+                    repo.updateEnrollment(enrollment.id, {
+                        status: 'completed',
+                        completedAt: enrollment.completedAt,
+                        currentStepId: null,
+                        nextStepAt: null,
+                        completedSteps: enrollment.completedSteps,
+                        emailsSent: enrollment.emailsSent,
+                    }),
+                    repo.updateCampaign(campaign.id, { stats: campaign.stats }),
+                ]);
+            } catch (err) {
+                logger.error('Failed to persist enrollment completion', { error: err });
+            }
         }
 
         return { success: true, action: 'completed', nextStepAt: null };
     }
 }
+
+// C-089: Compile known variable replacement regexes once at module level
+const VARIABLE_PATTERNS: Record<string, RegExp> = {
+    '{{lead.company_name}}': /\{\{lead\.company_name\}\}/g,
+    '{{lead.domain}}': /\{\{lead\.domain\}\}/g,
+    '{{lead.email}}': /\{\{lead\.email\}\}/g,
+    '{{lead.first_name}}': /\{\{lead\.first_name\}\}/g,
+    '{{lead.industry}}': /\{\{lead\.industry\}\}/g,
+    '{{lead.website}}': /\{\{lead\.website\}\}/g,
+    '{{unsubscribe_link}}': /\{\{unsubscribe_link\}\}/g,
+};
 
 /**
  * Replaces template variables in content
@@ -693,7 +793,11 @@ function replaceVariables(
 
     let result = content;
     for (const [key, value] of Object.entries(variables)) {
-        result = result.replace(new RegExp(key, 'g'), value);
+        const pattern = VARIABLE_PATTERNS[key];
+        if (pattern) {
+            pattern.lastIndex = 0; // reset stateful /g regex
+            result = result.replace(pattern, value);
+        }
     }
 
     // Replace custom fields
@@ -778,12 +882,13 @@ export function getLeadEnrollments(leadId: string): CampaignEnrollment[] {
 }
 
 /**
- * Records engagement event
+ * B-035 / E-137: Records engagement event.
+ * Made async and awaits persistence instead of fire-and-forget.
  */
-export function recordEngagement(
+export async function recordEngagement(
     enrollmentId: string,
     event: 'opened' | 'clicked' | 'replied'
-): void {
+): Promise<void> {
     const enrollment = enrollments.get(enrollmentId);
     if (!enrollment) return;
 
@@ -805,23 +910,27 @@ export function recordEngagement(
             break;
     }
 
-    // FIX-009: Persist engagement to DB so it survives restarts
+    // FIX-009 + B-035: Persist engagement to DB — await instead of fire-and-forget
     if (repo) {
-        repo.updateEnrollment(enrollmentId, {
-            emailsOpened: enrollment.emailsOpened,
-            emailsClicked: enrollment.emailsClicked,
-            replied: enrollment.replied,
-        }).catch(err => logger.error('Failed to persist engagement', { error: err }));
-        repo.updateCampaign(enrollment.campaignId, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        try {
+            await repo.updateEnrollment(enrollmentId, {
+                emailsOpened: enrollment.emailsOpened,
+                emailsClicked: enrollment.emailsClicked,
+                replied: enrollment.replied,
+            });
+            await repo.updateCampaign(enrollment.campaignId, { stats: campaign.stats });
+        } catch (err) {
+            logger.error('Failed to persist engagement', { error: err, enrollmentId, event });
+        }
     }
 
     logger.debug('Recorded engagement', { enrollmentId, event });
 }
 
 /**
- * Pauses an enrollment
+ * E-136: Pauses an enrollment — await persistence instead of fire-and-forget.
  */
-export function pauseEnrollment(enrollmentId: string): boolean {
+export async function pauseEnrollment(enrollmentId: string): Promise<boolean> {
     const enrollment = enrollments.get(enrollmentId);
     if (!enrollment || enrollment.status !== 'active') {
         return false;
@@ -835,11 +944,15 @@ export function pauseEnrollment(enrollmentId: string): boolean {
         campaign.stats.activeCount--;
     }
 
-    // FIX-009: Persist pause to DB
+    // FIX-009 + E-136: Persist pause to DB — await instead of fire-and-forget
     if (repo) {
-        repo.updateEnrollment(enrollmentId, { status: 'paused', pausedAt: enrollment.pausedAt }).catch(err => logger.error('Failed to persist pause', { error: err }));
-        if (campaign) {
-            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        try {
+            await repo.updateEnrollment(enrollmentId, { status: 'paused', pausedAt: enrollment.pausedAt });
+            if (campaign) {
+                await repo.updateCampaign(campaign.id, { stats: campaign.stats });
+            }
+        } catch (err) {
+            logger.error('Failed to persist pause', { error: err, enrollmentId });
         }
     }
 
@@ -847,9 +960,9 @@ export function pauseEnrollment(enrollmentId: string): boolean {
 }
 
 /**
- * Resumes a paused enrollment
+ * E-136: Resumes a paused enrollment — await persistence.
  */
-export function resumeEnrollment(enrollmentId: string): boolean {
+export async function resumeEnrollment(enrollmentId: string): Promise<boolean> {
     const enrollment = enrollments.get(enrollmentId);
     if (!enrollment || enrollment.status !== 'paused') {
         return false;
@@ -870,15 +983,19 @@ export function resumeEnrollment(enrollmentId: string): boolean {
         campaign.stats.activeCount++;
     }
 
-    // FIX-009: Persist resume to DB
+    // FIX-009 + E-136: Persist resume to DB — await instead of fire-and-forget
     if (repo) {
-        repo.updateEnrollment(enrollmentId, {
-            status: 'active',
-            pausedAt: null,
-            nextStepAt: enrollment.nextStepAt,
-        }).catch(err => logger.error('Failed to persist resume', { error: err }));
-        if (campaign) {
-            repo.updateCampaign(campaign.id, { stats: campaign.stats }).catch(err => logger.error('Failed to persist campaign stats', { error: err }));
+        try {
+            await repo.updateEnrollment(enrollmentId, {
+                status: 'active',
+                pausedAt: null,
+                nextStepAt: enrollment.nextStepAt,
+            });
+            if (campaign) {
+                await repo.updateCampaign(campaign.id, { stats: campaign.stats });
+            }
+        } catch (err) {
+            logger.error('Failed to persist resume', { error: err, enrollmentId });
         }
     }
 

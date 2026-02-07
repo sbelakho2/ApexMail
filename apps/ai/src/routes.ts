@@ -13,6 +13,19 @@ import { secureHeaders } from 'hono/secure-headers';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 
+// G-199: Structured logger for AI service (local — no @apexmail/lib dependency)
+const aiLogger = {
+    error(msg: string, meta?: Record<string, unknown>) {
+        console.error(JSON.stringify({ level: 'error', service: 'ai-routes', msg, ...meta, ts: new Date().toISOString() }));
+    },
+    warn(msg: string, meta?: Record<string, unknown>) {
+        console.warn(JSON.stringify({ level: 'warn', service: 'ai-routes', msg, ...meta, ts: new Date().toISOString() }));
+    },
+    info(msg: string, meta?: Record<string, unknown>) {
+        console.log(JSON.stringify({ level: 'info', service: 'ai-routes', msg, ...meta, ts: new Date().toISOString() }));
+    },
+};
+
 import { InferenceEngine, EmbeddingsService } from './inference/index.js';
 import { ChatbotAssistant, IntentDetector } from './chatbot/index.js';
 import { MailbotExecutor } from './mailbot/index.js';
@@ -127,7 +140,8 @@ app.use('/api/*', async (c, next) => {
 // AI-009: Include request ID in error responses for tracing
 app.onError((err, c) => {
     const requestId = c.req.header('X-Request-ID') ?? 'unknown';
-    console.error(`API Error [${requestId}]:`, err);
+    // G-199: Use structured logger instead of console.error
+    aiLogger.error('API Error', { requestId, error: err.message, stack: err.stack });
     
     // Return appropriate error code based on error type
     const status = err.message.includes('not found') ? 404 

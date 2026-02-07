@@ -56,6 +56,11 @@ async function main(): Promise<void> {
     lazyConnect: true,
   });
 
+  // C-078: Handle Redis connection errors to prevent uncaught exceptions
+  redisClient.on('error', (err: Error) => {
+    logger.error('Redis connection error', { error: err.message });
+  });
+
   try {
     await redisClient.connect();
     logger.info('Redis connected');

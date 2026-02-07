@@ -17,6 +17,65 @@ import { createHash } from 'crypto';
 
 const intervalSchema = z.enum(['minute', 'hour', 'day', 'week', 'month']);
 
+/** C-127: Maximum allowed date range for analytics queries (90 days). */
+const MAX_DATE_RANGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * C-127: Validate and parse analytics date range parameters.
+ *
+ * Ensures:
+ *  1. Both dates are valid ISO-8601 strings (if provided)
+ *  2. `since` is before `until`
+ *  3. The range does not exceed 90 days
+ *  4. `until` is not in the future (clamped to now)
+ *
+ * Returns a safe { since, until } period, falling back to sensible
+ * defaults when parameters are omitted.
+ */
+function validateDateRange(
+  sinceParam: string | undefined,
+  untilParam: string | undefined,
+  defaultSince: Date = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+): { since: Date; until: Date } {
+  const now = new Date();
+
+  let since = defaultSince;
+  let until = now;
+
+  if (sinceParam) {
+    since = new Date(sinceParam);
+    if (isNaN(since.getTime())) {
+      throw ApiError.badRequest('Invalid "since" date. Provide a valid ISO-8601 date string.');
+    }
+  }
+
+  if (untilParam) {
+    until = new Date(untilParam);
+    if (isNaN(until.getTime())) {
+      throw ApiError.badRequest('Invalid "until" date. Provide a valid ISO-8601 date string.');
+    }
+  }
+
+  // Clamp "until" to now — future dates are not meaningful for analytics
+  if (until > now) {
+    until = now;
+  }
+
+  // Ensure start is before end
+  if (since >= until) {
+    throw ApiError.badRequest('"since" must be before "until".');
+  }
+
+  // Enforce maximum range
+  if (until.getTime() - since.getTime() > MAX_DATE_RANGE_MS) {
+    throw ApiError.badRequest(
+      `Date range must not exceed 90 days. Requested range: ${Math.ceil((until.getTime() - since.getTime()) / (24 * 60 * 60 * 1000))} days.`
+    );
+  }
+
+  return { since, until };
+}
+
 /** Short hash of query params to partition cache per unique request. */
 function cacheKey(tenantId: string, endpoint: string, params: Record<string, string | undefined>): string {
   const sorted = Object.entries(params)
@@ -85,10 +144,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
 
-    const period = {
-      since: since ? new Date(since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until);
 
     const key = cacheKey(tenantId, 'dashboard', { since: period.since.toISOString(), until: period.until.toISOString() });
 
@@ -188,10 +245,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid interval. Must be: minute, hour, day, week, month');
     }
 
-    const period = {
-      since: since ? new Date(since) : getDefaultSince(interval),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until, getDefaultSince(interval));
 
     const key = cacheKey(tenantId, 'volume', { interval, since: period.since.toISOString(), until: period.until.toISOString(), domainId });
 
@@ -239,10 +294,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid interval');
     }
 
-    const period = {
-      since: since ? new Date(since) : getDefaultSince(interval),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until, getDefaultSince(interval));
 
     const key = cacheKey(tenantId, 'engagement', { interval, since: period.since.toISOString(), until: period.until.toISOString(), domainId, campaignId });
 
@@ -290,10 +343,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const sortBy = c.req.query('sortBy') ?? 'sent';
     const limit = parseInt(c.req.query('limit') ?? '10', 10);
 
-    const period = {
-      since: since ? new Date(since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until);
 
     const key = cacheKey(tenantId, 'domains', { since: period.since.toISOString(), until: period.until.toISOString(), sortBy, limit: String(limit) });
 
@@ -366,10 +417,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const sortBy = c.req.query('sortBy') ?? 'sent';
     const limit = parseInt(c.req.query('limit') ?? '20', 10);
 
-    const period = {
-      since: since ? new Date(since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until);
 
     // IMP-009: Cache campaign stats (previously uncached — every request hit DB)
     const key = cacheKey(tenantId, 'campaigns', { since: period.since.toISOString(), until: period.until.toISOString(), sortBy, limit: String(limit) });
@@ -444,10 +493,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const until = c.req.query('until');
     const domainId = c.req.query('domainId');
 
-    const period = {
-      since: since ? new Date(since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until);
 
     // IMP-009: Cache bounce analysis (previously uncached)
     const key = cacheKey(tenantId, 'bounces', { since: period.since.toISOString(), until: period.until.toISOString(), domainId });
@@ -505,10 +552,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid interval');
     }
 
-    const period = {
-      since: since ? new Date(since) : getDefaultSince(interval),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until, getDefaultSince(interval));
 
     // IMP-009: Cache suppression trends (previously uncached)
     const key = cacheKey(tenantId, 'suppressions', { interval, since: period.since.toISOString(), until: period.until.toISOString() });
@@ -549,10 +594,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
 
-    const period = {
-      since: since ? new Date(since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until);
 
     const key = cacheKey(tenantId, 'deliverability', { since: period.since.toISOString(), until: period.until.toISOString() });
 
@@ -645,10 +688,8 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Format must be json or csv');
     }
 
-    const period = {
-      since: since ? new Date(since) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
-    };
+    // C-127: Validate and clamp date range
+    const period = validateDateRange(since, until);
 
     let data: unknown;
 

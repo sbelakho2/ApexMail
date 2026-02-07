@@ -10,8 +10,10 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'ha-failover' });
 import { HealthCheckService, HealthStatus, ClusterHealth } from './health-check.js';
 
 export enum FailoverState {
@@ -221,7 +223,7 @@ export class FailoverService {
     // Start health checks
     this.healthCheck.startPeriodicChecks();
 
-    console.log('[Failover] Monitoring started');
+    logger.info('[Failover] Monitoring started');
   }
 
   /**
@@ -233,7 +235,7 @@ export class FailoverService {
       this.monitorInterval = null;
     }
     this.healthCheck.stopPeriodicChecks();
-    console.log('[Failover] Monitoring stopped');
+    logger.info('[Failover] Monitoring stopped');
   }
 
   /**
@@ -249,7 +251,7 @@ export class FailoverService {
     const splitBrainResult = await this.checkSplitBrain();
     if (splitBrainResult.detected) {
       this.state = FailoverState.MANUAL_INTERVENTION;
-      console.error('[Failover] SPLIT-BRAIN DETECTED - Entering manual intervention mode');
+      logger.error('[Failover] SPLIT-BRAIN DETECTED - Entering manual intervention mode');
       return; // Do not proceed with automatic failover
     }
 
@@ -277,13 +279,13 @@ export class FailoverService {
     const count = (this.failureCount.get(componentName) ?? 0) + 1;
     this.failureCount.set(componentName, count);
 
-    console.log(`[Failover] ${componentName} failure detected (${count}/${failoverConfig.threshold})`);
+    logger.info(`[Failover] ${componentName} failure detected (${count}/${failoverConfig.threshold})`);
 
     if (count >= failoverConfig.threshold) {
       // Check cooldown
       const lastFailoverTime = this.lastFailover.get(componentName);
       if (lastFailoverTime && Date.now() - lastFailoverTime.getTime() < failoverConfig.cooldownPeriod) {
-        console.log(`[Failover] ${componentName} in cooldown period, skipping failover`);
+        logger.info(`[Failover] ${componentName} in cooldown period, skipping failover`);
         return;
       }
 
@@ -348,7 +350,7 @@ export class FailoverService {
     
     this.notifyListeners(event);
 
-    console.log(`[Failover] Starting ${type} failover for ${componentName}: ${reason}`);
+    logger.info(`[Failover] Starting ${type} failover for ${componentName}: ${reason}`);
 
     try {
       // Execute failover based on component type
@@ -381,7 +383,7 @@ export class FailoverService {
       // Send alert
       await this.sendAlert('failover_completed', event);
 
-      console.log(`[Failover] ${componentName} failover completed in ${event.duration}ms`);
+      logger.info(`[Failover] ${componentName} failover completed in ${event.duration}ms`);
 
       return { ok: true, value: event };
     } catch (error) {
@@ -398,7 +400,7 @@ export class FailoverService {
       // Send critical alert
       await this.sendAlert('failover_failed', event);
 
-      console.error(`[Failover] ${componentName} failover failed:`, error);
+      logger.error(`[Failover] ${componentName} failover failed`, { error: error instanceof Error ? error.message : String(error) });
 
       return { ok: false, error: error as Error };
     }
@@ -475,11 +477,11 @@ export class FailoverService {
           );
         }
 
-        console.log(`[Failover] Replication lag acceptable: ${lagSeconds.toFixed(2)}s, ${bytesBehind} bytes behind`);
+        logger.info(`[Failover] Replication lag acceptable: ${lagSeconds.toFixed(2)}s, ${bytesBehind} bytes behind`);
 
         // Step 2: Promote standby to primary
         // In production, this would use pg_promote() or external orchestration
-        console.log('[Failover] Promoting standby database...');
+        logger.info('[Failover] Promoting standby database...');
         
         // Simulate promotion (actual command would be executed on the server)
         // await client.query('SELECT pg_promote()');
@@ -656,7 +658,7 @@ export class FailoverService {
     this.state = FailoverState.FAILING_BACK;
     this.notifyListeners(event);
 
-    console.log(`[Failover] Starting failback for ${componentName}`);
+    logger.info(`[Failover] Starting failback for ${componentName}`);
 
     try {
       // For database failback, we need special handling to prevent data loss
@@ -682,7 +684,7 @@ export class FailoverService {
       await this.storeFailoverEvent(event);
       await this.sendAlert('failback_completed', event);
 
-      console.log(`[Failover] ${componentName} failback completed`);
+      logger.info(`[Failover] ${componentName} failback completed`);
 
       return { ok: true, value: event };
     } catch (error) {
@@ -750,7 +752,7 @@ export class FailoverService {
         if (!origIsReplica) {
           // SPLIT-BRAIN RISK: Original is NOT in recovery mode!
           // This means it thinks it's still primary. We must fence it first.
-          console.warn('[Failback] SPLIT-BRAIN RISK: Original primary not in recovery mode. Fencing...');
+          logger.warn('[Failback] SPLIT-BRAIN RISK: Original primary not in recovery mode. Fencing...');
           
           // Fence by putting into maintenance mode / rejecting connections
           await origClient.query(`
@@ -810,7 +812,7 @@ export class FailoverService {
           );
         }
 
-        console.log(`[Failback] Replication lag acceptable: ${lagSeconds.toFixed(2)}s, ${bytesBehind} bytes behind`);
+        logger.info(`[Failback] Replication lag acceptable: ${lagSeconds.toFixed(2)}s, ${bytesBehind} bytes behind`);
 
       } finally {
         if (origClient) origClient.release();
@@ -839,7 +841,7 @@ export class FailoverService {
         await currClient.query('CHECKPOINT');
         
         event.metadata.checkpointCompleted = true;
-        console.log('[Failback] Checkpoint completed on current primary');
+        logger.info('[Failback] Checkpoint completed on current primary');
         
       } finally {
         if (currClient) currClient.release();
@@ -848,7 +850,7 @@ export class FailoverService {
 
       // Step 5: Promote original standby to primary
       // In production, this would use pg_promote() or external orchestration
-      console.log('[Failback] Promoting original primary...');
+      logger.info('[Failback] Promoting original primary...');
       
       // Step 6: Update connection configuration
       await this.updateDatabaseEndpoint(origHost, parseInt(origPort, 10));
@@ -943,7 +945,7 @@ export class FailoverService {
     // SPLIT-BRAIN: Both nodes think they are primary!
     if (primaryIsWritable && standbyIsWritable) {
       const details = `CRITICAL: Split-brain detected! Both ${primaryTarget.endpoint} and ${standbyTarget.endpoint} are accepting writes. Immediate manual intervention required.`;
-      console.error(`[Failover] ${details}`);
+      logger.error(`[Failover] ${details}`);
       
       // Send critical alert
       await this.sendAlert('split_brain_detected', {
@@ -1010,7 +1012,7 @@ export class FailoverService {
       try {
         listener(event);
       } catch (error) {
-        console.error('[Failover] Listener error:', error);
+        logger.error('[Failover] Listener error', { error: error instanceof Error ? error.message : String(error) });
       }
     }
   }
@@ -1041,7 +1043,7 @@ export class FailoverService {
         JSON.stringify(event.metadata),
       ]);
     } catch (error) {
-      console.error('[Failover] Failed to store event:', error);
+      logger.error('[Failover] Failed to store event', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -1064,7 +1066,7 @@ export class FailoverService {
         }),
       });
     } catch (error) {
-      console.error('[Failover] Failed to send alert:', error);
+      logger.error('[Failover] Failed to send alert', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -1087,10 +1089,10 @@ export class FailoverService {
 
   // Alias methods for app.ts and routes compatibility
   async initialize(): Promise<void> {
-    console.log('[Failover] Initializing failover service...');
+    logger.info('[Failover] Initializing failover service...');
     // Start monitoring
     this.startMonitoring();
-    console.log('[Failover] Initialized');
+    logger.info('[Failover] Initialized');
   }
 
   async getStatus(): Promise<{
@@ -1124,7 +1126,7 @@ export class FailoverService {
    * Rejects failback if replication is not caught up to prevent data loss
    */
   async failback(component: string): Promise<void> {
-    console.log(`[Failover] Initiating failback for ${component}`);
+    logger.info(`[Failover] Initiating failback for ${component}`);
     
     const failoverConfig = this.configs.get(component);
     if (!failoverConfig) {
@@ -1158,7 +1160,7 @@ export class FailoverService {
           
           if (!isReplica) {
             // Not in standby mode - check replication lag from the other side
-            console.log('[Failback] Target is already primary, checking if safe to proceed');
+            logger.info('[Failback] Target is already primary, checking if safe to proceed');
           } else {
             // Target is standby - check replication lag
             const lagResult = await client.query(`
@@ -1183,7 +1185,7 @@ export class FailoverService {
               );
             }
             
-            console.log(`[Failback] Replication lag check passed: ${lagSeconds.toFixed(2)}s`);
+            logger.info(`[Failback] Replication lag check passed: ${lagSeconds.toFixed(2)}s`);
           }
         } finally {
           client.release();
@@ -1211,7 +1213,7 @@ export class FailoverService {
       throw new Error(`Failback failed: ${transitionResult.error}`);
     }
     
-    console.log(`[Failover] Failback complete for ${component}`);
+    logger.info(`[Failover] Failback complete for ${component}`);
   }
 
   getFailoverHistory(limit: number = 100): FailoverEvent[] {

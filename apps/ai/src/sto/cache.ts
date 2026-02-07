@@ -344,9 +344,21 @@ export class STOCache {
             };
         }
 
+        // C-062: Use SCAN instead of KEYS to avoid blocking Redis
+        const scanKeys = async (pattern: string): Promise<string[]> => {
+            const allKeys: string[] = [];
+            let cursor = '0';
+            do {
+                const [nextCursor, keys] = await this.redis!.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+                cursor = nextCursor;
+                allKeys.push(...keys);
+            } while (cursor !== '0');
+            return allKeys;
+        };
+
         const [subscriberKeys, recommendationKeys, info] = await Promise.all([
-            this.redis.keys(`${this.config.keyPrefix}pattern:*`),
-            this.redis.keys(`${this.config.keyPrefix}rec:*`),
+            scanKeys(`${this.config.keyPrefix}pattern:*`),
+            scanKeys(`${this.config.keyPrefix}rec:*`),
             this.redis.info('memory'),
         ]);
 
@@ -366,10 +378,15 @@ export class STOCache {
     async clearAll(): Promise<void> {
         if (!this.redis) return;
 
-        const keys = await this.redis.keys(`${this.config.keyPrefix}*`);
-        if (keys.length > 0) {
-            await this.redis.del(...keys);
-        }
+        // C-062: Use SCAN instead of KEYS to avoid blocking Redis
+        let cursor = '0';
+        do {
+            const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', `${this.config.keyPrefix}*`, 'COUNT', 200);
+            cursor = nextCursor;
+            if (keys.length > 0) {
+                await this.redis.del(...keys);
+            }
+        } while (cursor !== '0');
     }
 
     // ========================================

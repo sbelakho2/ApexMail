@@ -21,6 +21,10 @@ import { AuditLogger } from './audit';
 import { SecretManager } from './secrets';
 import { GDPRAutomation } from './gdpr';
 import { complianceConfig } from './config';
+import { createLogger } from '@apexmail/lib';
+
+// D-117/D-118: Use structured logger instead of console.log/error
+const logger = createLogger({ name: 'compliance' });
 
 // Initialize database and Redis
 const db = new Pool({
@@ -68,9 +72,9 @@ async function processGDPRQueue(): Promise<void> {
             await gdprAutomation.processRequest(requestId);
             // Only remove from processing queue after successful completion
             await redis.lrem(PROCESSING_QUEUE, 1, item);
-            console.log(`[GDPR] Processed request: ${requestId}`);
+            logger.info('GDPR request processed', { requestId });
         } catch (err) {
-            console.error('[GDPR] Error processing request:', err);
+            logger.error('GDPR error processing request', { error: err });
             // Move from processing to failed queue for manual review
             await redis.lrem(PROCESSING_QUEUE, 1, item);
             await redis.lpush('gdpr:requests:failed', item);
@@ -84,11 +88,13 @@ async function processGDPRQueue(): Promise<void> {
 async function processSecretRotations(): Promise<void> {
     try {
         const result = await secretManager.processAutoRotations();
-        console.log(
-            `[Secrets] Rotations: ${result.rotated.length} rotated, ${result.notified.length} notified, ${result.errors.length} errors`
-        );
+        logger.info('Secret rotations completed', {
+            rotated: result.rotated.length,
+            notified: result.notified.length,
+            errors: result.errors.length,
+        });
     } catch (err) {
-        console.error('[Secrets] Error processing rotations:', err);
+        logger.error('Error processing rotations', { error: err });
     }
 }
 
@@ -107,13 +113,13 @@ async function processRiskAssessments(): Promise<void> {
         for (const row of result.rows) {
             try {
                 await riskEngine.forceReassessment(row.tenant_id);
-                console.log(`[Risk] Reassessed tenant: ${row.tenant_id}`);
+                logger.info('Risk reassessed tenant', { tenantId: row.tenant_id });
             } catch (err) {
-                console.error(`[Risk] Error reassessing tenant ${row.tenant_id}:`, err);
+                logger.error('Risk error reassessing tenant', { tenantId: row.tenant_id, error: err });
             }
         }
     } catch (err) {
-        console.error('[Risk] Error processing assessments:', err);
+        logger.error('Risk error processing assessments', { error: err });
     }
 }
 
@@ -126,9 +132,9 @@ async function archiveAuditLogs(): Promise<void> {
         const olderThan = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
         const result = await auditLogger.archive(olderThan);
-        console.log(`[Audit] Archived ${result.archivedCount} entries older than ${olderThan.toISOString()}`);
+        logger.info('Audit logs archived', { archivedCount: result.archivedCount, olderThan: olderThan.toISOString() });
     } catch (err) {
-        console.error('[Audit] Error archiving logs:', err);
+        logger.error('Error archiving audit logs', { error: err });
     }
 }
 
@@ -140,7 +146,7 @@ async function verifyAuditChains(): Promise<void> {
         // Verify global chain
         const result = await auditLogger.verifyChain();
         if (!result.valid) {
-            console.error('[Audit] Chain integrity check FAILED:', result.error);
+            logger.error('Audit chain integrity check FAILED', { error: result.error });
             // Alert operations team
             await redis.lpush(
                 'alerts:queue',
@@ -152,10 +158,10 @@ async function verifyAuditChains(): Promise<void> {
                 })
             );
         } else {
-            console.log(`[Audit] Chain integrity verified: ${result.entriesChecked} entries`);
+            logger.info('Audit chain integrity verified', { entriesChecked: result.entriesChecked });
         }
     } catch (err) {
-        console.error('[Audit] Error verifying chain:', err);
+        logger.error('Error verifying audit chain', { error: err });
     }
 }
 
@@ -397,7 +403,7 @@ async function initializeSchema(): Promise<void> {
         );
     `);
 
-    console.log('[Schema] Database schema initialized');
+    logger.info('Database schema initialized');
 }
 
 /**
@@ -419,7 +425,7 @@ function startBackgroundJobs(): void {
     // Verify audit chain integrity daily at 3 AM
     new CronJob('0 3 * * *', verifyAuditChains, null, true);
 
-    console.log('[Jobs] Background jobs started');
+    logger.info('Background jobs started');
 }
 
 /**
@@ -444,7 +450,7 @@ async function start(): Promise<void> {
             port,
         });
 
-        console.log(`[Compliance] Service started on port ${port}`);
+        logger.info('Compliance service started', { port });
 
         // Log startup
         await auditLogger.log(
@@ -457,14 +463,14 @@ async function start(): Promise<void> {
             {}
         );
     } catch (err) {
-        console.error('[Compliance] Failed to start:', err);
+        logger.fatal('Failed to start compliance service', { error: err });
         process.exit(1);
     }
 }
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-    console.log('[Compliance] Shutting down...');
+    logger.info('Compliance shutting down (SIGTERM)');
     await contentScanner.shutdownOCR();
     await db.end();
     await redis.quit();
@@ -472,7 +478,7 @@ process.on('SIGTERM', async () => {
 });
 
 process.on('SIGINT', async () => {
-    console.log('[Compliance] Shutting down...');
+    logger.info('Compliance shutting down (SIGINT)');
     await contentScanner.shutdownOCR();
     await db.end();
     await redis.quit();

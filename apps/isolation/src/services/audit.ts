@@ -11,8 +11,10 @@
 import { Pool, type PoolClient as _PoolClient } from 'pg';
 import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'isolation:audit' });
 
 /**
  * Simple hash function for advisory lock IDs
@@ -156,11 +158,11 @@ export class AuditService {
     // Start buffer flush interval with error handling
     this.flushInterval = setInterval(() => {
       this.flushBuffer().catch(err => {
-        console.error('[Audit] Buffer flush failed:', err instanceof Error ? err.message : err);
+        logger.error('[Audit] Buffer flush failed:', { error: err instanceof Error ? err.message : String(err) });
       });
     }, this.flushIntervalMs);
 
-    console.log('[Audit] Service initialized');
+    logger.info('[Audit] Service initialized');
   }
 
   /**
@@ -541,7 +543,7 @@ export class AuditService {
         DELETE FROM iso_audit_logs WHERE timestamp < $1
       `, [cutoffDate]);
 
-      console.log(`[Audit] Cleaned up ${result.rowCount} old audit logs`);
+      logger.info(`[Audit] Cleaned up ${result.rowCount} old audit logs`);
 
       return { ok: true, value: result.rowCount ?? 0 };
     } catch (error) {
@@ -557,7 +559,7 @@ export class AuditService {
       clearInterval(this.flushInterval);
     }
     await this.flushBuffer();
-    console.log('[Audit] Service shut down');
+    logger.info('[Audit] Service shut down');
   }
 
   // ==================== Private Methods ====================
@@ -601,7 +603,7 @@ export class AuditService {
         ) VALUES ${placeholders}
       `, values.flat());
     } catch (error) {
-      console.error('[Audit] Failed to flush buffer:', error);
+      logger.error('[Audit] Failed to flush buffer:', { error: error instanceof Error ? error.message : String(error) });
       // Re-add events to buffer
       this.buffer = [...eventsToFlush, ...this.buffer];
     }

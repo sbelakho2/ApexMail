@@ -10,8 +10,10 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'ha-health-check' });
 
 export enum HealthStatus {
   HEALTHY = 'healthy',
@@ -90,7 +92,7 @@ export class HealthCheckService {
             try {
               listener(health);
             } catch (error) {
-              console.error('[HealthCheck] Listener error:', error);
+              logger.error('[HealthCheck] Listener error:', { error: error instanceof Error ? error.message : String(error) });
             }
           }
 
@@ -98,7 +100,7 @@ export class HealthCheckService {
           await this.publishHealth(health);
         })
         .catch(err => {
-          console.error('[HealthCheck] Health check failed:', err instanceof Error ? err.message : err);
+          logger.error('[HealthCheck] Health check failed:', { error: err instanceof Error ? err.message : String(err) });
         });
     }, config.healthCheckInterval);
 
@@ -108,7 +110,7 @@ export class HealthCheckService {
         try {
           listener(health);
         } catch (error) {
-          console.error('[HealthCheck] Listener error:', error);
+          logger.error('[HealthCheck] Listener error:', { error: error instanceof Error ? error.message : String(error) });
         }
       }
     });
@@ -152,6 +154,14 @@ export class HealthCheckService {
     // Check Redis health
     const redisHealth = await this.checkRedisHealth();
     components.push(redisHealth);
+
+    // Check system resources
+    const [memoryHealth, diskHealth] = await Promise.all([
+      this.checkMemoryHealth(),
+      this.checkDiskHealth(),
+    ]);
+    components.push(memoryHealth);
+    components.push(diskHealth);
 
     // Check service endpoints
     const serviceHealths = await Promise.all(
@@ -344,6 +354,112 @@ export class HealthCheckService {
   }
 
   /**
+   * G-206: Check memory usage health
+   */
+  private async checkMemoryHealth(): Promise<ComponentHealth> {
+    const startTime = Date.now();
+
+    try {
+      const memUsage = process.memoryUsage();
+      const totalMem = require('os').totalmem();
+      const freeMem = require('os').freemem();
+      const usedPercent = ((totalMem - freeMem) / totalMem) * 100;
+      const heapUsedPercent = (memUsage.heapUsed / memUsage.heapTotal) * 100;
+      const latencyMs = Date.now() - startTime;
+
+      let status = HealthStatus.HEALTHY;
+      let message: string | undefined;
+
+      if (usedPercent > 95 || heapUsedPercent > 95) {
+        status = HealthStatus.UNHEALTHY;
+        message = `Critical memory usage: system ${usedPercent.toFixed(1)}%, heap ${heapUsedPercent.toFixed(1)}%`;
+      } else if (usedPercent > 85 || heapUsedPercent > 85) {
+        status = HealthStatus.DEGRADED;
+        message = `High memory usage: system ${usedPercent.toFixed(1)}%, heap ${heapUsedPercent.toFixed(1)}%`;
+      }
+
+      return {
+        name: 'memory',
+        status,
+        latencyMs,
+        message,
+        lastCheck: new Date(),
+        metadata: {
+          systemTotalMb: Math.round(totalMem / 1024 / 1024),
+          systemFreeMb: Math.round(freeMem / 1024 / 1024),
+          systemUsedPercent: parseFloat(usedPercent.toFixed(1)),
+          heapTotalMb: Math.round(memUsage.heapTotal / 1024 / 1024),
+          heapUsedMb: Math.round(memUsage.heapUsed / 1024 / 1024),
+          heapUsedPercent: parseFloat(heapUsedPercent.toFixed(1)),
+          rssMb: Math.round(memUsage.rss / 1024 / 1024),
+          externalMb: Math.round(memUsage.external / 1024 / 1024),
+        },
+      };
+    } catch (error) {
+      return {
+        name: 'memory',
+        status: HealthStatus.UNKNOWN,
+        latencyMs: Date.now() - startTime,
+        message: (error as Error).message,
+        lastCheck: new Date(),
+      };
+    }
+  }
+
+  /**
+   * G-206: Check disk space health
+   */
+  private async checkDiskHealth(): Promise<ComponentHealth> {
+    const startTime = Date.now();
+
+    try {
+      const { execSync } = require('child_process');
+      // Use df to check root partition usage
+      const output = execSync("df -P / | tail -1", { encoding: 'utf-8', timeout: 5000 });
+      const parts = output.trim().split(/\s+/);
+      // df -P output: Filesystem 1024-blocks Used Available Capacity Mounted
+      const totalKb = parseInt(parts[1] || '0', 10);
+      const usedKb = parseInt(parts[2] || '0', 10);
+      const availableKb = parseInt(parts[3] || '0', 10);
+      const usedPercent = totalKb > 0 ? (usedKb / totalKb) * 100 : 0;
+      const latencyMs = Date.now() - startTime;
+
+      let status = HealthStatus.HEALTHY;
+      let message: string | undefined;
+
+      if (usedPercent > 95) {
+        status = HealthStatus.UNHEALTHY;
+        message = `Critical disk usage: ${usedPercent.toFixed(1)}% used`;
+      } else if (usedPercent > 85) {
+        status = HealthStatus.DEGRADED;
+        message = `High disk usage: ${usedPercent.toFixed(1)}% used`;
+      }
+
+      return {
+        name: 'disk',
+        status,
+        latencyMs,
+        message,
+        lastCheck: new Date(),
+        metadata: {
+          totalGb: parseFloat((totalKb / 1024 / 1024).toFixed(2)),
+          usedGb: parseFloat((usedKb / 1024 / 1024).toFixed(2)),
+          availableGb: parseFloat((availableKb / 1024 / 1024).toFixed(2)),
+          usedPercent: parseFloat(usedPercent.toFixed(1)),
+        },
+      };
+    } catch (error) {
+      return {
+        name: 'disk',
+        status: HealthStatus.UNKNOWN,
+        latencyMs: Date.now() - startTime,
+        message: (error as Error).message,
+        lastCheck: new Date(),
+      };
+    }
+  }
+
+  /**
    * Get replication lag in milliseconds
    */
   private async getReplicationLag(): Promise<number | undefined> {
@@ -373,7 +489,7 @@ export class HealthCheckService {
       const lagMs = replicaResult.rows[0]?.lag_ms;
       return lagMs ? Math.round(lagMs) : 0;
     } catch (error) {
-      console.error('[HealthCheck] Failed to get replication lag:', error);
+      logger.error('[HealthCheck] Failed to get replication lag:', { error: error instanceof Error ? error.message : String(error) });
       return undefined;
     }
   }
@@ -419,7 +535,7 @@ export class HealthCheckService {
         timestamp: health.lastUpdate.toISOString(),
       }));
     } catch (error) {
-      console.error('[HealthCheck] Failed to publish health:', error);
+      logger.error('[HealthCheck] Failed to publish health:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -429,7 +545,14 @@ export class HealthCheckService {
   async getClusterNodesHealth(): Promise<Result<ClusterHealth[]>> {
     try {
       const pattern = `ha:health:${config.clusterId}:*`;
-      const keys = await this.redis.keys(pattern);
+      // C-062: Use SCAN instead of KEYS to avoid blocking Redis
+      const keys: string[] = [];
+      let cursor = '0';
+      do {
+        const [nextCursor, batchKeys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+        cursor = nextCursor;
+        keys.push(...batchKeys);
+      } while (cursor !== '0');
       
       if (keys.length === 0) {
         return { ok: true, value: [] };
@@ -477,7 +600,7 @@ export class HealthCheckService {
     });
 
     // Store custom check function (would need additional tracking)
-    console.log(`[HealthCheck] Added custom check: ${name}`);
+    logger.info(`[HealthCheck] Added custom check: ${name}`);
   }
 
   /**

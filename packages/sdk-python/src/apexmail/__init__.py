@@ -19,6 +19,8 @@ from .client import ApexMail, AsyncApexMail
 from .exceptions import (
     ApexMailError,
     AuthenticationError,
+    ConflictError,
+    ForbiddenError,
     NotFoundError,
     RateLimitError,
     ServerError,
@@ -46,6 +48,8 @@ __all__ = [
     # Exceptions
     "ApexMailError",
     "AuthenticationError",
+    "ConflictError",
+    "ForbiddenError",
     "NotFoundError",
     "RateLimitError",
     "ServerError",

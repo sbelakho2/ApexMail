@@ -182,14 +182,20 @@ const createWebhookSchema = z.object({
   events: z.array(z.enum(eventTypes)).min(1).max(eventTypes.length),
   description: z.string().max(500).optional(),
   secret: z.string().min(16).max(256).optional(),
-  headers: z.record(z.string().max(1000), z.string().max(4000)).optional(), // Limit header key/value sizes
+  headers: z.record(z.string().max(1000), z.string().max(4000)).refine(
+    (h) => Object.keys(h).length <= 20,
+    { message: 'Too many custom headers (max 20)' }
+  ).optional(), // Limit header key/value sizes and count
   enabled: z.boolean().default(true),
   retryPolicy: z.object({
     maxRetries: z.number().int().min(0).max(10).default(3),
     retryDelay: z.number().int().min(1000).max(3600000).default(60000),
     backoffMultiplier: z.number().min(1).max(5).default(2),
   }).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.unknown()).refine(
+    (m) => JSON.stringify(m).length <= 8192,
+    { message: 'Metadata payload too large (max 8KB)' }
+  ).optional(),
 });
 
 const updateWebhookSchema = createWebhookSchema.partial();
@@ -197,6 +203,12 @@ const updateWebhookSchema = createWebhookSchema.partial();
 const testWebhookSchema = z.object({
   eventType: z.enum(eventTypes).default('message.delivered'),
 });
+
+/**
+ * F-227: UUID format regex for route parameter validation.
+ * Prevents malformed IDs from reaching DB queries.
+ */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
@@ -212,10 +224,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const input = createWebhookSchema.parse(body);
 
-    // Validate URL is HTTPS in production
+    // F-192: Enforce HTTPS for all webhook URLs (not just production).
+    // HTTP endpoints expose webhook payloads (including secrets) in transit.
     const url = new URL(input.url);
-    if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
-      throw ApiError.badRequest('Webhook URL must use HTTPS in production');
+    if (url.protocol !== 'https:') {
+      throw ApiError.badRequest('Webhook URL must use HTTPS');
     }
 
     // SECURITY: Validate URL for SSRF vulnerabilities
@@ -272,6 +285,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id', requireScopes('webhooks:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
 
     const webhook = await webhooksRepo.findById(webhookId, tenantId);
     if (!webhook) {
@@ -341,6 +359,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
+
     // Check webhook exists
     const existing = await webhooksRepo.findById(webhookId, tenantId);
     if (!existing) {
@@ -352,9 +375,10 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // Validate URL if provided
     if (input.url) {
+      // F-192: Enforce HTTPS for all webhook URLs (not just production)
       const url = new URL(input.url);
-      if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
-        throw ApiError.badRequest('Webhook URL must use HTTPS in production');
+      if (url.protocol !== 'https:') {
+        throw ApiError.badRequest('Webhook URL must use HTTPS');
       }
       // SECURITY: Validate URL for SSRF vulnerabilities
       await validateWebhookUrl(input.url);
@@ -407,6 +431,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
+
     const existing = await webhooksRepo.findById(webhookId, tenantId);
     if (!existing) {
       throw ApiError.notFound('Webhook');
@@ -445,6 +474,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
 
     const webhook = await webhooksRepo.findById(webhookId, tenantId);
     if (!webhook) {
@@ -537,6 +571,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const status = c.req.query('status');
     const limit = parseInt(c.req.query('limit') ?? '50', 10);
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
+
     const webhook = await webhooksRepo.findById(webhookId, tenantId);
     if (!webhook) {
       throw ApiError.notFound('Webhook');
@@ -568,6 +607,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
 
     const existing = await webhooksRepo.findById(webhookId, tenantId);
     if (!existing) {
@@ -607,6 +651,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
 
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
+
     const existing = await webhooksRepo.findById(webhookId, tenantId);
     if (!existing) {
       throw ApiError.notFound('Webhook');
@@ -644,6 +693,11 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const userId = c.get('userId');
     const webhookId = c.req.param('id');
     const logger = c.get('logger');
+
+    // F-227: Validate ID format before passing to DB query
+    if (!uuidRegex.test(webhookId)) {
+      throw ApiError.badRequest('Invalid webhook ID format', 'INVALID_ID');
+    }
 
     const webhook = await webhooksRepo.findById(webhookId, tenantId);
     if (!webhook) {

@@ -222,16 +222,67 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
 
     const parsed = schema.parse(body);
+
+    /**
+     * E-181: Invoice generation error handling.
+     *
+     * 1. Check for existing invoice for the same tenant + period to prevent
+     *    double-charging if the request is retried after a transient failure.
+     * 2. Log errors with full context for operational triage.
+     * 3. Return a clear error so the caller can retry safely.
+     *
+     * The underlying createInvoice uses a DB-generated UUID and sequential
+     * invoice number (nextval), so a duplicate INSERT would get a new ID —
+     * the period overlap check below is the idempotency guard.
+     */
+    const periodStart = new Date(parsed.periodStart);
+    const periodEnd = new Date(parsed.periodEnd);
+
+    // E-181: Guard against double-invoicing for the same period
+    const existingCheck = await ctx.db.query(
+      `SELECT id, invoice_number, status FROM invoices
+       WHERE tenant_id = $1
+         AND period_start = $2
+         AND period_end = $3
+         AND status NOT IN ('void')
+       LIMIT 1`,
+      [tenantId, periodStart, periodEnd]
+    );
+
+    if (existingCheck.ok && existingCheck.value.rows.length > 0) {
+      const existing = existingCheck.value.rows[0] as { id: string; invoice_number: string; status: string };
+      return c.json({
+        error: 'Invoice already exists for this period',
+        existingInvoiceId: existing.id,
+        invoiceNumber: existing.invoice_number,
+        status: existing.status,
+      }, 409);
+    }
+
     const result = await ctx.invoices.createInvoice({
       tenantId,
-      periodStart: new Date(parsed.periodStart),
-      periodEnd: new Date(parsed.periodEnd),
+      periodStart,
+      periodEnd,
       lineItems: parsed.lineItems,
       notes: parsed.notes,
     });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      // E-181: Log with context so operators can triage and retry
+      const logger = (ctx as any).logger ?? console;
+      const logFn = typeof logger.error === 'function' ? logger.error.bind(logger) : console.error;
+      logFn('E-181: Invoice generation failed', {
+        tenantId,
+        periodStart: parsed.periodStart,
+        periodEnd: parsed.periodEnd,
+        lineItemCount: parsed.lineItems.length,
+        error: result.error.message,
+      });
+      return c.json({
+        error: 'Invoice generation failed — please retry',
+        retryable: true,
+        detail: result.error.message,
+      }, 500);
     }
 
     return c.json(result.value, 201);

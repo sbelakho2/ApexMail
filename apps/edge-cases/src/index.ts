@@ -6,6 +6,9 @@
 
 import { serve } from '@hono/node-server';
 import { createApp, initializeServices, shutdown } from './app.js';
+import { createLogger } from '@apexmail/lib';
+
+const logger = createLogger({ name: 'edge-cases' });
 
 const PORT = parseInt(process.env.EDGE_CASES_PORT || '4600', 10);
 const HOST = process.env.EDGE_CASES_HOST || '0.0.0.0';
@@ -14,7 +17,7 @@ const HOST = process.env.EDGE_CASES_HOST || '0.0.0.0';
  * Main entry point
  */
 async function main(): Promise<void> {
-  console.log('[EdgeCases] Starting edge cases service...');
+  logger.info('Starting edge cases service...');
   
   try {
     // Initialize all services
@@ -30,22 +33,21 @@ async function main(): Promise<void> {
       hostname: HOST,
     });
     
-    console.log(`[EdgeCases] Server running on http://${HOST}:${PORT}`);
-    console.log('[EdgeCases] Endpoints:');
-    console.log('  - Health: GET /health');
-    console.log('  - Ready: GET /ready');
-    console.log('  - Live: GET /live');
-    console.log('  - EAI Validation: POST /api/v1/eai/validate');
-    console.log('  - Attachments: POST /api/v1/attachments/validate');
-    console.log('  - Calendar: POST /api/v1/calendar/invite');
-    console.log('  - Delivery: POST /api/v1/delivery/parse-response');
+    logger.info('Edge cases service running', { host: HOST, port: PORT });
+
+    // Available endpoints:
+    // - Health: GET /health, GET /ready, GET /live
+    // - EAI Validation: POST /api/v1/eai/validate
+    // - Attachments: POST /api/v1/attachments/validate
+    // - Calendar: POST /api/v1/calendar/invite
+    // - Delivery: POST /api/v1/delivery/parse-response
     
     // Graceful shutdown handlers
     const signals: NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
     
     signals.forEach((signal) => {
       process.on(signal, async () => {
-        console.log(`\n[EdgeCases] Received ${signal}, starting graceful shutdown...`);
+        logger.info('Received shutdown signal', { signal });
         
         try {
           // Stop accepting new connections
@@ -54,28 +56,28 @@ async function main(): Promise<void> {
           // Shutdown services
           await shutdown();
           
-          console.log('[EdgeCases] Graceful shutdown complete');
+          logger.info('Graceful shutdown complete');
           process.exit(0);
         } catch (error) {
-          console.error('[EdgeCases] Error during shutdown:', error);
+          logger.error('Error during shutdown', { error: error instanceof Error ? error.message : String(error) });
           process.exit(1);
         }
       });
     });
     
     // Unhandled rejection handler
-    process.on('unhandledRejection', (reason, promise) => {
-      console.error('[EdgeCases] Unhandled Rejection at:', promise, 'reason:', reason);
+    process.on('unhandledRejection', (reason) => {
+      logger.error('Unhandled rejection', { reason: reason instanceof Error ? reason.message : String(reason) });
     });
     
     // Uncaught exception handler
     process.on('uncaughtException', (error) => {
-      console.error('[EdgeCases] Uncaught Exception:', error);
+      logger.error('Uncaught exception', { error: error.message, stack: error.stack });
       process.exit(1);
     });
     
   } catch (error) {
-    console.error('[EdgeCases] Failed to start service:', error);
+    logger.error('Failed to start service', { error: error instanceof Error ? error.message : String(error) });
     process.exit(1);
   }
 }

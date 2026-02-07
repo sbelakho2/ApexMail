@@ -34,31 +34,44 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
     const apiKeyId = c.get('apiKeyId');
     const logger = c.get('logger');
 
-    // Determine the rate limit key
-    const limitKey = apiKeyId
+    // F-206: Rate limit by both tenant/API-key AND IP address.
+    // The tenant key prevents a single tenant from monopolising the API.
+    // The IP key prevents credential-stuffing or abuse from a single source.
+    const tenantLimitKey = apiKeyId
       ? `ratelimit:apikey:${apiKeyId}`
       : `ratelimit:tenant:${tenantId}`;
 
+    const clientIp = c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
+      || c.req.header('x-real-ip')
+      || 'unknown';
+    const ipLimitKey = `ratelimit:ip:${clientIp}`;
+
     const windowMs = ctx.config.rateLimit.windowMs;
     const maxRequests = ctx.config.rateLimit.maxRequests;
+    // F-206: Per-IP limit is higher than per-tenant to allow shared IPs (NAT)
+    const maxRequestsPerIp = Math.floor(maxRequests * 2);
 
     try {
       const redisCache = await getCache();
       const now = Date.now();
       const windowStart = Math.floor(now / windowMs) * windowMs;
       const windowEnd = windowStart + windowMs;
-      const key = `${limitKey}:${windowStart}`;
 
-      // SECURITY FIX: Use atomic INCR operation to prevent race conditions
-      // Previous implementation used GET + SET which allowed concurrent requests
-      // to read the same count and bypass the rate limit (TOCTOU vulnerability)
-      const count = await redisCache.incr(key);
-      
-      // Set TTL only on first increment (when count is 1)
-      // This ensures the key expires after the window ends
-      if (count === 1) {
-        await redisCache.expire(key, Math.ceil(windowMs / 1000) + 1);
-      }
+      // --- C-132: Pipeline INCR + EXPIRE into a single round-trip per key ---
+      const ttlSeconds = Math.ceil(windowMs / 1000) + 1;
+
+      const tenantKey = `${tenantLimitKey}:${windowStart}`;
+      const ipKey = `${ipLimitKey}:${windowStart}`;
+
+      // Fire both pipelined calls concurrently — each is already
+      // a single Redis round-trip internally (INCR + EXPIRE in one pipeline)
+      const [tenantCount, ipCount] = await Promise.all([
+        redisCache.incrWithExpire(tenantKey, ttlSeconds),
+        redisCache.incrWithExpire(ipKey, ttlSeconds),
+      ]);
+
+      // Use the more restrictive of the two counts for headers
+      const count = Math.max(tenantCount, Math.ceil(ipCount * (maxRequests / maxRequestsPerIp)));
 
       // Set rate limit headers
       const remaining = Math.max(0, maxRequests - count);
@@ -66,15 +79,18 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
       c.header('X-RateLimit-Remaining', String(remaining));
       c.header('X-RateLimit-Reset', String(Math.floor(windowEnd / 1000)));
 
-      // Check if over limit
-      if (count > maxRequests) {
+      // Check if either limit is exceeded
+      if (tenantCount > maxRequests || ipCount > maxRequestsPerIp) {
         const retryAfter = Math.ceil((windowEnd - now) / 1000);
         c.header('Retry-After', String(retryAfter));
 
         logger.warn('Rate limit exceeded', {
-          key: limitKey,
-          count,
+          tenantKey: tenantLimitKey,
+          ipKey: ipLimitKey,
+          tenantCount,
+          ipCount,
           maxRequests,
+          maxRequestsPerIp,
           retryAfter,
         });
 
@@ -166,13 +182,11 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
       // JSON.parse("42") returns 42 (number), so get<number> is correct here.
       const previousCount = (await redisCache.get<number>(previousKey)) ?? 0;
 
-      // Atomic increment for current window count
-      const currentCount = await redisCache.incr(currentKey);
-      
-      // Set TTL only on first increment
-      if (currentCount === 1) {
-        await redisCache.expire(currentKey, Math.ceil(windowMs * 2 / 1000));
-      }
+      // C-132: Atomic INCR + EXPIRE in a single pipeline round-trip
+      const currentCount = await redisCache.incrWithExpire(
+        currentKey,
+        Math.ceil(windowMs * 2 / 1000),
+      );
 
       // Calculate weighted count based on time into current window
       const windowProgress = (now % windowMs) / windowMs;

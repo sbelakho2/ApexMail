@@ -68,6 +68,30 @@ class NotFoundError(ApexMailError):
         super().__init__(message, code=code, status_code=404)
 
 
+class ForbiddenError(ApexMailError):
+    """Raised when access is forbidden (403)."""
+
+    def __init__(
+        self,
+        message: str = "Forbidden",
+        *,
+        code: str = "FORBIDDEN",
+    ) -> None:
+        super().__init__(message, code=code, status_code=403)
+
+
+class ConflictError(ApexMailError):
+    """Raised when a resource conflict occurs (409)."""
+
+    def __init__(
+        self,
+        message: str = "Conflict",
+        *,
+        code: str = "CONFLICT",
+    ) -> None:
+        super().__init__(message, code=code, status_code=409)
+
+
 class RateLimitError(ApexMailError):
     """Raised when rate limit is exceeded (429)."""
 

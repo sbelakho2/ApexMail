@@ -4,7 +4,7 @@
  * Data access for SMTP authentication credentials
  */
 
-import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
 import { ok, err, type Result } from '@apexmail/lib';
 
@@ -35,6 +35,10 @@ export class SmtpCredentialsRepository {
      * Create new SMTP credentials for a tenant
      * Returns the plain password only once - it cannot be retrieved again
      */
+    /**
+     * A-015: Fix TOCTOU race on username uniqueness.
+     * Use INSERT ... ON CONFLICT instead of SELECT-then-INSERT.
+     */
     async create(tenantId: string, username?: string): Promise<Result<SmtpCredentialWithSecret, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
         
@@ -46,22 +50,17 @@ export class SmtpCredentialsRepository {
         const passwordHash = this.hashPassword(password);
 
         try {
-            // Check for existing username
-            const existing = await this.pool.query(
-                `SELECT id FROM smtp_credentials WHERE username = $1`,
-                [finalUsername]
-            );
-
-            if (existing.rows.length > 0) {
-                return err(new Error('Username already exists'));
-            }
-
             const result = await this.pool.query<Record<string, unknown>>(
                 `INSERT INTO smtp_credentials (id, tenant_id, username, password_hash)
                  VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (username) DO NOTHING
                  RETURNING id, tenant_id, username, is_active, created_at`,
                 [id, tenantId, finalUsername, passwordHash]
             );
+
+            if (result.rows.length === 0) {
+                return err(new Error('Username already exists'));
+            }
 
             const row = result.rows[0];
             if (!row) {
@@ -224,6 +223,52 @@ export class SmtpCredentialsRepository {
     }
 
     /**
+     * F-188: Find expired SMTP credentials (older than maxAgeDays, default 90)
+     * Returns credentials that should be rotated for security.
+     */
+    async findExpired(maxAgeDays = 90): Promise<SmtpCredential[]> {
+        const result = await this.pool.query<Record<string, unknown>>(
+            `SELECT id, tenant_id, username, is_active, created_at
+             FROM smtp_credentials
+             WHERE created_at < NOW() - INTERVAL '1 day' * $1
+               AND is_active = true
+             ORDER BY created_at ASC`,
+            [maxAgeDays]
+        );
+
+        return result.rows.map(row => this.mapRow(row));
+    }
+
+    /**
+     * F-188: Rotate an SMTP credential — generates a new password, updates the
+     * hash, and returns the new plain-text password (shown once).
+     * Unlike regeneratePassword, rotate also records the rotation timestamp
+     * by resetting created_at so the credential won't be flagged as expired again.
+     */
+    async rotate(id: string, tenantId: string): Promise<Result<{ password: string }, Error>> {
+        const password = this.generateSecurePassword();
+        const passwordHash = this.hashPassword(password);
+
+        try {
+            const result = await this.pool.query(
+                `UPDATE smtp_credentials
+                 SET password_hash = $3,
+                     created_at = NOW()
+                 WHERE id = $1 AND tenant_id = $2 AND is_active = true`,
+                [id, tenantId, passwordHash]
+            );
+
+            if ((result.rowCount ?? 0) === 0) {
+                return err(new Error('Credential not found or inactive'));
+            }
+
+            return ok({ password });
+        } catch (error) {
+            return err(error instanceof Error ? error : new Error(String(error)));
+        }
+    }
+
+    /**
      * Count credentials for a tenant
      */
     async countByTenant(tenantId: string): Promise<number> {
@@ -261,10 +306,10 @@ export class SmtpCredentialsRepository {
     }
 
     private hashPassword(password: string): string {
-        // Use SHA-256 with a static salt (in production, use bcrypt or argon2)
+        // G-198: Use HMAC-SHA-256 instead of plain SHA-256 for proper keyed hashing
         const salt = process.env.SMTP_PASSWORD_SALT ?? 'apexmail-smtp-default-salt';
-        return createHash('sha256')
-            .update(salt + password)
+        return createHmac('sha256', salt)
+            .update(password)
             .digest('hex');
     }
 

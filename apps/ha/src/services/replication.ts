@@ -13,8 +13,10 @@
 
 import { Pool } from 'pg';
 import Redis from 'ioredis';
-import { Result } from '@apexmail/lib';
+import { Result, createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'ha-replication' });
 
 /**
  * SECURITY: Sanitize PostgreSQL identifier names to prevent SQL injection
@@ -216,15 +218,15 @@ export class ReplicationService {
         createdPools.push(pool);
       }
 
-      console.log('[Replication] Service initialized');
+      logger.info('[Replication] Service initialized');
     } catch (error) {
       // Clean up any pools that were successfully created
-      console.error('[Replication] Initialization failed, cleaning up pools');
+      logger.error('[Replication] Initialization failed, cleaning up pools');
       for (const pool of createdPools) {
         try {
           await pool.end();
         } catch (cleanupError) {
-          console.error('[Replication] Error closing pool during cleanup:', cleanupError);
+          logger.error('[Replication] Error closing pool during cleanup', { error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) });
         }
       }
       this.replicaPools.clear();
@@ -245,11 +247,11 @@ export class ReplicationService {
         await this.collectStats();
         await this.checkLagThresholds();
       } catch (error) {
-        console.error('[Replication] Monitoring error:', error);
+        logger.error('[Replication] Monitoring error', { error: error instanceof Error ? error.message : String(error) });
       }
     }, intervalMs);
 
-    console.log(`[Replication] Started monitoring every ${intervalMs}ms`);
+    logger.info(`[Replication] Started monitoring every ${intervalMs}ms`);
   }
 
   /**
@@ -408,7 +410,7 @@ export class ReplicationService {
         safeWalSize: null,
       };
 
-      console.log(`[Replication] Created physical slot: ${slotName}`);
+      logger.info(`[Replication] Created physical slot: ${slotName}`);
 
       return { ok: true, value: slot };
     } catch (error) {
@@ -453,7 +455,7 @@ export class ReplicationService {
         safeWalSize: null,
       };
 
-      console.log(`[Replication] Created logical slot: ${slotName}`);
+      logger.info(`[Replication] Created logical slot: ${slotName}`);
 
       return { ok: true, value: slot };
     } catch (error) {
@@ -471,7 +473,7 @@ export class ReplicationService {
         [slotName]
       );
 
-      console.log(`[Replication] Dropped slot: ${slotName}`);
+      logger.info(`[Replication] Dropped slot: ${slotName}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -498,7 +500,7 @@ export class ReplicationService {
         WITH (publish = '${operations.toLowerCase()}')
       `);
 
-      console.log(`[Replication] Created publication: ${config.publicationName}`);
+      logger.info(`[Replication] Created publication: ${config.publicationName}`);
 
       await client.query('COMMIT');
       return { ok: true, value: undefined };
@@ -551,7 +553,7 @@ export class ReplicationService {
         )
       `);
 
-      console.log(`[Replication] Created subscription: ${safeSubscriptionName} on ${replicaHost}`);
+      logger.info(`[Replication] Created subscription: ${safeSubscriptionName} on ${replicaHost}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -582,7 +584,7 @@ export class ReplicationService {
       // Reload configuration
       await this.primaryDb.query('SELECT pg_reload_conf()');
 
-      console.log(`[Replication] Set synchronous mode: ${mode} for ${replicaNames.join(', ')}`);
+      logger.info(`[Replication] Set synchronous mode: ${mode} for ${replicaNames.join(', ')}`);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -603,7 +605,7 @@ export class ReplicationService {
       // Trigger promotion
       await replicaPool.query('SELECT pg_promote()');
 
-      console.log(`[Replication] Promoted replica: ${replicaHost}`);
+      logger.info(`[Replication] Promoted replica: ${replicaHost}`);
 
       // Publish event
       await this.redis.publish('replication:events', JSON.stringify({
@@ -629,7 +631,7 @@ export class ReplicationService {
 
     try {
       await replicaPool.query('SELECT pg_wal_replay_pause()');
-      console.log(`[Replication] Paused replay on: ${replicaHost}`);
+      logger.info(`[Replication] Paused replay on: ${replicaHost}`);
       return { ok: true, value: undefined };
     } catch (error) {
       return { ok: false, error: error as Error };
@@ -647,7 +649,7 @@ export class ReplicationService {
 
     try {
       await replicaPool.query('SELECT pg_wal_replay_resume()');
-      console.log(`[Replication] Resumed replay on: ${replicaHost}`);
+      logger.info(`[Replication] Resumed replay on: ${replicaHost}`);
       return { ok: true, value: undefined };
     } catch (error) {
       return { ok: false, error: error as Error };
@@ -749,7 +751,7 @@ export class ReplicationService {
       `);
 
       const currentWal = result.rows[0]?.current_wal ?? 'unknown';
-      console.log(`[Replication] WAL cleanup check - current: ${currentWal}`);
+      logger.info(`[Replication] WAL cleanup check - current: ${currentWal}`);
 
       // In production, would actually clean up old WAL files
       return { ok: true, value: { filesRemoved: 0, bytesFreed: 0 } };
@@ -845,7 +847,20 @@ export class ReplicationService {
 
     await this.redis.publish('replication:alerts', JSON.stringify(alert));
 
-    console.log(`[Replication] ${severity.toUpperCase()}: ${message}`);
+    // E-169: Use appropriate log level for replication lag alerts
+    if (severity === 'critical') {
+      logger.error(`[Replication] CRITICAL: ${message}`, {
+        replica: replica?.id,
+        host: replica?.host,
+        lagMs: replica?.replayLagMs,
+      });
+    } else {
+      logger.warn(`[Replication] WARNING: ${message}`, {
+        replica: replica?.id,
+        host: replica?.host,
+        lagMs: replica?.replayLagMs,
+      });
+    }
   }
 
   /**
@@ -885,6 +900,6 @@ export class ReplicationService {
     }
 
     this.replicaPools.clear();
-    console.log('[Replication] Service shut down');
+    logger.info('[Replication] Service shut down');
   }
 }

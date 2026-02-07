@@ -81,6 +81,7 @@ export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
           message: err.message,
           ...(err.details && { details: err.details }),
         },
+        requestId,
       }, err.statusCode as 400);
     }
 
@@ -103,6 +104,7 @@ export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
           message: 'Request validation failed',
           details,
         },
+        requestId,
       }, 400);
     }
 
@@ -122,6 +124,7 @@ export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
         // SECURITY FIX: Never expose stack traces in responses
         // Stack traces are logged server-side for debugging
       },
+      requestId,
     }, 500);
   };
 }

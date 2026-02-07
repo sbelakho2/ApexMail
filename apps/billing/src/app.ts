@@ -66,6 +66,11 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   const db = createDatabase();
   const redis = new Redis(config.redisUrl);
 
+  // C-078: Handle Redis connection errors to prevent uncaught exceptions
+  redis.on('error', (err: Error) => {
+    console.error('Redis connection error', err.message);
+  });
+
   // Initialize services
   const metering = new MeteringService(db, redis);
   const usageAlerts = new UsageAlertsService(db, redis, metering);

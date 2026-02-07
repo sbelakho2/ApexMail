@@ -9,7 +9,10 @@
  */
 
 import { generateUUID } from '@apexmail/lib/crypto';
+import { createLogger } from '@apexmail/lib';
 import type { Pool } from 'pg';
+
+const logger = createLogger({ name: 'devex-sandbox' });
 
 export interface SandboxEnvironment {
   id: string;
@@ -1002,7 +1005,7 @@ export class SandboxService {
   private async forwardEmail(email: CapturedEmail, forwardTo: string): Promise<void> {
     // In production, this would actually forward the email
     // For now, we just log it
-    console.log(`[Sandbox] Forwarding email ${email.id} to ${forwardTo}`);
+    logger.info(`[Sandbox] Forwarding email ${email.id} to ${forwardTo}`);
   }
 
   private async triggerWebhook(url: string, event: string, payload: unknown): Promise<void> {
@@ -1017,7 +1020,7 @@ export class SandboxService {
         body: JSON.stringify({ event, data: payload, timestamp: new Date().toISOString() }),
       });
     } catch (error) {
-      console.error(`[Sandbox] Webhook trigger failed:`, error);
+      logger.error(`[Sandbox] Webhook trigger failed:`, { error: error instanceof Error ? error.message : String(error) });
     }
   }
 

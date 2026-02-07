@@ -418,10 +418,28 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
         return c.json({ error: updateResult.error.message }, 500);
       }
 
+      // E-170: Audit trail for plan change to PAYG
+      const previousSub = subscriptionResult.ok ? subscriptionResult.value : null;
+      const effectiveDate = previousSub?.billingCycleEnd ?? new Date().toISOString();
+      await ctx.db.query(
+        `INSERT INTO audit_logs (id, tenant_id, action, resource_type, metadata, created_at)
+         VALUES (gen_random_uuid(), $1, 'plan.changed', 'subscription',
+                 $2::jsonb, NOW())`,
+        [
+          tenantId,
+          JSON.stringify({
+            previousPlan: previousSub ? 'subscription' : 'unknown',
+            newPlan: 'payg',
+            changeType: 'downgrade',
+            effectiveDate,
+          }),
+        ]
+      );
+
       return c.json({
         success: true,
         message: 'Switched to Pay As You Go billing',
-        effectiveDate: subscriptionResult.value?.billingCycleEnd ?? new Date().toISOString(),
+        effectiveDate,
       });
     }
 
@@ -442,6 +460,22 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     if (!switchResult.ok) {
       return c.json({ error: switchResult.error.message }, 500);
     }
+
+    // E-170: Audit trail for plan change
+    await ctx.db.query(
+      `INSERT INTO audit_logs (id, tenant_id, action, resource_type, metadata, created_at)
+       VALUES (gen_random_uuid(), $1, 'plan.changed', 'subscription',
+               $2::jsonb, NOW())`,
+      [
+        tenantId,
+        JSON.stringify({
+          newPlan: parsed.planName,
+          billingInterval: parsed.billingInterval,
+          proration: previewResult.value,
+          changeType: previewResult.value.netAmount >= 0 ? 'upgrade' : 'downgrade',
+        }),
+      ]
+    );
 
     return c.json({
       success: true,

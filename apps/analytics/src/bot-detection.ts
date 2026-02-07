@@ -102,6 +102,12 @@ export class BotDetectionService {
   private readonly VELOCITY_WINDOW_MS = 5000; // 5 second window
   private readonly INSTANT_CLICK_THRESHOLD_MS = 1000; // Clicks under 1s are suspicious
   private readonly VELOCITY_THRESHOLD = 3; // 3+ clicks in window is suspicious
+  /**
+   * C-095: Maximum number of keys in the click velocity cache before eviction.
+   * Without a cap, if cleanupVelocityCache is never called (or called too
+   * infrequently), the map grows without bound → eventual OOM.
+   */
+  private static readonly MAX_VELOCITY_CACHE_SIZE = 50_000;
 
   /**
    * Analyze a click event for bot characteristics
@@ -250,7 +256,18 @@ export class BotDetectionService {
     // Add current click
     recentClicks.push(click);
     this.clickVelocityCache.set(key, recentClicks);
-    
+
+    // C-095: Evict oldest entries when cache exceeds cap to prevent OOM
+    if (this.clickVelocityCache.size > BotDetectionService.MAX_VELOCITY_CACHE_SIZE) {
+      const excess = this.clickVelocityCache.size - BotDetectionService.MAX_VELOCITY_CACHE_SIZE;
+      let removed = 0;
+      for (const k of this.clickVelocityCache.keys()) {
+        if (removed >= excess) break;
+        this.clickVelocityCache.delete(k);
+        removed++;
+      }
+    }
+
     // Check if velocity exceeds threshold
     return {
       isHighVelocity: recentClicks.length >= this.VELOCITY_THRESHOLD,

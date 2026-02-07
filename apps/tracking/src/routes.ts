@@ -6,6 +6,7 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { bodyLimit } from 'hono/body-limit';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
@@ -24,6 +25,40 @@ interface TrackingContext {
 
 // 1x1 transparent GIF
 const TRANSPARENT_GIF = Buffer.from(config.tracking.pixel.gifBase64, 'base64');
+
+/**
+ * E-190: Bot detection for tracking pixels.
+ * Email security scanners (Barracuda, Mimecast, etc.) and email client
+ * proxies pre-fetch tracking pixels, inflating open metrics.
+ * This function checks the User-Agent against known bot patterns.
+ *
+ * Returns true if the UA matches a known bot/scanner/proxy pattern.
+ */
+const BOT_UA_PATTERNS: RegExp[] = [
+  /GoogleImageProxy/i,
+  /YahooMailProxy/i,
+  /Barracuda/i,
+  /Mimecast/i,
+  /FireEye/i,
+  /ProofPoint/i,
+  /Symantec/i,
+  /MessageLabs/i,
+  /Trend\s?Micro/i,
+  /Sophos/i,
+  /\bbot\b/i,
+  /\bcrawler\b/i,
+  /\bscanner\b/i,
+  /\bspider\b/i,
+  /\bprefetch\b/i,
+  /link\s?preview/i,
+  /Microsoft\s?Office/i,
+  /ms-office/i,
+];
+
+function isBot(userAgent: string | undefined): boolean {
+  if (!userAgent) return false;
+  return BOT_UA_PATTERNS.some(pattern => pattern.test(userAgent));
+}
 
 /**
  * SECURITY: Verify that a redirect domain is allowed for a tenant
@@ -174,12 +209,13 @@ function isIPInRanges(ip: string, ranges: string[]): boolean {
 
 /**
  * Check if an IP is within a CIDR range
+ * F-176: Fix signed overflow — use unsigned right shift (>>>) throughout
  */
 function ipInCIDR(ip: string, cidr: string): boolean {
   const [rangeIP, prefixStr] = cidr.split('/');
   const prefix = parseInt(prefixStr || '32', 10);
   
-  if (!rangeIP) {
+  if (!rangeIP || prefix < 0 || prefix > 32) {
     return false;
   }
   
@@ -190,7 +226,9 @@ function ipInCIDR(ip: string, cidr: string): boolean {
     return false;
   }
   
-  const mask = prefix >= 32 ? ~0 : ~(0xFFFFFFFF >>> prefix);
+  if (prefix === 0) return true;
+  // Use unsigned shift to prevent signed overflow
+  const mask = (~0 << (32 - prefix)) >>> 0;
   return (ipNum & mask) === (rangeNum & mask);
 }
 
@@ -218,6 +256,39 @@ export function createRoutes(ctx: TrackingContext): Hono {
   const { db, redis, logger, codec, processor } = ctx;
   const app = new Hono();
 
+  /**
+   * E-182: Structured request logging middleware.
+   * Logs every tracking request with the four fields needed for
+   * abuse detection and bot filtering:
+   *   1. IP address  — for abuse detection and rate limit correlation
+   *   2. User-Agent  — for bot detection (prefetch bots, scanners)
+   *   3. Token/ID    — tracking token from path or query parameter
+   *   4. Response status — to correlate with error rates
+   */
+  app.use('*', async (c, next) => {
+    const startTime = Date.now();
+    await next();
+    const durationMs = Date.now() - startTime;
+    const status = c.res.status;
+    const ip = getClientIP(c);
+    const userAgent = c.req.header('user-agent') ?? 'unknown';
+    // Extract tracking token from path param or query param
+    const pathParts = c.req.path.split('/');
+    const trackingToken = pathParts[pathParts.length - 1]?.substring(0, 20) ?? '';
+    const method = c.req.method;
+    const path = c.req.path;
+
+    logger.info('tracking.request', {
+      method,
+      path,
+      status,
+      durationMs,
+      ip,
+      userAgent,
+      trackingToken: trackingToken ? trackingToken + '...' : 'none',
+    });
+  });
+
   // FIX-040: Rate limiting middleware using Redis sliding window
   if (config.rateLimit.enabled) {
     app.use('*', async (c, next) => {
@@ -226,10 +297,13 @@ export function createRoutes(ctx: TrackingContext): Hono {
       const now = Math.floor(Date.now() / 60000); // Current minute
       const windowKey = `${key}:${now}`;
       
-      const count = await redis.incr(windowKey);
-      if (count === 1) {
-        await redis.expire(windowKey, 120); // 2 min TTL (covers current + next window)
-      }
+      // A-022: Pipeline INCR + EXPIRE for atomicity — avoids a key leaking
+      // without a TTL if the process crashes between the two commands.
+      const pipeline = redis.pipeline();
+      pipeline.incr(windowKey);
+      pipeline.expire(windowKey, 120); // 2 min TTL (covers current + next window)
+      const results = await pipeline.exec();
+      const count = (results?.[0]?.[1] as number) ?? 0;
       
       if (count > config.rateLimit.maxRequestsPerMinute) {
         logger.warn('Rate limit exceeded', { ip, count });
@@ -239,6 +313,20 @@ export function createRoutes(ctx: TrackingContext): Hono {
       return next();
     });
   }
+
+  /**
+   * E-187: Body size limit for POST endpoints (unsubscribe / preferences).
+   * Form submissions should be tiny; 10KB is generous. This prevents
+   * attackers from sending oversized payloads to tracking endpoints.
+   */
+  app.use(`${config.tracking.unsubscribe.path}/*`, bodyLimit({
+    maxSize: 10 * 1024, // 10 KB
+    onError: (c) => c.json({ error: 'Request body too large' }, 413),
+  }));
+  app.use(`${config.tracking.preferences.path}/*`, bodyLimit({
+    maxSize: 10 * 1024, // 10 KB
+    onError: (c) => c.json({ error: 'Request body too large' }, 413),
+  }));
 
   // CORS for pixel (needed for cross-origin image loading)
   app.use(`${config.tracking.pixel.path}/*`, cors({
@@ -253,29 +341,67 @@ export function createRoutes(ctx: TrackingContext): Hono {
   
   app.get(`${config.tracking.pixel.path}/:trackingId`, async (c) => {
     const trackingId = c.req.param('trackingId');
+
+    // E-148: Validate trackingId parameter before processing
+    if (!trackingId || trackingId.length < 10 || trackingId.length > 4096) {
+      // Return pixel anyway (don't leak info) but skip processing
+      return c.body(TRANSPARENT_GIF, 200, {
+        'Content-Type': 'image/gif',
+        'Content-Length': TRANSPARENT_GIF.length.toString(),
+        'Cache-Control': config.tracking.pixel.cacheControl,
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'X-Content-Type-Options': 'nosniff',
+      });
+    }
+
     const userAgent = c.req.header('user-agent');
     // SECURITY FIX: Use validated IP extraction instead of blindly trusting headers
     const ipAddress = getClientIP(c);
 
-    logger.debug('Open pixel request', { trackingId: trackingId.substring(0, 20) + '...' });
+    // E-190: Detect bots/scanners that pre-fetch tracking pixels
+    const botDetected = isBot(userAgent);
+    if (botDetected) {
+      logger.debug('E-190: Bot detected on open pixel', {
+        trackingId: trackingId.substring(0, 20) + '...',
+        userAgent,
+      });
+    }
+
+    logger.debug('Open pixel request', { trackingId: trackingId.substring(0, 20) + '...', botDetected });
 
     // Decode tracking data
     const data = codec.decode(trackingId);
     
     if (data) {
-      // Record open event asynchronously (don't block response)
-      processor.recordOpen({
-        tenantId: data.tenantId,
-        messageId: data.messageId,
-        recipient: data.recipient,
-        userAgent,
-        ipAddress,
-      }).catch(err => {
-        logger.error('Failed to record open', { error: err instanceof Error ? err.message : 'Unknown' });
-      });
+      // E-190: Skip recording for detected bots to avoid inflating open metrics.
+      // Known scanners (Barracuda, Mimecast, etc.) pre-fetch tracking pixels;
+      // counting those as human opens produces misleading engagement data.
+      if (botDetected) {
+        logger.info('E-190: Skipping open recording for bot', {
+          messageId: data.messageId,
+          userAgent,
+        });
+      } else {
+        // Record open event asynchronously (don't block response)
+        processor.recordOpen({
+          tenantId: data.tenantId,
+          messageId: data.messageId,
+          recipient: data.recipient,
+          userAgent,
+          ipAddress,
+        }).catch(err => {
+          logger.error('Failed to record open', { error: err instanceof Error ? err.message : 'Unknown' });
+        });
+      }
     } else {
       logger.warn('Invalid tracking ID', { trackingId: trackingId.substring(0, 20) + '...' });
     }
+
+    // F-209: Cache-busting query params (e.g. ?cb=<random>) are accepted and
+    // ignored — they make each pixel URL unique so email clients that strip
+    // Cache-Control headers still re-fetch the image on every open.
+    // No explicit handling needed: Hono ignores unknown query params.
 
     // Always return the pixel (even for invalid tracking IDs)
     return c.body(TRANSPARENT_GIF, 200, {
@@ -284,6 +410,9 @@ export function createRoutes(ctx: TrackingContext): Hono {
       'Cache-Control': config.tracking.pixel.cacheControl,
       'Pragma': 'no-cache',
       'Expires': '0',
+      // F-209: Vary on the full request URI so proxies treat each
+      // cache-busted URL (?cb=xxx) as a distinct resource.
+      'Vary': '*',
       // Prevent caching in proxies
       'X-Content-Type-Options': 'nosniff',
     });
@@ -293,14 +422,18 @@ export function createRoutes(ctx: TrackingContext): Hono {
   app.get('/o.gif', async (c) => {
     const trackingId = c.req.query('t');
     
-    if (trackingId) {
+    // F-215: Validate token — non-empty, reasonable length, same rules as main pixel
+    if (trackingId && trackingId.length >= 10 && trackingId.length <= 4096) {
       const userAgent = c.req.header('user-agent');
       // SECURITY FIX: Use validated IP extraction
       const ipAddress = getClientIP(c);
+
+      // E-190: Bot detection for alternative pixel endpoint
+      const botDetected = isBot(userAgent);
       
       const data = codec.decode(trackingId);
       
-      if (data) {
+      if (data && !botDetected) {
         processor.recordOpen({
           tenantId: data.tenantId,
           messageId: data.messageId,
@@ -317,6 +450,11 @@ export function createRoutes(ctx: TrackingContext): Hono {
       'Content-Type': 'image/gif',
       'Content-Length': TRANSPARENT_GIF.length.toString(),
       'Cache-Control': config.tracking.pixel.cacheControl,
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      // F-209: Vary on full URI for cache-busting query params
+      'Vary': '*',
+      'X-Content-Type-Options': 'nosniff',
     });
   });
 
@@ -326,6 +464,15 @@ export function createRoutes(ctx: TrackingContext): Hono {
   
   app.get(`${config.tracking.click.path}/:trackingId`, async (c) => {
     const trackingId = c.req.param('trackingId');
+
+    // E-148: Validate trackingId parameter before processing
+    if (!trackingId || trackingId.length < 10 || trackingId.length > 4096) {
+      logger.warn('Click tracking: invalid trackingId length', {
+        length: trackingId?.length ?? 0,
+      });
+      return c.redirect(config.tracking.click.fallbackUrl, config.tracking.click.redirectStatus as 301 | 302 | 303 | 307 | 308);
+    }
+
     const originalUrl = c.req.query('r');
     const userAgent = c.req.header('user-agent');
     // SECURITY FIX: Use validated IP extraction
@@ -408,6 +555,13 @@ export function createRoutes(ctx: TrackingContext): Hono {
   // POST endpoint for List-Unsubscribe-Post header
   app.post(`${config.tracking.unsubscribe.path}/:token`, async (c) => {
     const token = c.req.param('token');
+
+    // E-148: Validate token parameter before processing
+    if (!token || token.length < 10 || token.length > 4096) {
+      logger.warn('Unsubscribe: invalid token length', { length: token?.length ?? 0 });
+      return c.json({ error: 'Invalid token' }, 400);
+    }
+
     const body = await c.req.text();
     const userAgent = c.req.header('user-agent');
     // SECURITY FIX: Use validated IP extraction
@@ -465,6 +619,12 @@ export function createRoutes(ctx: TrackingContext): Hono {
   // GET endpoint for manual unsubscribe (shows confirmation page)
   app.get(`${config.tracking.unsubscribe.path}/:token`, async (c) => {
     const token = c.req.param('token');
+
+    // E-148: Validate token parameter before processing
+    if (!token || token.length < 10 || token.length > 4096) {
+      return c.html(renderErrorPage('Invalid or expired unsubscribe link'));
+    }
+
     const confirm = c.req.query('confirm');
 
     // Decode token
@@ -517,6 +677,11 @@ export function createRoutes(ctx: TrackingContext): Hono {
   app.get(`${config.tracking.preferences.path}/:token`, async (c) => {
     const token = c.req.param('token');
 
+    // E-148: Validate token parameter before processing
+    if (!token || token.length < 10 || token.length > 4096) {
+      return c.html(renderErrorPage('Invalid or expired preferences link'));
+    }
+
     // Decode token
     const data = codec.verifyPreferencesToken(token);
     
@@ -558,6 +723,12 @@ export function createRoutes(ctx: TrackingContext): Hono {
 
   app.post(`${config.tracking.preferences.path}/:token`, async (c) => {
     const token = c.req.param('token');
+
+    // E-148: Validate token parameter before processing
+    if (!token || token.length < 10 || token.length > 4096) {
+      return c.json({ error: 'Invalid token' }, 400);
+    }
+
     const body = await c.req.parseBody();
 
     // Decode token
@@ -601,20 +772,33 @@ export function createRoutes(ctx: TrackingContext): Hono {
     }
 
     // Update category preferences
+    // B-033: Wrap all category preference updates in a single transaction
+    // Previously each category was a separate INSERT/UPDATE; a crash mid-loop
+    // would leave preferences in a partial state.
     const categories = Object.keys(body).filter(k => k.startsWith('category_'));
     
-    for (const key of categories) {
-      const category = key.replace('category_', '');
-      const subscribed = body[key] === 'true';
-      
-      const prefId = generateId('prf');
-      await db.query(`
-        INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
-        ON CONFLICT (tenant_id, email, category) DO UPDATE SET
-          subscribed = $5,
-          updated_at = NOW()
-      `, [prefId, data.tenantId, email, category, subscribed]);
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      for (const key of categories) {
+        const category = key.replace('category_', '');
+        const subscribed = body[key] === 'true';
+        
+        const prefId = generateId('prf');
+        await client.query(`
+          INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
+          VALUES ($1, $2, $3, $4, $5, NOW())
+          ON CONFLICT (tenant_id, email, category) DO UPDATE SET
+            subscribed = $5,
+            updated_at = NOW()
+        `, [prefId, data.tenantId, email, category, subscribed]);
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error('Failed to update subscription preferences', { error: err });
+    } finally {
+      client.release();
     }
 
     return c.redirect(`${config.tracking.preferences.path}/${token}?saved=1`);
@@ -634,7 +818,10 @@ export function createRoutes(ctx: TrackingContext): Hono {
       await redis.ping();
       return c.json({ status: 'ready' });
     } catch (error) {
-      return c.json({ status: 'not ready', error: String(error) }, 503);
+      // E-161: Don't leak internal details (connection strings, stack traces)
+      // in the readiness probe response. Log the full error server-side only.
+      logger.error('Readiness check failed', { error: error instanceof Error ? error.message : 'Unknown' });
+      return c.json({ status: 'not ready' }, 503);
     }
   });
 

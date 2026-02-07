@@ -116,7 +116,51 @@ export class RiskScoringEngine {
     }
 
     /**
-     * Collect all metrics needed for risk assessment
+     * Collect all metrics needed for risk assessment.
+     *
+     * C-137: Index advisory for compliance report query performance.
+     * The queries below use correlated subqueries across multiple tables.
+     * Ensure the following indexes exist to prevent sequential scans:
+     *
+     *   -- Core message stats (getSendingStats)
+     *   CREATE INDEX IF NOT EXISTS idx_messages_tenant_created
+     *     ON messages (tenant_id, created_at);
+     *   CREATE INDEX IF NOT EXISTS idx_messages_tenant_status_created
+     *     ON messages (tenant_id, status, created_at);
+     *
+     *   -- Spam / unsubscribe lookups
+     *   CREATE INDEX IF NOT EXISTS idx_spam_complaints_tenant_created
+     *     ON spam_complaints (tenant_id, created_at);
+     *   CREATE INDEX IF NOT EXISTS idx_unsubscribes_tenant_created
+     *     ON unsubscribes (tenant_id, created_at);
+     *
+     *   -- Violation stats (getViolationStats)
+     *   CREATE INDEX IF NOT EXISTS idx_abuse_reports_tenant_created
+     *     ON abuse_reports (tenant_id, created_at);
+     *   CREATE INDEX IF NOT EXISTS idx_content_violations_tenant_created
+     *     ON content_violations (tenant_id, created_at);
+     *   CREATE INDEX IF NOT EXISTS idx_scan_results_tenant_phishing_created
+     *     ON scan_results (tenant_id, phishing_detected, created_at);
+     *
+     *   -- Account info subqueries
+     *   CREATE INDEX IF NOT EXISTS idx_domains_tenant_verified
+     *     ON domains (tenant_id, verified);
+     *   CREATE INDEX IF NOT EXISTS idx_payment_events_tenant_type_created
+     *     ON payment_events (tenant_id, type, created_at);
+     *
+     *   -- Engagement stats
+     *   CREATE INDEX IF NOT EXISTS idx_campaign_stats_tenant_created
+     *     ON campaign_stats (tenant_id, created_at);
+     *
+     *   -- Blocklist join
+     *   CREATE INDEX IF NOT EXISTS idx_tenant_ips_tenant
+     *     ON tenant_ips (tenant_id);
+     *   CREATE INDEX IF NOT EXISTS idx_blocklist_entries_ip_removed
+     *     ON blocklist_entries (ip_address, removed_at);
+     *
+     *   -- Audit log queries (used by audit export/stats)
+     *   CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
+     *     ON audit_logs (tenant_id, created_at);
      */
     private async collectMetrics(tenantId: string): Promise<TenantMetrics> {
         const [

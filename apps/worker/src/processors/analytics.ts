@@ -89,11 +89,13 @@ export class AnalyticsProcessor {
     this.isRunning = true;
 
     // Start flush timer
+    // C-064 / D-112: Add .unref() so timer doesn't prevent process exit
     this.flushTimer = setInterval(() => {
       this.flushBuffers().catch(err => {
         this.logger.error('Flush error', { error: err });
       });
     }, this.config.flushInterval);
+    this.flushTimer.unref();
 
     // Start polling for events
     this.poll();
@@ -480,6 +482,7 @@ export class AnalyticsProcessor {
     const msUntilNextHour = nextHour.getTime() - now.getTime();
 
     // MEM-003 FIX: Store timer reference for cleanup
+    // D-113: Add .unref() so timer doesn't prevent process exit
     this.hourlyAggregationTimer = setTimeout(() => {
       this.runHourlyAggregation().catch(err => {
         this.logger.error('Hourly aggregation error', { error: err });
@@ -490,6 +493,7 @@ export class AnalyticsProcessor {
         this.scheduleHourlyAggregation();
       }
     }, msUntilNextHour);
+    this.hourlyAggregationTimer.unref();
   }
 
   private async runHourlyAggregation(): Promise<void> {
@@ -643,12 +647,21 @@ export class AnalyticsProcessor {
 
   /**
    * Get real-time stats from Redis
+   * C-061: Use SCAN instead of KEYS to avoid blocking Redis
    */
   async getRealtimeStats(tenantId: string, date?: Date): Promise<Record<string, number>> {
     const dateStr = (date ?? new Date()).toISOString().split('T')[0];
     const keyPattern = `stats:${tenantId}:${dateStr}:*`;
 
-    const keys = await this.redis.keys(keyPattern);
+    // Use SCAN iterator instead of KEYS to avoid blocking Redis
+    const keys: string[] = [];
+    let cursor = '0';
+    do {
+      const [nextCursor, batch] = await this.redis.scan(cursor, 'MATCH', keyPattern, 'COUNT', 100);
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== '0');
+
     if (keys.length === 0) return {};
 
     const values = await this.redis.mget(keys);

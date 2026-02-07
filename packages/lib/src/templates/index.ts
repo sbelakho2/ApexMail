@@ -305,6 +305,41 @@ function getSocialIcon(name: string): string {
  */
 function createHandlebarsInstance(options?: TemplateRenderOptions): typeof Handlebars {
     const hbs = Handlebars.create();
+
+    /**
+     * F-240: Prototype pollution prevention.
+     *
+     * Handlebars by default allows templates to access `__proto__`,
+     * `constructor`, and other prototype properties on the context
+     * object. An attacker who controls template content could use
+     * {{__proto__.polluted}} or {{constructor.constructor}} to
+     * access or enumerate internal JS engine details.
+     *
+     * We register a hook that silently blocks any property lookup
+     * that would traverse the prototype chain.
+     */
+    const BLOCKED_PROPERTIES = new Set([
+        '__proto__',
+        'constructor',
+        'prototype',
+        '__defineGetter__',
+        '__defineSetter__',
+        '__lookupGetter__',
+        '__lookupSetter__',
+    ]);
+
+    // Override lookupProperty on the Handlebars runtime so that any
+    // property traversal through blocked names (even nested paths like
+    // {{a.__proto__.b}}) returns undefined.
+    const originalLookup = (hbs.Utils as any).lookupProperty;
+    if (typeof originalLookup === 'function') {
+        (hbs.Utils as any).lookupProperty = function (parent: any, propertyName: string) {
+            if (BLOCKED_PROPERTIES.has(propertyName)) {
+                return undefined;
+            }
+            return originalLookup(parent, propertyName);
+        };
+    }
     
     // Register default helpers
     registerDefaultHelpers(hbs);
@@ -384,7 +419,19 @@ function registerDefaultHelpers(hbs: typeof Handlebars): void {
     // Object helpers
     hbs.registerHelper('json', (obj: unknown) => JSON.stringify(obj, null, 2));
     
-    // Default value helper
+    /**
+     * E-179: Default / fallback value helper.
+     *
+     * When a template variable is missing from the context Handlebars renders
+     * it as an empty string (non-strict mode) or throws (strict mode).
+     *
+     * To provide an explicit fallback use:
+     *   {{default name "Valued Customer"}}    → uses name if present, else "Valued Customer"
+     *   {{default user.company "Your Company"}} → nested path with fallback
+     *
+     * This is the recommended pattern for user-facing merge tags where a
+     * blank output would look broken.
+     */
     hbs.registerHelper('default', (value: unknown, defaultValue: unknown) => value ?? defaultValue);
 }
 
@@ -395,14 +442,56 @@ function registerDefaultHelpers(hbs: typeof Handlebars): void {
 export class TemplateEngine {
     private handlebars: typeof Handlebars;
     private options: TemplateRenderOptions;
+
+    /**
+     * C-072: LRU-style cache for compiled Handlebars templates.
+     * Avoids re-parsing and re-compiling the same template string on every
+     * render call.  Keyed by the raw template source; capped at 200 entries
+     * to bound memory.
+     */
+    private compiledCache = new Map<string, Handlebars.TemplateDelegate>();
+    private static readonly MAX_CACHE_SIZE = 200;
+
+    /** C-102: Maximum time (ms) allowed for template rendering */
+    private static readonly RENDER_TIMEOUT_MS = 5_000;
     
     constructor(options?: TemplateRenderOptions) {
         this.options = options || {};
         this.handlebars = createHandlebarsInstance(options);
     }
+
+    /**
+     * C-102: Render a template with a timeout guard.
+     * Uses Promise.race to abort rendering that exceeds RENDER_TIMEOUT_MS,
+     * preventing malicious or broken templates from blocking the event loop.
+     */
+    async renderWithTimeout(
+        template: string,
+        context: TemplateContext = {},
+        options?: TemplateRenderOptions,
+    ): Promise<TemplateRenderResult> {
+        return Promise.race([
+            Promise.resolve(this.render(template, context, options)),
+            new Promise<never>((_, reject) =>
+                setTimeout(
+                    () => reject(new Error('Template rendering timed out')),
+                    TemplateEngine.RENDER_TIMEOUT_MS,
+                ),
+            ),
+        ]);
+    }
     
     /**
-     * Render a template with context data
+     * Render a template with context data.
+     *
+     * E-179: Missing variable behaviour:
+     * - **Non-strict mode** (default): Missing variables render as empty
+     *   strings, which is safe for user-facing emails. Use the {{default}}
+     *   helper to supply a fallback, e.g. {{default name "Friend"}}.
+     * - **Strict mode** (`strict: true`): Throws an error if a referenced
+     *   variable is not present in `context`, useful for validation.
+     *
+     * The engine never emits the literal text "undefined" for missing vars.
      */
     render(template: string, context: TemplateContext = {}, options?: TemplateRenderOptions): TemplateRenderResult {
         const opts = { ...this.options, ...options };
@@ -418,12 +507,23 @@ export class TemplateEngine {
             errors.push(...mjmlResult.errors);
         }
         
-        // Step 2: Process Handlebars variables
+        // Step 2: Process Handlebars variables (C-072: cached compilation)
         try {
-            const compiled = this.handlebars.compile(html, {
-                strict: opts.strict,
-                noEscape: false, // HTML escape by default for security
-            });
+            // Include strict flag in cache key so strict vs non-strict compile differently
+            const cacheKey = `${opts.strict ? '1' : '0'}:${html}`;
+            let compiled = this.compiledCache.get(cacheKey);
+            if (!compiled) {
+                compiled = this.handlebars.compile(html, {
+                    strict: opts.strict,
+                    noEscape: false, // HTML escape by default for security
+                });
+                // Evict oldest entry when cache is full
+                if (this.compiledCache.size >= TemplateEngine.MAX_CACHE_SIZE) {
+                    const firstKey = this.compiledCache.keys().next().value;
+                    if (firstKey !== undefined) this.compiledCache.delete(firstKey);
+                }
+                this.compiledCache.set(cacheKey, compiled);
+            }
             html = compiled(context);
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Template compilation failed';

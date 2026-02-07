@@ -1,5 +1,9 @@
 /**
  * Events Routes - Email event tracking and querying
+ *
+ * F-213: Response envelope standard — see messages.ts header for full spec.
+ * List: { events: T[], pagination: { total, limit, offset, hasMore } }
+ * By message: { messageId, events: T[], timeline: T[] }
  */
 
 import { Hono } from 'hono';

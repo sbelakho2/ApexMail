@@ -294,6 +294,7 @@ export async function addStageAutomation(
  */
 export async function storeLead(lead: Lead): Promise<void> {
     const db = requireDb();
+    try {
     await db.query(
         `INSERT INTO sales_leads (
             id, tenant_id, company_name, domain, website, email, email_verified,
@@ -363,6 +364,11 @@ export async function storeLead(lead: Lead): Promise<void> {
             lead.nextFollowUpAt,
         ]
     );
+    } catch (error) {
+        // E-144: Log and rethrow — don't crash the process silently
+        logger.error('Failed to store lead', { leadId: lead.id, error: error instanceof Error ? error.message : String(error) });
+        throw error;
+    }
 }
 
 /**
@@ -461,6 +467,7 @@ export async function moveLeadToStage(
     newStage: PipelineStage,
     userId?: string
 ): Promise<Lead | null> {
+  try {
     const db = requireDb();
     const result = await db.query('SELECT * FROM sales_leads WHERE id = $1', [leadId]);
     if (result.rows.length === 0) return null;
@@ -507,6 +514,11 @@ export async function moveLeadToStage(
 
     logger.info('Moved lead to stage', { leadId, oldStage, newStage });
     return updatedLead;
+  } catch (error) {
+    // E-144: Log error and return null — don't crash the process
+    logger.error('Failed to move lead to stage', { leadId, newStage, error: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
 }
 
 /**
@@ -520,6 +532,7 @@ async function executeStageAutomations(
     const automations = stageConfig.automations.filter((a) => a.trigger === trigger);
 
     for (const automation of automations) {
+      try {
         switch (automation.action) {
             case 'create_task':
                 await createTask(lead.id, lead.tenantId, {
@@ -569,6 +582,15 @@ async function executeStageAutomations(
                 await updateLead(lead.id, { assignedTo: automation.config['userId'] as string });
                 break;
         }
+      } catch (error) {
+        // E-144: Log automation error but continue processing remaining automations
+        logger.error('Stage automation failed', {
+            leadId: lead.id,
+            stage: stageConfig.name,
+            action: automation.action,
+            error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 }
 

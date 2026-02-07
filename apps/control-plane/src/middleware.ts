@@ -99,6 +99,68 @@ async function validateSession(sessionToken: string): Promise<boolean> {
     }
 }
 
+// G-208: Session duration for refresh calculations
+const SESSION_DURATION_MS = 8 * 60 * 60 * 1000; // 8 hours — must match login route
+
+/**
+ * G-208: Validates session and returns a refreshed token when the session is
+ * past its half-life (sliding expiry). This keeps active users logged in
+ * without requiring re-authentication, while still bounding absolute session
+ * lifetime via the maxAge check in validateSession.
+ */
+async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid: boolean; refreshedToken?: string }> {
+    try {
+        const [payload, signature] = sessionToken.split('.');
+        if (!payload || !signature) return { valid: false };
+
+        const secret = process.env.CONTROL_PLANE_JWT_SECRET;
+        if (!secret) return { valid: false };
+
+        const crypto = await import('crypto');
+        const expectedSignature = crypto
+            .createHmac('sha256', secret)
+            .update(payload)
+            .digest('base64url');
+
+        const signatureBuffer = Buffer.from(signature);
+        const expectedBuffer = Buffer.from(expectedSignature);
+        if (signatureBuffer.length !== expectedBuffer.length) return { valid: false };
+        if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return { valid: false };
+
+        const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
+
+        if (decoded.exp && Date.now() > decoded.exp) return { valid: false };
+        if (decoded.type !== 'control_plane') return { valid: false };
+
+        const maxAge = 24 * 60 * 60 * 1000;
+        if (decoded.iat && Date.now() - decoded.iat > maxAge) return { valid: false };
+
+        // G-208: Sliding refresh — if more than half the session duration has
+        // elapsed since issuance, mint a fresh token.
+        const halfLife = SESSION_DURATION_MS / 2;
+        const elapsed = Date.now() - (decoded.iat || 0);
+        let refreshedToken: string | undefined;
+
+        if (elapsed > halfLife) {
+            const refreshedPayload = {
+                ...decoded,
+                iat: Date.now(),
+                exp: Date.now() + SESSION_DURATION_MS,
+            };
+            const refreshedB64 = Buffer.from(JSON.stringify(refreshedPayload)).toString('base64url');
+            const refreshedSig = crypto
+                .createHmac('sha256', secret)
+                .update(refreshedB64)
+                .digest('base64url');
+            refreshedToken = `${refreshedB64}.${refreshedSig}`;
+        }
+
+        return { valid: true, refreshedToken };
+    } catch {
+        return { valid: false };
+    }
+}
+
 /**
  * Validates the control plane API key
  */
@@ -204,9 +266,9 @@ export async function middleware(request: NextRequest) {
         return NextResponse.redirect(new URL('/login', request.url));
     }
     
-    const isValidSession = await validateSession(sessionToken);
+    const sessionResult = await validateSessionWithRefresh(sessionToken);
     
-    if (!isValidSession) {
+    if (!sessionResult.valid) {
         // Invalid or expired session
         console.warn(`[SECURITY] Invalid session attempt from IP: ${clientIp}`);
         const response = NextResponse.redirect(new URL('/login', request.url));
@@ -268,6 +330,17 @@ export async function middleware(request: NextRequest) {
     // Prevent caching of authenticated content
     response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     response.headers.set('Pragma', 'no-cache');
+
+    // G-208: Set refreshed session cookie if the session was past half-life
+    if (sessionResult.refreshedToken) {
+        response.cookies.set(CONTROL_PLANE_SESSION_COOKIE, sessionResult.refreshedToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'strict',
+            maxAge: SESSION_DURATION_MS / 1000,
+            path: '/',
+        });
+    }
     
     return response;
 }

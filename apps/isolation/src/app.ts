@@ -6,14 +6,17 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
+import { logger as honoLogger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { compress } from 'hono/compress';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import { createLogger } from '@apexmail/lib';
 
 import { config } from './config.js';
+
+const logger = createLogger({ name: 'isolation:app' });
 import { TenantService } from './services/tenant.js';
 import { DataIsolationService } from './services/data-isolation.js';
 import { EncryptionService } from './services/encryption.js';
@@ -51,7 +54,7 @@ async function initializeServices(): Promise<void> {
 
   // Test database connection
   await pool.query('SELECT 1');
-  console.log('[Isolation] Database connection established');
+  logger.info('[Isolation] Database connection established');
 
   // Create Redis connection
   redis = new Redis({
@@ -64,11 +67,11 @@ async function initializeServices(): Promise<void> {
   });
 
   redis.on('connect', () => {
-    console.log('[Isolation] Redis connection established');
+    logger.info('[Isolation] Redis connection established');
   });
 
   redis.on('error', (error: Error) => {
-    console.error('[Isolation] Redis error:', error.message);
+    logger.error('[Isolation] Redis error:', { error: error instanceof Error ? error.message : String(error) });
   });
 
   // Initialize services with dependencies
@@ -85,7 +88,7 @@ async function initializeServices(): Promise<void> {
 
   dataIsolationService = new DataIsolationService(pool, redis);
 
-  console.log('[Isolation] All services initialized');
+  logger.info('[Isolation] All services initialized');
 }
 
 /**
@@ -95,7 +98,7 @@ export function createApp(): Hono {
   const app = new Hono();
 
   // Global middleware
-  app.use('*', logger());
+  app.use('*', honoLogger());
   app.use('*', cors({
     origin: config.cors.origins,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -250,7 +253,7 @@ export function createApp(): Hono {
 
   // Error handling
   app.onError((error, c) => {
-    console.error('[Isolation] Unhandled error:', error);
+    logger.error('[Isolation] Unhandled error:', { error: error instanceof Error ? error.message : String(error) });
     
     // Log critical errors
     if (auditService) {
@@ -274,7 +277,7 @@ export function createApp(): Hono {
             error: error.message,
           },
           metadata: {},
-        }).catch(console.error);
+        }).catch((err: unknown) => logger.error('[Isolation] Audit log failed', { error: err instanceof Error ? err.message : String(err) }));
       }
     }
     
@@ -299,27 +302,27 @@ export function createApp(): Hono {
  * Shutdown services gracefully
  */
 export async function shutdown(): Promise<void> {
-  console.log('[Isolation] Shutting down services...');
+  logger.info('[Isolation] Shutting down services...');
   
   // Flush audit buffer
   if (auditService) {
     await (auditService as unknown as { flushBuffer(): Promise<void> }).flushBuffer();
-    console.log('[Isolation] Audit buffer flushed');
+    logger.info('[Isolation] Audit buffer flushed');
   }
   
   // Close Redis connection
   if (redis) {
     await redis.quit();
-    console.log('[Isolation] Redis connection closed');
+    logger.info('[Isolation] Redis connection closed');
   }
   
   // Close database pool
   if (pool) {
     await pool.end();
-    console.log('[Isolation] Database connection closed');
+    logger.info('[Isolation] Database connection closed');
   }
   
-  console.log('[Isolation] Shutdown complete');
+  logger.info('[Isolation] Shutdown complete');
 }
 
 /**
