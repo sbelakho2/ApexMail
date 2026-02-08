@@ -205,8 +205,8 @@ describe('Batch 6: Runtime Performance (#81–100)', () => {
     expect(routes).toContain('getSharedEngine');
     expect(routes).not.toMatch(/const inference = new InferenceEngine\(\)/);
 
-    const chatbot = readSource('apps/ai/src/chatbot/assistant.ts');
-    expect(chatbot).toContain('getSharedEngine');
+    const assistant = readSource('apps/ai/src/assistant/unified.ts');
+    expect(assistant).toContain('getSharedEngine');
 
     const content = readSource('apps/ai/src/content/generator.ts');
     expect(content).toContain('getSharedEngine');

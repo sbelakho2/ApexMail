@@ -73,6 +73,35 @@ export interface ChatSession {
     metadata?: Record<string, unknown>;
 }
 
+export interface CustomerProfile {
+    /** Customer display name */
+    name?: string;
+    /** Customer email address */
+    email?: string;
+    /** Current subscription plan */
+    plan?: 'free' | 'starter' | 'professional' | 'enterprise';
+    /** Account status */
+    accountStatus?: 'active' | 'suspended' | 'past_due' | 'trial' | 'cancelled';
+    /** Monthly send quota */
+    sendQuota?: number;
+    /** Sends used this billing period */
+    sendsUsed?: number;
+    /** Account creation date */
+    memberSince?: Date;
+    /** Verified email domains */
+    verifiedDomains?: string[];
+    /** Whether the user has completed onboarding */
+    onboarded?: boolean;
+    /** User role in the organization */
+    role?: 'owner' | 'admin' | 'editor' | 'viewer';
+    /** Organization/company name */
+    organization?: string;
+    /** Two-factor authentication enabled */
+    twoFactorEnabled?: boolean;
+    /** Session authentication level */
+    authLevel?: 'basic' | 'verified' | 'elevated';
+}
+
 export interface ChatContext {
     campaignId?: string;
     contactId?: string;
@@ -85,6 +114,12 @@ export interface ChatContext {
     recentActivity?: string[];
     currentCampaign?: string;
     selectedSegment?: string;
+    /** Customer profile for personalized, context-aware support */
+    customer?: CustomerProfile;
+    /** Whether the current session has been identity-verified */
+    authenticated?: boolean;
+    /** Tenant ID for multi-tenant isolation */
+    tenantId?: string;
 }
 
 export interface ExtractedEntity {
@@ -175,6 +210,8 @@ export type MailbotActionType =
     | 'send_campaign'
     | 'schedule_campaign'
     | 'pause_campaign'
+    | 'resume_campaign'
+    | 'stop_campaign'
     | 'delete_campaign'
     | 'create_list'
     | 'delete_list'
@@ -184,6 +221,7 @@ export type MailbotActionType =
     | 'remove_contact'
     | 'import_contacts'
     | 'tag_contacts'
+    | 'tag_contact'
     | 'create_segment'
     | 'generate_content'
     | 'analyze_performance'
@@ -725,4 +763,117 @@ export interface AIServiceError {
     code: string;
     message: string;
     details?: Record<string, unknown>;
+}
+
+// ========================================
+// AUTONOMOUS ASSISTANT TYPES
+// ========================================
+
+/** Risk level for autonomous actions */
+export type AutonomousRiskLevel = 'safe' | 'low' | 'medium' | 'high' | 'critical';
+
+/** Escalation reason codes */
+export type EscalationReason =
+    | 'high_risk_action'        // Action is too risky for autonomous execution
+    | 'billing_change'          // Financial impact requires human approval
+    | 'account_deletion'        // Destructive account-level action
+    | 'data_export'             // Bulk data leaving the platform
+    | 'compliance_concern'      // Potential regulatory issue
+    | 'angry_customer'          // Sentiment detection → human needed
+    | 'repeated_failure'        // Bot failed multiple times → needs human
+    | 'ambiguous_intent'        // Can't confidently determine what user wants
+    | 'security_incident'       // Suspicious activity detected
+    | 'quota_override'          // User requesting quota exception
+    | 'custom_request'          // Request outside bot capabilities
+    | 'confidence_too_low'      // Intent confidence below threshold
+    | 'multi_step_risky'        // Multi-step workflow with cumulative risk
+    | 'pii_detected'            // PII in request needs human handling
+    | 'legal_request';          // Legal/subpoena/compliance request
+
+/** Escalation ticket created when bot can't handle autonomously */
+export interface EscalationTicket {
+    id: string;
+    sessionId: string;
+    tenantId: string;
+    userId: string;
+    reason: EscalationReason;
+    severity: 'low' | 'medium' | 'high' | 'urgent';
+    summary: string;
+    conversationHistory: Array<{ role: string; content: string }>;
+    suggestedAction?: string;
+    customerProfile?: CustomerProfile;
+    createdAt: Date;
+    status: 'open' | 'assigned' | 'resolved' | 'dismissed';
+    assignedTo?: string;
+    resolvedAt?: Date;
+    resolution?: string;
+}
+
+/** Configuration for autonomous mode — set by control-plane owner */
+export interface AutonomousConfig {
+    /** Master toggle — enables/disables autonomous mode */
+    enabled: boolean;
+    /** Actions the bot may execute without user confirmation */
+    autoApproveActions: string[];
+    /** Actions that ALWAYS require human escalation */
+    alwaysEscalateActions: string[];
+    /** Confidence threshold — below this, escalate to human */
+    confidenceThreshold: number;
+    /** Maximum autonomous actions per session before forcing escalation */
+    maxAutoActionsPerSession: number;
+    /** Maximum monetary value ($) of autonomous billing actions */
+    maxAutonomousBillingAmount: number;
+    /** Enable proactive outreach (bot initiates conversations) */
+    proactiveOutreach: boolean;
+    /** Proactive triggers */
+    proactiveTriggers: ProactiveTrigger[];
+    /** Sentiment threshold — below this negative score, escalate */
+    sentimentEscalationThreshold: number;
+    /** Rate limit for autonomous actions per hour per tenant */
+    autonomousActionsPerHour: number;
+    /** Allowed hours for autonomous actions (UTC) */
+    allowedHoursUtc: { start: number; end: number };
+    /** Audit log every autonomous action */
+    auditAllActions: boolean;
+    /** Dry-run mode — log actions but don't execute */
+    dryRun: boolean;
+}
+
+/** Proactive trigger — bot reaches out based on events */
+export interface ProactiveTrigger {
+    id: string;
+    event: ProactiveTriggerEvent;
+    enabled: boolean;
+    action: string;
+    messageTemplate: string;
+    cooldownMinutes: number;
+}
+
+export type ProactiveTriggerEvent =
+    | 'deliverability_drop'      // Deliverability score drops below threshold
+    | 'bounce_rate_spike'        // Bounce rate exceeds threshold
+    | 'quota_approaching'        // >80% of send quota used
+    | 'domain_expiring'          // Domain cert/DNS about to expire
+    | 'campaign_stalled'         // Campaign hasn't been sent in N days
+    | 'billing_past_due'         // Payment failed/past due
+    | 'new_user_onboarding'      // New user hasn't completed setup
+    | 'engagement_drop'          // Open/click rates dropping
+    | 'compliance_deadline'      // GDPR/CAN-SPAM deadline approaching
+    | 'api_errors_spike';        // API error rate exceeding threshold
+
+/** Autonomous action audit log entry */
+export interface AutonomousAuditEntry {
+    id: string;
+    tenantId: string;
+    sessionId: string;
+    userId: string;
+    action: string;
+    params: Record<string, unknown>;
+    riskLevel: AutonomousRiskLevel;
+    autoApproved: boolean;
+    escalated: boolean;
+    escalationReason?: EscalationReason;
+    result?: 'success' | 'failure' | 'pending';
+    timestamp: Date;
+    durationMs: number;
 }

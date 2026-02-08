@@ -7,6 +7,10 @@ import { CronJob } from 'cron';
 import { createLogger, generateId } from '@apexmail/lib';
 import { config } from '../config.js';
 import type { CampaignRepository } from './repository.js';
+import { cadenceGovernor } from './cadence-governor.js';
+import { validateAndProcessCopy } from './copy-gates.js';
+import { funnelTracker } from './funnel-tracker.js';
+import { safetyMonitor } from './safety.js';
 import type {
     DripCampaign,
     DripSequenceStep,
@@ -642,6 +646,38 @@ export async function processEnrollmentStep(
     // Process step based on type
     switch (currentStep.type) {
         case 'email': {
+            // ── Cadence governor check ──────────────────────────────
+            // Ensure we haven't exceeded touch limits for this contact
+            // Infer timezone from lead location if available
+            if (lead.location?.countryCode) {
+                cadenceGovernor.inferTimezone(
+                    lead.email || lead.id,
+                    lead.location.countryCode,
+                    lead.domain ?? undefined
+                );
+            }
+            if (lead.location?.timezone) {
+                cadenceGovernor.setContactTimezone(lead.email || lead.id, lead.location.timezone);
+            }
+            const cadenceCheck = cadenceGovernor.canSend(lead.email || lead.id);
+            if (!cadenceCheck.allowed) {
+                logger.info('Cadence governor blocked send', {
+                    enrollmentId,
+                    stepId: currentStep.id,
+                    reason: cadenceCheck.reason,
+                });
+                // Re-schedule for later rather than skipping
+                enrollment.nextStepAt = cadenceCheck.suggestedTime ?? new Date(Date.now() + 3600_000);
+                if (repo) {
+                    try {
+                        await repo.updateEnrollment(enrollment.id, { nextStepAt: enrollment.nextStepAt });
+                    } catch (err) {
+                        logger.error('Failed to persist cadence delay', { error: err });
+                    }
+                }
+                return { success: false, action: 'skipped', nextStepAt: enrollment.nextStepAt };
+            }
+
             // Select A/B variant if configured
             let subject = currentStep.content.subject || '';
             let htmlBody = currentStep.content.htmlBody || '';
@@ -659,6 +695,41 @@ export async function processEnrollmentStep(
             htmlBody = replaceVariables(htmlBody, lead, enrollment);
             textBody = replaceVariables(textBody, lead, enrollment);
 
+            // ── Copy gates ──────────────────────────────────────────
+            // Validate copy quality before sending
+            const copyResult = validateAndProcessCopy({
+                subject,
+                body: htmlBody,
+                templateBaseline: null,
+                tokens: {
+                    '{{lead.first_name}}': '',
+                    '{{lead.company_name}}': lead.companyName || '',
+                },
+                isHighRisk: false,
+            });
+            if (!copyResult.approved) {
+                const issueMessages = copyResult.lint.violations.map((v: { message: string }) => v.message);
+                logger.warn('Copy gate rejected email', {
+                    enrollmentId,
+                    stepId: currentStep.id,
+                    issues: issueMessages,
+                });
+                // Still send but log for monitoring — hard-block only in safe mode
+                safetyMonitor.traceDecision({
+                    contactId: lead.email || lead.id,
+                    campaignId: enrollment.campaignId,
+                    enrollmentId: enrollment.id,
+                    subjectArmId: null,
+                    valuePropArmId: null,
+                    ctaArmId: null,
+                    subjectArmPrior: null,
+                    valuePropArmPrior: null,
+                    decayApplied: false,
+                    controlGroup: false,
+                    randomSeed: Math.random(),
+                });
+            }
+
             if (lead.email) {
                 try {
                     await sendEmail({
@@ -670,6 +741,33 @@ export async function processEnrollmentStep(
 
                     enrollment.emailsSent++;
                     campaign.stats.emailsSent++;
+
+                    // ── Record send in cadence governor ──
+                    cadenceGovernor.recordTouch(
+                        lead.email || lead.id,
+                        enrollment.campaignId,
+                        enrollment.id,
+                        currentStep.id
+                    );
+
+                    // ── Track funnel stage: delivered ──
+                    funnelTracker.recordEvent({
+                        contactId: lead.email || lead.id,
+                        accountId: lead.companyName || '',
+                        campaignId: enrollment.campaignId,
+                        enrollmentId: enrollment.id,
+                        stage: 'delivered',
+                        attribution: {
+                            subjectArmId: null,
+                            valuePropArmId: null,
+                            templateId: currentStep.id,
+                            toneId: null,
+                            sendTimePolicyId: null,
+                            controlGroup: false,
+                        },
+                        occurredAt: new Date(),
+                        metadata: {},
+                    });
 
                     // E-165: Clear failure tracking on success
                     if (enrollment.metadata._stepFailures) {
@@ -845,6 +943,7 @@ function replaceVariables(
         '{{lead.industry}}': lead.industry || '',
         '{{lead.website}}': lead.website || '',
         '{{unsubscribe_link}}': `https://apexmail.ee/unsubscribe/${enrollment.id}`,
+        '{{preferences_link}}': `https://apexmail.ee/preferences/${enrollment.id}`,
     };
 
     let result = content;
@@ -1007,14 +1106,46 @@ export async function recordEngagement(
         case 'opened':
             enrollment.emailsOpened++;
             campaign.stats.emailsOpened++;
+            funnelTracker.recordEvent({
+                contactId: enrollment.leadId,
+                accountId: '',
+                campaignId: campaign.id,
+                enrollmentId: enrollment.id,
+                stage: 'opened',
+                attribution: { subjectArmId: null, valuePropArmId: null, templateId: null, toneId: null, sendTimePolicyId: null, controlGroup: false },
+                occurredAt: new Date(),
+                metadata: {},
+            });
             break;
         case 'clicked':
             enrollment.emailsClicked++;
             campaign.stats.emailsClicked++;
+            funnelTracker.recordEvent({
+                contactId: enrollment.leadId,
+                accountId: '',
+                campaignId: campaign.id,
+                enrollmentId: enrollment.id,
+                stage: 'clicked',
+                attribution: { subjectArmId: null, valuePropArmId: null, templateId: null, toneId: null, sendTimePolicyId: null, controlGroup: false },
+                occurredAt: new Date(),
+                metadata: {},
+            });
             break;
         case 'replied':
             enrollment.replied = true;
             campaign.stats.repliesReceived++;
+            funnelTracker.recordEvent({
+                contactId: enrollment.leadId,
+                accountId: '',
+                campaignId: campaign.id,
+                enrollmentId: enrollment.id,
+                stage: 'replied',
+                attribution: { subjectArmId: null, valuePropArmId: null, templateId: null, toneId: null, sendTimePolicyId: null, controlGroup: false },
+                occurredAt: new Date(),
+                metadata: {},
+            });
+            // Record reply in cadence governor to stop further sends
+            cadenceGovernor.recordStopEvent(enrollment.leadId, 'reply');
             break;
     }
 

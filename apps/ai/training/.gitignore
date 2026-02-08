@@ -1,0 +1,12 @@
+# Training artifacts
+.venv/
+data/
+output/
+output-onnx/
+__pycache__/
+*.pyc
+*.pth
+*.bin
+*.onnx
+wandb/
+runs/

@@ -25,6 +25,7 @@ import * as inbox from './inbox/index.js';
 import * as crm from './crm/index.js';
 import * as calendar from './calendar/index.js';
 import * as ads from './ads/index.js';
+import { getDbPool } from './db.js';
 import type { LeadFilters, LeadStatus, PipelineStage, MeetingType, PromoType, PromoPlacement, TaskType, TaskPriority } from './types.js';
 
 // Type validation helpers
@@ -556,7 +557,7 @@ app.post('/api/v1/inbox/process', async (c) => {
     // FIX-500-127: Persist the classified inbox message to the database.
     // Previously the message was only returned in the HTTP response.
     try {
-        const pool = (await import('./db.js')).getDbPool();
+        const pool = getDbPool();
         await pool.query(
             `INSERT INTO autopilot_inbox_messages (
                 id, tenant_id, lead_id, campaign_id, message_id, in_reply_to,
@@ -986,6 +987,249 @@ app.onError((err, c) => {
         { success: false, error: 'Internal server error' },
         500
     );
+});
+
+// ════════════════════════════════════════════════════════════════════
+//  New modules — bandits, safety, funnel, migration, errors, activation
+// ════════════════════════════════════════════════════════════════════
+
+// ── Funnel Stats ──
+app.get('/api/v1/funnel/stats/:campaignId', async (c) => {
+    const campaignId = c.req.param('campaignId');
+    const stats = campaigns.funnelTracker.getFunnelStats(campaignId);
+    return c.json({ success: true, data: stats });
+});
+
+// ── Safety Health Report ──
+app.get('/api/v1/safety/health', (c) => {
+    const report = campaigns.safetyMonitor.generateHealthReport(
+        { activationRate: 0, replyRate: 0, negativeRate: 0, bounceRate: 0 },
+        { activationRate: 0, replyRate: 0 },
+        campaigns.banditManager.getAllPools()
+    );
+    return c.json({ success: true, data: report });
+});
+
+app.post('/api/v1/safety/validate-list', async (c) => {
+    const body = await c.req.json<{ emails: string[] }>();
+    if (!Array.isArray(body.emails)) {
+        return c.json({ success: false, error: 'emails must be an array' }, 400);
+    }
+    const result = campaigns.validateLeadList(body.emails);
+    return c.json({ success: true, data: result });
+});
+
+// ── Bandit Stats ──
+app.get('/api/v1/bandits/pools', (c) => {
+    const pools = campaigns.banditManager.getAllPools().map(p => p.serialize());
+    return c.json({ success: true, data: pools });
+});
+
+// ── Migration Hub ──
+app.get('/api/v1/migration/providers', (c) => {
+    const slugs = campaigns.getAllProviderSlugs();
+    return c.json({ success: true, data: slugs });
+});
+
+app.get('/api/v1/migration/providers/:slug', (c) => {
+    const slug = c.req.param('slug');
+    const provider = campaigns.getProvider(slug);
+    if (!provider) {
+        return c.json({ success: false, error: 'Provider not found' }, 404);
+    }
+    return c.json({ success: true, data: provider });
+});
+
+// ── Error Encyclopedia ──
+app.get('/api/v1/errors', (c) => {
+    const query = c.req.query('q');
+    const category = c.req.query('category');
+
+    let results;
+    if (query) {
+        results = campaigns.searchErrors(query);
+    } else if (category) {
+        results = campaigns.getErrorsByCategory(category as any);
+    } else {
+        results = campaigns.ERROR_ENTRIES;
+    }
+    return c.json({ success: true, data: results });
+});
+
+app.get('/api/v1/errors/:code', (c) => {
+    const code = c.req.param('code');
+    const entry = campaigns.getErrorEntry(code);
+    if (!entry) {
+        return c.json({ success: false, error: 'Error code not found' }, 404);
+    }
+    return c.json({ success: true, data: entry });
+});
+
+// ── Activation Path ──
+app.post('/api/v1/activation/start', async (c) => {
+    const body = await c.req.json<{ userId: string; tenantId: string }>();
+    const progress = campaigns.activationTracker.initUser(body.userId, body.tenantId);
+    return c.json({ success: true, data: progress });
+});
+
+app.get('/api/v1/activation/:userId', (c) => {
+    const userId = c.req.param('userId');
+    const progress = campaigns.activationTracker.getProgress(userId);
+    if (!progress) {
+        return c.json({ success: false, error: 'User not found' }, 404);
+    }
+    return c.json({
+        success: true,
+        data: {
+            ...progress,
+            completionPercent: campaigns.activationTracker.getCompletionPercent(userId),
+            currentStep: campaigns.activationTracker.getCurrentStep(userId),
+            timeToActivationMs: campaigns.activationTracker.getTimeToActivation(userId),
+        },
+    });
+});
+
+app.post('/api/v1/activation/:userId/complete/:stepId', async (c) => {
+    const userId = c.req.param('userId');
+    const stepId = c.req.param('stepId') as any;
+    campaigns.activationTracker.completeStep(userId, stepId);
+    return c.json({ success: true });
+});
+
+app.get('/api/v1/activation/stats/summary', (c) => {
+    const stats = campaigns.activationTracker.getActivationStats();
+    return c.json({ success: true, data: stats });
+});
+
+app.get('/api/v1/sandbox/validate', (c) => {
+    const to = c.req.query('to');
+    if (!to) {
+        return c.json({ success: false, error: 'to query param required' }, 400);
+    }
+    const result = campaigns.validateSandboxSend(to);
+    return c.json({ success: true, data: result });
+});
+
+// ── Template Cialdini lookup ──
+app.get('/api/v1/templates/by-principle/:principle', (c) => {
+    const principle = c.req.param('principle') as any;
+    const templates = campaigns.getTemplatesByPrinciple(principle);
+    return c.json({ success: true, data: templates });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Operator Console — ON/OFF, email approval, statistics
+// ═══════════════════════════════════════════════════════════════════
+
+// ── System ON/OFF ──
+app.post('/api/v1/operator/start', (c) => {
+    const result = campaigns.operatorConsole.turnOn();
+    return c.json({ success: result.success, message: result.message });
+});
+
+app.post('/api/v1/operator/stop', (c) => {
+    const result = campaigns.operatorConsole.turnOff();
+    return c.json({ success: result.success, message: result.message });
+});
+
+// ── System Overview ──
+app.get('/api/v1/operator/overview', (c) => {
+    const overview = campaigns.operatorConsole.getOverview();
+    return c.json({ success: true, data: overview });
+});
+
+// ── Full Dashboard (all stats in one call) ──
+app.get('/api/v1/operator/dashboard', (c) => {
+    const dashboard = campaigns.operatorConsole.getFullDashboard();
+    return c.json({ success: true, data: dashboard });
+});
+
+// ── Email Approval Queue ──
+app.get('/api/v1/operator/approvals/pending', (c) => {
+    const pending = campaigns.operatorConsole.getPendingEmails();
+    return c.json({ success: true, data: pending });
+});
+
+app.post('/api/v1/operator/approvals/:id/approve', (c) => {
+    const id = c.req.param('id');
+    const ok = campaigns.operatorConsole.approveEmail(id);
+    return c.json({ success: ok });
+});
+
+app.post('/api/v1/operator/approvals/:id/reject', (c) => {
+    const id = c.req.param('id');
+    const ok = campaigns.operatorConsole.rejectEmail(id);
+    return c.json({ success: ok });
+});
+
+app.post('/api/v1/operator/approvals/approve-all', (c) => {
+    const count = campaigns.operatorConsole.approveAll();
+    return c.json({ success: true, approved: count });
+});
+
+// ── Candidate Performance ──
+app.get('/api/v1/operator/candidates', (c) => {
+    const candidates = campaigns.operatorConsole.getCandidatePerformance();
+    return c.json({ success: true, data: candidates });
+});
+
+// ── Hourly Outcomes ──
+app.get('/api/v1/operator/outcomes', (c) => {
+    const limit = parseInt(c.req.query('limit') || '24', 10);
+    const outcomes = campaigns.operatorConsole.getHourlyOutcomes(limit);
+    return c.json({ success: true, data: outcomes });
+});
+
+// ── Current Metrics ──
+app.get('/api/v1/operator/metrics', (c) => {
+    const metrics = campaigns.operatorConsole.getCurrentMetrics();
+    return c.json({ success: true, data: metrics });
+});
+
+// ── Baseline Comparison ──
+app.get('/api/v1/operator/baseline', (c) => {
+    const comparison = campaigns.operatorConsole.getBaselineComparison();
+    return c.json({ success: true, data: comparison });
+});
+
+// ── Safety Report ──
+app.get('/api/v1/operator/safety', (c) => {
+    const report = campaigns.operatorConsole.getSafetyReport();
+    return c.json({ success: true, data: report });
+});
+
+// ── Exit Safe Mode ──
+app.post('/api/v1/operator/safe-mode/exit', (c) => {
+    campaigns.operatorConsole.exitSafeMode();
+    return c.json({ success: true, message: 'Exited safe mode' });
+});
+
+// ── Operator Action Log ──
+app.get('/api/v1/operator/actions', (c) => {
+    const limit = parseInt(c.req.query('limit') || '50', 10);
+    const actions = campaigns.operatorConsole.getActionLog(limit);
+    return c.json({ success: true, data: actions });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Hourly Loop Direct API (advanced)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get('/api/v1/loop/stats', (c) => {
+    const stats = campaigns.hourlyLoop.getStats();
+    return c.json({ success: true, data: stats });
+});
+
+app.post('/api/v1/loop/run-now', async (c) => {
+    try {
+        const outcome = await campaigns.hourlyLoop.runHourlyCycle();
+        return c.json({ success: true, data: outcome });
+    } catch (err) {
+        return c.json({
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+        }, 500);
+    }
 });
 
 export default app;

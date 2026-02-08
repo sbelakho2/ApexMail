@@ -44,8 +44,7 @@ interface ModelConfig {
 // Export all modules for programmatic use
 export * from './types.js';
 export * from './inference/index.js';
-export * from './chatbot/index.js';
-export * from './mailbot/index.js';
+export * from './assistant/index.js';
 export * from './sto/index.js';
 export * from './content/index.js';
 export * from './analytics/index.js';
@@ -112,9 +111,11 @@ async function startService(): Promise<void> {
                 'POST /api/inference/generate',
                 'POST /api/inference/chat',
                 'POST /api/inference/embed',
-                'POST /api/chatbot/session',
-                'POST /api/chatbot/message',
-                'POST /api/mailbot/command',
+                'POST /api/assistant/session',
+                'POST /api/assistant/message',
+                'POST /api/assistant/confirm/:id',
+                'POST /api/assistant/intent',
+                'GET  /api/assistant/actions',
                 'POST /api/sto/optimize',
                 'POST /api/content/generate',
                 'POST /api/content/subject-lines',

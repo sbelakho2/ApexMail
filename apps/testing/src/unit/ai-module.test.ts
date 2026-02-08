@@ -221,7 +221,7 @@ describe('UCBBandit', () => {
                 }
             }
             
-            return bestArm;
+            return bestArm ? { armId: bestArm.id, value: bestArm.value, ucbValue: bestArm.ucbValue } : null;
         }
 
         recordReward(armId: string, reward: number): void {
@@ -444,7 +444,7 @@ describe('ModelLifecycleManager', () => {
         private status: ModelStatus = 'unloaded';
         private warmupComplete = false;
         private consecutiveErrors = 0;
-        private loadedAt: Date | null = null;
+        public loadedAt: Date | null = null;
 
         async load(loadFn: () => Promise<void>): Promise<void> {
             this.status = 'loading';
@@ -908,56 +908,59 @@ describe('AuthSignatureVerification', () => {
 
 describe('STOCache', () => {
     // Mock Redis client
+    const redisData = new Map<string, any>();
+    const redisSortedSets = new Map<string, Map<string, number>>();
+    
     const mockRedis = {
-        data: new Map<string, any>(),
-        sortedSets: new Map<string, Map<string, number>>(),
+        data: redisData,
+        sortedSets: redisSortedSets,
         
         get: vi.fn((key: string) => {
-            const val = mockRedis.data.get(key);
+            const val = redisData.get(key);
             return Promise.resolve(val ? JSON.stringify(val) : null);
         }),
         
-        setex: vi.fn((key: string, ttl: number, value: string) => {
-            mockRedis.data.set(key, JSON.parse(value));
+        setex: vi.fn((key: string, _ttl: number, value: string) => {
+            redisData.set(key, JSON.parse(value));
             return Promise.resolve('OK');
         }),
         
         zadd: vi.fn((key: string, score: number, member: string) => {
-            if (!mockRedis.sortedSets.has(key)) {
-                mockRedis.sortedSets.set(key, new Map());
+            if (!redisSortedSets.has(key)) {
+                redisSortedSets.set(key, new Map());
             }
-            mockRedis.sortedSets.get(key)!.set(member, score);
+            redisSortedSets.get(key)!.set(member, score);
             return Promise.resolve(1);
         }),
         
         zincrby: vi.fn((key: string, increment: number, member: string) => {
-            if (!mockRedis.sortedSets.has(key)) {
-                mockRedis.sortedSets.set(key, new Map());
+            if (!redisSortedSets.has(key)) {
+                redisSortedSets.set(key, new Map());
             }
-            const set = mockRedis.sortedSets.get(key)!;
+            const set = redisSortedSets.get(key)!;
             const current = set.get(member) || 0;
             set.set(member, current + increment);
             return Promise.resolve((current + increment).toString());
         }),
         
         zrange: vi.fn((key: string, start: number, stop: number, withScores?: string) => {
-            const set = mockRedis.sortedSets.get(key);
+            const set = redisSortedSets.get(key);
             if (!set) return Promise.resolve([]);
             
             const sorted = Array.from(set.entries())
-                .sort((a, b) => a[1] - b[1]);
+                .sort((a: [string, number], b: [string, number]) => a[1] - b[1]);
             
             const sliced = sorted.slice(start, stop === -1 ? undefined : stop + 1);
             
             if (withScores === 'WITHSCORES') {
-                return Promise.resolve(sliced.flatMap(([k, v]) => [k, v.toString()]));
+                return Promise.resolve(sliced.flatMap(([k, v]: [string, number]) => [k, v.toString()]));
             }
-            return Promise.resolve(sliced.map(([k]) => k));
+            return Promise.resolve(sliced.map(([k]: [string, number]) => k));
         }),
         
         del: vi.fn((key: string) => {
-            mockRedis.data.delete(key);
-            mockRedis.sortedSets.delete(key);
+            redisData.delete(key);
+            redisSortedSets.delete(key);
             return Promise.resolve(1);
         }),
         

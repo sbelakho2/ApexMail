@@ -735,17 +735,17 @@ describe('Phase 8: AI-Powered Intelligence Suite', () => {
     });
   });
 
-  describe('8.2 Chatbot', () => {
+  describe('8.2 Unified Assistant', () => {
     
-    it('8.2.1 should have chatbot assistant', () => {
-      expect(fileExists('apps/ai/src/chatbot/assistant.ts')).toBe(true);
+    it('8.2.1 should have unified assistant', () => {
+      expect(fileExists('apps/ai/src/assistant/unified.ts')).toBe(true);
     });
   });
 
-  describe('8.3 Mailbot', () => {
+  describe('8.3 Action Router', () => {
     
-    it('8.3.1 should have mailbot executor', () => {
-      expect(fileExists('apps/ai/src/mailbot/executor.ts')).toBe(true);
+    it('8.3.1 should have action router', () => {
+      expect(fileExists('apps/ai/src/assistant/actions.ts')).toBe(true);
     });
   });
 

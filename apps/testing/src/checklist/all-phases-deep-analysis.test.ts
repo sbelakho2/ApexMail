@@ -378,11 +378,11 @@ describe('PHASE 8: AI Intelligence - Deep Analysis', () => {
     });
   });
 
-  describe('Mailbot Executor', () => {
-    const content = readSourceFile('apps/ai/src/mailbot/executor.ts');
+  describe('Unified Assistant', () => {
+    const content = readSourceFile('apps/ai/src/assistant/unified.ts');
     
     it('should have safety checks for automated actions', () => {
-      expect(content).toMatch(/permission|allow|safe|check/i);
+      expect(content).toMatch(/confirm|permission|allow|safe|check/i);
     });
   });
 });
@@ -442,6 +442,7 @@ describe('PHASE 12: Developer Experience - Deep Analysis', () => {
       // Verify fix: should use config.maxWebhookEndpointsPerTenant
       const usesConfig = content.includes('maxWebhookEndpointsPerTenant') || content.includes('config.');
       const dynamicMessage = content.includes('`Maximum ${');
+      void dynamicMessage;
       
       if (usesConfig) {
         console.log('✅ VERIFIED: Webhook limit now uses configurable value');
@@ -672,6 +673,7 @@ describe('PHASE 10: Operations - Deep Analysis', () => {
       // Verify fix: should have .catch() handlers for async calls in setInterval
       const hasCatchHandler = content.includes('.catch(');
       const hasErrorEvent = content.includes('refresh:error') || content.includes('manager:refresh:error');
+      void hasErrorEvent;
       
       if (hasCatchHandler) {
         console.log('✅ VERIFIED: Async calls in setInterval have .catch() handlers');

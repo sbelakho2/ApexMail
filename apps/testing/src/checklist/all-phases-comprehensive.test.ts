@@ -508,13 +508,9 @@ describe('Phase 8: AI Intelligence', () => {
         });
     });
 
-    describe('8.4 Chatbot & Mailbot', () => {
-        it('should have chatbot module', () => {
-            expect(dirExists('apps/ai/src/chatbot')).toBe(true);
-        });
-
-        it('should have mailbot module', () => {
-            expect(dirExists('apps/ai/src/mailbot')).toBe(true);
+    describe('8.4 Unified Assistant', () => {
+        it('should have unified assistant module', () => {
+            expect(dirExists('apps/ai/src/assistant')).toBe(true);
         });
     });
 });

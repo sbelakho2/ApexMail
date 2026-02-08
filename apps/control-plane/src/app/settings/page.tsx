@@ -26,6 +26,7 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
     { id: 'integrations', title: 'Integrations', description: 'Calendar, CRM, payment providers', icon: '🔗' },
     { id: 'email', title: 'Email Configuration', description: 'Sending limits, domains, defaults', icon: '📧' },
     { id: 'tenants', title: 'Tenant Defaults', description: 'Default plans, limits, features', icon: '👥' },
+    { id: 'ai', title: 'AI Assistant', description: 'Autonomous mode, escalation, proactive', icon: '🤖' },
     { id: 'compliance', title: 'Compliance Settings', description: 'Data retention, privacy, audit', icon: '⚖️' },
     { id: 'backup', title: 'Backup & Recovery', description: 'Backup schedule, disaster recovery', icon: '💾' },
 ];
@@ -85,6 +86,32 @@ export default function SettingsPage() {
         lastBackup: new Date(1737000000000 - 3600000).toISOString(),
     });
 
+    // AI Assistant State
+    const [aiConfig, setAiConfig] = useState({
+        enabled: false,
+        dryRun: true,
+        confidenceThreshold: 0.7,
+        maxAutoActionsPerSession: 10,
+        maxAutonomousBillingAmount: 0,
+        autonomousActionsPerHour: 50,
+        sentimentEscalationThreshold: -0.5,
+        proactiveOutreach: false,
+        auditAllActions: true,
+        allowedHoursStart: 0,
+        allowedHoursEnd: 24,
+        autoApproveActions: [
+            'get_billing_status', 'get_billing_history', 'get_campaign_stats',
+            'check_api_status', 'check_deliverability', 'get_sender_reputation',
+            'get_bounce_report', 'account_health_check', 'verify_domain',
+            'analyze_campaigns', 'export_data', 'export_report',
+        ],
+        alwaysEscalateActions: [
+            'cancel_subscription', 'process_refund', 'delete_campaign',
+            'delete_list', 'revoke_api_key', 'downgrade_plan',
+            'send_campaign', 'import_contacts',
+        ],
+    });
+
     // Refs for timeout cleanup (Fix 38)
     const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -110,6 +137,7 @@ export default function SettingsPage() {
                 if (data.tenantDefaults) setTenantDefaults(prev => ({ ...prev, ...data.tenantDefaults }));
                 if (data.complianceConfig) setComplianceConfig(prev => ({ ...prev, ...data.complianceConfig }));
                 if (data.backupConfig) setBackupConfig(prev => ({ ...prev, ...data.backupConfig }));
+                if (data.aiConfig) setAiConfig(prev => ({ ...prev, ...data.aiConfig }));
             }
         } catch {
             // Ignore invalid localStorage data
@@ -129,6 +157,7 @@ export default function SettingsPage() {
                 tenantDefaults,
                 complianceConfig,
                 backupConfig: { ...backupConfig, lastBackup: backupConfig.lastBackup },
+                aiConfig,
             };
             localStorage.setItem('control-plane-settings', JSON.stringify(settingsData));
         } catch {
@@ -455,6 +484,200 @@ export default function SettingsPage() {
                                     />
                                 </div>
                             </div>
+                        </div>
+                    )}
+
+                    {/* AI Assistant */}
+                    {activeSection === 'ai' && (
+                        <div className="space-y-6">
+                            <h2 className="text-lg font-bold text-foreground">AI Assistant</h2>
+                            <p className="text-sm text-muted-foreground">
+                                Configure autonomous mode to let the AI assistant handle routine customer requests without human intervention.
+                                High-risk actions are always escalated to you.
+                            </p>
+
+                            {/* Main toggle */}
+                            <div className="flex items-center justify-between py-4 border-t border-border">
+                                <div>
+                                    <div className="font-medium text-foreground">Enable Autonomous Mode</div>
+                                    <div className="text-sm text-muted-foreground">
+                                        Allow the assistant to auto-execute safe actions for customers
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setAiConfig({ ...aiConfig, enabled: !aiConfig.enabled })}
+                                    className={cn(
+                                        'relative w-14 h-7 rounded-full transition-colors',
+                                        aiConfig.enabled ? 'bg-primary' : 'bg-muted'
+                                    )}
+                                >
+                                    <div className={cn(
+                                        'absolute top-1 w-5 h-5 bg-background rounded-full shadow-sm transition-transform',
+                                        aiConfig.enabled ? 'left-8' : 'left-1'
+                                    )} />
+                                </button>
+                            </div>
+
+                            {aiConfig.enabled && (
+                                <>
+                                    {/* Safety toggles */}
+                                    <div className="space-y-4 border-t border-border pt-4">
+                                        <h3 className="text-sm font-semibold text-foreground">Safety Controls</h3>
+                                        {[
+                                            { key: 'dryRun', label: 'Dry Run Mode', desc: 'Log decisions without executing — test autonomous mode safely' },
+                                            { key: 'auditAllActions', label: 'Audit All Actions', desc: 'Log every autonomous decision for review in the audit log' },
+                                            { key: 'proactiveOutreach', label: 'Proactive Outreach', desc: 'Let the assistant proactively message customers about issues' },
+                                        ].map(item => (
+                                            <div key={item.key} className="flex items-center justify-between py-2">
+                                                <div>
+                                                    <div className="font-medium text-foreground">{item.label}</div>
+                                                    <div className="text-sm text-muted-foreground">{item.desc}</div>
+                                                </div>
+                                                <button
+                                                    onClick={() => setAiConfig({
+                                                        ...aiConfig,
+                                                        [item.key]: !aiConfig[item.key as keyof typeof aiConfig]
+                                                    })}
+                                                    className={cn(
+                                                        'relative w-14 h-7 rounded-full transition-colors',
+                                                        aiConfig[item.key as keyof typeof aiConfig] ? 'bg-primary' : 'bg-muted'
+                                                    )}
+                                                >
+                                                    <div className={cn(
+                                                        'absolute top-1 w-5 h-5 bg-background rounded-full shadow-sm transition-transform',
+                                                        aiConfig[item.key as keyof typeof aiConfig] ? 'left-8' : 'left-1'
+                                                    )} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    {/* Thresholds */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-border pt-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-foreground mb-2">
+                                                Confidence Threshold
+                                            </label>
+                                            <p className="text-xs text-muted-foreground mb-1">
+                                                Minimum confidence to auto-approve ({(aiConfig.confidenceThreshold * 100).toFixed(0)}%)
+                                            </p>
+                                            <input
+                                                type="range"
+                                                min="0.5"
+                                                max="0.99"
+                                                step="0.01"
+                                                value={aiConfig.confidenceThreshold}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, confidenceThreshold: Number(e.target.value) })}
+                                                className="w-full"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-foreground mb-2">
+                                                Sentiment Escalation
+                                            </label>
+                                            <p className="text-xs text-muted-foreground mb-1">
+                                                Escalate when sentiment drops below ({aiConfig.sentimentEscalationThreshold.toFixed(1)})
+                                            </p>
+                                            <input
+                                                type="range"
+                                                min="-1"
+                                                max="0"
+                                                step="0.1"
+                                                value={aiConfig.sentimentEscalationThreshold}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, sentimentEscalationThreshold: Number(e.target.value) })}
+                                                className="w-full"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-foreground mb-2">
+                                                Max Auto Actions / Session
+                                            </label>
+                                            <input
+                                                type="number"
+                                                value={aiConfig.maxAutoActionsPerSession}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, maxAutoActionsPerSession: Number(e.target.value) })}
+                                                className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-foreground mb-2">
+                                                Max Actions / Hour
+                                            </label>
+                                            <input
+                                                type="number"
+                                                value={aiConfig.autonomousActionsPerHour}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, autonomousActionsPerHour: Number(e.target.value) })}
+                                                className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-foreground mb-2">
+                                                Max Billing Amount ($)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                value={aiConfig.maxAutonomousBillingAmount}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, maxAutonomousBillingAmount: Number(e.target.value) })}
+                                                className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-foreground mb-2">
+                                                Allowed Hours (UTC)
+                                            </label>
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="23"
+                                                    value={aiConfig.allowedHoursStart}
+                                                    onChange={(e) => setAiConfig({ ...aiConfig, allowedHoursStart: Number(e.target.value) })}
+                                                    className="w-20 px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                                />
+                                                <span className="text-muted-foreground">to</span>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="24"
+                                                    value={aiConfig.allowedHoursEnd}
+                                                    onChange={(e) => setAiConfig({ ...aiConfig, allowedHoursEnd: Number(e.target.value) })}
+                                                    className="w-20 px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Auto-approve actions */}
+                                    <div className="border-t border-border pt-4">
+                                        <h3 className="text-sm font-semibold text-foreground mb-2">Auto-Approve Actions</h3>
+                                        <p className="text-xs text-muted-foreground mb-3">
+                                            These safe, read-only actions are executed without human confirmation
+                                        </p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {aiConfig.autoApproveActions.map(action => (
+                                                <span key={action} className="px-2 py-1 bg-success/10 text-success text-xs rounded-full font-mono">
+                                                    ✓ {action}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Always-escalate actions */}
+                                    <div className="border-t border-border pt-4">
+                                        <h3 className="text-sm font-semibold text-foreground mb-2">Always Escalate Actions</h3>
+                                        <p className="text-xs text-muted-foreground mb-3">
+                                            These high-risk actions always require human approval
+                                        </p>
+                                        <div className="flex flex-wrap gap-2">
+                                            {aiConfig.alwaysEscalateActions.map(action => (
+                                                <span key={action} className="px-2 py-1 bg-destructive/10 text-destructive text-xs rounded-full font-mono">
+                                                    ⚠️ {action}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
                         </div>
                     )}
 

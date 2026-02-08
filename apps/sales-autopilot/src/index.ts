@@ -4,10 +4,11 @@
 
 import { serve } from '@hono/node-server';
 import { createLogger } from '@apexmail/lib';
-import { Redis } from 'ioredis';
+import ioredis from 'ioredis';
+const { Redis } = ioredis;
 import { config } from './config.js';
 import app from './routes.js';
-import { startCampaignProcessor, stopCampaignProcessor, setCampaignRepository, CampaignRepository } from './campaigns/index.js';
+import { startCampaignProcessor, stopCampaignProcessor, setCampaignRepository, CampaignRepository, hydrateCaches, banditManager, cadenceGovernor, safetyMonitor, funnelTracker, operatorConsole } from './campaigns/index.js';
 import { getLead, initCrmDatabase } from './crm/index.js';
 import { closeDbPool, getDbPool } from './db.js';
 
@@ -26,6 +27,20 @@ async function main(): Promise<void> {
     // instead of using ephemeral in-memory Maps that lose state on restart.
     const campaignRepo = new CampaignRepository(pool);
     setCampaignRepository(campaignRepo);
+
+    // Wire DB pools to all campaign singletons so they persist to Postgres
+    banditManager.setDb(pool);
+    cadenceGovernor.setDb(pool);
+    safetyMonitor.setDb(pool);
+    funnelTracker.setDb(pool);
+    operatorConsole.setDb(pool);
+
+    // Hydrate in-memory caches from DB (order matters: bandits before safety)
+    await hydrateCaches();
+    await banditManager.hydrateFromDb();
+    await cadenceGovernor.hydrateFromDb();
+    await safetyMonitor.hydrateFromDb();
+    logger.info('All campaign modules hydrated from database');
 
     // FIX-500-122: Create Redis connection from parsed config. The config.redis.url
     // was parsed but never used to create a connection. ioredis is already in

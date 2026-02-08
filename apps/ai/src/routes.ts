@@ -28,8 +28,7 @@ const aiLogger = {
 };
 
 import { InferenceEngine, EmbeddingsService, getSharedEngine } from './inference/index.js';
-import { ChatbotAssistant, IntentDetector } from './chatbot/index.js';
-import { MailbotExecutor } from './mailbot/index.js';
+import { UnifiedAssistant, ActionRouter } from './assistant/index.js';
 import { STOOptimizer } from './sto/index.js';
 import { ContentGenerator } from './content/index.js';
 import { PredictiveAnalytics } from './analytics/index.js';
@@ -37,9 +36,8 @@ import { PredictiveAnalytics } from './analytics/index.js';
 // FIX-500-099: Use shared engine instead of creating a new instance
 const inference = getSharedEngine();
 const embeddings = new EmbeddingsService();
-const chatbot = new ChatbotAssistant();
-const intentDetector = new IntentDetector();
-const mailbot = new MailbotExecutor();
+const assistant = new UnifiedAssistant();
+const actionRouter = new ActionRouter();
 const sto = new STOOptimizer();
 const content = new ContentGenerator();
 const analytics = new PredictiveAnalytics();
@@ -338,13 +336,14 @@ inferenceRoutes.get('/model', (c) => {
 app.route('/api/inference', inferenceRoutes);
 
 // ========================================
-// CHATBOT ROUTES
+// UNIFIED ASSISTANT ROUTES
+// (replaces chatbot + mailbot with a single AI assistant)
 // ========================================
 
-const chatbotRoutes = new Hono();
+const assistantRoutes = new Hono();
 
 // Start session
-chatbotRoutes.post(
+assistantRoutes.post(
     '/session',
     zValidator('json', z.object({
         userId: z.string().min(1),
@@ -359,7 +358,7 @@ chatbotRoutes.post(
     })),
     async (c) => {
         const { userId, context } = c.req.valid('json');
-        const session = chatbot.startSession(userId, context);
+        const session = assistant.startSession(userId, context);
 
         return c.json({
             success: true,
@@ -371,8 +370,8 @@ chatbotRoutes.post(
     }
 );
 
-// Send message
-chatbotRoutes.post(
+// Send message (handles chat, commands, and backend actions in one endpoint)
+assistantRoutes.post(
     '/message',
     zValidator('json', z.object({
         sessionId: z.string().min(1),
@@ -381,19 +380,37 @@ chatbotRoutes.post(
     })),
     async (c) => {
         const { sessionId, message, context } = c.req.valid('json');
-        const response = await chatbot.chat(sessionId, message, context);
+        const response = await assistant.chat(sessionId, message, context as Record<string, unknown> | undefined);
+
+        // Auto-execute non-confirmation actions through the action router
+        const executedResults = [];
+        for (const action of response.actions) {
+            if (!action.confirm && actionRouter.has(action.action)) {
+                const result = await actionRouter.execute(action);
+                executedResults.push({ action: action.action, result });
+            }
+        }
 
         return c.json({
             success: true,
-            data: response,
+            data: {
+                message: response.message,
+                actions: response.actions,
+                executedResults,
+                suggestedActions: response.suggestedActions,
+                requiresConfirmation: response.requiresConfirmation,
+                confirmationId: response.confirmationId,
+                tokens: response.tokens,
+                latencyMs: response.latencyMs,
+            },
         });
     }
 );
 
 // Get session
-chatbotRoutes.get('/session/:sessionId', (c) => {
+assistantRoutes.get('/session/:sessionId', (c) => {
     const sessionId = c.req.param('sessionId');
-    const session = chatbot.getSession(sessionId);
+    const session = assistant.getSession(sessionId);
 
     if (!session) {
         return c.json({ success: false, error: 'Session not found' }, 404);
@@ -405,21 +422,10 @@ chatbotRoutes.get('/session/:sessionId', (c) => {
     });
 });
 
-// Get suggestions
-chatbotRoutes.get('/session/:sessionId/suggestions', async (c) => {
-    const sessionId = c.req.param('sessionId');
-    const suggestions = await chatbot.generateSuggestions(sessionId);
-
-    return c.json({
-        success: true,
-        data: suggestions,
-    });
-});
-
 // End session
-chatbotRoutes.delete('/session/:sessionId', (c) => {
+assistantRoutes.delete('/session/:sessionId', (c) => {
     const sessionId = c.req.param('sessionId');
-    const deleted = chatbot.endSession(sessionId);
+    const deleted = assistant.endSession(sessionId);
 
     return c.json({
         success: true,
@@ -427,15 +433,52 @@ chatbotRoutes.delete('/session/:sessionId', (c) => {
     });
 });
 
-// Detect intent
-chatbotRoutes.post(
+// Confirm pending action
+assistantRoutes.post(
+    '/confirm/:confirmationId',
+    async (c) => {
+        const confirmationId = c.req.param('confirmationId');
+        const result = assistant.confirmAction(confirmationId);
+
+        // Execute the confirmed action
+        if (result.success && result.action && actionRouter.has(result.action.action)) {
+            const execResult = await actionRouter.execute(result.action);
+            return c.json({
+                success: true,
+                data: { ...result, executionResult: execResult },
+            });
+        }
+
+        return c.json({
+            success: result.success,
+            data: result,
+        }, result.success ? 200 : 404);
+    }
+);
+
+// Cancel pending action
+assistantRoutes.delete(
+    '/confirm/:confirmationId',
+    (c) => {
+        const confirmationId = c.req.param('confirmationId');
+        const result = assistant.cancelAction(confirmationId);
+
+        return c.json({
+            success: result.success,
+            data: result,
+        }, result.success ? 200 : 404);
+    }
+);
+
+// Detect intent (quick classification without full chat)
+assistantRoutes.post(
     '/intent',
     zValidator('json', z.object({
         text: z.string().min(1).max(1000),
     })),
     async (c) => {
         const { text } = c.req.valid('json');
-        const intent = intentDetector.detect(text);
+        const intent = await assistant.detectIntent(text);
 
         return c.json({
             success: true,
@@ -444,86 +487,17 @@ chatbotRoutes.post(
     }
 );
 
-app.route('/api/chatbot', chatbotRoutes);
-
-// ========================================
-// MAILBOT ROUTES
-// ========================================
-
-const mailbotRoutes = new Hono();
-
-// Process command
-mailbotRoutes.post(
-    '/command',
-    zValidator('json', z.object({
-        command: z.string().min(1).max(1000),
-        userId: z.string().min(1),
-        context: z.object({
-            activeCampaign: z.string().optional(),
-            activeList: z.string().optional(),
-        }).optional(),
-    })),
-    async (c) => {
-        const body = c.req.valid('json');
-        const response = await mailbot.process(body);
-
-        return c.json({
-            success: true,
-            data: response,
-        });
-    }
-);
-
-// Confirm action
-mailbotRoutes.post(
-    '/confirm/:confirmationId',
-    async (c) => {
-        const confirmationId = c.req.param('confirmationId');
-        const response = mailbot.confirmAction(confirmationId);
-
-        return c.json({
-            success: true,
-            data: response,
-        });
-    }
-);
-
-// Cancel action
-mailbotRoutes.delete(
-    '/confirm/:confirmationId',
-    async (c) => {
-        const confirmationId = c.req.param('confirmationId');
-        const response = mailbot.cancelAction(confirmationId);
-
-        return c.json({
-            success: true,
-            data: response,
-        });
-    }
-);
-
-// Get suggestions
-mailbotRoutes.get('/suggestions', (c) => {
-    const query = c.req.query('q') || '';
-    const suggestions = mailbot.getSuggestions(query);
+// Get available actions
+assistantRoutes.get('/actions', (c) => {
+    const actions = assistant.getAvailableActions();
 
     return c.json({
         success: true,
-        data: suggestions,
+        data: actions,
     });
 });
 
-// Get available commands
-mailbotRoutes.get('/commands', (c) => {
-    const commands = mailbot.getAvailableCommands();
-
-    return c.json({
-        success: true,
-        data: commands,
-    });
-});
-
-app.route('/api/mailbot', mailbotRoutes);
+app.route('/api/assistant', assistantRoutes);
 
 // ========================================
 // STO ROUTES

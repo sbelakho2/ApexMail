@@ -195,7 +195,7 @@ describe('TrackingCodec', () => {
       const valid = codec.encode({ tenantId: 't', messageId: 'm', recipient: 'a@b.com' });
       // Decode from base64url, flip a bit, re-encode
       const buf = Buffer.from(valid, 'base64url');
-      buf[buf.length - 1] ^= 0x01;
+      buf[buf.length - 1]! ^= 0x01;
       const tampered = buf.toString('base64url');
       expect(codec.decode(tampered)).toBeNull();
     });
@@ -234,7 +234,7 @@ describe('TrackingCodec', () => {
     it('rejects token with tampered signature', () => {
       const token = codec.generateUnsubscribeToken('tenant-1', 'user@example.com');
       const buf = Buffer.from(token, 'base64url');
-      buf[buf.length - 1] ^= 0xFF; // Flip all bits of last byte
+      buf[buf.length - 1]! ^= 0xFF; // Flip all bits of last byte
       const tampered = buf.toString('base64url');
       expect(codec.verifyUnsubscribeToken(tampered)).toBeNull();
     });
@@ -288,7 +288,7 @@ describe('TrackingCodec', () => {
     it('rejects tampered preferences token', () => {
       const token = codec.generatePreferencesToken('tenant-1', 'user@example.com');
       const buf = Buffer.from(token, 'base64url');
-      buf[buf.length - 1] ^= 0xFF;
+      buf[buf.length - 1]! ^= 0xFF;
       const tampered = buf.toString('base64url');
       expect(codec.verifyPreferencesToken(tampered)).toBeNull();
     });
@@ -658,7 +658,7 @@ describe('Cross-Codec Security', () => {
     // Tampering with the encoded token will invalidate it
     const buf = Buffer.from(token, 'base64url');
     // Try to change tenantId bytes (after IV + authTag)
-    buf[29] ^= 0x01;
+    buf[29]! ^= 0x01;
     expect(codec.decode(buf.toString('base64url'))).toBeNull();
   });
 });

@@ -643,6 +643,509 @@ DO NOT JUST RUN GENERIC TESTS FOR EACH BATCH. WRITE/DESIGN THE PROPER TESTS FOR 
 
 ---
 
+## 500 High-Likelihood User Questions (incl. edge cases)
+
+1. How do I create my first email campaign?
+2. Where do I upload my logo for templates?
+3. How do I change my sender name and address?
+4. Can I add multiple sending domains?
+5. How do I verify my sending domain?
+6. Where do I find my API key?
+7. What format is an ApexMail API key?
+8. How do I rotate an API key without downtime?
+9. How do I revoke a compromised API key?
+10. Can I create separate API keys for dev and prod?
+11. What is the ApexMail API base URL?
+12. Do you have a sandbox or test mode?
+13. How do I switch to a different workspace or tenant?
+14. Can I invite teammates and set roles?
+15. How do I reset a user’s password?
+16. Can I enable two-factor authentication?
+17. Do you support single sign-on (SSO)?
+18. How do I set up SAML SSO?
+19. Can I restrict logins by IP address?
+20. How do I view the audit log?
+21. Where can I see my account status?
+22. How do I contact support?
+23. What’s your support email address?
+24. Where is your status page?
+25. How do I change the account owner?
+26. Can I transfer ownership to another user?
+27. How do I update my company profile?
+28. Can I set a custom from-name per campaign?
+29. How do I add a physical address to emails?
+30. Can I set default footer content?
+31. How do I update my timezone?
+32. How do I set my default language?
+33. Can I localize the UI for my team?
+34. How do I configure notifications?
+35. Can I disable email notifications for some events?
+36. How do I export my account data?
+37. Where do I download my invoices?
+38. How do I update my billing email address?
+39. Can I add a PO number to invoices?
+40. Do you support VAT invoices?
+41. How do I update my payment method?
+42. My payment failed — what should I do?
+43. Why was my card declined?
+44. Do you support ACH or wire transfers?
+45. Is there a minimum spend for Enterprise?
+46. How do I change plans mid-cycle?
+47. How does proration work?
+48. Can I preview proration before switching?
+49. How do I downgrade to a smaller plan?
+50. How do I switch to Pay As You Go (PAYG)?
+51. When does a PAYG switch take effect?
+52. Will switching to PAYG cancel my subscription?
+53. Can I pause my subscription instead of canceling?
+54. How do I cancel my plan at period end?
+55. Do you offer refunds?
+56. What is your cancellation policy?
+57. Do unused emails roll over?
+58. What happens if I exceed my monthly limits?
+59. Do you charge overages on monthly plans?
+60. How is PAYG email pricing calculated?
+61. How is PAYG API pricing calculated?
+62. Can you estimate my PAYG bill for this month?
+63. How do I set billing alerts at 80% usage?
+64. Can I get usage alerts via webhook?
+65. Where can I see my current usage?
+66. How often is usage data updated?
+67. Can I see usage broken down by campaign?
+68. Can I see usage by API key?
+69. Can I set hard caps on usage?
+70. Do you support spending limits?
+71. How do I update my tax/VAT details?
+72. Do you charge VAT for EU customers?
+73. Can you provide a W-9 or vendor form?
+74. What legal entity issues invoices?
+75. Where are you headquartered?
+76. When was ApexMail founded?
+77. Are you GDPR compliant?
+78. Do you offer a DPA (Data Processing Addendum)?
+79. Where can I sign the DPA?
+80. How do I request a GDPR data export?
+81. How do I delete a contact for GDPR?
+82. Can I delete an entire list?
+83. How do I delete my account?
+84. What data do you retain after cancellation?
+85. How long do you retain email logs?
+86. Can I set data retention periods?
+87. Do you support SOC 2?
+88. Do you have an ISO 27001 certification?
+89. Where can I download your security report?
+90. Do you support HIPAA?
+91. Can I send to EU and US recipients?
+92. Do you support CCPA requests?
+93. How do I handle unsubscribes automatically?
+94. Do you add a List-Unsubscribe header?
+95. Can I customize the unsubscribe page?
+96. How do I manage a suppression list?
+97. Can I import a suppression list?
+98. How do I export suppressed contacts?
+99. Can I whitelist specific domains?
+100. How do I set up double opt-in?
+101. How do I configure SPF for my domain?
+102. How do I configure DKIM for my domain?
+103. How do I configure DMARC for my domain?
+104. Why is my domain not verifying?
+105. How long does DNS propagation take?
+106. Can I verify multiple subdomains?
+107. What is a custom tracking domain?
+108. How do I set up a custom tracking domain?
+109. Why are my links being rewritten?
+110. How do I disable link tracking?
+111. How do I enable open tracking?
+112. Are opens affected by Apple MPP?
+113. What is a good open rate?
+114. What is a good click-through rate?
+115. What is CTOR and why does it matter?
+116. How do I improve deliverability?
+117. Why are my emails going to spam?
+118. How do I warm up a new domain?
+119. How do I warm up a new IP?
+120. Do you provide dedicated IPs?
+121. When should I use a dedicated IP?
+122. Can you monitor my sender reputation?
+123. How do I check my bounce rate?
+124. What bounce rate is acceptable?
+125. How do I reduce complaint rate?
+126. What is a feedback loop (FBL)?
+127. Do you support Google Postmaster Tools?
+128. Can you help with blocklist removal?
+129. How do I handle hard bounces?
+130. How do I handle soft bounces?
+131. Can I set a bounce processing delay?
+132. How do I avoid spam traps?
+133. Do you support BIMI?
+134. Can I add a logo in Gmail?
+135. How do I add a reply-to address?
+136. Can I use different from-addresses per list?
+137. How do I set a default sender for a workspace?
+138. Can I send from multiple brands?
+139. How do I manage multiple brands under one account?
+140. Can I separate reporting by brand?
+141. How do I create a campaign template?
+142. Can I import HTML for a template?
+143. Do you support MJML?
+144. How do I upload images for emails?
+145. Is there an image hosting CDN?
+146. Can I use custom fonts?
+147. How do I add a preheader?
+148. Can I set a global header/footer?
+149. How do I add merge tags?
+150. What merge tags are supported?
+151. How do I personalize with custom fields?
+152. What happens if a merge tag is missing?
+153. Can I set fallback values for merge tags?
+154. How do I add dynamic content blocks?
+155. Do you support conditional content?
+156. Can I insert a product recommendation block?
+157. How do I create an A/B test?
+158. What can I A/B test in a campaign?
+159. How long should an A/B test run?
+160. How do I choose a winning variant?
+161. Can I schedule a campaign?
+162. Can I schedule based on recipient timezone?
+163. Do you support send time optimization?
+164. How do I pause a scheduled send?
+165. How do I cancel a campaign that is sending?
+166. Can I resend to non-openers?
+167. How do I send to a segment?
+168. How do I create a segment?
+169. Can I build segments from custom fields?
+170. How do I exclude suppressed contacts from a send?
+171. How do I create a list?
+172. How do I rename a list?
+173. How do I delete a list?
+174. Can I merge two lists?
+175. How do I import contacts from CSV?
+176. What CSV columns are supported?
+177. How do I map CSV columns to fields?
+178. Can I import without sending a confirmation email?
+179. How do I export contacts?
+180. Can I export contacts by segment?
+181. How do I deduplicate contacts?
+182. What happens if I import a duplicate email?
+183. Can I update existing contacts on import?
+184. How do I add tags to contacts?
+185. How do I remove tags from contacts?
+186. Can I bulk delete contacts?
+187. How do I suppress a single contact?
+188. How do I unsuppress a contact?
+189. Can I suppress an entire domain?
+190. Can I suppress by regex or pattern?
+191. How do I track conversions?
+192. Can I add UTM parameters automatically?
+193. How do I enable click tracking?
+194. How do I disable click tracking for a link?
+195. Can I track revenue from emails?
+196. Do you support ecommerce integrations?
+197. How do I connect Shopify?
+198. How do I connect WooCommerce?
+199. How do I connect Stripe?
+200. Do you support custom webhooks for events?
+201. What webhook events do you support?
+202. How do I verify webhook signatures?
+203. Can I retry failed webhooks?
+204. How do I see webhook delivery logs?
+205. Can I filter webhook events by list?
+206. Do you support transactional emails?
+207. How do I send a transactional email via API?
+208. Can I send attachments?
+209. What attachment size limits apply?
+210. Can I send inline images?
+211. Do you support AMP for Email?
+212. Can I schedule transactional sends?
+213. How do I set idempotency keys on API sends?
+214. What is the API rate limit?
+215. How do I increase my API rate limit?
+216. Do you offer bulk send endpoints?
+217. How do I validate email addresses via API?
+218. Is there a sandbox API key?
+219. Do you support webhook retries with backoff?
+220. Can I pause webhook delivery?
+221. How do I create an automation workflow?
+222. What automation triggers are supported?
+223. Can I trigger a workflow on a tag change?
+224. Can I trigger a workflow on a webhook event?
+225. How do I add a delay step?
+226. Can I branch based on opens or clicks?
+227. Do you support A/B testing inside workflows?
+228. How do I stop a workflow for a contact?
+229. How do I restart a workflow?
+230. Can I enroll a contact multiple times?
+231. How do I build a welcome series?
+232. How do I build an abandoned cart series?
+233. How do I build a re-engagement series?
+234. Can I set a goal step in a workflow?
+235. How do I prevent overlapping automations?
+236. Can I throttle workflow sends?
+237. How do I handle quiet hours?
+238. Can I skip weekends in workflows?
+239. How do I manage automation errors?
+240. Where do I see automation logs?
+241. What analytics dashboards are available?
+242. How do I view campaign performance over time?
+243. Can I compare two campaigns?
+244. How do I see open/click heatmaps?
+245. Can I see top-performing links?
+246. How do I export analytics to CSV?
+247. Can I schedule analytics reports?
+248. Do you support cohort analysis?
+249. How do I track list growth over time?
+250. Can I see churn or unsubscribe trends?
+251. How do I track spam complaints?
+252. Can I see deliverability by ISP?
+253. Do you provide inbox placement testing?
+254. Can I monitor domain reputation?
+255. What is my sender score?
+256. Can I see bounce reasons?
+257. How do I track conversions by campaign?
+258. Can I attribute revenue to a workflow?
+259. How do I measure ROI for email?
+260. Can I set custom KPIs?
+261. Do you support custom events?
+262. How do I fire a custom event via API?
+263. Can I use custom events for segmentation?
+264. Can I use custom events in automations?
+265. How do I backfill historical events?
+266. How do I delete custom events?
+267. What is the retention period for events?
+268. Can I export event logs?
+269. How do I access raw event data?
+270. Can I stream events to my data warehouse?
+271. Do you support BigQuery exports?
+272. Do you support Snowflake exports?
+273. Do you support S3 exports?
+274. How do I set up a webhook to my warehouse?
+275. Can I throttle event exports?
+276. How do I see API usage by endpoint?
+277. How do I see API usage by key?
+278. What is the maximum batch size for API sends?
+279. Does the API support pagination?
+280. How do I handle API pagination?
+281. Do you provide SDKs for Node.js?
+282. Do you provide SDKs for Python?
+283. Is there a TypeScript SDK?
+284. Are there examples for cURL?
+285. Can I test API requests in the dashboard?
+286. How do I generate an API key from the UI?
+287. Can I set API key permissions?
+288. Can I limit an API key to read-only?
+289. How do I revoke an API key via API?
+290. What headers are required for API calls?
+291. Do you support idempotent sends?
+292. What error codes can the API return?
+293. How do I interpret a 429 error?
+294. How do I retry API requests safely?
+295. Do you support webhooks for delivery events?
+296. How do I verify delivery and bounce events?
+297. Can I replay webhook events?
+298. How do I secure webhook endpoints?
+299. Do you sign webhook payloads?
+300. Can I rotate webhook signing secrets?
+301. How do I create a custom event schema?
+302. Can I validate webhook payloads?
+303. How do I set up IP allowlists for webhooks?
+304. Do you support IPv6 for webhooks?
+305. How do I check webhook latency?
+306. What is the webhook retry policy?
+307. Can I disable webhook retries?
+308. Do you support dead-letter queues for webhooks?
+309. How do I handle duplicate webhook events?
+310. How do I handle out-of-order events?
+311. Can I test webhook delivery from the UI?
+312. How do I set up a webhook for unsubscribes?
+313. How do I set up a webhook for spam complaints?
+314. Can I send a campaign via API and UI interchangeably?
+315. How do I link a template to an API send?
+316. Can I use dynamic data in API sends?
+317. How do I send to multiple lists via API?
+318. How do I exclude a segment via API?
+319. How do I set a reply-to via API?
+320. How do I add attachments via API?
+321. What content types are supported for attachments?
+322. Can I send inline images via API?
+323. What is the max payload size for API sends?
+324. Do you compress API responses?
+325. Can I request gzip encoding?
+326. How do I check service health via API?
+327. Is there a status endpoint?
+328. How do I subscribe to incident notifications?
+329. How do I enable maintenance mode?
+330. Do you support read replicas for reporting?
+331. Can I connect ApexMail to Zapier?
+332. Do you support Make (Integromat)?
+333. Do you support Segment?
+334. Do you support RudderStack?
+335. Can I integrate with HubSpot?
+336. Can I integrate with Salesforce?
+337. Do you support Webflow forms?
+338. Can I connect WordPress forms?
+339. Do you support Shopify product feeds?
+340. Can I sync custom properties from my CRM?
+341. How do I map CRM fields to ApexMail fields?
+342. Can I sync unsubscribe status back to my CRM?
+343. Can I sync purchase history into ApexMail?
+344. How do I trigger a workflow from my app?
+345. Can I trigger a workflow from a webhook?
+346. How do I disable tracking for transactional emails?
+347. Can I mark a message as transactional?
+348. How do I separate marketing vs transactional domains?
+349. Can I use a subdomain for marketing?
+350. Can I use a different subdomain for transactional?
+351. What security measures protect my data?
+352. Do you encrypt data at rest?
+353. Do you encrypt data in transit?
+354. How do you handle key rotation?
+355. Do you support customer-managed keys?
+356. How do I request data deletion?
+357. How do I export all contact data?
+358. Do you log email content?
+359. Who can access my data internally?
+360. Do you support role-based access control?
+361. Can I restrict access to billing only?
+362. Can I restrict access to API keys?
+363. Can I set approval workflows for sends?
+364. Do you support send approvals for Enterprise?
+365. Can I require two-person approval?
+366. How do I audit who sent a campaign?
+367. Can I prevent test sends to real users?
+368. How do I configure a sending “allow list”?
+369. Can I block sending to certain domains?
+370. Do you support legal holds?
+371. Can I export compliance logs?
+372. How do I handle GDPR right-to-be-forgotten?
+373. How do I respond to a data subject access request?
+374. Can I provide proof of consent?
+375. How do you store consent timestamps?
+376. Can I require double opt-in for specific lists?
+377. How do I handle consent updates?
+378. Can I track consent changes over time?
+379. Do you support age-gated consent?
+380. Can I store regional consent flags?
+381. How do I handle US CAN-SPAM requirements?
+382. Do you support one-click unsubscribe?
+383. How do I add a physical address automatically?
+384. Can I localize unsubscribe text by language?
+385. Do you block sending without an unsubscribe link?
+386. How do I handle transactional emails that shouldn’t have unsubscribe links?
+387. Can I suppress a contact globally across tenants?
+388. How do I transfer data between tenants?
+389. Can I merge tenants?
+390. How do I split a tenant into two?
+391. What happens if I delete a tenant?
+392. Can I restore deleted data?
+393. How do I back up my data?
+394. Do you provide automated backups?
+395. Can I export templates in bulk?
+396. Can I version templates?
+397. How do I rollback a template change?
+398. Can I lock a template to prevent edits?
+399. How do I set template permissions?
+400. Do you support dark mode previews?
+401. Can I preview emails on mobile?
+402. Do you support inbox previews?
+403. Can I test rendering in Outlook and Gmail?
+404. How do I send a test email?
+405. Can I send a test to multiple recipients?
+406. How do I validate links before sending?
+407. Can I check for broken links?
+408. How do I spell-check a campaign?
+409. Can I set a “quiet hours” window?
+410. How do I enforce send frequency caps?
+411. Can I prevent more than 1 email/day to a contact?
+412. How do I view a contact’s engagement timeline?
+413. Can I see which emails a contact opened?
+414. How do I delete a contact’s engagement history?
+415. Can I anonymize contact data?
+416. How do I handle duplicate contacts with different IDs?
+417. Can I merge two contacts?
+418. How do I reconcile contacts from multiple sources?
+419. Can I import contacts with non-Latin characters?
+420. Do you support UTF-8 in subject lines?
+421. Do you support emojis in subject lines?
+422. How do I avoid spammy subject lines?
+423. Can I run a subject line generator?
+424. Can I generate preheaders automatically?
+425. Do you support AI-assisted copywriting?
+426. Can I set brand tone and voice?
+427. How do I store brand guidelines?
+428. Can I upload reusable content blocks?
+429. Do you support conditional blocks by segment?
+430. Can I personalize images by recipient?
+431. How do I embed videos in emails?
+432. Can I add AMP carousels?
+433. How do I include dynamic coupons?
+434. Can I set different offers by segment?
+435. How do I handle timezone-based offers?
+436. Can I set expiry timers in emails?
+437. Do you support live inventory blocks?
+438. Can I include survey forms in emails?
+439. Can I track survey responses?
+440. How do I connect survey results to segments?
+441. What happens if I send to a list with zero contacts?
+442. What happens if I schedule a send in the past?
+443. What if I delete a list used by an automation?
+444. What if I delete a template used by a scheduled send?
+445. What if an API send fails mid-batch?
+446. How do you handle partial failures?
+447. What if a webhook endpoint times out?
+448. Do you retry on 5xx errors?
+449. How do I debug a failed webhook delivery?
+450. Can I download webhook failure logs?
+451. Why did my campaign send slower than expected?
+452. Can I throttle send speed?
+453. Do you support scheduling by time zones?
+454. Can I target only active subscribers?
+455. How do I define “active” subscribers?
+456. Can I automatically sunset inactive contacts?
+457. How do I create a win-back campaign?
+458. How do I exclude VIP customers from promos?
+459. Can I segment by purchase frequency?
+460. Can I segment by total spend?
+461. How do I handle contacts without consent?
+462. Can I import consent status?
+463. How do I audit consent for a contact?
+464. Do you store IP address and timestamp for consent?
+465. Can I purge old consent records?
+466. How do I handle regional compliance differences?
+467. Do you support sending from multiple time zones?
+468. Can I set a default sending region?
+469. How do I view SLA status for Enterprise?
+470. Can I request a custom SLA?
+471. Do you support disaster recovery?
+472. What is your RPO/RTO?
+473. How do you handle data residency?
+474. Can I host data in the EU only?
+475. Can I host data in the US only?
+476. Do you support private cloud deployments?
+477. How do I request a security review?
+478. Can I run a penetration test?
+479. How do you handle vulnerability disclosures?
+480. What is your incident response process?
+481. How do I report spam or abuse?
+482. Can I block abusive senders in my tenant?
+483. Can I set per-user sending limits?
+484. Can I enforce approval for high-volume sends?
+485. Can I restrict who can delete campaigns?
+486. Can I enable soft-delete for contacts?
+487. How do I restore a deleted campaign?
+488. Can I clone a campaign?
+489. Can I duplicate a workflow?
+490. How do I copy a template to another tenant?
+491. Can I export and import templates between accounts?
+492. Do you support multi-language templates?
+493. Can I insert localized content by locale?
+494. How do I handle RTL languages?
+495. Do you support accessibility checks for emails?
+496. Can I validate color contrast?
+497. How do I handle long subject lines on mobile?
+498. What happens if I send to invalid email addresses?
+499. What happens if a contact unsubscribes mid-campaign?
+500. What happens if a contact resubscribes after unsubscribing?
+
 ## Progress Summary
 
 | Batch | Items | Status |

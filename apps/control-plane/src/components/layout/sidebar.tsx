@@ -22,6 +22,7 @@ const navSections: NavSection[] = [
             { href: '/crm', label: 'CRM Pipeline', icon: '📊' },
             { href: '/leads', label: 'Lead Discovery', icon: '🎯' },
             { href: '/campaigns', label: 'Drip Campaigns', icon: '📧' },
+            { href: '/autopilot', label: 'Autopilot Console', icon: '🤖' },
             { href: '/inbox', label: 'Inbox Sentinel', icon: '📥' },
             { href: '/calendar', label: 'Demo Scheduling', icon: '📅' },
         ],

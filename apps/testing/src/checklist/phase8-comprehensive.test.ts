@@ -296,17 +296,10 @@ describe('Phase 8: AI-Powered Intelligence Suite (Comprehensive)', () => {
         });
     });
 
-    describe('8.4 Chatbot & Mailbot', () => {
-        describe('8.4.1 Chatbot Module', () => {
-            it('should have chatbot module', () => {
-                expect(directoryExists('apps/ai/src/chatbot')).toBe(true);
-            });
-        });
-        
-        describe('8.4.2 Mailbot Module', () => {
-            // Evidence Required: Auto-respond to common inquiries
-            it('should have mailbot module', () => {
-                expect(directoryExists('apps/ai/src/mailbot')).toBe(true);
+    describe('8.4 Unified Assistant', () => {
+        describe('8.4.1 Assistant Module', () => {
+            it('should have unified assistant module', () => {
+                expect(directoryExists('apps/ai/src/assistant')).toBe(true);
             });
         });
     });

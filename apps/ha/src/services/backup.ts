@@ -1114,8 +1114,7 @@ export class BackupService {
         let result = Buffer.concat(chunks);
         
         if (this.encryptionKey) {
-          const encrypted = encryptBufferAES256GCM(result, this.encryptionKey);
-          result = encrypted;
+          result = encryptBufferAES256GCM(result, this.encryptionKey) as Buffer;
         }
         
         resolve(result);
