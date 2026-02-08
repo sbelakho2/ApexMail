@@ -38,6 +38,11 @@ const bulkCheckSuppressionSchema = z.object({
   emails: z.array(z.string().email().max(254)).min(1).max(10000), // RFC 5321 max email length
 });
 
+/**
+ * F-201: UUID format regex for suppression ID validation.
+ */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
   const suppressionsRepo = new SuppressionsRepository(ctx.db);
@@ -92,7 +97,10 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const suppression = result.value;
 
     // Audit log
-    await auditRepo.create({
+    // FIX-072: Fire-and-forget — audit writes should not block the HTTP response.
+    // The primary operation already succeeded; if the audit write fails, the
+    // suppression was still created correctly.
+    auditRepo.create({
       tenantId,
       userId: userId ?? undefined,
       action: 'suppression.created',
@@ -103,7 +111,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         source: input.source ?? 'api',
         emailHash: hashEmail(input.email),
       },
-    });
+    }).catch(err => logger.warn('Audit log write failed', { error: err instanceof Error ? err.message : 'Unknown' }));
 
     logger.info('Suppression added', {
       suppressionId: suppression.id,
@@ -151,8 +159,8 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to add suppressions');
     }
 
-    // Audit log
-    await auditRepo.create({
+    // Audit log (FIX-072: fire-and-forget)
+    auditRepo.create({
       tenantId,
       userId: userId ?? undefined,
       action: 'suppression.bulk_created',
@@ -162,7 +170,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
         count: result.value.imported,
         skipped: result.value.duplicates,
       },
-    });
+    }).catch(err => logger.warn('Audit log write failed', { error: err instanceof Error ? err.message : 'Unknown' }));
 
     logger.info('Bulk suppressions added', {
       created: result.value.imported,
@@ -250,11 +258,29 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   // List suppressions
   router.get('/', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
-    const type = c.req.query('reason') as SuppressionType | undefined; // reason maps to type
-    const scope = c.req.query('scope') as SuppressionScope | undefined;
+    const typeParam = c.req.query('reason');
+    const scopeParam = c.req.query('scope');
     const includeExpired = c.req.query('includeExpired') === 'true';
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = parseInt(c.req.query('limit') ?? '50', 10) || 50;
+    const offset = parseInt(c.req.query('offset') ?? '0', 10) || 0;
+
+    // F-200: Validate type/scope enums at runtime
+    const validTypes = ['bounce', 'complaint', 'unsubscribe', 'manual', 'list_unsubscribe'] as const;
+    const validScopes = ['tenant', 'domain', 'campaign'] as const;
+    let type: SuppressionType | undefined;
+    let scope: SuppressionScope | undefined;
+    if (typeParam) {
+      if (!validTypes.includes(typeParam as any)) {
+        throw ApiError.badRequest(`Invalid reason/type. Must be one of: ${validTypes.join(', ')}`);
+      }
+      type = typeParam as SuppressionType;
+    }
+    if (scopeParam) {
+      if (!validScopes.includes(scopeParam as any)) {
+        throw ApiError.badRequest(`Invalid scope. Must be one of: ${validScopes.join(', ')}`);
+      }
+      scope = scopeParam as SuppressionScope;
+    }
 
     const result = await suppressionsRepo.listByTenant(tenantId, {
       type,
@@ -316,6 +342,11 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const suppressionId = c.req.param('id');
 
+    // F-201: Validate UUID format before DB query
+    if (!uuidRegex.test(suppressionId)) {
+      throw ApiError.badRequest('Invalid suppression ID format', 'INVALID_ID');
+    }
+
     const result = await suppressionsRepo.findById(suppressionId, tenantId);
 
     if (!result.ok) {
@@ -355,6 +386,11 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const userId = c.get('userId');
     const suppressionId = c.req.param('id');
     const logger = c.get('logger');
+
+    // F-201: Validate UUID format before DB query
+    if (!uuidRegex.test(suppressionId)) {
+      throw ApiError.badRequest('Invalid suppression ID format', 'INVALID_ID');
+    }
 
     // Verify ownership
     const existing = await suppressionsRepo.findById(suppressionId, tenantId);
@@ -406,11 +442,19 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.notFound('Suppression');
     }
 
-    const firstSuppression = existing.value[0]!;
-    const result = await suppressionsRepo.remove(firstSuppression.id, tenantId);
+    // F-202: Remove ALL matching suppressions, not just the first
+    let removedCount = 0;
+    const removedIds: string[] = [];
+    for (const suppression of existing.value) {
+      const result = await suppressionsRepo.remove(suppression.id, tenantId);
+      if (result.ok) {
+        removedCount++;
+        removedIds.push(suppression.id);
+      }
+    }
 
-    if (!result.ok) {
-      throw ApiError.internal('Failed to remove suppression');
+    if (removedCount === 0) {
+      throw ApiError.internal('Failed to remove suppressions');
     }
 
     // Audit log
@@ -419,10 +463,11 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       userId: userId ?? undefined,
       action: 'suppression.deleted',
       resourceType: 'suppression',
-      resourceId: firstSuppression.id,
+      resourceId: removedIds[0]!,
       metadata: {
-        reason: firstSuppression.reason,
-        emailHash: firstSuppression.emailHash,
+        reason: existing.value[0]!.reason,
+        emailHash: existing.value[0]!.emailHash,
+        removedCount,
       },
     });
 

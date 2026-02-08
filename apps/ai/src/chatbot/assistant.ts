@@ -6,6 +6,7 @@
  */
 
 import { InferenceEngine } from '../inference/engine.js';
+import { getSharedEngine } from '../inference/index.js';
 import type {
     ChatMessage,
     ChatSession,
@@ -262,7 +263,8 @@ export class ChatbotAssistant {
 
     constructor(config?: Partial<ChatbotConfig>) {
         this.config = { ...DEFAULT_CHATBOT_CONFIG, ...config };
-        this.engine = new InferenceEngine({
+        // FIX-500-099: Use shared engine instead of creating a new instance
+        this.engine = getSharedEngine({
             temperature: this.config.temperature,
         });
         this.sessionManager = new SessionManager();

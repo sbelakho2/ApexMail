@@ -72,11 +72,27 @@ export class WebhookProcessor {
   private readonly logger: Logger;
   private readonly circuitBreakers: CircuitBreakerFactory;
   private readonly notifier: QueueNotifier | undefined;
+  /**
+   * FIX-500-082: Reuse a single dns.Resolver instance instead of
+   * creating implicit resolvers via dns.resolve4/dns.resolve6 per call.
+   */
+  private readonly dnsResolver: dns.Resolver;
+  /**
+   * FIX-500-083: DNS result cache with 60-second TTL to avoid
+   * re-resolving the same hostname on every webhook delivery.
+   */
+  private readonly dnsCache = new Map<string, { ips: string[]; expiresAt: number }>();
+  private static readonly DNS_CACHE_TTL_MS = 60_000;
   
   private isRunning = false;
   private activeJobs = 0;
   /** C-114: Track active jobs per tenant to enforce per-tenant concurrency. */
   private readonly tenantActiveJobs = new Map<string, number>();
+  /**
+   * FIX-500-081: Batch completion buffer — success completions are queued
+   * here and flushed in a single multi-row transaction after each poll batch.
+   */
+  private readonly pendingSuccesses: Array<{ job: WebhookJob; result: WebhookDeliveryResult }> = [];
 
   constructor(options: WebhookProcessorConfig) {
     this.db = options.db;
@@ -84,6 +100,9 @@ export class WebhookProcessor {
     this.config = options.config;
     this.logger = options.logger;
     this.notifier = options.notifier;
+    
+    // FIX-500-082: Reuse a single dns.Resolver instance
+    this.dnsResolver = new dns.Resolver();
     
     // Initialize circuit breaker factory for per-endpoint circuit breakers
     this.circuitBreakers = new CircuitBreakerFactory(options.redis, {
@@ -157,6 +176,9 @@ export class WebhookProcessor {
             });
           }
         }
+
+        // FIX-500-081: Flush batched success completions in one transaction
+        await this.flushPendingSuccesses();
       } catch (error) {
         this.logger.error('Poll error', { error });
         await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
@@ -212,9 +234,10 @@ export class WebhookProcessor {
         limit: MAX_CONCURRENT_PER_TENANT,
         jobId: job.id,
       });
-      // Release the job back to pending so it can be picked up later
+      // FIX-500-101: Set scheduled_at 5s in the future to avoid hot-loop
+      // re-fetch on the next 100ms poll cycle.
       await this.db.query(
-        `UPDATE webhook_queue SET status = 'pending', locked_until = NULL, updated_at = NOW() WHERE id = $1`,
+        `UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + INTERVAL '5 seconds', locked_until = NULL, updated_at = NOW() WHERE id = $1`,
         [job.id],
       );
       return;
@@ -267,16 +290,15 @@ export class WebhookProcessor {
           jobId: job.id,
         });
         
-        // Schedule for retry if circuit is open
-        if (job.attempt < job.maxRetries) {
-          await this.retryJob(job, 'Circuit breaker open');
-        } else {
-          await this.failJob(job, { 
-            success: false, 
-            responseTime: 0, 
-            error: 'Circuit breaker open - max retries exceeded' 
-          });
-        }
+        // FIX-500-005: Don't increment attempt count when CB is open — the endpoint
+        // was never contacted, so consuming a retry is unfair. Just reschedule with
+        // a delay so we re-check the CB state later.
+        const cbRetryDelay = Math.min(30000, job.retryDelay * Math.pow(job.backoffMultiplier, job.attempt - 1));
+        const scheduledAt = new Date(Date.now() + cbRetryDelay);
+        await this.db.query(
+          `UPDATE webhook_queue SET status = 'pending', scheduled_at = $1, locked_until = NULL, last_error = 'Circuit breaker open — waiting for recovery', updated_at = NOW() WHERE id = $2`,
+          [scheduledAt, job.id]
+        );
         return;
       }
 
@@ -449,13 +471,47 @@ export class WebhookProcessor {
       let responseBody: string | undefined;
 
       try {
-        responseBody = await response.text();
-        // Truncate response body
-        if (responseBody.length > 1000) {
-          responseBody = responseBody.substring(0, 1000) + '...';
+        /**
+         * FIX-500-084: Stream response body with byte limit instead of
+         * buffering the entire response via response.text(). We read up
+         * to 1 KB and discard the rest.
+         */
+        const MAX_RESPONSE_BYTES = 1024;
+        const reader = response.body?.getReader();
+        if (reader) {
+          const chunks: Uint8Array[] = [];
+          let totalBytes = 0;
+          let truncated = false;
+
+          while (totalBytes < MAX_RESPONSE_BYTES) {
+            const { done, value } = await reader.read();
+            if (done || !value) break;
+            const remaining = MAX_RESPONSE_BYTES - totalBytes;
+            if (value.length > remaining) {
+              chunks.push(value.subarray(0, remaining));
+              totalBytes += remaining;
+              truncated = true;
+              break;
+            }
+            chunks.push(value);
+            totalBytes += value.length;
+          }
+          // Cancel the rest of the stream to free resources
+          reader.cancel().catch(() => {});
+
+          const decoder = new TextDecoder();
+          responseBody = chunks.map(c => decoder.decode(c, { stream: true })).join('');
+          if (truncated) {
+            responseBody += '...';
+          }
         }
-      } catch {
-        // Ignore response body read errors
+      } catch (bodyErr) {
+        // FIX-500-436: Log response body read errors for debugging.
+        // Don't fail the delivery, but record the issue for diagnostics.
+        this.logger.warn('FIX-500-436: Failed to read webhook response body', {
+          statusCode: response.status,
+          error: bodyErr instanceof Error ? bodyErr.message : String(bodyErr),
+        });
       }
 
       if (response.ok) {
@@ -539,18 +595,22 @@ export class WebhookProcessor {
 
   /**
    * SECURITY (FIX-032): Validate URL at delivery time to prevent DNS rebinding.
-   * Even though URLs are validated at registration, DNS records can change.
+   * FIX-500-082: Uses reusable Resolver instance.
+   * FIX-500-083: Caches DNS results for 60 seconds.
    */
   private async validateDeliveryUrl(urlString: string): Promise<void> {
     const url = new URL(urlString);
     const hostname = url.hostname;
 
-    // Block known internal hostnames
-    const blocked = [
+    // FIX-500-437: Allow extending blocked hosts via env var for different
+    // deployment environments (AWS 169.254.169.254, custom internal DNS, etc.)
+    const defaultBlocked = [
       'localhost', '127.0.0.1', '::1', '0.0.0.0', '[::1]',
       'metadata.google.internal', 'instance-data',
       'kubernetes.default', 'kubernetes.default.svc',
     ];
+    const extraBlocked = process.env.WEBHOOK_BLOCKED_HOSTS?.split(',').map(h => h.trim()).filter(Boolean) ?? [];
+    const blocked = [...defaultBlocked, ...extraBlocked];
     if (blocked.some(h => hostname.toLowerCase() === h || hostname.toLowerCase().endsWith('.' + h))) {
       throw new Error('URL points to internal/localhost address');
     }
@@ -563,10 +623,34 @@ export class WebhookProcessor {
       return;
     }
 
-    // Resolve DNS and check ALL IPs
-    const addresses4 = await dns.resolve4(hostname).catch(() => [] as string[]);
-    const addresses6 = await dns.resolve6(hostname).catch(() => [] as string[]);
-    const allAddresses = [...addresses4, ...addresses6];
+    // FIX-500-083: Check DNS cache first
+    // FIX-500-442: Implement LRU eviction by deleting and re-inserting on hit,
+    // so the Map iteration order reflects access order (most recent at end).
+    const cached = this.dnsCache.get(hostname);
+    let allAddresses: string[];
+
+    if (cached && cached.expiresAt > Date.now()) {
+      // LRU: move to end of Map iteration order
+      this.dnsCache.delete(hostname);
+      this.dnsCache.set(hostname, cached);
+      allAddresses = cached.ips;
+    } else {
+      // FIX-500-082: Use the shared resolver instance
+      const addresses4 = await this.dnsResolver.resolve4(hostname).catch(() => [] as string[]);
+      const addresses6 = await this.dnsResolver.resolve6(hostname).catch(() => [] as string[]);
+      allAddresses = [...addresses4, ...addresses6];
+
+      // Cache the result
+      // FIX-500-442: Cap DNS cache size; evict oldest (LRU) entry
+      if (this.dnsCache.size >= 500) {
+        const firstKey = this.dnsCache.keys().next().value;
+        if (firstKey !== undefined) this.dnsCache.delete(firstKey);
+      }
+      this.dnsCache.set(hostname, {
+        ips: allAddresses,
+        expiresAt: Date.now() + WebhookProcessor.DNS_CACHE_TTL_MS,
+      });
+    }
 
     if (allAddresses.length === 0) {
       throw new Error('URL hostname could not be resolved');
@@ -579,6 +663,9 @@ export class WebhookProcessor {
     }
   }
 
+  /**
+   * FIX-500-081: Queue success for batch flush instead of per-job transaction.
+   */
   private async handleSuccess(job: WebhookJob, result: WebhookDeliveryResult): Promise<void> {
     this.logger.info('Webhook delivered successfully', {
       jobId: job.id,
@@ -587,26 +674,113 @@ export class WebhookProcessor {
       responseTime: result.responseTime,
     });
 
-    /**
-     * PERF-003: Transactional completion — all-or-nothing.
-     *
-     * Previously these were 3 independent queries with no transaction:
-     *   1. INSERT INTO webhook_deliveries (record delivery)
-     *   2. UPDATE webhooks (update stats)
-     *   3. DELETE FROM webhook_queue (remove job)
-     *
-     * If the process crashed between step 1 and step 3, the job stayed in
-     * the queue with status='processing'. When the lock expired, it was
-     * re-fetched and re-delivered — the customer received a duplicate webhook.
-     *
-     * Now all three run in a single transaction: either the delivery is
-     * recorded AND the job is removed, or neither happens.
-     */
+    this.pendingSuccesses.push({ job, result });
+  }
+
+  /**
+   * FIX-500-081: Flush all pending success completions in a single
+   * multi-row transaction. Falls back to individual handling on error.
+   * FIX-500-450: Uses unnest arrays instead of manual $N param numbering
+   * for cleaner, less error-prone batched INSERTs.
+   */
+  private async flushPendingSuccesses(): Promise<void> {
+    if (this.pendingSuccesses.length === 0) return;
+
+    const batch = this.pendingSuccesses.splice(0);
+    const client = await this.db.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // FIX-500-450: Batch INSERT delivery records using unnest arrays
+      if (batch.length > 0) {
+        const ids: string[] = [];
+        const webhookIds: string[] = [];
+        const tenantIds: string[] = [];
+        const eventTypes: string[] = [];
+        const statusCodes: number[] = [];
+        const responseTimes: number[] = [];
+        const attempts: number[] = [];
+
+        for (const { job, result } of batch) {
+          ids.push(generateId('wdl'));
+          webhookIds.push(job.webhookId);
+          tenantIds.push(job.tenantId);
+          eventTypes.push(job.eventType);
+          statusCodes.push(result.statusCode ?? 0);
+          responseTimes.push(result.responseTime ?? 0);
+          attempts.push(job.attempt);
+        }
+
+        await client.query(`
+          INSERT INTO webhook_deliveries (
+            id, webhook_id, tenant_id, event_type, status, status_code,
+            response_time, attempt, delivered_at
+          )
+          SELECT
+            unnest($1::text[]),
+            unnest($2::text[]),
+            unnest($3::text[]),
+            unnest($4::text[]),
+            'success',
+            unnest($5::int[]),
+            unnest($6::int[]),
+            unnest($7::int[]),
+            NOW()
+        `, [ids, webhookIds, tenantIds, eventTypes, statusCodes, responseTimes, attempts]);
+      }
+
+      // Batch UPDATE webhook stats via unnest
+      const webhookIds = batch.map(b => b.job.webhookId);
+      await client.query(`
+        UPDATE webhooks
+        SET
+          total_deliveries = total_deliveries + 1,
+          successful_deliveries = successful_deliveries + 1,
+          last_delivery_at = NOW(),
+          last_success_at = NOW(),
+          updated_at = NOW()
+        WHERE id = ANY($1::text[])
+      `, [webhookIds]);
+
+      // Batch DELETE from queue
+      const jobIds = batch.map(b => b.job.id);
+      await client.query(
+        'DELETE FROM webhook_queue WHERE id = ANY($1::text[])',
+        [jobIds]
+      );
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      this.logger.error('FIX-500-081: Batch flush failed, falling back to individual', {
+        error: error instanceof Error ? error.message : String(error),
+        count: batch.length,
+      });
+      // Fall back to individual handling
+      for (const { job, result } of batch) {
+        try {
+          await this.handleSuccessIndividual(job, result);
+        } catch (individualErr) {
+          this.logger.error('Individual webhook success handling also failed', {
+            jobId: job.id,
+            error: individualErr instanceof Error ? individualErr.message : String(individualErr),
+          });
+        }
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * FIX-500-081: Fallback per-job success handler when batch flush fails.
+   */
+  private async handleSuccessIndividual(job: WebhookJob, result: WebhookDeliveryResult): Promise<void> {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
 
-      // Record delivery
       await client.query(`
         INSERT INTO webhook_deliveries (
           id, webhook_id, tenant_id, event_type, status, status_code,
@@ -622,10 +796,9 @@ export class WebhookProcessor {
         job.attempt,
       ]);
 
-      // Update webhook stats
       await client.query(`
         UPDATE webhooks
-        SET 
+        SET
           total_deliveries = total_deliveries + 1,
           successful_deliveries = successful_deliveries + 1,
           last_delivery_at = NOW(),
@@ -634,13 +807,12 @@ export class WebhookProcessor {
         WHERE id = $1
       `, [job.webhookId]);
 
-      // Remove from queue
       await client.query('DELETE FROM webhook_queue WHERE id = $1', [job.id]);
 
       await client.query('COMMIT');
-    } catch (error) {
+    } catch (err) {
       await client.query('ROLLBACK');
-      throw error;
+      throw err;
     } finally {
       client.release();
     }
@@ -685,14 +857,34 @@ export class WebhookProcessor {
   /**
    * F-234: retryAfterMs — when the target server sends a Retry-After header,
    * we honour it instead of using our own exponential backoff, capped at 1 hour.
+   *
+   * FIX-500-170: Record each failed delivery attempt before rescheduling.
+   * Previously retryJob only UPDATE'd the queue — no record of the attempt was
+   * stored in webhook_deliveries, making it impossible to debug partial failures.
    */
   private async retryJob(job: WebhookJob, error: string, retryAfterMs?: number): Promise<void> {
     const nextAttempt = job.attempt + 1;
-    const MAX_RETRY_DELAY = 60000; // 60 seconds cap (for computed backoff)
+    // FIX-500-102: Increased from 60s to 300s to survive longer outages
+    const MAX_RETRY_DELAY = 300_000; // 300 seconds cap (for computed backoff)
     const computedDelay = Math.min(job.retryDelay * Math.pow(job.backoffMultiplier, job.attempt - 1), MAX_RETRY_DELAY);
     // F-234: Prefer server-requested delay over computed backoff
     const delay = retryAfterMs ?? computedDelay;
     const scheduledAt = new Date(Date.now() + delay);
+
+    // FIX-500-170: Record the failed delivery attempt
+    await this.db.query(`
+      INSERT INTO webhook_deliveries (
+        id, webhook_id, tenant_id, event_type, status,
+        error_message, attempt, delivered_at
+      ) VALUES ($1, $2, $3, $4, 'failed', $5, $6, NOW())
+    `, [
+      generateId('wdl'),
+      job.webhookId,
+      job.tenantId,
+      job.eventType,
+      error,
+      job.attempt,
+    ]);
 
     await this.db.query(`
       UPDATE webhook_queue

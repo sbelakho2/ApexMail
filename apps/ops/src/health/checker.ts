@@ -49,6 +49,7 @@ export class HealthChecker extends EventEmitter {
 
     constructor(config: HealthCheckConfig) {
         super();
+        this.setMaxListeners(50); // FIX-500-332: Prevent maxListeners warning
         this.config = config;
         this.initializeDefaultChecks();
     }
@@ -411,6 +412,7 @@ export class HealthChecker extends EventEmitter {
             // If no handler, assume healthy (for testing)
             if (this.listenerCount('tcp:check') === 0) {
                 clearTimeout(timeoutId);
+                logger.warn('FIX-500-333: No tcp:check handler registered, assuming healthy', { host, port });
                 resolve({ healthy: true, latency: Date.now() - startTime });
             }
         });
@@ -444,6 +446,7 @@ export class HealthChecker extends EventEmitter {
             // If no handler, assume healthy (for testing)
             if (this.listenerCount('database:check') === 0) {
                 clearTimeout(timeoutId);
+                logger.warn('FIX-500-333: No database:check handler registered, assuming healthy', { name });
                 resolve({ healthy: true, latency: Date.now() - startTime });
             }
         });
@@ -477,6 +480,7 @@ export class HealthChecker extends EventEmitter {
             // If no handler, assume healthy (for testing)
             if (this.listenerCount('redis:check') === 0) {
                 clearTimeout(timeoutId);
+                logger.warn('FIX-500-333: No redis:check handler registered, assuming healthy', { name });
                 resolve({ healthy: true, latency: Date.now() - startTime });
             }
         });
@@ -510,6 +514,7 @@ export class HealthChecker extends EventEmitter {
             // If no handler, assume healthy (for testing)
             if (this.listenerCount('storage:check') === 0) {
                 clearTimeout(timeoutId);
+                logger.warn('FIX-500-333: No storage:check handler registered, assuming healthy');
                 resolve({ healthy: true, latency: Date.now() - startTime });
             }
         });

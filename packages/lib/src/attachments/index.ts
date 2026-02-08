@@ -92,6 +92,8 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     private maxSize: number;
     private allowedTypes: string[] | null;
     private expirationDays: number | null;
+    // FIX-500-377: Mutex to prevent concurrent cleanup races
+    private cleanupInProgress = false;
     
     constructor(config: AttachmentStorageConfig) {
         this.basePath = config.localPath || './data/attachments';
@@ -217,6 +219,12 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     }
     
     async cleanupExpired(): Promise<number> {
+        // FIX-500-377: Concurrency guard — prevent overlapping cleanup runs
+        if (this.cleanupInProgress) {
+            logger.info('Cleanup already in progress, skipping');
+            return 0;
+        }
+        this.cleanupInProgress = true;
         let deleted = 0;
         
         try {
@@ -228,7 +236,9 @@ export class LocalAttachmentStorage implements AttachmentStorage {
                 
                 const metadataPath = path.join(this.metadataPath, file);
                 const content = await fs.readFile(metadataPath, 'utf-8');
-                const metadata: AttachmentMetadata = JSON.parse(content);
+                let metadata: AttachmentMetadata;
+                try { metadata = JSON.parse(content); }
+                catch { continue; }
                 
                 if (metadata.expiresAt && new Date(metadata.expiresAt) < now) {
                     await this.delete(metadata.id);
@@ -237,6 +247,8 @@ export class LocalAttachmentStorage implements AttachmentStorage {
             }
         } catch (err) {
             logger.error('Error during cleanup', { error: err });
+        } finally {
+            this.cleanupInProgress = false;
         }
         
         if (deleted > 0) {
@@ -458,6 +470,10 @@ export class S3AttachmentStorage implements AttachmentStorage {
         return headers;
     }
     
+    // FIX-500-376: TODO: Migrate to @aws-sdk/client-s3 for complete SigV4 support
+    // including session tokens (STS), chunked uploads, query-string signing,
+    // multi-value headers, and edge cases. This simplified implementation works for
+    // basic PUT/GET/DELETE but is not production-complete for all S3 operations.
     private signRequest(
         method: string,
         path: string,

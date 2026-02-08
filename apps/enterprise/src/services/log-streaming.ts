@@ -7,8 +7,11 @@
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { encryptAES256CBC, decryptAES256CBC, hmacSign } from '@apexmail/lib/crypto';
+import { decryptAES256CBC, encryptAES256GCM, decryptAES256GCM, hmacSign } from '@apexmail/lib/crypto';
+import { createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
+
+const logger = createLogger({ name: 'enterprise-log-streaming' });
 
 // Result type for error handling
 type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -984,12 +987,15 @@ export class LogStreamingService {
   }
 
   private getNestedValue(obj: any, path: string): any {
-    // FIX-019: Block prototype-chain traversal
+    // FIX-500-345: Short-circuit on blocked keys instead of continuing traversal
     const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-    return path.split('.').reduce((o, k) => {
+    const parts = path.split('.');
+    let current = obj;
+    for (const k of parts) {
       if (BLOCKED_KEYS.has(k)) return undefined;
-      return (o || {})[k];
-    }, obj);
+      current = (current || {})[k];
+    }
+    return current;
   }
 
   private setupFlushTimer(stream: LogStream): void {
@@ -1032,16 +1038,26 @@ export class LogStreamingService {
     return decrypted as unknown as DestinationConfig;
   }
 
+  // FIX-500-034: Use AES-256-GCM (authenticated encryption) instead of AES-256-CBC
+  // which is vulnerable to padding oracle attacks.
   private encrypt(text: string): string {
-    return encryptAES256CBC(text, config.logStreaming.encryptionKey, 'salt');
+    return encryptAES256GCM(text, config.logStreaming.encryptionKey);
   }
 
   private decrypt(text: string): string {
-    const result = decryptAES256CBC(text, config.logStreaming.encryptionKey, 'salt');
-    if (!result.ok) {
-      throw result.error;
+    // Try GCM first (new format: salt:iv:authTag:ciphertext)
+    const gcmResult = decryptAES256GCM(text, config.logStreaming.encryptionKey);
+    if (gcmResult.ok) {
+      return gcmResult.value;
     }
-    return result.value;
+    // Fallback to legacy CBC for existing encrypted data
+    const cbcResult = decryptAES256CBC(text, config.logStreaming.encryptionKey, 'salt');
+    if (!cbcResult.ok) {
+      throw cbcResult.error;
+    }
+    // FIX-500-344: Log migration hint so callers can re-encrypt with GCM
+    logger.info('Legacy CBC-encrypted credential decrypted; callers should re-encrypt with GCM');
+    return cbcResult.value;
   }
 
   /**

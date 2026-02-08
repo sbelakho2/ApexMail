@@ -66,6 +66,10 @@ const DEFAULT_PREDICTOR_CONFIG: PredictorConfig = {
     modelUpdateInterval: 86400000, // 24 hours
 };
 
+// FIX-500-398: Prevent unbounded growth of in-memory data
+const MAX_HISTORICAL_DATA = 100_000;
+const MAX_SUBSCRIBERS = 50_000;
+
 /**
  * Predictive Analytics Engine
  * 
@@ -279,6 +283,11 @@ export class PredictiveAnalytics {
         this.historicalData = this.historicalData.filter(
             (d) => d.sentAt >= cutoff
         );
+
+        // FIX-500-398: Hard cap on array size to prevent unbounded growth
+        if (this.historicalData.length > MAX_HISTORICAL_DATA) {
+            this.historicalData = this.historicalData.slice(-MAX_HISTORICAL_DATA);
+        }
     }
 
     /**
@@ -286,6 +295,14 @@ export class PredictiveAnalytics {
      */
     addSubscriberData(data: SubscriberBehavior): void {
         this.subscriberData.set(data.subscriberId, data);
+
+        // FIX-500-398: Evict oldest entry if cap exceeded
+        if (this.subscriberData.size > MAX_SUBSCRIBERS) {
+            const firstKey = this.subscriberData.keys().next().value;
+            if (firstKey !== undefined) {
+                this.subscriberData.delete(firstKey);
+            }
+        }
     }
 
     /**
@@ -358,7 +375,9 @@ export class PredictiveAnalytics {
         // For now, adjust coefficients based on historical data
 
         if (this.historicalData.length < this.config.minDataPoints) {
-            this.lastModelUpdate = new Date();
+            // FIX-500-397: Don't set lastModelUpdate when skipping due to
+            // insufficient data — otherwise the model won't retry for another
+            // full modelUpdateInterval even though no training was done.
             return;
         }
 

@@ -5,6 +5,7 @@
  * content scanning, audit logs, secrets management, and GDPR automation.
  */
 
+import crypto from 'crypto';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
@@ -149,7 +150,10 @@ app.use('*', async (c, next) => {
         return c.json({ error: 'Internal server error: auth not configured' }, 500);
     }
 
-    if (token !== expectedToken) {
+    // FIX-500-027: Use timing-safe comparison to prevent timing side-channel attacks
+    const tokenBuf = Buffer.from(token);
+    const expectedBuf = Buffer.from(expectedToken);
+    if (tokenBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(tokenBuf, expectedBuf)) {
         routeLogger.warn('Invalid bearer token presented', { path });
         return c.json({ error: 'Unauthorized: invalid bearer token' }, 401);
     }
@@ -240,7 +244,8 @@ app.get('/api/risk/stats', async (c) => {
     const cacheKey = 'compliance:cache:risk_stats';
     const cached = await redis.get(cacheKey);
     if (cached) {
-        return c.json(JSON.parse(cached));
+        try { return c.json(JSON.parse(cached)); }
+        catch { await redis.del(cacheKey); }
     }
     const stats = await riskEngine.getRiskStats();
     await redis.setex(cacheKey, 300, JSON.stringify(stats));
@@ -283,11 +288,15 @@ app.get('/api/scan/stats', async (c) => {
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
 
-    // C-123: Cache scan stats for 5 minutes (keyed by query params)
-    const cacheKey = `compliance:cache:scan_stats:${tenantId ?? 'all'}:${startDate ?? ''}:${endDate ?? ''}`;
+    // FIX-500-418: Hash user-supplied query params to prevent cache key injection.
+    // Raw user input could contain ':' or newlines that pollute the Redis key namespace.
+    const keyInput = `${tenantId ?? 'all'}:${startDate ?? ''}:${endDate ?? ''}`;
+    const keyHash = crypto.createHash('sha256').update(keyInput).digest('hex').slice(0, 16);
+    const cacheKey = `compliance:cache:scan_stats:${keyHash}`;
     const cached = await redis.get(cacheKey);
     if (cached) {
-        return c.json(JSON.parse(cached));
+        try { return c.json(JSON.parse(cached)); }
+        catch { await redis.del(cacheKey); }
     }
 
     const stats = await contentScanner.getStats(
@@ -316,8 +325,8 @@ app.get('/api/audit', async (c) => {
         startDate: c.req.query('startDate') ? new Date(c.req.query('startDate')!) : undefined,
         endDate: c.req.query('endDate') ? new Date(c.req.query('endDate')!) : undefined,
         outcome: isAuditOutcome(outcomeParam) ? outcomeParam : undefined,
-        limit: c.req.query('limit') ? parseInt(c.req.query('limit')!, 10) : 50,
-        offset: c.req.query('offset') ? parseInt(c.req.query('offset')!, 10) : 0,
+        limit: c.req.query('limit') ? parseInt(c.req.query('limit')!, 10) || 50 : 50,
+        offset: c.req.query('offset') ? parseInt(c.req.query('offset')!, 10) || 0 : 0,
     };
 
     const result = await auditLogger.query(query);
@@ -363,11 +372,14 @@ app.get('/api/audit/stats', async (c) => {
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
 
-    // C-123: Cache audit stats for 5 minutes (keyed by query params)
-    const cacheKey = `compliance:cache:audit_stats:${tenantId ?? 'all'}:${startDate ?? ''}:${endDate ?? ''}`;
+    // FIX-500-418: Hash user-supplied query params to prevent cache key injection.
+    const auditKeyInput = `${tenantId ?? 'all'}:${startDate ?? ''}:${endDate ?? ''}`;
+    const auditKeyHash = crypto.createHash('sha256').update(auditKeyInput).digest('hex').slice(0, 16);
+    const cacheKey = `compliance:cache:audit_stats:${auditKeyHash}`;
     const cached = await redis.get(cacheKey);
     if (cached) {
-        return c.json(JSON.parse(cached));
+        try { return c.json(JSON.parse(cached)); }
+        catch { await redis.del(cacheKey); }
     }
 
     const stats = await auditLogger.getStats(

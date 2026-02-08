@@ -37,6 +37,14 @@ export interface WebhookInsert {
     secret: string;
     events?: string[];
     headers?: Record<string, string>;
+    description?: string;
+    enabled?: boolean;
+    retryPolicy?: {
+        maxRetries?: number;
+        retryDelay?: number;
+        backoffMultiplier?: number;
+    };
+    metadata?: Record<string, unknown>;
 }
 
 export interface WebhookUpdate {
@@ -123,12 +131,46 @@ export class WebhooksRepository {
         return result.rows[0] ? this.mapRow(result.rows[0]) : null;
     }
 
-    async findByTenant(tenantId: string): Promise<Webhook[]> {
+    // FIX-500-047: Add pagination to prevent unbounded result sets
+    async findByTenant(tenantId: string, options?: { limit?: number; offset?: number }): Promise<Webhook[]> {
+        const limit = options?.limit ?? 100;
+        const offset = options?.offset ?? 0;
         const result = await this.pool.query<Record<string, unknown>>(
-            `SELECT * FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC`,
-            [tenantId]
+            `SELECT * FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+            [tenantId, limit, offset]
         );
         
+        return result.rows.map(row => this.mapRow(row));
+    }
+
+    /**
+     * FIX-500-098: Filter webhooks at the SQL level instead of fetching all
+     * and filtering in application code.
+     */
+    async findByTenantFiltered(
+        tenantId: string,
+        filters?: { enabled?: boolean; event?: string },
+    ): Promise<Webhook[]> {
+        const conditions: string[] = ['tenant_id = $1'];
+        const params: unknown[] = [tenantId];
+        let idx = 2;
+
+        if (filters?.enabled !== undefined) {
+            conditions.push(`enabled = $${idx++}`);
+            params.push(filters.enabled);
+        }
+
+        if (filters?.event) {
+            conditions.push(`(events @> $${idx}::jsonb OR events @> '"*"'::jsonb)`);
+            params.push(JSON.stringify([filters.event]));
+            idx++;
+        }
+
+        const result = await this.pool.query<Record<string, unknown>>(
+            `SELECT * FROM webhooks WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT 100`,
+            params,
+        );
+
         return result.rows.map(row => this.mapRow(row));
     }
 
@@ -245,28 +287,37 @@ export class WebhooksRepository {
         }
     }
 
-    async recordTrigger(id: string, success: boolean, errorMessage?: string): Promise<void> {
+    // FIX-500-258/265: Add RETURNING id + rowCount check and tenant_id WHERE clause
+    async recordTrigger(id: string, success: boolean, errorMessage?: string, tenantId?: string): Promise<boolean> {
         if (success) {
-            await this.pool.query(
+            const params = tenantId ? [id, tenantId] : [id];
+            const result = await this.pool.query(
                 `UPDATE webhooks 
                  SET last_triggered_at = NOW(),
                      last_success_at = NOW(),
                      failure_count = 0,
                      disabled_reason = NULL
-                 WHERE id = $1`,
-                [id]
+                 WHERE id = $1${tenantId ? ' AND tenant_id = $2' : ''}
+                 RETURNING id`,
+                params
             );
+            return (result.rowCount ?? 0) > 0;
         } else {
-            await this.pool.query(
+            const params = tenantId
+                ? [id, errorMessage ?? 'Too many consecutive failures', tenantId]
+                : [id, errorMessage ?? 'Too many consecutive failures'];
+            const result = await this.pool.query(
                 `UPDATE webhooks 
                  SET last_triggered_at = NOW(),
                      last_failure_at = NOW(),
                      failure_count = failure_count + 1,
                      enabled = CASE WHEN failure_count >= 9 THEN false ELSE enabled END,
                      disabled_reason = CASE WHEN failure_count >= 9 THEN $2 ELSE disabled_reason END
-                 WHERE id = $1`,
-                [id, errorMessage ?? 'Too many consecutive failures']
+                 WHERE id = $1${tenantId ? ' AND tenant_id = $3' : ''}
+                 RETURNING id`,
+                params
             );
+            return (result.rowCount ?? 0) > 0;
         }
     }
 
@@ -323,27 +374,33 @@ export class WebhooksRepository {
         return result.rows.map(row => this.mapQueueRow(row));
     }
 
-    async markDelivered(id: string, responseStatus: number, responseBody?: string): Promise<void> {
-        await this.pool.query(
+    // FIX-500-256: Add RETURNING id + rowCount check
+    async markDelivered(id: string, responseStatus: number, responseBody?: string): Promise<boolean> {
+        const result = await this.pool.query(
             `UPDATE webhook_queue
              SET status = 'delivered',
                  response_status = $2,
                  response_body = $3,
                  completed_at = NOW()
-             WHERE id = $1`,
+             WHERE id = $1
+             RETURNING id`,
             [id, responseStatus, responseBody]
         );
+        return (result.rowCount ?? 0) > 0;
     }
 
-    async markFailed(id: string, errorMessage: string): Promise<void> {
-        await this.pool.query(
+    // FIX-500-257: Add RETURNING id + rowCount check
+    async markFailed(id: string, errorMessage: string): Promise<boolean> {
+        const result = await this.pool.query(
             `UPDATE webhook_queue
              SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE status END,
                  error_message = $2,
                  completed_at = CASE WHEN attempt >= max_attempts THEN NOW() ELSE completed_at END
-             WHERE id = $1`,
+             WHERE id = $1
+             RETURNING id`,
             [id, errorMessage]
         );
+        return (result.rowCount ?? 0) > 0;
     }
 
     async getQueueStats(tenantId: string): Promise<{

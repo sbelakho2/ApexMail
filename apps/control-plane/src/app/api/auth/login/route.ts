@@ -16,8 +16,21 @@ import * as crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { validateCsrf } from '@/lib/csrf';
 
-// Rate limiting store (in production, use Redis)
+// Rate limiting store
+// FIX-500-029: In-memory rate limiter — only effective for single-instance deployments.
+// TODO: Migrate to Redis-backed sliding window (INCR + EXPIRE) for multi-instance.
+// Periodic cleanup prevents unbounded memory growth.
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
+
+// Cleanup stale rate limit entries every 30 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of loginAttempts) {
+        if (now - entry.lastAttempt > 30 * 60 * 1000) {
+            loginAttempts.delete(key);
+        }
+    }
+}, 30 * 60 * 1000).unref();
 
 // Maximum login attempts before lockout
 const MAX_ATTEMPTS = 5;
@@ -35,7 +48,9 @@ const SESSION_DURATION_MS = 8 * 60 * 60 * 1000; // 8 hours
 function getClientIp(request: NextRequest): string {
     const forwarded = request.headers.get('x-forwarded-for');
     if (forwarded) {
-        return forwarded.split(',')[0].trim();
+        // FIX-500-304: Use rightmost entry — the one added by our trusted reverse proxy.
+        const parts = forwarded.split(',').map(s => s.trim()).filter(Boolean);
+        return parts[parts.length - 1];
     }
     return request.headers.get('x-real-ip') || '127.0.0.1';
 }

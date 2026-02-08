@@ -2,7 +2,7 @@
  * Users Repository
  */
 
-import { Result, createLogger } from '@apexmail/lib';
+import { Result, createLogger, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUserId } from '@apexmail/lib/id';
 import { hashPassword, verifyPassword } from '@apexmail/lib/crypto';
 import type { DatabasePool } from '../pool.js';
@@ -287,14 +287,19 @@ export class UsersRepository {
     return Result.ok(this.mapRow(row));
   }
 
+  // FIX-500-254: Add RETURNING id + rowCount check
   async updatePassword(id: string, newPassword: string, tenantId?: string): Promise<Result<void, Error>> {
     const passwordHash = await hashPassword(newPassword);
     const sql = tenantId
-      ? 'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3'
-      : 'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2';
+      ? 'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3 RETURNING id'
+      : 'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id';
     const params = tenantId ? [passwordHash, id, tenantId] : [passwordHash, id];
     const result = await this.db.query(sql, params);
-    return result.ok ? Result.ok(undefined) : result;
+    if (!result.ok) return result;
+    if (result.value.rowCount === 0) {
+      return Result.err(new Error(`User ${id} not found`));
+    }
+    return Result.ok(undefined);
   }
 
   async listByTenant(
@@ -384,7 +389,7 @@ export class UsersRepository {
     updated_at: Date;
   }): User {
     const metadata = typeof row.metadata === 'string'
-      ? JSON.parse(row.metadata) as Record<string, unknown>
+      ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
       : row.metadata as unknown as Record<string, unknown>;
     
     // Extract preferences from metadata if present

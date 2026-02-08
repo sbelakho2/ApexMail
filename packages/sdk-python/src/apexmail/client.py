@@ -102,6 +102,9 @@ class BaseClient:
 
     def _handle_response(self, response: httpx.Response) -> dict:
         """Handle API response and raise appropriate exceptions."""
+        # FIX-500-294: Handle 204 No Content (DELETE responses)
+        if response.status_code == 204:
+            return {}
         if response.status_code == 200 or response.status_code == 201:
             return response.json()
 
@@ -141,6 +144,12 @@ class BaseClient:
 class ApexMail(BaseClient):
     """
     Synchronous ApexMail API client.
+
+    FIX-500-466: The sync and async clients share a common BaseClient for
+    initialization, validation, headers, and error handling. The remaining
+    duplication (retry loops in _request) is inherent to Python's sync/async
+    duality and cannot be easily deduplicated without a code generator
+    (e.g. unasync). This is a known acceptable pattern.
 
     Usage:
         client = ApexMail(api_key="am_live_xxxx")
@@ -238,6 +247,13 @@ class ApexMail(BaseClient):
     def close(self) -> None:
         """Close the HTTP client."""
         self._client.close()
+
+    # FIX-500-296: Safety net for unclosed clients
+    def __del__(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "ApexMail":
         return self

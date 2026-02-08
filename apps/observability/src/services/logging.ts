@@ -547,13 +547,22 @@ export class LoggingService {
     this.buffer = [];
 
     try {
+      /**
+       * FIX-500-093: Multi-row INSERT instead of per-row loop.
+       * Builds a single INSERT with dynamic VALUES tuples to reduce
+       * round-trips from N to 1.
+       */
+      const COLS_PER_ROW = 11;
+      const valueTuples: string[] = [];
+      const params: unknown[] = [];
+
+      let i = 0;
       for (const log of logsToFlush) {
-        await this.db.query(`
-          INSERT INTO obs_logs (
-            timestamp, level, level_name, message, service,
-            trace_id, span_id, context, error_info, duration, metadata
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        `, [
+        const base = i * COLS_PER_ROW;
+        valueTuples.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`
+        );
+        params.push(
           log.timestamp,
           log.level,
           log.levelName,
@@ -565,8 +574,16 @@ export class LoggingService {
           log.error ? JSON.stringify(log.error) : null,
           log.duration,
           log.metadata ? JSON.stringify(log.metadata) : null,
-        ]);
+        );
+        i++;
       }
+
+      await this.db.query(`
+        INSERT INTO obs_logs (
+          timestamp, level, level_name, message, service,
+          trace_id, span_id, context, error_info, duration, metadata
+        ) VALUES ${valueTuples.join(', ')}
+      `, params);
     } catch (error) {
       logger.error('[Logging] Failed to flush log buffer:', { error: error instanceof Error ? error.message : String(error) });
       // Re-add failed logs to buffer

@@ -195,20 +195,34 @@ export class PostgresQueueProvider implements QueueProvider {
         params
       );
 
-      const jobs: QueueJob<T>[] = (result.rows as QueueJobRow[]).map((row) => ({
-        id: row.id,
-        queue: row.queue,
-        payload: JSON.parse(row.payload) as T,
-        priority: row.priority,
-        attempts: row.attempts,
-        maxAttempts: row.max_attempts,
-        visibilityTimeout: row.visibility_timeout,
-        createdAt: row.created_at,
-        scheduledAt: row.scheduled_at,
-        lockedUntil: row.locked_until,
-        tenantId: row.tenant_id,
-        metadata: JSON.parse(row.metadata) as Record<string, unknown>,
-      }));
+      // FIX-500-372: Wrap JSON.parse in try-catch to handle corrupt job payloads
+      // without crashing the entire dequeue batch
+      const jobs: QueueJob<T>[] = [];
+      for (const row of result.rows as QueueJobRow[]) {
+        try {
+          jobs.push({
+            id: row.id,
+            queue: row.queue,
+            payload: JSON.parse(row.payload) as T,
+            priority: row.priority,
+            attempts: row.attempts,
+            maxAttempts: row.max_attempts,
+            visibilityTimeout: row.visibility_timeout,
+            createdAt: row.created_at,
+            scheduledAt: row.scheduled_at,
+            lockedUntil: row.locked_until,
+            tenantId: row.tenant_id,
+            metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+          });
+        } catch (parseError) {
+          // Skip corrupt jobs — log and let them expire via visibility timeout
+          this.logger.error('Failed to parse job payload/metadata', {
+            jobId: row.id,
+            queue,
+            error: parseError instanceof Error ? parseError.message : String(parseError),
+          });
+        }
+      }
 
       if (jobs.length > 0) {
         this.logger.debug('Jobs dequeued', { queue, count: jobs.length });
@@ -418,6 +432,8 @@ export class FairQueueScheduler {
   private readonly maxTenantShare: number;
   private readonly tenantCounts: Map<string, number> = new Map();
   private readonly windowMs: number;
+  // FIX-500-371: Cap tenantCounts to prevent unbounded growth between resets
+  private static readonly MAX_TENANT_ENTRIES = 10_000;
   private lastReset: number = Date.now();
 
   constructor(
@@ -436,8 +452,8 @@ export class FairQueueScheduler {
     queueName: string,
     maxJobs: number
   ): Promise<Result<QueueJob<T>[], Error>> {
-    // Reset counts if window expired
-    if (Date.now() - this.lastReset > this.windowMs) {
+    // Reset counts if window expired or tenant count exceeds cap
+    if (Date.now() - this.lastReset > this.windowMs || this.tenantCounts.size > FairQueueScheduler.MAX_TENANT_ENTRIES) {
       this.tenantCounts.clear();
       this.lastReset = Date.now();
     }

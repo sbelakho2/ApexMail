@@ -4,7 +4,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
 
@@ -296,11 +296,13 @@ export class EventsRepository {
     return Result.ok(row ? this.mapRow(row) : null);
   }
 
-  async findByMessageId(messageId: string, tenantId?: string): Promise<Result<Event[], Error>> {
+  async findByMessageId(messageId: string, tenantId?: string, options?: { limit?: number }): Promise<Result<Event[], Error>> {
+    // FIX-500-046: Add LIMIT to prevent unbounded result sets
+    const limit = options?.limit ?? 1000;
     const query = tenantId
-      ? 'SELECT * FROM events WHERE message_id = $1 AND tenant_id = $2 ORDER BY timestamp'
-      : 'SELECT * FROM events WHERE message_id = $1 ORDER BY timestamp';
-    const params = tenantId ? [messageId, tenantId] : [messageId];
+      ? 'SELECT * FROM events WHERE message_id = $1 AND tenant_id = $2 ORDER BY timestamp LIMIT $3'
+      : 'SELECT * FROM events WHERE message_id = $1 ORDER BY timestamp LIMIT $2';
+    const params = tenantId ? [messageId, tenantId, limit] : [messageId, limit];
     
     const result = await this.db.query<{
       id: string;
@@ -371,13 +373,8 @@ export class EventsRepository {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-    const countResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM events ${whereClause}`,
-      values
-    );
-
-    if (!countResult.ok) return countResult;
-
+    // FIX-500-044: Use COUNT(*) OVER() to combine count and data in a single query
+    // FIX-500-049: Functional index idx_events_recipient_domain added in migration 010_performance_indexes.sql
     const limit = options.limit ?? 100;
     const offset = options.offset ?? 0;
     values.push(limit, offset);
@@ -405,8 +402,9 @@ export class EventsRepository {
       deduplication_key: string;
       processed_at: Date;
       metadata: string;
+      total_count: string;
     }>(
-      `SELECT * FROM events ${whereClause}
+      `SELECT *, COUNT(*) OVER() AS total_count FROM events ${whereClause}
        ORDER BY timestamp DESC
        LIMIT $${paramIndex++} OFFSET $${paramIndex}`,
       values
@@ -416,7 +414,7 @@ export class EventsRepository {
 
     return Result.ok({
       events: result.value.rows.map((row) => this.mapRow(row)),
-      total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
+      total: parseInt(result.value.rows[0]?.total_count ?? '0', 10),
     });
   }
 
@@ -671,7 +669,7 @@ export class EventsRepository {
       deviceType: row.device_type,
       location: row.location
         ? (typeof row.location === 'string'
-          ? JSON.parse(row.location)
+          ? parseJsonOrDefault<EventLocation>(row.location, null as unknown as EventLocation)
           : row.location) as EventLocation
         : null,
       linkUrl: row.link_url,
@@ -683,13 +681,13 @@ export class EventsRepository {
       mtaResponse: row.mta_response,
       rawPayload: row.raw_payload
         ? (typeof row.raw_payload === 'string'
-          ? JSON.parse(row.raw_payload)
+          ? parseJsonOrDefault<Record<string, unknown>>(row.raw_payload, {})
           : row.raw_payload) as Record<string, unknown>
         : null,
       deduplicationKey: row.deduplication_key,
       processedAt: row.processed_at,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
     };
   }

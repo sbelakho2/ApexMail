@@ -108,7 +108,19 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
    *
    * Degrades gracefully: if Redis is down, falls through to DB every time.
    */
-  const inflight = new Map<string, Promise<unknown>>();
+  // FIX-500-441: Track creation time for each inflight entry so we can
+  // periodically clean up entries that hang forever (e.g., DB connection dropped).
+  const inflight = new Map<string, { promise: Promise<unknown>; createdAt: number }>();
+  const INFLIGHT_MAX_AGE_MS = 120_000; // 2 minutes
+  const inflightCleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of inflight) {
+      if (now - entry.createdAt > INFLIGHT_MAX_AGE_MS) {
+        inflight.delete(key);
+      }
+    }
+  }, 60_000);
+  inflightCleanup.unref();
 
   async function cached<T>(key: string, ttlSeconds: number, compute: () => Promise<T>): Promise<T> {
     // Try reading from cache
@@ -120,17 +132,17 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Singleflight: if another request is already computing this key, reuse its result
-    const existing = inflight.get(key) as Promise<T> | undefined;
-    if (existing) return existing;
+    const existing = inflight.get(key);
+    if (existing) return existing.promise as Promise<T>;
 
     const promise = (async () => {
       const value = await compute();
-      // Write-behind: don't block the response on cache write
+      // Write-behind: don’t block the response on cache write
       redis.setex(key, ttlSeconds, JSON.stringify(value)).catch(() => {});
       return value;
     })();
 
-    inflight.set(key, promise);
+    inflight.set(key, { promise, createdAt: Date.now() });
     try {
       return await promise;
     } finally {
@@ -341,7 +353,13 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
     const sortBy = c.req.query('sortBy') ?? 'sent';
-    const limit = parseInt(c.req.query('limit') ?? '10', 10);
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '10', 10) || 10, 50));
+
+    // F-208: Validate sort field against whitelist
+    const validDomainSorts = ['sent', 'delivered', 'openRate', 'bounceRate'] as const;
+    if (!validDomainSorts.includes(sortBy as any)) {
+      throw ApiError.badRequest(`Invalid sortBy. Must be one of: ${validDomainSorts.join(', ')}`);
+    }
 
     // C-127: Validate and clamp date range
     const period = validateDateRange(since, until);
@@ -415,7 +433,13 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
     const sortBy = c.req.query('sortBy') ?? 'sent';
-    const limit = parseInt(c.req.query('limit') ?? '20', 10);
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '20', 10) || 20, 100));
+
+    // F-208: Validate sort field against whitelist
+    const validCampaignSorts = ['sent', 'openRate', 'clickRate', 'bounceRate'] as const;
+    if (!validCampaignSorts.includes(sortBy as any)) {
+      throw ApiError.badRequest(`Invalid sortBy. Must be one of: ${validCampaignSorts.join(', ')}`);
+    }
 
     // C-127: Validate and clamp date range
     const period = validateDateRange(since, until);
@@ -747,6 +771,10 @@ export function analyticsRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     if (format === 'csv') {
+      // FIX-500-488: For large datasets, consider replacing this in-memory
+      // CSV build with a streaming approach (ReadableStream + TransformStream)
+      // to avoid large memory allocation. Current approach is acceptable for
+      // typical report sizes but won't scale to millions of rows.
       const csv = convertReportToCSV(data as ReportData);
       c.header('Content-Type', 'text/csv');
       c.header('Content-Disposition', `attachment; filename="apexmail-${reportType}-${Date.now()}.csv"`);

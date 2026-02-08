@@ -65,6 +65,16 @@ export class AnalyticsProcessor {
   private hourlyAggregationTimer: NodeJS.Timeout | null = null;
   private readonly aggregationBuffer = new Map<string, AggregatedStats>();
   /**
+   * FIX-500-104: Mutex flag to prevent concurrent flushBuffer() calls.
+   * Timer-triggered and buffer-full flushes can overlap without this.
+   */
+  private isFlushing = false;
+  /**
+   * FIX-500-107: Maximum event buffer size to prevent OOM when
+   * Postgres is down and events keep accumulating.
+   */
+  private static readonly MAX_EVENT_BUFFER_SIZE = 50_000;
+  /**
    * IMP-004: Maximum number of aggregation keys before forced eviction.
    * Without a cap, if Postgres writes fail repeatedly the aggregationBuffer
    * grows without bound → eventual OOM. With the cap, oldest entries are
@@ -137,19 +147,52 @@ export class AnalyticsProcessor {
   private async poll(): Promise<void> {
     while (this.isRunning) {
       try {
-        const events = await this.fetchEvents(this.config.batchSize);
-        
-        if (events.length === 0) {
-          // LISTEN/NOTIFY wakeup: sleep until notified or fallback timeout
-          if (this.notifier) {
-            await this.notifier.waitForNotification('queue_analytics_queue', 30_000);
-          } else {
-            await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
-          }
-          continue;
-        }
+        // FIX-500-103: Honour concurrency config by fetching and processing
+        // multiple batches in parallel up to the configured limit.
+        const concurrency = Math.max(1, this.config.concurrency ?? 1);
 
-        await this.processEvents(events);
+        if (concurrency <= 1) {
+          // Single-batch mode (original behaviour)
+          const events = await this.fetchEvents(this.config.batchSize);
+
+          if (events.length === 0) {
+            if (this.notifier) {
+              await this.notifier.waitForNotification('queue_analytics_queue', 30_000);
+            } else {
+              await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+            }
+            continue;
+          }
+
+          await this.processEvents(events);
+        } else {
+          // Multi-batch concurrent mode
+          const batches: AnalyticsEvent[][] = [];
+          for (let i = 0; i < concurrency; i++) {
+            const events = await this.fetchEvents(this.config.batchSize);
+            if (events.length === 0) break;
+            batches.push(events);
+          }
+
+          if (batches.length === 0) {
+            if (this.notifier) {
+              await this.notifier.waitForNotification('queue_analytics_queue', 30_000);
+            } else {
+              await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
+            }
+            continue;
+          }
+
+          // FIX-500-440: Check allSettled results for rejections instead of silently dropping errors.
+          const settledResults = await Promise.allSettled(batches.map(b => this.processEvents(b)));
+          for (const result of settledResults) {
+            if (result.status === 'rejected') {
+              this.logger.error('FIX-500-440: Concurrent batch processing failed', {
+                error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+              });
+            }
+          }
+        }
       } catch (error) {
         this.logger.error('Poll error', { error });
         await new Promise(resolve => setTimeout(resolve, this.config.pollInterval));
@@ -157,18 +200,26 @@ export class AnalyticsProcessor {
     }
   }
 
+  /**
+   * FIX-500-002: Two-phase analytics processing.
+   * Phase 1 (fetchEvents): Mark events as 'processing' — they won't be picked up
+   * by other workers but aren't considered "done" yet.
+   * Phase 2 (markEventsProcessed): After successful flush, mark them as 'processed'.
+   * If the flush fails, events remain in 'processing' state and can be recovered
+   * by a stale-processing sweep (same pattern as email_queue).
+   */
   private async fetchEvents(limit: number): Promise<AnalyticsEvent[]> {
     const result = await this.db.query<AnalyticsEvent>(`
       WITH claimed AS (
         SELECT id
         FROM analytics_queue
-        WHERE processed = false
+        WHERE processed = false AND processing = false
         ORDER BY timestamp ASC
         LIMIT $1
         FOR UPDATE SKIP LOCKED
       )
       UPDATE analytics_queue
-      SET processed = true, processed_at = NOW()
+      SET processing = true, processing_at = NOW()
       WHERE id IN (SELECT id FROM claimed)
       RETURNING
         id, tenant_id as "tenantId", event_type as "eventType",
@@ -180,12 +231,30 @@ export class AnalyticsProcessor {
     return result.rows;
   }
 
+  private async markEventsProcessed(eventIds: string[]): Promise<void> {
+    if (eventIds.length === 0) return;
+    await this.db.query(
+      `UPDATE analytics_queue SET processed = true, processed_at = NOW(), processing = false WHERE id = ANY($1)`,
+      [eventIds]
+    );
+  }
+
   private async processEvents(events: AnalyticsEvent[]): Promise<void> {
     this.activeJobs++;
 
     try {
       // Add to buffer
       this.eventBuffer.push(...events);
+
+      // FIX-500-107: Enforce event buffer size cap to prevent OOM
+      if (this.eventBuffer.length > AnalyticsProcessor.MAX_EVENT_BUFFER_SIZE) {
+        const dropped = this.eventBuffer.length - AnalyticsProcessor.MAX_EVENT_BUFFER_SIZE;
+        this.eventBuffer = this.eventBuffer.slice(dropped);
+        this.logger.warn('FIX-500-107: Event buffer exceeded cap, dropped oldest events', {
+          dropped,
+          cap: AnalyticsProcessor.MAX_EVENT_BUFFER_SIZE,
+        });
+      }
 
       // Update aggregation counters
       for (const event of events) {
@@ -197,6 +266,18 @@ export class AnalyticsProcessor {
         await this.flushBuffers();
       }
 
+      // FIX-500-002: Mark events as fully processed after successful buffering/flushing
+      await this.markEventsProcessed(events.map(e => e.id));
+    } catch (error) {
+      // FIX-500-002: Reset processing flag so stale-recovery sweep can reclaim them
+      const eventIds = events.map(e => e.id);
+      await this.db.query(
+        `UPDATE analytics_queue SET processing = false, processing_at = NULL WHERE id = ANY($1)`,
+        [eventIds]
+      ).catch(resetErr => {
+        this.logger.error('Failed to reset processing flag on analytics events', { error: resetErr });
+      });
+      throw error;
     } finally {
       this.activeJobs--;
     }
@@ -209,35 +290,42 @@ export class AnalyticsProcessor {
     const periodEnd = new Date(periodStart);
     periodEnd.setHours(periodEnd.getHours() + 1);
 
-    // Create aggregation keys for different dimensions
-    const keys = [
-      // Tenant level
-      `${event.tenantId}|${periodStart.toISOString()}`,
+    // FIX-500-006: Use structured aggregation keys with explicit type prefix
+    // to eliminate ambiguous parsing. Previous format used `||` for campaign-only
+    // keys, which created 4-segment keys indistinguishable from domain+campaign keys.
+    // New format: "T:<tenantId>:<periodISO>" for tenant-level,
+    //             "D:<tenantId>:<domainId>:<periodISO>" for domain-level,
+    //             "C:<tenantId>:<campaignId>:<periodISO>" for campaign-level,
+    //             "DC:<tenantId>:<domainId>:<campaignId>:<periodISO>" for both.
+    // FIX-500-439: Use epoch milliseconds for the period key instead of ISO string.
+    // ISO strings contain ':' characters (e.g., 2025-01-01T00:00:00.000Z) which
+    // are ambiguous with the ':' delimiter used between key segments. Epoch format
+    // is guaranteed to contain only digits, eliminating parsing ambiguity.
+    const periodKey = String(periodStart.getTime());
+    const keys: Array<{ key: string; domainId?: string; campaignId?: string }> = [
+      { key: `T:${event.tenantId}:${periodKey}` },
     ];
 
     if (event.domainId) {
-      keys.push(`${event.tenantId}|${event.domainId}|${periodStart.toISOString()}`);
+      keys.push({ key: `D:${event.tenantId}:${event.domainId}:${periodKey}`, domainId: event.domainId });
     }
 
     if (event.campaignId) {
-      keys.push(`${event.tenantId}||${event.campaignId}|${periodStart.toISOString()}`);
+      keys.push({ key: `C:${event.tenantId}:${event.campaignId}:${periodKey}`, campaignId: event.campaignId });
     }
 
     if (event.domainId && event.campaignId) {
-      keys.push(`${event.tenantId}|${event.domainId}|${event.campaignId}|${periodStart.toISOString()}`);
+      keys.push({ key: `DC:${event.tenantId}:${event.domainId}:${event.campaignId}:${periodKey}`, domainId: event.domainId, campaignId: event.campaignId });
     }
 
-    for (const key of keys) {
+    for (const { key, domainId, campaignId } of keys) {
       let stats = this.aggregationBuffer.get(key);
       
       if (!stats) {
-        // Parse key: tenantId|domainOrCampaign|campaignOrTime|timestamp
-        const [tenantId, domainOrCampaign, campaignOrTime] = key.split('|');
-        
         stats = {
-          tenantId: tenantId ?? '',  // Ensure tenantId is always a string
-          domainId: domainOrCampaign && !domainOrCampaign.startsWith('20') ? domainOrCampaign : undefined,
-          campaignId: campaignOrTime && !campaignOrTime.startsWith('20') ? campaignOrTime : undefined,
+          tenantId: event.tenantId,
+          domainId,
+          campaignId,
           periodStart,
           periodEnd,
           sent: 0,
@@ -309,9 +397,15 @@ export class AnalyticsProcessor {
    * new events could arrive and be lost if the write failed.
    */
   private async flushBuffers(): Promise<void> {
+    // FIX-500-104: Mutex to prevent concurrent flushes
+    if (this.isFlushing) return;
+
     if (this.eventBuffer.length === 0 && this.aggregationBuffer.size === 0) {
       return;
     }
+
+    this.isFlushing = true;
+    try {
 
     this.logger.debug('Flushing analytics buffers', {
       events: this.eventBuffer.length,
@@ -352,6 +446,10 @@ export class AnalyticsProcessor {
       // Any new events that arrived during flush attempt are preserved
       this.logger.error('Failed to flush buffers - will retry', { error });
       throw error;
+    }
+    } finally {
+      // FIX-500-104: Release flush mutex
+      this.isFlushing = false;
     }
   }
 
@@ -470,7 +568,16 @@ export class AnalyticsProcessor {
       pipeline.expire(key, 7 * 24 * 60 * 60); // 7 day TTL
     }
 
-    await pipeline.exec();
+    // FIX-500-438: Check pipeline results for individual command failures.
+    // Previously the return value was ignored, silently dropping partial errors.
+    const results = await pipeline.exec();
+    if (results) {
+      for (const [err] of results) {
+        if (err) {
+          this.logger.warn('FIX-500-438: Redis pipeline command failed', { error: err.message });
+        }
+      }
+    }
   }
 
   private scheduleHourlyAggregation(): void {
@@ -483,12 +590,16 @@ export class AnalyticsProcessor {
 
     // MEM-003 FIX: Store timer reference for cleanup
     // D-113: Add .unref() so timer doesn't prevent process exit
-    this.hourlyAggregationTimer = setTimeout(() => {
-      this.runHourlyAggregation().catch(err => {
+    this.hourlyAggregationTimer = setTimeout(async () => {
+      try {
+        await this.runHourlyAggregation();
+      } catch (err) {
         this.logger.error('Hourly aggregation error', { error: err });
-      });
+      }
 
-      // Schedule next run
+      // FIX-500-105: Schedule next run AFTER completion to avoid drift.
+      // Previously scheduled before the run started, causing accumulated
+      // drift when the aggregation takes significant time.
       if (this.isRunning) {
         this.scheduleHourlyAggregation();
       }
@@ -651,38 +762,19 @@ export class AnalyticsProcessor {
    */
   async getRealtimeStats(tenantId: string, date?: Date): Promise<Record<string, number>> {
     const dateStr = (date ?? new Date()).toISOString().split('T')[0];
-    const keyPattern = `stats:${tenantId}:${dateStr}:*`;
 
-    // Use SCAN iterator instead of KEYS to avoid blocking Redis
-    const keys: string[] = [];
-    let cursor = '0';
-    do {
-      const [nextCursor, batch] = await this.redis.scan(cursor, 'MATCH', keyPattern, 'COUNT', 100);
-      cursor = nextCursor;
-      keys.push(...batch);
-    } while (cursor !== '0');
-
-    if (keys.length === 0) return {};
-
+    // FIX-500-059: Construct explicit keys instead of using SCAN with wildcard pattern
+    const eventTypes = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'failed', 'deferred', 'dropped'];
+    const keys = eventTypes.map(et => `stats:${tenantId}:${dateStr}:${et}`);
     const values = await this.redis.mget(keys);
 
     const stats: Record<string, number> = {};
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const value = values[i];
-      
-      // Skip if key is undefined (shouldn't happen but TypeScript is cautious)
-      if (key === undefined) continue;
-      
-      // Extract event type from key
-      const parts = key.split(':');
-      const eventType = parts[parts.length - 1];
-      
-      if (eventType !== undefined) {
-        stats[eventType] = parseInt(value ?? '0', 10);
+    for (let i = 0; i < eventTypes.length; i++) {
+      const val = values[i];
+      if (val !== null && val !== undefined) {
+        stats[eventTypes[i]!] = parseInt(val, 10);
       }
     }
-
     return stats;
   }
 }

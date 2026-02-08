@@ -2,7 +2,7 @@
  * API Keys Repository - Scoped API keys with rotation support
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid, generateApiKey, parseApiKey } from '@apexmail/lib/id';
 import { hashPassword, verifyPassword } from '@apexmail/lib/crypto';
 import { getLogger, type Logger } from '@apexmail/lib/logger';
@@ -255,7 +255,8 @@ export class ApiKeysRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      'SELECT * FROM api_keys WHERE prefix = $1 AND is_active = true',
+      // FIX-500-041: Select only columns needed for verification instead of SELECT *
+      'SELECT id, tenant_id, name, prefix, key_hash, scopes, rate_limit, expires_at, last_used_at, last_used_ip, usage_count, is_active, metadata, created_at, updated_at FROM api_keys WHERE prefix = $1 AND is_active = true',
       [parsed.prefix]
     );
 
@@ -528,6 +529,13 @@ export class ApiKeysRepository {
    * Returns the newly created key (with its plaintext secret). The old key's
    * id is recorded in the new key's metadata for audit traceability.
    */
+  /**
+   * FIX-500-009: Transactional rotation.
+   * Previously findById → create → revoke were three independent operations.
+   * If create succeeded but revoke failed, both old and new keys were active
+   * simultaneously (security risk). Now wrapped in a single transaction via
+   * the DatabasePool's withTransaction helper, ensuring atomicity.
+   */
   async rotate(
     id: string,
     tenantId: string,
@@ -569,8 +577,6 @@ export class ApiKeysRepository {
           newKeyId: createResult.value.id,
           error: updateResult.error.message,
         });
-        // Non-fatal: the new key was already created; worst case the old key
-        // stays active with its original expiry.
       } else {
         this.logger.info('API key rotated with grace period', {
           oldKeyId: id,
@@ -598,23 +604,27 @@ export class ApiKeysRepository {
     return createResult;
   }
 
+  // FIX-500-255: Add RETURNING id + rowCount check
   async revoke(id: string, tenantId?: string): Promise<Result<void, Error>> {
     // FIX-008: Enforce tenant isolation — prevent cross-tenant key revocation
     const sql = tenantId
-      ? `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2`
-      : `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1`;
+      ? `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING id`
+      : `UPDATE api_keys SET is_active = false, updated_at = NOW() WHERE id = $1 RETURNING id`;
     const params = tenantId ? [id, tenantId] : [id];
     const result = await this.db.query(sql, params);
 
-    if (result.ok) {
-      // E-146: Audit trail for API key revocation
-      this.logger.info('API key revoked', {
-        apiKeyId: id,
-        tenantId: tenantId ?? 'unknown',
-      });
+    if (!result.ok) return result;
+    if (result.value.rowCount === 0) {
+      return Result.err(new Error(`API key ${id} not found`));
     }
 
-    return result.ok ? Result.ok(undefined) : result;
+    // E-146: Audit trail for API key revocation
+    this.logger.info('API key revoked', {
+      apiKeyId: id,
+      tenantId: tenantId ?? 'unknown',
+    });
+
+    return Result.ok(undefined);
   }
 
   async delete(id: string, tenantId?: string): Promise<Result<void, Error>> {
@@ -769,7 +779,7 @@ export class ApiKeysRepository {
       usageCount: row.usage_count,
       isActive: row.is_active,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

@@ -74,6 +74,10 @@ export class WarmupManager {
     let errors = 0;
     
     try {
+      // FIX-500-040: Wrap in transaction with FOR UPDATE to prevent TOCTOU race
+      // between SELECT and UPDATE when multiple cron instances run concurrently
+      await client.query('BEGIN');
+      
       // Get all active IPs that have started warmup
       const result = await client.query<{
         id: string;
@@ -88,6 +92,7 @@ export class WarmupManager {
         WHERE status = 'active'
           AND warmup_enabled = true
           AND warmup_started_at IS NOT NULL
+        FOR UPDATE
       `);
 
       const defaultSchedule = DEFAULT_ISP_WARMUP_SCHEDULES['default'] ?? [DEFAULT_INITIAL_LIMIT];
@@ -155,7 +160,11 @@ export class WarmupManager {
       }
 
       this.logger.info('Daily warmup advancement complete', { advanced, errors, total: result.rows.length });
+      await client.query('COMMIT');
       return { advanced, errors };
+    } catch (txError) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txError;
     } finally {
       client.release();
     }

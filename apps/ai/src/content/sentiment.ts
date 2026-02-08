@@ -447,8 +447,16 @@ export class SentimentAnalyzer {
 }
 
 /**
- * Naive Bayes classifier for sentiment
- * Pre-trained on email marketing data patterns
+ * FIX-500-132: Naive Bayes classifier for sentiment.
+ *
+ * This classifier is never trained in production — no training data pipeline
+ * feeds it labeled samples. When `predict()` is called on an un-trained
+ * instance it falls through to the AFINN lexicon with a fixed 0.5 base
+ * probability, making it functionally equivalent to SentimentAnalyzer.
+ *
+ * The class is retained for offline experimentation and batch-training
+ * workflows. For production sentiment analysis, use `sentimentAnalyzer`
+ * (the canonical SentimentAnalyzer singleton below).
  */
 export class NaiveBayesSentiment {
     private positivePrior = 0.5;
@@ -568,9 +576,15 @@ export class NaiveBayesSentiment {
 
     /**
      * Deserialize the classifier
+     * FIX-500-189: Wrap JSON.parse in try/catch with meaningful error.
      */
     static deserialize(json: string): NaiveBayesSentiment {
-        const data = JSON.parse(json);
+        let data: any;
+        try {
+            data = JSON.parse(json);
+        } catch (err) {
+            throw new Error(`NaiveBayesSentiment.deserialize: invalid JSON — ${err instanceof Error ? err.message : String(err)}`);
+        }
         const classifier = new NaiveBayesSentiment();
         
         classifier.positivePrior = data.positivePrior;
@@ -586,5 +600,8 @@ export class NaiveBayesSentiment {
     }
 }
 
-// Export singleton instance
+// FIX-500-131: Canonical singleton instance — use this for all production
+// sentiment analysis. Callers should import `sentimentAnalyzer` rather than
+// constructing their own SentimentAnalyzer to benefit from shared custom
+// lexicon entries and avoid redundant allocations.
 export const sentimentAnalyzer = new SentimentAnalyzer();

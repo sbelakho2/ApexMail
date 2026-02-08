@@ -93,16 +93,13 @@ export class CompactionWorker {
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - config.compaction.hotRetentionDays);
       
-      // Find distinct dates in events table that need compaction
+      // FIX-500-058: Use LEFT JOIN anti-pattern instead of correlated NOT EXISTS subquery
       const datesResult = await this.db.query<{ date: Date }>(`
-        SELECT DISTINCT DATE(timestamp) as date
-        FROM events
-        WHERE timestamp < $1
-          AND NOT EXISTS (
-            SELECT 1 FROM compaction_log
-            WHERE compaction_log.date = DATE(events.timestamp)
-              AND compaction_log.status = 'completed'
-          )
+        SELECT DISTINCT DATE(e.timestamp) as date
+        FROM events e
+        LEFT JOIN compaction_log cl ON cl.date = DATE(e.timestamp) AND cl.status = 'completed'
+        WHERE e.timestamp < $1
+          AND cl.date IS NULL
         ORDER BY date
         LIMIT 30
       `, [cutoffDate]);

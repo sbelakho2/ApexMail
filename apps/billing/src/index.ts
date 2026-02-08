@@ -34,6 +34,9 @@ async function main(): Promise<void> {
     }
     logger.info(`Cleared ${intervalHandles.length} intervals and ${timeoutHandles.length} timeouts`);
 
+    // FIX-500-364: Shutdown metering service (clears its internal flush timer)
+    await ctx.metering.shutdown();
+
     // Close Redis connection
     await ctx.redis.quit();
 

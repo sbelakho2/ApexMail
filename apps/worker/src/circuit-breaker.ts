@@ -54,6 +54,12 @@ export class CircuitBreaker {
   private readonly config: CircuitBreakerConfig;
   private readonly keyPrefix: string;
 
+  /**
+   * FIX-500-112: Circuit breaker key TTL in seconds (24 hours).
+   * Without TTL, abandoned circuit breaker keys persist in Redis forever.
+   */
+  private static readonly KEY_TTL_SECONDS = 86400;
+
   constructor(redis: Redis, config: Partial<CircuitBreakerConfig> & { name: string }) {
     this.redis = redis;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -76,6 +82,17 @@ export class CircuitBreaker {
 
         // Transition to HALF_OPEN if reset timeout has elapsed
         if (timeSinceOpen >= this.config.resetTimeout) {
+          // FIX-500-111: Only one caller should transition to HALF_OPEN.
+          // Use SET NX to ensure only the first concurrent caller wins.
+          const acquired = await this.redis.set(
+            `${this.keyPrefix}:half_open_lock`,
+            '1',
+            'EX', 30,  // lock expires after 30s
+            'NX'
+          );
+          if (!acquired) {
+            return false; // Another caller already transitioning
+          }
           await this.setState(CircuitState.HALF_OPEN);
           return true; // Allow one request through
         }
@@ -98,7 +115,10 @@ export class CircuitBreaker {
     const state = await this.getState();
 
     if (state === CircuitState.HALF_OPEN) {
+      // FIX-500-110: Set TTL on successes counter so stale successes
+      // from hours ago don't incorrectly close the circuit.
       const successes = await this.redis.incr(`${this.keyPrefix}:successes`);
+      await this.redis.expire(`${this.keyPrefix}:successes`, 120); // 2 minute TTL
 
       if (successes >= this.config.successThreshold) {
         // Circuit recovered, close it
@@ -106,10 +126,8 @@ export class CircuitBreaker {
       }
     }
 
-    // Reset failure count on success in closed state
-    if (state === CircuitState.CLOSED) {
-      await this.redis.del(`${this.keyPrefix}:failures`);
-    }
+    // FIX-500-113: In CLOSED state, let the rolling window handle failure
+    // expiration naturally instead of wiping all failures on a single success.
   }
 
   /**
@@ -130,7 +148,9 @@ export class CircuitBreaker {
     const failureCount = await this.redis.zcard(`${this.keyPrefix}:failure_times`);
 
     // Update last failure time
-    await this.redis.set(`${this.keyPrefix}:last_failure`, now.toString());
+    // FIX-500-112: Set TTL on last_failure and failure_times
+    await this.redis.set(`${this.keyPrefix}:last_failure`, now.toString(), 'EX', CircuitBreaker.KEY_TTL_SECONDS);
+    await this.redis.expire(`${this.keyPrefix}:failure_times`, CircuitBreaker.KEY_TTL_SECONDS);
 
     if (state === CircuitState.HALF_OPEN) {
       // Any failure in half-open state opens the circuit again
@@ -199,7 +219,8 @@ export class CircuitBreaker {
    */
   async open(): Promise<void> {
     await this.setState(CircuitState.OPEN);
-    await this.redis.set(`${this.keyPrefix}:opened_at`, Date.now().toString());
+    // FIX-500-112: Set TTL on opened_at to prevent forever accumulation
+    await this.redis.set(`${this.keyPrefix}:opened_at`, Date.now().toString(), 'EX', CircuitBreaker.KEY_TTL_SECONDS);
     await this.redis.del(`${this.keyPrefix}:successes`);
   }
 
@@ -224,7 +245,8 @@ export class CircuitBreaker {
   }
 
   private async setState(state: CircuitState): Promise<void> {
-    await this.redis.set(`${this.keyPrefix}:state`, state);
+    // FIX-500-112: Set TTL on state key to prevent forever accumulation
+    await this.redis.set(`${this.keyPrefix}:state`, state, 'EX', CircuitBreaker.KEY_TTL_SECONDS);
   }
 }
 

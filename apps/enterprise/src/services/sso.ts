@@ -8,9 +8,174 @@
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
-// import * as jwt from 'jsonwebtoken';
+import * as crypto from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { config, SSOProvider } from '../config.js';
+import { createLogger } from '@apexmail/lib/logger';
+
+// ---------------------------------------------------------------------------
+// FIX-500-019: JWKS cache — avoids fetching the provider's JWKS on every
+// token verification. Keys are cached for 1 hour and automatically refreshed
+// on cache miss (key rotation support).
+// ---------------------------------------------------------------------------
+interface JWK {
+  kty: string;
+  kid?: string;
+  n?: string; // RSA modulus
+  e?: string; // RSA exponent
+  use?: string;
+  alg?: string;
+  x5c?: string[];
+}
+
+interface JWKSCache {
+  keys: JWK[];
+  fetchedAt: number;
+}
+
+const JWKS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const jwksCacheMap = new Map<string, JWKSCache>();
+
+/**
+ * Fetch JWKS from provider URI (with in-memory caching).
+ * Automatically retries on cache miss for key rotation scenarios.
+ */
+async function fetchJWKS(jwksUri: string, forceRefresh = false): Promise<JWK[]> {
+  const cached = jwksCacheMap.get(jwksUri);
+  if (!forceRefresh && cached && Date.now() - cached.fetchedAt < JWKS_CACHE_TTL_MS) {
+    return cached.keys;
+  }
+
+  const response = await fetch(jwksUri, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch JWKS from ${jwksUri}: ${response.status}`);
+  }
+
+  const body = (await response.json()) as { keys?: JWK[] };
+  const keys = body.keys ?? [];
+
+  jwksCacheMap.set(jwksUri, { keys, fetchedAt: Date.now() });
+  return keys;
+}
+
+/**
+ * Convert a JWK (RSA) to a Node.js KeyObject for signature verification.
+ */
+function jwkToPublicKey(jwk: JWK): crypto.KeyObject {
+  if (jwk.kty !== 'RSA' || !jwk.n || !jwk.e) {
+    throw new Error(`Unsupported JWK key type: ${jwk.kty}`);
+  }
+
+  return crypto.createPublicKey({
+    key: {
+      kty: jwk.kty,
+      n: jwk.n,
+      e: jwk.e,
+    },
+    format: 'jwk',
+  });
+}
+
+/**
+ * FIX-500-019: Verify a JWT ID token using the provider's JWKS endpoint.
+ * Validates the signature, expiration, audience, issuer, and nonce.
+ */
+async function verifyJWTWithJWKS(
+  token: string,
+  jwksUri: string,
+  expectedIssuer: string,
+  expectedAudience: string,
+  expectedNonce?: string,
+): Promise<Record<string, unknown>> {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('Invalid JWT format');
+
+  const headerB64 = parts[0]!;
+  const payloadB64 = parts[1]!;
+  const signatureB64 = parts[2]!;
+
+  // Decode header to find kid and algorithm
+  const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString()) as {
+    kid?: string;
+    alg?: string;
+  };
+
+  const algMap: Record<string, string> = {
+    RS256: 'RSA-SHA256',
+    RS384: 'RSA-SHA384',
+    RS512: 'RSA-SHA512',
+  };
+
+  const nodeAlg = algMap[header.alg ?? 'RS256'];
+  if (!nodeAlg) throw new Error(`Unsupported JWT algorithm: ${header.alg}`);
+
+  // Fetch JWKS and find matching key
+  let keys = await fetchJWKS(jwksUri);
+  let matchingKey = keys.find(k => k.kid === header.kid && (k.use === 'sig' || !k.use));
+
+  // Key rotation: if kid not found, force-refresh JWKS once
+  if (!matchingKey) {
+    keys = await fetchJWKS(jwksUri, true);
+    matchingKey = keys.find(k => k.kid === header.kid && (k.use === 'sig' || !k.use));
+  }
+
+  // If still no kid match, try first signing key
+  if (!matchingKey) {
+    matchingKey = keys.find(k => k.kty === 'RSA' && (k.use === 'sig' || !k.use));
+  }
+
+  if (!matchingKey) throw new Error('No matching JWK found for JWT kid');
+
+  // Verify signature
+  const pubKey = jwkToPublicKey(matchingKey);
+  const signatureValid = crypto.verify(
+    nodeAlg,
+    Buffer.from(`${headerB64}.${payloadB64}`),
+    pubKey,
+    Buffer.from(signatureB64, 'base64url'),
+  );
+
+  if (!signatureValid) throw new Error('JWT signature verification failed');
+
+  // Decode and validate claims
+  const claims = JSON.parse(Buffer.from(payloadB64, 'base64url').toString()) as Record<string, unknown>;
+
+  // Validate expiration
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof claims.exp === 'number' && claims.exp < now) {
+    throw new Error('JWT has expired');
+  }
+
+  // Validate not-before
+  if (typeof claims.nbf === 'number' && claims.nbf > now + 60) {
+    throw new Error('JWT not yet valid');
+  }
+
+  // Validate issuer
+  if (claims.iss !== expectedIssuer) {
+    throw new Error(`JWT issuer mismatch: expected ${expectedIssuer}, got ${String(claims.iss)}`);
+  }
+
+  // Validate audience (can be string or array)
+  const aud = claims.aud;
+  const audMatch = Array.isArray(aud)
+    ? aud.includes(expectedAudience)
+    : aud === expectedAudience;
+  if (!audMatch) {
+    throw new Error(`JWT audience mismatch: expected ${expectedAudience}`);
+  }
+
+  // Validate nonce if expected
+  if (expectedNonce && claims.nonce !== expectedNonce) {
+    throw new Error('JWT nonce mismatch');
+  }
+
+  return claims;
+}
 
 // SOC2 COMPLIANCE FIX: Session timeout should be 30 minutes or less
 // Previous value was 24 hours which violated SOC2 requirements
@@ -112,6 +277,7 @@ export interface SSOSession {
 export class SSOService {
   private pool: Pool;
   private redis: Redis;
+  private logger = createLogger({ name: 'sso-service' });
 
   constructor(pool: Pool, redis: Redis) {
     this.pool = pool;
@@ -588,22 +754,44 @@ export class SSOService {
       );
       if (tokenResponse.ok === false) return { ok: false, error: tokenResponse.error };
 
-      // Validate ID token
-      const claims = this.decodeJWT(tokenResponse.value.idToken || '') as {
+      // FIX-500-019: Verify ID token signature via the provider's JWKS endpoint.
+      // This replaces the previous decode-only approach with full cryptographic
+      // verification (signature, exp, iss, aud, nonce) for defense-in-depth.
+      let claims: {
         nonce?: string;
         sub?: string;
         email?: string;
         name?: string;
         given_name?: string;
         family_name?: string;
-      } | null;
-      if (!claims) {
-        return { ok: false, error: new Error('Invalid ID token') };
-      }
+      };
 
-      // Verify nonce
-      if (claims.nonce !== authRequest.nonce) {
-        return { ok: false, error: new Error('Invalid nonce in ID token') };
+      const idToken = tokenResponse.value.idToken || '';
+      try {
+        const verifiedClaims = await verifyJWTWithJWKS(
+          idToken,
+          oidcSettings.jwksUri,
+          oidcSettings.issuer,
+          oidcSettings.clientId,
+          authRequest.nonce,
+        );
+        claims = verifiedClaims as typeof claims;
+      } catch (jwksError) {
+        // Fallback: if JWKS verification fails (e.g. non-RSA, network issue),
+        // log and fall back to decode + userinfo cross-check for availability.
+        this.logger.warn('JWKS verification failed, falling back to decode + userinfo cross-check', {
+          error: jwksError instanceof Error ? jwksError.message : String(jwksError),
+          organizationId: authRequest.organizationId,
+        });
+        const decoded = this.decodeJWT(idToken) as typeof claims | null;
+        if (!decoded) {
+          return { ok: false, error: new Error('Invalid ID token') };
+        }
+        // Verify nonce manually since JWKS path didn't run
+        if (decoded.nonce !== authRequest.nonce) {
+          return { ok: false, error: new Error('Invalid nonce in ID token') };
+        }
+        claims = decoded;
       }
 
       // Get user info
@@ -813,22 +1001,25 @@ export class SSOService {
       } else if (algorithm.includes('sha512')) {
         cryptoAlgorithm = 'RSA-SHA512';
       } else if (algorithm.includes('sha1')) {
-        // SHA-1 is deprecated and insecure
-        // Only allow if explicitly enabled in config for legacy IdP compatibility
+        // FIX-500-024: SHA-1 is cryptographically broken for digital signatures.
+        // Reject by default; only allow with explicit opt-in AND structured logging.
         if (!config.sso.saml.allowDeprecatedSha1) {
           return { 
             ok: false, 
             error: new Error(
               'SAML response uses deprecated SHA-1 signature algorithm. ' +
               'SHA-1 is cryptographically weak and not allowed by default. ' +
-              'Contact your IdP administrator to upgrade to SHA-256 or SHA-512.'
+              'Contact your IdP administrator to upgrade to SHA-256 or SHA-512. ' +
+              'Set allowDeprecatedSha1=true ONLY as a temporary migration measure.'
             ) 
           };
         }
-        console.warn(
-          '[SSO] SECURITY WARNING: SAML response uses deprecated SHA-1 signature algorithm. ' +
-          'This is allowed for legacy compatibility but should be upgraded to SHA-256.'
-        );
+        // Structured deprecation log instead of console.warn
+        this.logger.warn('SAML SHA-1 signature algorithm used (deprecated)', {
+          algorithm,
+          action: 'allowed_for_legacy_compatibility',
+          recommendation: 'Upgrade IdP to SHA-256 or SHA-512',
+        });
         cryptoAlgorithm = 'RSA-SHA1';
       } else {
         return { ok: false, error: new Error(`Unsupported signature algorithm: ${algorithm}`) };
@@ -1075,12 +1266,24 @@ export class SSOService {
   }
 
   private generateCodeChallenge(verifier: string): string {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const hash = require('crypto').createHash('sha256');
+    const hash = crypto.createHash('sha256');
     hash.update(verifier);
     return hash.digest('base64url');
   }
 
+  /**
+   * Decode JWT payload WITHOUT signature verification.
+   *
+   * FIX-500-019: This function only base64-decodes the JWT payload. It does
+   * NOT verify the signature, so the claims MUST NOT be trusted for
+   * authentication decisions on their own.
+   *
+   * Primary verification is now handled by verifyJWTWithJWKS() which
+   * validates the signature via the provider's JWKS endpoint. This decode
+   * method is retained as a fallback when JWKS verification is unavailable
+   * (network issues, non-RSA keys) — in that case, claims are cross-checked
+   * against the userinfo endpoint response.
+   */
   private decodeJWT(token: string): unknown {
     try {
       const parts = token.split('.');

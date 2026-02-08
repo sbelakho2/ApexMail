@@ -150,7 +150,7 @@ const PATTERNS = {
         /(?:morning|afternoon|monday|tuesday|wednesday|thursday|friday)/i,
     ],
     question: [
-        /\?/,
+        /\w\s*\?\s*$/m,  // FIX-500-167: Require word char before '?' at end-of-line to avoid URL false positives
         /(?:can|could|would) you (?:explain|clarify|tell me)/i,
         /(?:what|how|why|when|where|who) (?:is|are|does|do|can|could|would)/i,
         /(?:i|we) (?:have|had) (?:a )?(?:question|few questions)/i,
@@ -192,22 +192,19 @@ const REFERRAL_PATTERNS = [
     /forward(?:ed|ing)? (?:this )?to (\w+(?:\.\w+)?@[\w.-]+\.\w+)/i,
 ];
 
+// FIX-500-135: Removed dead fields `_redis`, `_queueKey`, `_processedKey` and
+// their @ts-expect-error suppressions. These were never read after assignment.
+// When Redis-backed queue/dedup is implemented, add the fields back with
+// proper usage so the @ts-expect-error suppression is not needed.
 export class ReplyHandler {
     private readonly db: Pool;
-    // @ts-expect-error Reserved for future queue management
-    private readonly _redis: Redis;
     private readonly logger: Logger;
     private readonly llmEnabled: boolean;
     private readonly llmEndpoint?: string;
     private readonly llmApiKey?: string;
-    // @ts-expect-error Reserved for future queue management
-    private readonly _queueKey = 'reply:process:queue';
-    // @ts-expect-error Reserved for future deduplication
-    private readonly _processedKey = 'reply:processed:';
 
     constructor(config: ReplyHandlerConfig) {
         this.db = config.db;
-        this._redis = config.redis;
         this.logger = config.logger;
         this.llmEnabled = config.llmEnabled ?? false;
         this.llmEndpoint = config.llmEndpoint;
@@ -246,6 +243,8 @@ export class ReplyHandler {
                 if (pattern.test(fullText)) {
                     matchCount++;
                     score += 0.3;
+                    // FIX-500-168: Short-circuit inner loop when score is high enough
+                    if (score >= 0.95) break;
                 }
             }
             
@@ -261,6 +260,11 @@ export class ReplyHandler {
         // Get best match
         const bestMatch = matches[0];
         
+        // FIX-500-168: Skip LLM when pattern match is confident enough
+        if (bestMatch && bestMatch.score >= 0.8) {
+            return this.buildResult(bestMatch.type, bestMatch.score, fullText, body);
+        }
+
         if (!bestMatch || bestMatch.score < 0.3) {
             // Use LLM if enabled and pattern matching is uncertain
             if (this.llmEnabled && this.llmEndpoint) {
@@ -516,19 +520,21 @@ export class ReplyHandler {
 
     /**
      * Detect sentiment from text
+     * FIX-500-169: Use word-boundary regex instead of text.includes() to
+     * avoid false positives (e.g. "interested" matching "not interested").
      */
     private detectSentiment(text: string): 'positive' | 'negative' | 'neutral' {
-        const positiveWords = ['interested', 'great', 'love', 'excited', 'perfect', 'thanks', 'wonderful', 'amazing', 'yes', 'absolutely'];
-        const negativeWords = ['not interested', 'no thanks', 'spam', 'stop', 'remove', 'unsubscribe', 'annoying', 'never', 'hate', 'terrible'];
+        const positivePatterns = [/\binterested\b/i, /\bgreat\b/i, /\blove\b/i, /\bexcited\b/i, /\bperfect\b/i, /\bthanks\b/i, /\bwonderful\b/i, /\bamazing\b/i, /\byes\b/i, /\babsolutely\b/i];
+        const negativePatterns = [/\bnot interested\b/i, /\bno thanks\b/i, /\bspam\b/i, /\bstop\b/i, /\bremove\b/i, /\bunsubscribe\b/i, /\bannoying\b/i, /\bnever\b/i, /\bhate\b/i, /\bterrible\b/i];
         
         let positiveCount = 0;
         let negativeCount = 0;
         
-        for (const word of positiveWords) {
-            if (text.includes(word)) positiveCount++;
+        for (const pattern of positivePatterns) {
+            if (pattern.test(text)) positiveCount++;
         }
-        for (const word of negativeWords) {
-            if (text.includes(word)) negativeCount++;
+        for (const pattern of negativePatterns) {
+            if (pattern.test(text)) negativeCount++;
         }
         
         if (positiveCount > negativeCount + 1) return 'positive';
@@ -610,8 +616,10 @@ export class ReplyHandler {
         }
 
         try {
+            // FIX-500-166: Add AbortSignal.timeout to prevent hanging LLM requests
             const response = await fetch(this.llmEndpoint, {
                 method: 'POST',
+                signal: AbortSignal.timeout(15_000),
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${this.llmApiKey}`,
@@ -652,9 +660,22 @@ export class ReplyHandler {
                 const content = data.choices[0]?.message?.content;
                 if (content) {
                     const parsed = JSON.parse(content);
+                    // FIX-500-165: Validate LLM response before trusting it
+                    const VALID_CLASSIFICATIONS: ReadonlySet<string> = new Set([
+                        'out_of_office', 'not_interested', 'interested', 'tell_me_more',
+                        'wrong_person', 'referral', 'unsubscribe', 'bounce',
+                        'positive_intent', 'meeting_request', 'question',
+                        'complaint', 'spam', 'unknown',
+                    ]);
+                    const classification = VALID_CLASSIFICATIONS.has(parsed.classification)
+                        ? (parsed.classification as ReplyClassification)
+                        : 'unknown';
+                    const confidence = typeof parsed.confidence === 'number'
+                        ? Math.max(0, Math.min(1, parsed.confidence))
+                        : 0.5;
                     return this.buildResult(
-                        parsed.classification as ReplyClassification,
-                        parsed.confidence as number,
+                        classification,
+                        confidence,
                         `${subject}\n${body}`,
                         body
                     );
@@ -823,6 +844,30 @@ export class ReplyHandler {
     }
 
     /**
+     * FIX-500-109: Recover stale inbound messages stuck in processing state.
+     * Messages with processing_at set but no processed_at for >30 minutes
+     * are presumed to have been abandoned by a crashed worker.
+     */
+    async recoverStaleMessages(): Promise<number> {
+        const result = await this.db.query(
+            `UPDATE inbound_messages
+             SET processing_at = NULL
+             WHERE processing_at IS NOT NULL
+               AND processed_at IS NULL
+               AND processing_at < NOW() - INTERVAL '30 minutes'
+             RETURNING id`,
+        );
+        const count = result.rowCount ?? 0;
+        if (count > 0) {
+            this.logger.warn('FIX-500-109: Recovered stale inbound messages', {
+                count,
+                ids: result.rows.map((r: { id: string }) => r.id).slice(0, 10),
+            });
+        }
+        return count;
+    }
+
+    /**
      * Get unprocessed replies count
      */
     async getUnprocessedCount(tenantId?: string): Promise<number> {
@@ -838,7 +883,8 @@ export class ReplyHandler {
     }
 
     /**
-     * Process all pending replies
+     * FIX-500-108: Process pending replies concurrently with a limit,
+     * instead of sequentially one at a time including LLM calls.
      */
     async processAllPending(limit = 100): Promise<ProcessedReply[]> {
         const result = await this.db.query<{ id: string }>(`
@@ -854,20 +900,32 @@ export class ReplyHandler {
             RETURNING id
         `, [limit]);
 
+        // FIX-500-108: Process concurrently with a limit of 10
+        const CONCURRENCY_LIMIT = 10;
         const processed: ProcessedReply[] = [];
-        
-        for (const { id } of result.rows) {
-            try {
-                const reply = await this.processInboundMessage(id);
-                if (reply) {
-                    processed.push(reply);
+        const ids = result.rows.map(r => r.id);
+
+        for (let i = 0; i < ids.length; i += CONCURRENCY_LIMIT) {
+            const chunk = ids.slice(i, i + CONCURRENCY_LIMIT);
+            const results = await Promise.allSettled(
+                chunk.map(async (id) => {
+                    try {
+                        return await this.processInboundMessage(id);
+                    } catch (error) {
+                        this.logger.error('Failed to process inbound message', { id, error });
+                        await this.db.query(
+                            'UPDATE inbound_messages SET processing_at = NULL WHERE id = $1',
+                            [id]
+                        );
+                        return null;
+                    }
+                })
+            );
+
+            for (const r of results) {
+                if (r.status === 'fulfilled' && r.value) {
+                    processed.push(r.value);
                 }
-            } catch (error) {
-                this.logger.error('Failed to process inbound message', { id, error });
-                await this.db.query(
-                    'UPDATE inbound_messages SET processing_at = NULL WHERE id = $1',
-                    [id]
-                );
             }
         }
 

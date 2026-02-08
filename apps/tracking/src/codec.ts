@@ -83,23 +83,32 @@ export class TrackingCodec {
   }
 
   /**
-   * Generate a signed token for unsubscribe links (simpler, verifiable)
+   * Generate a signed AND encrypted token for unsubscribe links.
+   *
+   * FIX-500-023: Previously the payload (tenant:email:ts) was only signed,
+   * leaving the recipient email visible in the base64url-decoded token.
+   * Now the payload is encrypted with AES-128-GCM (same as tracking tokens)
+   * which provides both confidentiality and integrity.
    */
   generateUnsubscribeToken(tenantId: string, recipient: string): string {
     const payload = `${tenantId}:${recipient}:${Date.now()}`;
-    const signature = hmacBuffer(this.signatureKey, payload, 'sha256')
-      .subarray(0, 16); // Truncate to 128 bits
     
-    const combined = Buffer.concat([
+    // Encrypt the payload so the recipient email is not visible
+    const { ciphertext, iv, authTag } = encryptAES128GCM(
       Buffer.from(payload, 'utf-8'),
-      signature,
-    ]);
+      this.encryptionKey
+    );
     
+    const combined = Buffer.concat([iv, authTag, ciphertext]);
     return this.base64UrlEncode(combined);
   }
 
   /**
    * Verify and decode an unsubscribe token
+   *
+   * FIX-500-023: Updated to decrypt AES-128-GCM encrypted tokens.
+   * Backward-compatible: tries decryption first, falls back to legacy
+   * HMAC-signed format for tokens generated before the migration.
    */
   verifyUnsubscribeToken(
     token: string,
@@ -108,21 +117,31 @@ export class TrackingCodec {
     try {
       const combined = this.base64UrlDecode(token);
       
-      if (combined.length < 17) {
+      if (combined.length < IV_LENGTH + AUTH_TAG_LENGTH + 1) {
         return null;
       }
       
-      const payloadBuffer = combined.subarray(0, combined.length - 16);
-      const providedSig = combined.subarray(combined.length - 16);
+      // Try AES-128-GCM decryption first (new format)
+      const iv = combined.subarray(0, IV_LENGTH);
+      const authTag = combined.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH);
+      const ciphertext = combined.subarray(IV_LENGTH + AUTH_TAG_LENGTH);
       
-      const payload = payloadBuffer.toString('utf-8');
+      const decryptResult = decryptAES128GCM(ciphertext, this.encryptionKey, iv, authTag);
+      let payload: string;
       
-      // Verify signature
-      const expectedSig = hmacBuffer(this.signatureKey, payload, 'sha256')
-        .subarray(0, 16);
-      
-      if (!this.timingSafeEqualBuffers(providedSig, expectedSig)) {
-        return null;
+      if (decryptResult.ok) {
+        payload = decryptResult.value.toString('utf-8');
+      } else {
+        // Fallback: try legacy HMAC-signed format (payload + 16-byte signature)
+        if (combined.length < 17) return null;
+        const payloadBuffer = combined.subarray(0, combined.length - 16);
+        const providedSig = combined.subarray(combined.length - 16);
+        payload = payloadBuffer.toString('utf-8');
+        const expectedSig = hmacBuffer(this.signatureKey, payload, 'sha256')
+          .subarray(0, 16);
+        if (!this.timingSafeEqualBuffers(providedSig, expectedSig)) {
+          return null;
+        }
       }
       
       // Parse payload
@@ -148,7 +167,7 @@ export class TrackingCodec {
       
       return {
         tenantId,
-        recipient: parts.slice(1, -1).join(':'), // Handle emails with colons (unlikely but safe)
+        recipient: parts.slice(1, -1).join(':'),
         timestamp: parsedTimestamp,
       };
       
@@ -216,7 +235,8 @@ export class TrackingCodec {
       totalLength += 2 + originalUrlBuf.length;
     }
     
-    const buffer = Buffer.alloc(totalLength);
+    // FIX-500-359: Use allocUnsafe since we immediately overwrite all bytes via copy()
+    const buffer = Buffer.allocUnsafe(totalLength);
     let offset = 0;
     
     buffer.writeUInt8(version, offset++);
@@ -271,26 +291,37 @@ export class TrackingCodec {
       
       // v2/v3 use UInt16 for field lengths; v1 uses UInt8
       const readLen = (version >= 2)
-        ? () => { const v = buffer.readUInt16BE(offset); offset += 2; return v; }
-        : () => buffer.readUInt8(offset++);
+        ? () => {
+            // FIX-500-360: Bounds check before reading length
+            if (offset + 2 > buffer.length) throw new RangeError('Buffer underflow');
+            const v = buffer.readUInt16BE(offset); offset += 2; return v;
+          }
+        : () => {
+            if (offset + 1 > buffer.length) throw new RangeError('Buffer underflow');
+            return buffer.readUInt8(offset++);
+          };
       
+      // FIX-500-360: Helper to read field with bounds validation
+      const readField = (label: string): string => {
+        const len = readLen();
+        if (offset + len > buffer.length) throw new RangeError(`${label} extends past buffer end`);
+        const val = buffer.subarray(offset, offset + len).toString('utf-8');
+        offset += len;
+        return val;
+      };
+
       // TenantId
-      const tenantIdLen = readLen();
-      const tenantId = buffer.subarray(offset, offset + tenantIdLen).toString('utf-8');
-      offset += tenantIdLen;
+      const tenantId = readField('tenantId');
       
       // MessageId
-      const messageIdLen = readLen();
-      const messageId = buffer.subarray(offset, offset + messageIdLen).toString('utf-8');
-      offset += messageIdLen;
+      const messageId = readField('messageId');
       
       // Recipient
-      const recipientLen = readLen();
-      const recipient = buffer.subarray(offset, offset + recipientLen).toString('utf-8');
-      offset += recipientLen;
+      const recipient = readField('recipient');
       
       // LinkId
       const linkIdLen = readLen();
+      if (offset + linkIdLen > buffer.length) throw new RangeError('linkId extends past buffer end');
       const linkId = linkIdLen > 0 
         ? buffer.subarray(offset, offset + linkIdLen).toString('utf-8')
         : undefined;
@@ -300,6 +331,7 @@ export class TrackingCodec {
       let originalUrl: string | undefined;
       if (version === 3 && offset < buffer.length) {
         const originalUrlLen = readLen();
+        if (offset + originalUrlLen > buffer.length) throw new RangeError('originalUrl extends past buffer end');
         if (originalUrlLen > 0) {
           originalUrl = buffer.subarray(offset, offset + originalUrlLen).toString('utf-8');
         }

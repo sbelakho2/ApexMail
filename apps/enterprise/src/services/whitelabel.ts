@@ -569,6 +569,9 @@ export class WhiteLabelService {
 
   /**
    * Render email template with variables
+   *
+   * FIX-500-039: HTML-escape variable values in HTML output to prevent XSS.
+   * Also escape regex special chars in keys to prevent regex injection.
    */
   renderTemplate(template: EmailTemplate, variables: Record<string, string>): { subject: string; html: string; text: string } {
     let subject = template.subject;
@@ -576,10 +579,21 @@ export class WhiteLabelService {
     let text = template.textContent;
 
     for (const [key, value] of Object.entries(variables)) {
-      const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
-      subject = subject.replace(regex, value);
-      html = html.replace(regex, value);
-      text = text.replace(regex, value);
+      // Escape regex special characters in key
+      const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`{{\\s*${escapedKey}\\s*}}`, 'g');
+      
+      // HTML-escape value for HTML content to prevent XSS
+      const htmlSafeValue = value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;');
+      
+      subject = subject.replace(regex, value);  // Subject is plain text
+      html = html.replace(regex, htmlSafeValue); // HTML needs escaping
+      text = text.replace(regex, value);  // Text is plain text
     }
 
     return { subject, html, text };

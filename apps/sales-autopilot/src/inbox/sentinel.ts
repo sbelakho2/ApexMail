@@ -454,10 +454,28 @@ export function processIncomingMessage(params: {
 }): InboxMessage {
     const bodyText = params.textBody || stripHtml(params.htmlBody || '');
 
-    const classification = classifyMessage(params.subject, bodyText);
-    const sentiment = analyzeSentiment(bodyText);
-    const intent = analyzeIntent(classification, bodyText);
-    const suggestedAction = suggestAction(classification, sentiment, intent);
+    // FIX-500-493: Wrap classification/analysis in try-catch so malformed
+    // input doesn't crash the entire message processing pipeline
+    let classification: ReturnType<typeof classifyMessage>;
+    let sentiment: ReturnType<typeof analyzeSentiment>;
+    let intent: ReturnType<typeof analyzeIntent>;
+    let suggestedAction: ReturnType<typeof suggestAction>;
+
+    try {
+        classification = classifyMessage(params.subject, bodyText);
+        sentiment = analyzeSentiment(bodyText);
+        intent = analyzeIntent(classification, bodyText);
+        suggestedAction = suggestAction(classification, sentiment, intent);
+    } catch (err) {
+        logger.error('Failed to classify incoming message, using fallback', {
+            messageId: params.messageId,
+            error: err instanceof Error ? err.message : String(err),
+        });
+        classification = 'other';
+        sentiment = { label: 'neutral', score: 0, confidence: 0 };
+        intent = { primary: 'unknown', secondary: [], confidence: 0 };
+        suggestedAction = null;
+    }
 
     const message: InboxMessage = {
         id: generateId('msg'),

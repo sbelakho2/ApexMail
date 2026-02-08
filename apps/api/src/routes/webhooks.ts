@@ -244,6 +244,10 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       secret,
       events: input.events,
       headers: input.headers,
+      description: input.description,
+      enabled: input.enabled,
+      retryPolicy: input.retryPolicy,
+      metadata: input.metadata,
     };
 
     const result = await webhooksRepo.create(webhookInsert);
@@ -316,23 +320,22 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // List webhooks
+  // FIX-500-098: Push enabled/event filters to SQL instead of fetching all
+  // and filtering in memory.
   router.get('/', requireScopes('webhooks:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const enabled = c.req.query('enabled');
     const event = c.req.query('event');
 
-    let webhooks = await webhooksRepo.findByTenant(tenantId);
-
-    // Filter by enabled status
+    const filters: { enabled?: boolean; event?: string } = {};
     if (enabled !== undefined) {
-      const isEnabled = enabled === 'true';
-      webhooks = webhooks.filter(w => w.enabled === isEnabled);
+      filters.enabled = enabled === 'true';
+    }
+    if (event) {
+      filters.event = event;
     }
 
-    // Filter by event type
-    if (event) {
-      webhooks = webhooks.filter(w => w.events.includes(event) || w.events.includes('*'));
-    }
+    const webhooks = await webhooksRepo.findByTenantFiltered(tenantId, filters);
 
     return c.json({
       webhooks: webhooks.map(w => ({
@@ -517,7 +520,8 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       });
 
       const duration = Date.now() - startTime;
-      const responseBody = await response.text().catch(() => '');
+      // F-206: Consume response body but don't expose it (may contain sensitive data)
+      await response.text().catch(() => '');
 
       // Record trigger in database
       await webhooksRepo.recordTrigger(webhook.id, response.ok, response.ok ? undefined : `HTTP ${response.status}`);
@@ -536,14 +540,16 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
           statusCode: response.status,
           statusText: response.statusText,
           duration,
-          responseBody: responseBody.substring(0, 1000),
+          // F-206: Redact response body — target endpoint may return sensitive data
+          responseBody: '[redacted]',
           requestPayload: testPayload,
           headers: {
             'X-ApexMail-Signature': signature,
             'X-ApexMail-Timestamp': timestamp.toString(),
           },
         },
-      });
+      // FIX-500-451: Return 502 when the test delivery fails instead of always 200
+      }, response.ok ? 200 : 502);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       
@@ -560,7 +566,8 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
           error: errorMessage,
           requestPayload: testPayload,
         },
-      });
+      // FIX-500-451: Return 502 for failed webhook test delivery
+      }, 502);
     }
   });
 
@@ -569,7 +576,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
     const status = c.req.query('status');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
+    const limit = parseInt(c.req.query('limit') ?? '50', 10) || 50;
 
     // F-227: Validate ID format before passing to DB query
     if (!uuidRegex.test(webhookId)) {

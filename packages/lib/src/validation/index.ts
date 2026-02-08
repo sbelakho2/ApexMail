@@ -310,30 +310,56 @@ function suggestCorrections(email: string, domain: string): string[] {
 
 /**
  * Calculate Levenshtein distance between two strings
+ * FIX-500-095: Uses two-row rolling array instead of full O(n×m) matrix,
+ * reducing memory from O(n×m) to O(min(n,m)). Also includes early
+ * termination: if all values in the current row exceed a threshold of 2
+ * (the only threshold used by callers), we can bail out early.
  */
 function levenshteinDistance(a: string, b: string): number {
-    const matrix: number[][] = [];
-    
-    for (let i = 0; i <= b.length; i++) {
-        matrix[i] = [i];
+    // Ensure a is the shorter string so we allocate fewer columns
+    if (a.length > b.length) {
+        [a, b] = [b, a];
     }
-    
-    for (let j = 0; j <= a.length; j++) {
-        matrix[0]![j] = j;
+
+    const m = a.length;
+    const n = b.length;
+
+    // The max threshold used by callers is 2 — if the length difference
+    // alone exceeds it, we can return immediately.
+    const MAX_THRESHOLD = 2;
+    if (n - m > MAX_THRESHOLD) return n - m;
+
+    let prev = new Array<number>(m + 1);
+    let curr = new Array<number>(m + 1);
+
+    // Initialise first row
+    for (let j = 0; j <= m; j++) {
+        prev[j] = j;
     }
-    
-    for (let i = 1; i <= b.length; i++) {
-        for (let j = 1; j <= a.length; j++) {
+
+    for (let i = 1; i <= n; i++) {
+        curr[0] = i;
+        let rowMin = i; // Track minimum value in row for early termination
+
+        for (let j = 1; j <= m; j++) {
             const cost = a[j - 1] === b[i - 1] ? 0 : 1;
-            matrix[i]![j] = Math.min(
-                (matrix[i - 1]?.[j] ?? 0) + 1,
-                (matrix[i]?.[j - 1] ?? 0) + 1,
-                (matrix[i - 1]?.[j - 1] ?? 0) + cost
-            );
+            const del = (prev[j] ?? 0) + 1;
+            const ins = (curr[j - 1] ?? 0) + 1;
+            const sub = (prev[j - 1] ?? 0) + cost;
+            const val = Math.min(del, ins, sub);
+            curr[j] = val;
+            if (val < rowMin) rowMin = val;
         }
+
+        // FIX-500-095: Early termination — if every value in this row
+        // exceeds the threshold, the final distance will too.
+        if (rowMin > MAX_THRESHOLD) return rowMin;
+
+        // Swap rows
+        [prev, curr] = [curr, prev];
     }
-    
-    return matrix[b.length]?.[a.length] ?? 0;
+
+    return prev[m] ?? 0;
 }
 
 /**

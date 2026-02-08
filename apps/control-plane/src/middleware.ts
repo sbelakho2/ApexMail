@@ -187,7 +187,10 @@ function validateApiKey(apiKey: string): boolean {
 function getClientIp(request: NextRequest): string {
     const forwarded = request.headers.get('x-forwarded-for');
     if (forwarded) {
-        return forwarded.split(',')[0].trim();
+        // FIX-500-304: Use rightmost entry — the one added by our trusted reverse proxy.
+        // The leftmost entry can be spoofed by the client.
+        const parts = forwarded.split(',').map(s => s.trim()).filter(Boolean);
+        return parts[parts.length - 1];
     }
     const realIp = request.headers.get('x-real-ip');
     if (realIp) {

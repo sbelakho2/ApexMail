@@ -476,8 +476,8 @@ export class InboxPlacementService {
       subject: row.subject,
       fromAddress: row.from_address,
       status: row.status as PlacementTest['status'],
-      results: JSON.parse(row.results),
-      summary: JSON.parse(row.summary),
+      results: (() => { try { return JSON.parse(row.results); } catch { return {}; } })(),
+      summary: (() => { try { return JSON.parse(row.summary); } catch { return {}; } })(),
       createdAt: row.created_at,
       completedAt: row.completed_at,
     };

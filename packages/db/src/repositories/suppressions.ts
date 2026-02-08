@@ -3,7 +3,7 @@
  * Handles bounces, complaints, unsubscribes, and manual suppressions
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
 
@@ -169,7 +169,8 @@ export class SuppressionsRepository {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM suppressions
+      // FIX-500-042: Select only columns needed for suppression check instead of SELECT *
+      `SELECT id, tenant_id, email_hash, scope, scope_id, reason, source, bounce_type, bounce_code, feedback_type, expires_at, metadata, created_at, updated_at FROM suppressions
        WHERE email_hash = $1
          AND (tenant_id IS NULL OR tenant_id = $2)
          AND (expires_at IS NULL OR expires_at > NOW())
@@ -616,7 +617,7 @@ export class SuppressionsRepository {
       feedbackType: row.feedback_type,
       expiresAt: row.expires_at,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

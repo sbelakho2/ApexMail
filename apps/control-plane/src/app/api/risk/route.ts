@@ -51,9 +51,13 @@ const DEMO_TENANTS = [
     },
 ];
 
-export async function GET() {
+export async function GET(request: Request) {
     try {
-        // TODO: Replace with full risk assessment DB query
+        // FIX-500-302: Add pagination support
+        const url = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
+        const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
+
         const rows = await query<{
             id: string;
             name: string;
@@ -64,7 +68,8 @@ export async function GET() {
             FROM tenants
             WHERE risk_score > 0
             ORDER BY risk_score DESC
-        `);
+            LIMIT $1 OFFSET $2
+        `, [limit, offset]);
 
         if (rows.length === 0) {
             return NextResponse.json(DEMO_TENANTS);
@@ -93,6 +98,7 @@ export async function GET() {
         return NextResponse.json(tenants);
     } catch (error) {
         console.error('Risk API error:', error);
-        return NextResponse.json(DEMO_TENANTS);
+        // FIX-500-298: Return 500 instead of masking errors with demo data
+        return NextResponse.json({ error: 'Failed to fetch risk data' }, { status: 500 });
     }
 }

@@ -379,6 +379,7 @@ export class InferenceQueue {
         reject: (error: Error) => void;
         request: unknown;
         timestamp: Date;
+        cancelled: boolean; // FIX-500-385: Track cancellation flag
     }> = [];
     private processing: boolean = false;
     
@@ -404,13 +405,15 @@ export class InferenceQueue {
                 reject,
                 request,
                 timestamp: new Date(),
+                cancelled: false, // FIX-500-385: Track cancellation instead of splicing
             });
 
             // Set timeout
+            // FIX-500-385: Mark as cancelled instead of splicing during iteration
             setTimeout(() => {
-                const idx = this.queue.findIndex(q => q.id === id);
-                if (idx !== -1) {
-                    this.queue.splice(idx, 1);
+                const item = this.queue.find(q => q.id === id);
+                if (item && !item.cancelled) {
+                    item.cancelled = true;
                     reject(new Error('Request timeout'));
                 }
             }, this.timeoutMs);
@@ -420,21 +423,35 @@ export class InferenceQueue {
         });
     }
 
+    // FIX-500-384: Process multiple items concurrently with bounded parallelism
+    private static readonly MAX_CONCURRENT = 5;
+
     private async processQueue(processFn: (req: unknown) => Promise<unknown>): Promise<void> {
         if (this.processing || this.queue.length === 0) return;
 
         this.processing = true;
 
         while (this.queue.length > 0) {
-            const item = this.queue.shift();
-            if (!item) continue;
-
-            try {
-                const result = await processFn(item.request);
-                item.resolve(result);
-            } catch (error) {
-                item.reject(error instanceof Error ? error : new Error(String(error)));
+            // FIX-500-385: Filter out cancelled items first
+            while (this.queue.length > 0 && this.queue[0].cancelled) {
+                this.queue.shift();
             }
+            if (this.queue.length === 0) break;
+
+            // FIX-500-384: Take a batch of up to MAX_CONCURRENT items
+            const batchSize = Math.min(InferenceQueue.MAX_CONCURRENT, this.queue.length);
+            const batch = this.queue.splice(0, batchSize).filter(item => !item.cancelled);
+
+            if (batch.length === 0) continue;
+
+            await Promise.all(batch.map(async (item) => {
+                try {
+                    const result = await processFn(item.request);
+                    item.resolve(result);
+                } catch (error) {
+                    item.reject(error instanceof Error ? error : new Error(String(error)));
+                }
+            }));
         }
 
         this.processing = false;

@@ -66,6 +66,11 @@ async function initializeServices(): Promise<void> {
     retryStrategy: (times: number) => Math.min(times * 100, 3000),
   });
 
+  // FIX-500-424: Increase maxListeners since this single Redis instance is
+  // shared by 5 services (Tenant, DataIsolation, Encryption, RateLimit, Audit)
+  // plus signal handlers, easily exceeding the default 10-listener limit.
+  redis.setMaxListeners(50);
+
   redis.on('connect', () => {
     logger.info('[Isolation] Redis connection established');
   });

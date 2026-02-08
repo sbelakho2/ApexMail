@@ -546,7 +546,8 @@ export type ActivityType =
     | 'tag_added'
     | 'tag_removed'
     | 'campaign_enrolled'
-    | 'campaign_exited';
+    | 'campaign_exited'
+    | 'demo_rescheduled';
 
 // Task Types
 export interface LeadTask {

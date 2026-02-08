@@ -90,6 +90,9 @@ export interface TemplateContext {
 export interface TemplateRenderOptions {
     /** Template format: 'mjml' | 'handlebars' | 'html' */
     format?: 'mjml' | 'handlebars' | 'html';
+    // FIX-500-380: Note: Use 'format', not 'type'. If callers pass a 'type' property
+    // it will be silently ignored. TypeScript catches this at compile time, but
+    // dynamic callers (e.g., API payloads spread into options) should validate.
     /** Enable strict mode - throw on missing variables */
     strict?: boolean;
     /** Custom helpers for Handlebars */
@@ -276,6 +279,15 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
 </body>
 </html>`;
     
+    // FIX-500-378: Warn about unrecognized MJML tags that were not converted
+    const unrecongnizedMjTags = content.match(/<mj-(?!body|section|column|text|button|image|divider|spacer|social|social-element)[a-z-]+/gi);
+    if (unrecongnizedMjTags) {
+        const uniqueTags = [...new Set(unrecongnizedMjTags.map(t => t.toLowerCase()))];
+        for (const tag of uniqueTags) {
+            errors.push(`Warning: unrecognized MJML tag '${tag}>' was not converted and may not render correctly`);
+        }
+    }
+
     return { html, errors };
 }
 

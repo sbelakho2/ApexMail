@@ -6,6 +6,8 @@
  */
 
 import { NextResponse } from 'next/server';
+// FIX-500-060: Import shared pool instead of creating a duplicate
+import { getPool as getSharedPool } from '../../../../lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,23 +15,8 @@ export const dynamic = 'force-dynamic';
 type Pool = import('pg').Pool;
 type PoolClient = import('pg').PoolClient;
 
-let pool: Pool | null = null;
-
 async function getPool(): Promise<Pool> {
-    if (!pool) {
-        const { Pool: PgPool } = await import('pg');
-        pool = new PgPool({
-            host: process.env.DB_HOST || 'localhost',
-            port: parseInt(process.env.DB_PORT || '5432', 10),
-            database: process.env.DB_NAME || 'apexmail',
-            user: process.env.DB_USER || 'postgres',
-            password: process.env.DB_PASSWORD || '',
-            max: 5,
-            idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 5000,
-        });
-    }
-    return pool;
+    return getSharedPool();
 }
 
 // Database configuration types
@@ -328,36 +315,10 @@ export async function GET(): Promise<NextResponse<DashboardStats | { error: stri
         }
     } catch (error) {
         console.error('Dashboard stats error:', error);
-        
-        // Return fallback data on error (graceful degradation)
-        return NextResponse.json({
-            sales: {
-                activeLeads: 0,
-                leadsThisWeek: 0,
-                campaignsRunning: 0,
-                demosScheduled: 0,
-                conversionRate: 0,
-            },
-            compliance: {
-                riskAlerts: 0,
-                criticalTenants: 0,
-                gdprPending: 0,
-                auditEventsToday: 0,
-            },
-            platform: {
-                activeTenants: 0,
-                totalEmails: 0,
-                mrr: 0,
-                healthStatus: 'down' as const,
-            },
-            recentActivity: [],
-            pipeline: {
-                prospect: 0,
-                outreach: 0,
-                engaged: 0,
-                demo: 0,
-                closed: 0,
-            },
-        }, { status: 200 }); // Return 200 with empty data for graceful degradation
+        // FIX-500-303: Return 500 instead of masking DB failure as success
+        return NextResponse.json(
+            { error: 'Failed to fetch dashboard stats' },
+            { status: 500 }
+        );
     }
 }

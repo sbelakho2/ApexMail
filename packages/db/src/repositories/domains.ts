@@ -2,7 +2,7 @@
  * Domains Repository
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid, generateDomainVerificationToken } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
 
@@ -225,13 +225,18 @@ export class DomainsRepository {
   }
 
   // A-011: Add optional tenantId for database-level tenant isolation
+  // FIX-500-253: Add RETURNING id + rowCount check
   async markExpired(id: string, tenantId?: string): Promise<Result<void, Error>> {
     const sql = tenantId
-      ? `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1 AND tenant_id = $2`
-      : `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1`;
+      ? `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING id`
+      : `UPDATE domains SET status = 'expired', updated_at = NOW() WHERE id = $1 RETURNING id`;
     const params = tenantId ? [id, tenantId] : [id];
     const result = await this.db.query(sql, params);
-    return result.ok ? Result.ok(undefined) : result;
+    if (!result.ok) return result;
+    if (result.value.rowCount === 0) {
+      return Result.err(new Error(`Domain ${id} not found`));
+    }
+    return Result.ok(undefined);
   }
 
   async delete(id: string, tenantId?: string): Promise<Result<void, Error>> {
@@ -337,9 +342,11 @@ export class DomainsRepository {
       created_at: Date;
       updated_at: Date;
     }>(
+      // FIX-500-054: Add LIMIT to prevent unbounded result sets
       `SELECT * FROM domains 
        WHERE status = 'pending' AND expires_at < NOW()
-       ORDER BY expires_at`
+       ORDER BY expires_at
+       LIMIT 100`
     );
 
     if (!result.ok) return result;
@@ -400,10 +407,10 @@ export class DomainsRepository {
       verifiedAt: row.verified_at,
       expiresAt: row.expires_at,
       dnsRecords: typeof row.dns_records === 'string'
-        ? JSON.parse(row.dns_records) as DnsRecords
+        ? parseJsonOrDefault<DnsRecords>(row.dns_records, { spf: null, dkim: null, dmarc: null, mx: null } as unknown as DnsRecords)
         : row.dns_records as unknown as DnsRecords,
       healthStatus: typeof row.health_status === 'string'
-        ? JSON.parse(row.health_status) as DnsHealthStatus
+        ? parseJsonOrDefault<DnsHealthStatus>(row.health_status, { healthy: false, lastChecked: null, issues: [] } as unknown as DnsHealthStatus)
         : row.health_status as unknown as DnsHealthStatus,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

@@ -191,13 +191,25 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   // List domains
   router.get('/', requireScopes('domains:read'), async (c) => {
     const tenantId = c.get('tenantId');
-    const status = c.req.query('status') as 'pending' | 'verified' | 'failed' | 'expired' | undefined;
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const statusParam = c.req.query('status');
+
+    // F-198: Validate status enum at runtime
+    const validStatuses = ['pending', 'verified', 'failed', 'expired'] as const;
+    let status: typeof validStatuses[number] | undefined;
+    if (statusParam) {
+      if (!validStatuses.includes(statusParam as any)) {
+        throw ApiError.badRequest(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+      }
+      status = statusParam as typeof validStatuses[number];
+    }
+
+    // F-199: Guard against NaN/negative limit/offset
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '50', 10) || 50, 100));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
     const result = await domainsRepo.listByTenant(tenantId, {
       status,
-      limit: Math.min(limit, 100),
+      limit,
       offset,
     });
 
@@ -263,18 +275,18 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const verificationResult = await verifyDomain(domain);
 
     if (verificationResult.verified) {
-      // Mark as verified (A-010: pass tenantId)
-      await domainsRepo.verify(domainId, tenantId);
-
-      // Audit log
-      await auditRepo.create({
-        tenantId,
-        userId: userId ?? undefined,
-        action: 'domain.verified',
-        resourceType: 'domain',
-        resourceId: domainId,
-        metadata: { domain: domain.domain },
-      });
+      // FIX-076: Parallel verify + audit log — they are independent writes
+      await Promise.all([
+        domainsRepo.verify(domainId, tenantId),
+        auditRepo.create({
+          tenantId,
+          userId: userId ?? undefined,
+          action: 'domain.verified',
+          resourceType: 'domain',
+          resourceId: domainId,
+          metadata: { domain: domain.domain },
+        }),
+      ]);
 
       logger.info('Domain verified', { domainId, domain: domain.domain });
 

@@ -4,6 +4,8 @@
  * Validates inbound email using SPF, DKIM, and DMARC
  */
 
+// FIX-500-367: DNS resolution uses module-level `dns` (default system resolver, created once).
+// If custom DNS servers are ever needed, create a single dns.Resolver at module scope.
 import { promises as dns } from 'dns';
 import { createVerify, createHash } from 'crypto';
 import type { Logger } from '@apexmail/lib';
@@ -1082,6 +1084,8 @@ export class EmailAuthenticator {
     if (!ip.includes(':')) {
       const ipParts = ip.split('.').map(Number);
       const networkParts = network.split('.').map(Number);
+      
+      if (ipParts.length !== 4 || networkParts.length !== 4) return false;
       
       const ipNum = (ipParts[0]! << 24) | (ipParts[1]! << 16) | (ipParts[2]! << 8) | ipParts[3]!;
       const netNum = (networkParts[0]! << 24) | (networkParts[1]! << 16) | (networkParts[2]! << 8) | networkParts[3]!;

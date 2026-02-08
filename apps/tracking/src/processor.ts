@@ -52,7 +52,8 @@ export class EventProcessor {
    * The old in-memory path is entirely removed: no buffer array, no absoluteMax,
    * no dropped event counter — Redis handles backpressure via its memory limits.
    */
-  private static readonly REDIS_WAL_KEY = 'apexmail:tracking:events:pending';
+  // FIX-500-348: Removed redundant 'tracking:' — Redis keyPrefix 'tracking:' auto-prepends
+  private static readonly REDIS_WAL_KEY = 'apexmail:events:pending';
 
   /**
    * PERF-001: Lua script for atomic LRANGE + LTRIM.
@@ -75,6 +76,7 @@ return events
 
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
+  private drainCommandRegistered = false;
 
   constructor(options: EventProcessorConfig) {
     this.db = options.db;
@@ -82,6 +84,17 @@ return events
     this.logger = options.logger;
     this.flushIntervalMs = options.flushIntervalMs ?? 1000;
     this.maxBufferSize = options.maxBufferSize ?? 100;
+
+    // FIX-068: Register custom command so ioredis uses EVALSHA (sends only the
+    // SHA1 hash after the first call) instead of sending the full script text
+    // on every eval() invocation.
+    if (!this.drainCommandRegistered) {
+      this.redis.defineCommand('atomicDrain', {
+        numberOfKeys: 1,
+        lua: EventProcessor.ATOMIC_DRAIN_SCRIPT,
+      });
+      this.drainCommandRegistered = true;
+    }
   }
 
   start(): void {
@@ -90,16 +103,34 @@ return events
       maxBufferSize: this.maxBufferSize,
     });
     
-    this.flushTimer = setInterval(() => {
-      this.flush().catch(err => {
+    // FIX-500-120: Use setTimeout with re-scheduling instead of a fixed
+    // interval timer. A fixed interval fires even while a flush is in
+    // progress, wasting the tick (the flushing flag prevents re-entry).
+    this.scheduleFlush();
+  }
+
+  /**
+   * FIX-500-120: Schedule next flush after the current one completes.
+   * Prevents timer-triggered flushes from overlapping with in-progress ones.
+   */
+  private scheduleFlush(): void {
+    this.flushTimer = setTimeout(async () => {
+      try {
+        await this.flush();
+      } catch (err) {
         this.logger.error('Flush error', { error: err instanceof Error ? err.message : 'Unknown' });
-      });
+      }
+      // Re-schedule only if not stopped
+      if (this.flushTimer !== null) {
+        this.scheduleFlush();
+      }
     }, this.flushIntervalMs);
   }
 
   async stop(): Promise<void> {
     if (this.flushTimer) {
-      clearInterval(this.flushTimer);
+      // FIX-500-120: Use clearTimeout (was clearInterval)
+      clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
     
@@ -157,17 +188,18 @@ return events
     // C-090: Pipeline enqueue + counter increment — they are independent and
     // can be batched into a single Redis round-trip.
     // E-174: Wrap in versioned envelope with checksum for integrity checking.
-    const date = new Date().toISOString().split('T')[0];
-    const hour = new Date().getUTCHours();
+    // FIX-069: Reuse single Date object instead of creating 3
+    const now = new Date();
+    const date = now.toISOString().split('T')[0];
+    const hour = now.getUTCHours();
     const hourlyKey = `stats:${data.tenantId}:${date}:${hour}:opens`;
     const dailyKey = `stats:${data.tenantId}:${date}:opens`;
 
+    // FIX-065: Single serialization — construct envelope via string concatenation
+    // instead of JSON.stringify(event) + JSON.stringify({...d: event}) which serializes twice
     const payload = JSON.stringify(event);
-    const envelope = JSON.stringify({
-      v: EventProcessor.WAL_VERSION,
-      cs: sha256(payload).slice(0, 8),
-      d: event,
-    });
+    const cs = sha256(payload).slice(0, 8);
+    const envelope = `{"v":${EventProcessor.WAL_VERSION},"cs":"${cs}","d":${payload}}`;
 
     const pipeline = this.redis.pipeline();
     pipeline.rpush(EventProcessor.REDIS_WAL_KEY, envelope);
@@ -212,18 +244,32 @@ return events
       timestamp: new Date(),
     };
     
-    await this.enqueueEvent(event);
-    
-    // Update Redis real-time counter
-    await this.incrementCounter(data.tenantId, 'clicks');
-    
-    // Also record unique clicks
-    // IMP-008: Use atomic SET NX EX instead of SETNX + EXPIRE (two commands).
-    // A crash between SETNX and EXPIRE would leave a key with no TTL that
-    // never expires, leaking memory in Redis forever. The single SET with
-    // NX + EX flags is atomic in Redis — no interleave possible.
+    // FIX-064: Consolidate 4 sequential Redis round-trips into a single pipeline.
+    // Previously: enqueueEvent (RPUSH), incrementCounter (pipeline), SET NX EX,
+    // conditional incrementCounter — each awaited sequentially.
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0];
+    const hour = now.getUTCHours();
+    const hourlyKey = `stats:${data.tenantId}:${dateStr}:${hour}:clicks`;
+    const dailyKey = `stats:${data.tenantId}:${dateStr}:clicks`;
     const uniqueKey = `unique_click:${data.tenantId}:${data.messageId}:${data.linkId}`;
-    const isFirstClick = await this.redis.set(uniqueKey, '1', 'EX', 86400 * 30, 'NX');
+
+    const payload = JSON.stringify(event);
+    // FIX-065: Single serialization — construct envelope via string concat
+    const cs = sha256(payload).slice(0, 8);
+    const envelope = `{"v":${EventProcessor.WAL_VERSION},"cs":"${cs}","d":${payload}}`;
+
+    const pipeline = this.redis.pipeline();
+    pipeline.rpush(EventProcessor.REDIS_WAL_KEY, envelope);
+    pipeline.incr(hourlyKey);
+    pipeline.expire(hourlyKey, 86400 * 7);
+    pipeline.incr(dailyKey);
+    pipeline.expire(dailyKey, 86400 * 90);
+    pipeline.set(uniqueKey, '1', 'EX', 86400 * 30, 'NX');
+    const results = await pipeline.exec();
+
+    // Check if unique click (SET NX returns 'OK' if set, null if existed)
+    const isFirstClick = results?.[5]?.[1] === 'OK';
     if (isFirstClick) {
       await this.incrementCounter(data.tenantId, 'unique_clicks');
     }
@@ -276,12 +322,10 @@ return events
    * so the flush loop can detect corrupted or incompatible entries.
    */
   private async enqueueEvent(event: TrackingEvent): Promise<void> {
+    // FIX-065: Single serialization — use string concat instead of nested JSON.stringify
     const payload = JSON.stringify(event);
-    const envelope = JSON.stringify({
-      v: EventProcessor.WAL_VERSION,
-      cs: sha256(payload).slice(0, 8), // 8-char checksum prefix (collision-resistant enough for corruption detection)
-      d: event,
-    });
+    const cs = sha256(payload).slice(0, 8); // 8-char checksum prefix (collision-resistant enough for corruption detection)
+    const envelope = `{"v":${EventProcessor.WAL_VERSION},"cs":"${cs}","d":${payload}}`;
     await this.redis.rpush(
       EventProcessor.REDIS_WAL_KEY,
       envelope
@@ -315,9 +359,8 @@ return events
        * The key difference is that the NEW approach eliminates the *guaranteed*
        * race window that existed between LRANGE and LTRIM.
        */
-      const rawEvents = await this.redis.eval(
-        EventProcessor.ATOMIC_DRAIN_SCRIPT,
-        1,
+      // FIX-068: Use defineCommand's EVALSHA instead of raw eval
+      const rawEvents = await (this.redis as any).atomicDrain(
         EventProcessor.REDIS_WAL_KEY,
         this.maxBufferSize.toString()
       ) as string[];
@@ -340,7 +383,12 @@ return events
               this.logger.warn('Skipping WAL entry with unsupported version', { version: outer.v });
               continue;
             }
-            const expectedCs = sha256(JSON.stringify(outer.d)).slice(0, 8);
+            // FIX-066: Extract raw JSON payload from envelope string to avoid
+            // re-serializing the parsed object (which is expensive and may produce
+            // different key ordering than the original).
+            const dIdx = raw.indexOf(',"d":');
+            const rawPayload = dIdx !== -1 ? raw.slice(dIdx + 5, raw.length - 1) : JSON.stringify(outer.d);
+            const expectedCs = sha256(rawPayload).slice(0, 8);
             if (outer.cs !== expectedCs) {
               this.logger.warn('WAL entry checksum mismatch — data may be corrupted, skipping', {
                 expected: expectedCs,
@@ -363,7 +411,33 @@ return events
       }
 
       if (eventsToFlush.length > 0) {
-        await this.writeEvents(eventsToFlush);
+        try {
+          await this.writeEvents(eventsToFlush);
+        } catch (writeError) {
+          // FIX-500-001: Re-push drained events back to Redis WAL on write failure.
+          // The atomic Lua drain already removed them from Redis, so if Postgres
+          // is down the events would be permanently lost. Re-enqueue them so
+          // the next flush cycle retries.
+          this.logger.error('writeEvents failed — re-pushing events to Redis WAL', {
+            count: eventsToFlush.length,
+            error: writeError instanceof Error ? writeError.message : 'Unknown',
+          });
+          const pipeline = this.redis.pipeline();
+          for (const evt of eventsToFlush) {
+            // FIX-065/066: Single serialization via string concat
+            const payload = JSON.stringify(evt);
+            const cs = sha256(payload).slice(0, 8);
+            const envelope = `{"v":${EventProcessor.WAL_VERSION},"cs":"${cs}","d":${payload}}`;
+            pipeline.rpush(EventProcessor.REDIS_WAL_KEY, envelope);
+          }
+          await pipeline.exec().catch(rePushErr => {
+            this.logger.error('CRITICAL: Failed to re-push events to Redis WAL — events may be lost', {
+              count: eventsToFlush.length,
+              error: rePushErr instanceof Error ? rePushErr.message : 'Unknown',
+            });
+          });
+          throw writeError; // Propagate so caller sees the failure
+        }
       }
 
       this.logger.debug('Flushed events from Redis WAL', { count: rawEvents.length });
@@ -381,37 +455,45 @@ return events
     if (events.length === 0) return;
     
     const client = await this.db.connect();
+    let hasError = false;
     try {
       await client.query('BEGIN');
       
       // Batch insert events
-      const values: unknown[] = [];
-      const placeholders: string[] = [];
-      let paramIndex = 1;
+      // FIX-500-483: Guard against PG's ~65535 param limit by chunking
+      const PARAMS_PER_EVENT = 10;
+      const MAX_EVENTS_PER_CHUNK = Math.floor(65000 / PARAMS_PER_EVENT); // 6500
       
-      for (const event of events) {
-        placeholders.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
-        values.push(
-          event.id,
-          event.tenantId,
-          event.messageId,
-          event.type,
-          event.recipient,
-          event.linkId ?? null,
-          event.linkUrl ?? null,
-          event.userAgent ?? null,
-          event.ipAddress ?? null,
-          event.timestamp
-        );
-      }
+      for (let chunkStart = 0; chunkStart < events.length; chunkStart += MAX_EVENTS_PER_CHUNK) {
+        const chunk = events.slice(chunkStart, chunkStart + MAX_EVENTS_PER_CHUNK);
+        const values: unknown[] = [];
+        const placeholders: string[] = [];
+        let paramIndex = 1;
       
-      await client.query(`
-        INSERT INTO events (
-          id, tenant_id, message_id, event_type, recipient,
-          link_id, link_url, user_agent, ip_address, timestamp
-        ) VALUES ${placeholders.join(', ')}
-        ON CONFLICT (id) DO NOTHING
-      `, values);
+        for (const event of chunk) {
+          placeholders.push(`($${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++})`);
+          values.push(
+            event.id,
+            event.tenantId,
+            event.messageId,
+            event.type,
+            event.recipient,
+            event.linkId ?? null,
+            event.linkUrl ?? null,
+            event.userAgent ?? null,
+            event.ipAddress ?? null,
+            event.timestamp
+          );
+        }
+      
+        await client.query(`
+          INSERT INTO events (
+            id, tenant_id, message_id, event_type, recipient,
+            link_id, link_url, user_agent, ip_address, timestamp
+          ) VALUES ${placeholders.join(', ')}
+          ON CONFLICT (id) DO NOTHING
+        `, values);
+      } // end chunk loop
       
       // Update message stats in batch using unnest (FIX-042: replaces per-message UPDATE loop)
       const messageUpdates = new Map<string, { opens: number; clicks: number; unsubscribes: number }>();
@@ -466,9 +548,12 @@ return events
       
     } catch (error) {
       await client.query('ROLLBACK');
+      hasError = true;
       throw error;
     } finally {
-      client.release();
+      // FIX-500-482: Destroy connection on error to avoid returning a
+      // potentially corrupted connection to the pool
+      client.release(hasError);
     }
   }
 
@@ -477,26 +562,21 @@ return events
     return sha256(data).substring(0, 32);
   }
 
-  // @ts-expect-error Retained — superseded by isDuplicateWithTTL (FIX-043)
-  private async isDuplicate(key: string): Promise<boolean> {
-    const exists = await this.redis.get(`dedupe:${key}`);
-    return exists !== null;
-  }
+  // FIX-500-136: Removed dead isDuplicate — superseded by isDuplicateWithTTL (FIX-043)
 
   private async isDuplicateWithTTL(key: string, ttlSeconds: number): Promise<boolean> {
     const result = await this.redis.set(`dedupe:${key}`, '1', 'EX', ttlSeconds, 'NX');
     return result === null; // Returns null if key already exists
   }
 
-  // @ts-expect-error Retained — manual deduplication helper for future use
-  private async _markProcessed(key: string): Promise<void> {
-    // TTL of 30 days for open deduplication
-    await this.redis.set(`dedupe:${key}`, '1', 'EX', 86400 * 30);
-  }
+  // FIX-500-137: Removed dead _markProcessed — isDuplicateWithTTL already sets
+  // the dedupe key atomically via SET ... NX, making this redundant.
 
   private async incrementCounter(tenantId: string, metric: string): Promise<void> {
-    const date = new Date().toISOString().split('T')[0];
-    const hour = new Date().getUTCHours();
+    // FIX-070: Reuse single Date object instead of creating 2
+    const now = new Date();
+    const date = now.toISOString().split('T')[0];
+    const hour = now.getUTCHours();
     
     // FIX-046: Use Redis pipeline to batch 4 commands into a single round-trip
     const hourlyKey = `stats:${tenantId}:${date}:${hour}:${metric}`;
@@ -540,12 +620,15 @@ return events
     }
     
     // Publish suppression event for other services
-    await this.redis.publish('suppression:added', JSON.stringify({
+    // F-217: Fire-and-forget — don't block unsubscribe flow for Redis publish
+    this.redis.publish('suppression:added', JSON.stringify({
       tenantId,
       email: normalizedEmail,
       reason: 'unsubscribe',
       category,
       timestamp: new Date().toISOString(),
-    }));
+    })).catch((err) => {
+      this.logger.error('Failed to publish suppression event', { error: err instanceof Error ? err.message : 'Unknown' });
+    });
   }
 }

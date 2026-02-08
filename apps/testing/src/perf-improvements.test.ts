@@ -363,8 +363,12 @@ describe('PERF-002: Events Table Partitioning Migration', () => {
 describe('PERF-003: Webhook Transactional Completion', () => {
   /**
    * We verify the transactional pattern by reading the source file and
-   * checking that handleSuccess and failJob use BEGIN/COMMIT/ROLLBACK
-   * with db.connect() instead of direct pool queries.
+   * checking that flushPendingSuccesses (batch) and failJob use
+   * BEGIN/COMMIT/ROLLBACK with db.connect() instead of direct pool queries.
+   *
+   * FIX-500-081 changed handleSuccess to push to pendingSuccesses, moving
+   * the transactional logic into flushPendingSuccesses (batch) and
+   * handleSuccessIndividual (fallback).
    */
   let webhookSource: string;
 
@@ -373,41 +377,41 @@ describe('PERF-003: Webhook Transactional Completion', () => {
     webhookSource = await fs.readFile(srcPath, 'utf-8');
   });
 
-  describe('handleSuccess transactional pattern', () => {
+  describe('flushPendingSuccesses batch transactional pattern', () => {
     it('should use db.connect() for explicit client checkout', () => {
-      // Extract handleSuccess method
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      // Extract flushPendingSuccesses method
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       expect(match).not.toBeNull();
       const method = match![0];
       expect(method).toContain('this.db.connect()');
     });
 
     it('should BEGIN a transaction', () => {
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       const method = match![0];
       expect(method).toContain("'BEGIN'");
     });
 
     it('should COMMIT on success', () => {
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       const method = match![0];
       expect(method).toContain("'COMMIT'");
     });
 
     it('should ROLLBACK on error', () => {
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       const method = match![0];
       expect(method).toContain("'ROLLBACK'");
     });
 
     it('should release client in finally block', () => {
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       const method = match![0];
       expect(method).toContain('client.release()');
     });
 
     it('should INSERT delivery, UPDATE stats, and DELETE queue in same transaction', () => {
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       const method = match![0];
       expect(method).toContain('INSERT INTO webhook_deliveries');
       expect(method).toContain('UPDATE webhooks');
@@ -415,7 +419,7 @@ describe('PERF-003: Webhook Transactional Completion', () => {
     });
 
     it('should use client.query (not this.db.query) for transactional queries', () => {
-      const match = webhookSource.match(/private async handleSuccess[\s\S]*?(?=\n  private async (?:handleFailure|handleError|retryJob|failJob))/);
+      const match = webhookSource.match(/private async flushPendingSuccesses[\s\S]*?(?=\n  private async )/);
       const method = match![0];
       // After BEGIN, all queries should use client.query
       const afterBegin = method.split("'BEGIN'")[1] ?? '';
@@ -489,10 +493,11 @@ describe('PERF-003: Webhook Transactional Completion', () => {
 
   describe('Transaction isolation verification', () => {
     it('should have try/catch/finally pattern for proper cleanup', () => {
-      // Verify both methods follow the correct pattern:
+      // Verify transactional methods follow the correct pattern:
       // const client = await this.db.connect();
       // try { BEGIN; ...; COMMIT; } catch { ROLLBACK; } finally { client.release(); }
-      for (const methodName of ['handleSuccess', 'failJob']) {
+      // FIX-500-081: handleSuccess now uses batch flush — check flushPendingSuccesses instead
+      for (const methodName of ['flushPendingSuccesses', 'failJob']) {
         const regex = new RegExp(`private async ${methodName}[\\s\\S]*?(?=\\n  private async )`);
         const match = webhookSource.match(regex);
         expect(match, `${methodName} not found`).not.toBeNull();
@@ -545,8 +550,8 @@ describe('PERF-004: Batch API Domain/Suppression Deduplication', () => {
     });
 
     it('should query each domain only once (loop over uniqueDomains, not messages)', () => {
-      // The domain lookup loop should iterate over uniqueDomains
-      expect(messagesRouteSource).toContain('for (const domain of uniqueDomains)');
+      // FIX-073: The domain lookups use Promise.all over uniqueDomains (parallel)
+      expect(messagesRouteSource).toContain('uniqueDomains.map(domain => domainsRepo.findByDomain');
     });
 
     it('should use domainCache in processSingleMessage instead of querying', () => {
@@ -726,11 +731,13 @@ describe('PERF-005: Message List Column Projection + Window Pagination', () => {
       expect(selectClause).not.toMatch(/\battachments\b/);
     });
 
-    it('should still SELECT * in findById (detail view)', () => {
+    it('should SELECT * by default in findById (detail view) with optional body exclusion', () => {
       const match = messagesRepoSource.match(/async findById[\s\S]*?(?=\n  async findByIdempotencyKey)/);
       expect(match).not.toBeNull();
       const method = match![0];
-      expect(method).toContain('SELECT *');
+      // FIX-500-043: findById now accepts includeBody option, but defaults to SELECT *
+      expect(method).toContain("includeBody");
+      expect(method).toContain("'*'");
     });
   });
 
@@ -790,7 +797,7 @@ describe('PERF-005: Message List Column Projection + Window Pagination', () => {
       const method = match![0];
       // recipients is needed for .length in the API response
       expect(method).toContain('recipients');
-      expect(method).toContain('JSON.parse');
+      expect(method).toContain('parseJsonOrDefault');
     });
 
     it('listByTenant should use mapListRow (not mapRow)', () => {

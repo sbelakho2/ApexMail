@@ -373,9 +373,20 @@ export async function storeLead(lead: Lead): Promise<void> {
 
 /**
  * Gets a lead by ID
+ * 
+ * FIX-500-016: Added optional tenantId parameter for tenant-scoped lookups.
+ * When tenantId is provided, the query is scoped to prevent cross-tenant
+ * data access. Without it, behavior is unchanged for backward compatibility.
  */
-export async function getLead(leadId: string): Promise<Lead | null> {
+export async function getLead(leadId: string, tenantId?: string): Promise<Lead | null> {
     const db = requireDb();
+    if (tenantId) {
+        const result = await db.query(
+            'SELECT * FROM sales_leads WHERE id = $1 AND tenant_id = $2',
+            [leadId, tenantId]
+        );
+        return result.rows[0] ? mapLeadRow(result.rows[0]) : null;
+    }
     const result = await db.query('SELECT * FROM sales_leads WHERE id = $1', [leadId]);
     return result.rows[0] ? mapLeadRow(result.rows[0]) : null;
 }
@@ -477,7 +488,10 @@ export async function moveLeadToStage(
     if (!pipeline) return null;
 
     const stageConfig = pipeline.stages.find(
-        (s) => s.name.toLowerCase().replace(/\s+/g, '_') === newStage
+        // FIX-500-322: Match by stage ID instead of mangled name.
+        // Stage IDs follow the pattern 'stage_<value>' (e.g. 'stage_prospect').
+        // The lead.stage stores the enum value (e.g. 'prospect').
+        (s) => s.id === `stage_${newStage}` || s.id === newStage
     );
 
     const oldStage = lead.stage;
@@ -864,10 +878,12 @@ export async function getOverdueTasks(tenantId?: string): Promise<LeadTask[]> {
 
 /**
  * Filters leads based on criteria
+ * FIX-500-318: Added limit/offset pagination with a default LIMIT of 200.
  */
 export async function filterLeads(
     tenantId: string,
-    filters: LeadFilters
+    filters: LeadFilters,
+    options?: { limit?: number; offset?: number }
 ): Promise<Lead[]> {
     const db = requireDb();
     const values: unknown[] = [tenantId];
@@ -926,8 +942,8 @@ export async function filterLeads(
     }
 
     const result = await db.query(
-        `SELECT * FROM sales_leads WHERE ${where.join(' AND ')} ORDER BY created_at DESC`,
-        values
+        `SELECT * FROM sales_leads WHERE ${where.join(' AND ')} ORDER BY created_at DESC LIMIT $${index++} OFFSET $${index++}`,
+        [...values, Math.min(options?.limit ?? 200, 1000), options?.offset ?? 0]
     );
 
     return result.rows.map(mapLeadRow);
@@ -947,8 +963,11 @@ export async function getPipelineStats(tenantId: string): Promise<{
     const result = await db.query('SELECT * FROM sales_leads WHERE tenant_id = $1', [tenantId]);
     const tenantLeads = result.rows.map(mapLeadRow);
 
+    const pipeline = await getPipeline(tenantId);
     const byStage: Record<string, { count: number; value: number }> = {};
-    const totalValue = 0;
+    // FIX-500-323: Compute totalValue as weighted pipeline value
+    // (lead score * stage probability) instead of always returning 0.
+    let totalValue = 0;
     let totalScore = 0;
     let closedWon = 0;
     let closedTotal = 0;
@@ -958,9 +977,19 @@ export async function getPipelineStats(tenantId: string): Promise<{
             byStage[lead.stage] = { count: 0, value: 0 };
         }
         const stageData = byStage[lead.stage];
+
+        // Look up stage probability for weighted value
+        const stageConfig = pipeline?.stages.find(
+            (s) => s.id === `stage_${lead.stage}` || s.id === lead.stage
+        );
+        const probability = stageConfig?.probability ?? 0;
+        const leadValue = lead.score * (probability / 100);
+
         if (stageData) {
             stageData.count++;
+            stageData.value += leadValue;
         }
+        totalValue += leadValue;
         totalScore += lead.score;
 
         if (lead.stage === 'closed_won') {
@@ -1004,32 +1033,44 @@ export async function getLeadsNeedingFollowUp(
 
 /**
  * Gets "rotten" leads (in same stage too long)
+ * FIX-500-317: Push rotten filtering into SQL WHERE clause instead of
+ * loading all leads into memory and filtering in JS.
  */
 export async function getRottenLeads(tenantId: string): Promise<Lead[]> {
     const pipeline = await getPipeline(tenantId);
     if (!pipeline) return [];
 
     const db = requireDb();
-    const leadsResult = await db.query('SELECT * FROM sales_leads WHERE tenant_id = $1', [tenantId]);
-    const leads = leadsResult.rows.map(mapLeadRow);
 
-    const rotten: Lead[] = [];
+    // Build SQL conditions from pipeline stage config
+    const rottenConditions: string[] = [];
+    const values: unknown[] = [tenantId];
+    let paramIndex = 2;
 
-    for (const lead of leads) {
-        const stageConfig = pipeline.stages.find(
-            (s) => s.name.toLowerCase().replace(/\s+/g, '_') === lead.stage
-        );
-
-        if (stageConfig?.rottenDays) {
-            const rottenDate = new Date(
-                lead.updatedAt.getTime() + stageConfig.rottenDays * 24 * 60 * 60 * 1000
+    for (const stage of pipeline.stages) {
+        if (stage.rottenDays) {
+            // Match by stage ID — e.g. 'stage_prospect' → 'prospect'
+            const stageValue = stage.id.replace(/^stage_/, '');
+            rottenConditions.push(
+                `(stage = $${paramIndex} AND updated_at < NOW() - INTERVAL '1 day' * $${paramIndex + 1})`
             );
-
-            if (new Date() > rottenDate) {
-                rotten.push(lead);
-            }
+            values.push(stageValue, stage.rottenDays);
+            paramIndex += 2;
         }
     }
 
-    return rotten;
+    if (rottenConditions.length === 0) {
+        return [];
+    }
+
+    const result = await db.query(
+        `SELECT * FROM sales_leads
+         WHERE tenant_id = $1
+         AND (${rottenConditions.join(' OR ')})
+         ORDER BY updated_at ASC
+         LIMIT 500`,
+        values
+    );
+
+    return result.rows.map(mapLeadRow);
 }

@@ -5,6 +5,7 @@
  * Analyzes historical data to determine optimal delivery times.
  */
 
+import type { Redis } from 'ioredis';
 import type {
     STORequest,
     STOResult,
@@ -49,6 +50,12 @@ const DEFAULT_STO_CONFIG: STOConfig = {
 };
 
 /**
+ * Hard limits to prevent unbounded memory growth
+ */
+const MAX_PATTERNS_PER_SUBSCRIBER = 10_000;
+const MAX_SUBSCRIBERS = 50_000;
+
+/**
  * Send Time Optimization Engine
  * 
  * Analyzes engagement patterns to recommend optimal send times
@@ -57,9 +64,19 @@ const DEFAULT_STO_CONFIG: STOConfig = {
 export class STOOptimizer {
     private config: STOConfig;
     private engagementData: Map<string, EngagementPattern[]> = new Map();
+    private redis: Redis | null = null;
+    private static readonly REDIS_KEY_PREFIX = 'sto:engagement:';
 
-    constructor(config?: Partial<STOConfig>) {
+    constructor(config?: Partial<STOConfig>, redis?: Redis) {
         this.config = { ...DEFAULT_STO_CONFIG, ...config };
+        this.redis = redis ?? null;
+    }
+
+    /**
+     * Connect to Redis for persistent engagement storage
+     */
+    connectRedis(redis: Redis): void {
+        this.redis = redis;
     }
 
     /**
@@ -101,7 +118,7 @@ export class STOOptimizer {
     }
 
     /**
-     * Add engagement data for learning
+     * Add engagement data for learning (persists to Redis if available)
      */
     addEngagementData(
         subscriberId: string,
@@ -114,11 +131,52 @@ export class STOOptimizer {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - this.config.lookbackDays);
 
-        const filtered = existing.filter(
+        let filtered = existing.filter(
             (p) => p.timestamp >= cutoff
         );
 
+        // Cap per-subscriber patterns to prevent unbounded growth
+        if (filtered.length > MAX_PATTERNS_PER_SUBSCRIBER) {
+            filtered = filtered
+                .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+                .slice(0, MAX_PATTERNS_PER_SUBSCRIBER);
+        }
+
         this.engagementData.set(subscriberId, filtered);
+
+        // Evict oldest subscriber if Map exceeds cap
+        if (this.engagementData.size > MAX_SUBSCRIBERS) {
+            let oldestKey: string | null = null;
+            let oldestTime = Infinity;
+            for (const [key, patterns] of this.engagementData.entries()) {
+                if (patterns.length === 0) { oldestKey = key; break; }
+                const newest = patterns[patterns.length - 1].timestamp.getTime();
+                if (newest < oldestTime) {
+                    oldestTime = newest;
+                    oldestKey = key;
+                }
+            }
+            if (oldestKey && oldestKey !== subscriberId) {
+                this.engagementData.delete(oldestKey);
+            }
+        }
+
+        // Persist to Redis asynchronously
+        if (this.redis) {
+            const key = `${STOOptimizer.REDIS_KEY_PREFIX}${subscriberId}`;
+            const serialized = JSON.stringify({
+                ...pattern,
+                timestamp: pattern.timestamp.toISOString(),
+                sentAt: pattern.sentAt?.toISOString() ?? null,
+                openedAt: pattern.openedAt?.toISOString() ?? null,
+                clickedAt: pattern.clickedAt?.toISOString() ?? null,
+                lastEngagement: pattern.lastEngagement?.toISOString() ?? null,
+            });
+            this.redis.zadd(key, pattern.timestamp.getTime(), serialized)
+                .then(() => this.redis!.expire(key, this.config.lookbackDays * 86400))
+                .then(() => this.redis!.zremrangebyrank(key, 0, -MAX_PATTERNS_PER_SUBSCRIBER - 1))
+                .catch(() => {/* best-effort */});
+        }
     }
 
     /**
@@ -311,10 +369,30 @@ export class STOOptimizer {
     }
 
     /**
-     * Clear all engagement data
+     * Clear all engagement data (local + Redis)
+     * FIX-500-396: Pipeline DEL instead of per-batch DEL for efficiency
      */
-    clearData(): void {
+    async clearData(): Promise<void> {
         this.engagementData.clear();
+        if (this.redis) {
+            try {
+                const allKeys: string[] = [];
+                let cursor = '0';
+                do {
+                    const [next, keys] = await this.redis.scan(cursor, 'MATCH', `${STOOptimizer.REDIS_KEY_PREFIX}*`, 'COUNT', '200');
+                    cursor = next;
+                    allKeys.push(...keys);
+                } while (cursor !== '0');
+
+                if (allKeys.length > 0) {
+                    const pipeline = this.redis.pipeline();
+                    for (const key of allKeys) {
+                        pipeline.del(key);
+                    }
+                    await pipeline.exec();
+                }
+            } catch { /* best-effort */ }
+        }
     }
 
     /**
@@ -360,22 +438,72 @@ export class STOOptimizer {
         _listId?: string
     ): Promise<EngagementPattern[]> {
         const patterns: EngagementPattern[] = [];
+        // FIX-500-399: Cap total patterns to avoid unbounded memory usage
+        const MAX_PATTERNS = 100_000;
 
         if (subscriberIds && subscriberIds.length > 0) {
             for (const id of subscriberIds) {
-                const subscriberPatterns = this.engagementData.get(id);
+                let subscriberPatterns = this.engagementData.get(id);
+                // On local miss, try loading from Redis
+                if ((!subscriberPatterns || subscriberPatterns.length === 0) && this.redis) {
+                    subscriberPatterns = await this.loadSubscriberFromRedis(id);
+                }
                 if (subscriberPatterns) {
                     patterns.push(...subscriberPatterns);
+                    if (patterns.length >= MAX_PATTERNS) break;
                 }
             }
         } else {
-            // Use all data
+            // Use all data — sample if too large
             for (const subscriberPatterns of this.engagementData.values()) {
                 patterns.push(...subscriberPatterns);
+                if (patterns.length >= MAX_PATTERNS) break;
             }
         }
 
+        // FIX-500-399: If we exceeded the cap, randomly sample down
+        if (patterns.length > MAX_PATTERNS) {
+            // Fisher-Yates partial shuffle to pick MAX_PATTERNS items
+            for (let i = patterns.length - 1; i > MAX_PATTERNS - 1; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [patterns[i], patterns[j]] = [patterns[j], patterns[i]];
+            }
+            patterns.length = MAX_PATTERNS;
+        }
+
         return patterns;
+    }
+
+    /**
+     * Load a subscriber's engagement data from Redis into local cache
+     */
+    private async loadSubscriberFromRedis(subscriberId: string): Promise<EngagementPattern[]> {
+        if (!this.redis) return [];
+        try {
+            const key = `${STOOptimizer.REDIS_KEY_PREFIX}${subscriberId}`;
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - this.config.lookbackDays);
+            const members = await this.redis.zrangebyscore(key, cutoff.getTime(), '+inf');
+            if (!members || members.length === 0) return [];
+
+            const patterns: EngagementPattern[] = members.map((raw: string) => {
+                let obj: Record<string, unknown>;
+                try { obj = JSON.parse(raw); }
+                catch { return null; }
+                return {
+                    ...obj,
+                    timestamp: new Date(obj.timestamp as string),
+                    sentAt: obj.sentAt ? new Date(obj.sentAt as string) : undefined,
+                    openedAt: obj.openedAt ? new Date(obj.openedAt as string) : undefined,
+                    clickedAt: obj.clickedAt ? new Date(obj.clickedAt as string) : undefined,
+                    lastEngagement: obj.lastEngagement ? new Date(obj.lastEngagement as string) : undefined,
+                } as EngagementPattern;
+            }).filter(Boolean) as EngagementPattern[];
+            this.engagementData.set(subscriberId, patterns);
+            return patterns;
+        } catch {
+            return [];
+        }
     }
 
     private computeOptimalTimes(
@@ -537,17 +665,30 @@ export class STOOptimizer {
         ));
 
         // Adjust for timezone offset: find what UTC hour produces `hour` in `resolvedTz`
+        // FIX-500-390: Compute the offset for the actual target date (not today)
+        // to correctly handle DST transitions. Iteratively adjust because the
+        // first correction may itself shift across a DST boundary.
         const testFormatter = new Intl.DateTimeFormat('en-US', {
             timeZone: resolvedTz,
             hour: 'numeric',
             hour12: false,
         });
-        const testHour = parseInt(
+        let testHour = parseInt(
             testFormatter.formatToParts(utcDate).find(p => p.type === 'hour')?.value ?? '0',
             10
         );
-        const tzOffsetHours = testHour - hour;
+        let tzOffsetHours = testHour - hour;
         utcDate.setHours(utcDate.getHours() - tzOffsetHours);
+
+        // Verify after adjustment (DST edge case: the adjustment itself may
+        // land on a different offset). Re-check once.
+        const verifyHour = parseInt(
+            testFormatter.formatToParts(utcDate).find(p => p.type === 'hour')?.value ?? '0',
+            10
+        );
+        if (verifyHour !== hour) {
+            utcDate.setHours(utcDate.getHours() - (verifyHour - hour));
+        }
 
         return utcDate;
     }
@@ -692,6 +833,56 @@ export class STOOptimizer {
         const recencyConfidence = (recent.length / patterns.length) * 0.2;
 
         return Math.min(dataConfidence + recConfidence + recencyConfidence, 1);
+    }
+
+    // FIX-500-133: Export/import engagement data for persistence.
+    // The engagementData Map is in-memory only; without serialization all
+    // learned patterns are lost on restart. These methods mirror the NDJSON
+    // approach used by FIX-500-087 in the embeddings store.
+
+    /**
+     * Export engagement data as NDJSON string for persistence.
+     * Each line is a JSON object: { subscriberId, patterns: [...] }
+     */
+    exportNdjson(): string {
+        const lines: string[] = [];
+        for (const [subscriberId, patterns] of this.engagementData.entries()) {
+            lines.push(JSON.stringify({ subscriberId, patterns }));
+        }
+        return lines.join('\n');
+    }
+
+    /**
+     * Import engagement data from an NDJSON string (as produced by exportNdjson).
+     * Merges with any existing data — duplicates are filtered by the
+     * lookbackDays window in addEngagementData.
+     */
+    importNdjson(ndjson: string): { imported: number; errors: number } {
+        let imported = 0;
+        let errors = 0;
+        for (const line of ndjson.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+                const record = JSON.parse(line) as {
+                    subscriberId: string;
+                    patterns: EngagementPattern[];
+                };
+                // Rehydrate Date objects
+                for (const p of record.patterns) {
+                    p.timestamp = new Date(p.timestamp as unknown as string);
+                    if (p.sentAt) p.sentAt = new Date(p.sentAt as unknown as string);
+                    if (p.openedAt) p.openedAt = new Date(p.openedAt as unknown as string);
+                    if (p.clickedAt) p.clickedAt = new Date(p.clickedAt as unknown as string);
+                }
+                for (const pattern of record.patterns) {
+                    this.addEngagementData(record.subscriberId, pattern);
+                }
+                imported++;
+            } catch {
+                errors++;
+            }
+        }
+        return { imported, errors };
     }
 }
 

@@ -138,38 +138,65 @@ describe('#47 – Webhooks findByTenant has pagination', () => {
 });
 
 // ---------------------------------------------------------------------------
-// #48: Missing index on messages.mta_message_id — migration note
+// #48: Missing index on messages.mta_message_id — migration 010
 // ---------------------------------------------------------------------------
-describe('#48 – mta_message_id index migration note', () => {
+describe('#48 – mta_message_id index migration', () => {
+    const migration = read('tools/migrations/010_performance_indexes.sql');
     const src = read('packages/db/src/repositories/messages.ts');
 
-    it('has FIX-500-048 annotation with index creation TODO', () => {
+    it('migration file contains CREATE INDEX for idx_messages_mta_message_id', () => {
+        expect(migration).toContain('idx_messages_mta_message_id');
+        expect(migration).toContain('CREATE INDEX CONCURRENTLY');
+        expect(migration).toContain('WHERE mta_message_id IS NOT NULL');
+    });
+
+    it('repository references migration 010', () => {
         expect(src).toContain('FIX-500-048');
-        expect(src).toContain('idx_messages_mta_message_id');
+        expect(src).toContain('migration 010');
     });
 });
 
 // ---------------------------------------------------------------------------
-// #49: Analytics domain GROUP BY — functional index note
+// #49: Analytics domain GROUP BY — functional index migration 010
 // ---------------------------------------------------------------------------
-describe('#49 – Analytics domain functional index note', () => {
+describe('#49 – Analytics domain functional index migration', () => {
+    const migration = read('tools/migrations/010_performance_indexes.sql');
     const src = read('packages/db/src/repositories/events.ts');
 
-    it('has FIX-500-049 annotation with index creation TODO', () => {
+    it('migration file contains functional index on recipient domain', () => {
+        expect(migration).toContain('idx_events_recipient_domain');
+        expect(migration).toContain("SPLIT_PART(recipient_email, '@', 2)");
+    });
+
+    it('repository references migration 010', () => {
         expect(src).toContain('FIX-500-049');
-        expect(src).toContain('idx_events_recipient_domain');
+        expect(src).toContain('migration 010');
     });
 });
 
 // ---------------------------------------------------------------------------
-// #50: Audit log composite index — migration note
+// #50: Audit log composite index — migration 010
 // ---------------------------------------------------------------------------
-describe('#50 – Audit log composite index migration note', () => {
+describe('#50 – Audit log composite index migration', () => {
+    const migration = read('tools/migrations/010_performance_indexes.sql');
     const src = read('packages/db/src/repositories/audit-logs.ts');
 
-    it('has FIX-500-050 annotation with index creation TODO', () => {
+    it('migration file contains composite index for audit log lookups', () => {
+        expect(migration).toContain('idx_audit_logs_resource_lookup');
+        expect(migration).toContain('tenant_id, resource_type, resource_id, timestamp DESC, id DESC');
+    });
+
+    it('down migration drops the indexes', () => {
+        const down = read('tools/migrations/010_performance_indexes_down.sql');
+        expect(down).toContain('DROP INDEX');
+        expect(down).toContain('idx_audit_logs_resource_lookup');
+        expect(down).toContain('idx_messages_mta_message_id');
+        expect(down).toContain('idx_events_recipient_domain');
+    });
+
+    it('repository references migration 010', () => {
         expect(src).toContain('FIX-500-050');
-        expect(src).toContain('idx_audit_logs_resource_lookup');
+        expect(src).toContain('migration 010');
     });
 });
 

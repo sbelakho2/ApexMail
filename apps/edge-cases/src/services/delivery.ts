@@ -6,8 +6,33 @@
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
+import dns from 'dns'; // FIX-500-407: Static import instead of dynamic
 import { Result } from '@apexmail/lib';
 import { config, GREYLIST_CODES, AUTO_SUBMITTED_VALUES } from '../config.js';
+
+// FIX-500-031: Wrap RegExp construction in try-catch (original fix).
+// FIX-500-409: Pre-compile auto-responder subject patterns once at module load.
+// Also cap pattern length to prevent ReDoS from long/complex user-sourced patterns.
+const MAX_PATTERN_LENGTH = 200;
+const compiledSubjectPatterns: RegExp[] = [];
+for (const pattern of config.autoResponder.subjectPatterns) {
+  if (pattern.length > MAX_PATTERN_LENGTH) continue; // skip dangerously long patterns
+  try {
+    compiledSubjectPatterns.push(new RegExp(pattern, 'i'));
+  } catch {
+    // FIX-500-031: skip invalid regex patterns gracefully
+    continue;
+  }
+}
+const RATE_LIMIT_PATTERNS = [
+  /rate.?limit/i,
+  /too many connections/i,
+  /too many messages/i,
+  /sending.+too fast/i,
+  /over quota/i,
+  /exceeded/i,
+  /throttl/i,
+];
 
 export enum DeliveryStatus {
   PENDING = 'pending',
@@ -72,6 +97,35 @@ export interface RetrySchedule {
   attemptNumber: number;
   delay: number;
   reason: string;
+}
+
+/**
+ * FIX-500-408: Validate IP address or CIDR notation.
+ * Rejects invalid CIDR prefixes (> 32 for IPv4, > 128 for IPv6).
+ */
+export function isValidIP(ip: string): boolean {
+  // Strip CIDR prefix if present
+  const parts = ip.split('/');
+  const addr = parts[0] as string | undefined;
+  const prefix = parts[1];
+
+  if (!addr) return false;
+
+  // Basic IPv4 check
+  const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(addr);
+  // Basic IPv6 check
+  const ipv6 = addr.includes(':');
+
+  if (!ipv4 && !ipv6) return false;
+
+  if (prefix !== undefined) {
+    const prefixNum = parseInt(prefix, 10);
+    if (isNaN(prefixNum) || prefixNum < 0) return false;
+    if (ipv4 && prefixNum > 32) return false;
+    if (ipv6 && prefixNum > 128) return false;
+  }
+
+  return true;
 }
 
 /**
@@ -152,19 +206,10 @@ export class DeliveryService {
 
   /**
    * Check if message indicates rate limiting
+   * FIX-500-405: Uses module-level pre-compiled patterns
    */
   private isRateLimitMessage(message: string): boolean {
-    const rateLimitPatterns = [
-      /rate.?limit/i,
-      /too many connections/i,
-      /too many messages/i,
-      /sending.+too fast/i,
-      /over quota/i,
-      /exceeded/i,
-      /throttl/i,
-    ];
-
-    return rateLimitPatterns.some(pattern => pattern.test(message));
+    return RATE_LIMIT_PATTERNS.some(pattern => pattern.test(message));
   }
 
   /**
@@ -333,16 +378,18 @@ export class DeliveryService {
     }
 
     // Check subject patterns
-    for (const pattern of config.autoResponder.subjectPatterns) {
-      if (new RegExp(pattern, 'i').test(subject)) {
-        indicators.push(`Subject matches: ${pattern}`);
-        confidence += 25;
-        
-        if (/out.of.office|ooo|vacation|away/i.test(subject)) {
-          type = 'ooo';
-        } else if (/auto/i.test(subject)) {
-          type = 'system';
-        }
+    // FIX-500-409: Use pre-compiled patterns from module level to avoid
+    // per-call RegExp construction and ReDoS risk from user-sourced patterns
+    for (const compiledPattern of compiledSubjectPatterns) {
+      if (compiledPattern.test(subject)) {
+          indicators.push(`Subject matches: ${compiledPattern.source}`);
+          confidence += 25;
+          
+          if (/out.of.office|ooo|vacation|away/i.test(subject)) {
+            type = 'ooo';
+          } else if (/auto/i.test(subject)) {
+            type = 'system';
+          }
       }
     }
 
@@ -399,8 +446,7 @@ export class DeliveryService {
         return { ok: true, value: JSON.parse(cached) };
       }
 
-      const { promises: dns } = await import('dns');
-      const records = await dns.resolveMx(domain);
+      const records = await dns.promises.resolveMx(domain);
 
       const mxRecords: MXRecord[] = records
         .map(r => ({
@@ -416,8 +462,7 @@ export class DeliveryService {
     } catch (error) {
       // If MX lookup fails, try A record as fallback
       try {
-        const { promises: dns } = await import('dns');
-        await dns.resolve4(domain);
+        await dns.promises.resolve4(domain);
         
         // Domain has A record, use it as implicit MX
         return {

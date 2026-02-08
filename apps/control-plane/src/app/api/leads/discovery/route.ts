@@ -34,9 +34,7 @@ export async function GET() {
         });
     } catch (error) {
         console.error('Leads discovery API error:', error);
-        return NextResponse.json({
-            sources: DEMO_SOURCES,
-            leads: DEMO_LEADS,
-        });
+        // FIX-500-018: Return 500 instead of masking errors with demo data
+        return NextResponse.json({ error: 'Failed to fetch lead discovery data' }, { status: 500 });
     }
 }

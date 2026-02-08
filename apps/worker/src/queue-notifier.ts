@@ -49,6 +49,10 @@ export class QueueNotifier extends EventEmitter {
       this.reconnectTimer = null;
     }
 
+    // FIX-500-176: Remove all outstanding waitForNotification listeners
+    // to prevent leaked promises from keeping the process alive.
+    this.removeAllListeners();
+
     if (this.client) {
       try {
         for (const ch of CHANNELS) {

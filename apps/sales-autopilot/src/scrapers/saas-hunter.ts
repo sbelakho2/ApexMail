@@ -128,12 +128,7 @@ export function calculateLeadScore(
     return Math.round(rawScore * 100);
 }
 
-interface ScrapeResult {
-    companies: ScrapedCompany[];
-    nextPageUrl: string | null;
-    totalFound: number;
-    errors: string[];
-}
+// FIX-500-319: Duplicate ScrapeResult interface removed (was declared at line 28 and here)
 
 /**
  * Fetches a page with proper rate limiting and headers
@@ -485,6 +480,9 @@ export async function enrichWithMxRecords(
 
 /**
  * Converts scraped companies to lead format with ML-based scoring
+ * FIX-500-325: Returns Lead[] instead of Partial<Lead>[]. All required fields
+ * are populated by this function, so there's no reason to use Partial — that
+ * forced unsafe casts in the caller.
  */
 export function scrapedToLeads(
     scrapedCompanies: Array<
@@ -492,7 +490,7 @@ export function scrapedToLeads(
     >,
     tenantId: string,
     enrichmentData?: Map<string, EnrichmentResult>
-): Partial<Lead>[] {
+): Lead[] {
     return scrapedCompanies.map((company) => {
         // Get enrichment data for this company if available
         const enrichment = enrichmentData?.get(company.domain) || null;
@@ -500,36 +498,39 @@ export function scrapedToLeads(
         // Calculate ML-based lead score
         const score = calculateLeadScore(company, enrichment);
 
+        const now = new Date();
         return {
             id: generateId('lead'),
             tenantId,
             companyName: company.name,
             domain: company.domain,
             website: company.website || null,
-        email: null,
-        emailVerified: false,
-        phone: null,
-        industry: company.category,
-        employeeCount: null,
-        revenue: null,
-        technologies: [],
-        socialProfiles: [],
-        location: null,
-        source: company.source,
-        sourceUrl: company.sourceUrl,
-        score, // ML-based score (0-100)
-        status: 'new',
-        stage: 'prospect',
-        assignedTo: null,
-        tags: company.tags,
-        customFields: {
-            description: company.description,
-        },
-        mxRecords: company.mxRecords,
-        emailProvider: company.emailProvider,
-        lastContactedAt: null,
-        nextFollowUpAt: null,
-    };
+            email: null,
+            emailVerified: false,
+            phone: null,
+            industry: company.category,
+            employeeCount: null,
+            revenue: null,
+            technologies: [] as string[],
+            socialProfiles: [] as Lead['socialProfiles'],
+            location: null,
+            source: company.source,
+            sourceUrl: company.sourceUrl,
+            score, // ML-based score (0-100)
+            status: 'new' as const,
+            stage: 'prospect' as const,
+            assignedTo: null,
+            tags: company.tags,
+            customFields: {
+                description: company.description,
+            } as Record<string, unknown>,
+            mxRecords: company.mxRecords,
+            emailProvider: company.emailProvider,
+            lastContactedAt: null,
+            nextFollowUpAt: null,
+            createdAt: now,
+            updatedAt: now,
+        };
     });
 }
 
@@ -542,7 +543,7 @@ export async function runDiscoveryJob(options: {
     categories: string[];
     maxPagesPerSource: number;
 }): Promise<{
-    leads: Partial<Lead>[];
+    leads: Lead[];
     stats: {
         totalScraped: number;
         totalWithMx: number;
@@ -624,7 +625,7 @@ export async function runDiscoveryJob(options: {
  * Exports leads to CSV format
  */
 export function exportLeadsToCsv(
-    leads: Partial<Lead>[]
+    leads: Lead[]
 ): string {
     const headers = [
         'Company Name',

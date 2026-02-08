@@ -117,7 +117,8 @@ export class RedisCacheProvider implements CacheProvider {
     try {
       return JSON.parse(value) as T;
     } catch {
-      return value as T;
+      // Return null instead of unsafe string cast — caller expects T, not string
+      return null;
     }
   }
 
@@ -245,7 +246,7 @@ export class RedisCacheProvider implements CacheProvider {
       try {
         return JSON.parse(v) as T;
       } catch {
-        return v as T;
+        return null;
       }
     });
   }
@@ -343,7 +344,7 @@ export class InMemoryCacheProvider implements CacheProvider {
     try {
       return JSON.parse(entry.value) as T;
     } catch {
-      return entry.value as T;
+      return null;
     }
   }
 
@@ -413,16 +414,28 @@ export class InMemoryCacheProvider implements CacheProvider {
     return true;
   }
 
+  // FIX-500-369: Atomic incr — use synchronous Map operations directly to avoid
+  // interleaving between concurrent async callers
   async incr(key: string, by = 1): Promise<number> {
-    const current = await this.get<number>(key) ?? 0;
+    const fullKey = this.key(key);
+    const entry = this.store.get(fullKey);
+    let current = 0;
+    if (entry && (!entry.expiresAt || entry.expiresAt > Date.now())) {
+      current = parseInt(entry.value, 10) || 0;
+    }
     const newValue = current + by;
-    await this.set(key, newValue);
+    const expiresAt = entry?.expiresAt;
+    this.store.set(fullKey, { value: String(newValue), expiresAt });
     return newValue;
   }
 
+  // FIX-500-370: Only set TTL when key is first created (count === by means it was just initialized)
   async incrWithExpire(key: string, ttlSeconds: number, by = 1): Promise<number> {
     const count = await this.incr(key, by);
-    await this.expire(key, ttlSeconds);
+    // Only set expiry on the first increment (when count equals the increment value)
+    if (count === by) {
+      await this.expire(key, ttlSeconds);
+    }
     return count;
   }
 

@@ -443,6 +443,11 @@ export class EnterpriseContractService {
    * Generate contract PDF content
    */
   generateContractPdf(contract: Contract): string {
+    // FIX-500-363: HTML-escape user-provided fields to prevent XSS in generated PDFs
+    const esc = (s: string | undefined | null): string => {
+      if (!s) return '';
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    };
     const formatCurrency = (cents: number): string =>
       `€${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
 
@@ -454,7 +459,7 @@ export class EnterpriseContractService {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Enterprise Contract - ${contract.name}</title>
+  <title>Enterprise Contract - ${esc(contract.name)}</title>
   <style>
     body { font-family: 'Georgia', serif; font-size: 11pt; line-height: 1.6; margin: 60px; color: #333; }
     h1 { font-size: 18pt; margin-bottom: 30px; text-align: center; }
@@ -524,7 +529,7 @@ export class EnterpriseContractService {
     ` : ''}
     ${contract.additionalFees.map(fee => `
     <tr>
-      <td>${fee.name} (${fee.frequency})</td>
+      <td>${esc(fee.name)} (${esc(fee.frequency)})</td>
       <td>${formatCurrency(fee.amount)}</td>
     </tr>
     `).join('')}
@@ -534,7 +539,7 @@ export class EnterpriseContractService {
   <div class="section">
     <p>Payment is due within ${contract.paymentTermsDays} days of invoice date (Net ${contract.paymentTermsDays}).</p>
     <p>Invoices will be issued monthly in arrears for usage and monthly fees.</p>
-    ${contract.purchaseOrderNumber ? `<p><strong>Purchase Order:</strong> ${contract.purchaseOrderNumber}</p>` : ''}
+    ${contract.purchaseOrderNumber ? `<p><strong>Purchase Order:</strong> ${esc(contract.purchaseOrderNumber)}</p>` : ''}
   </div>
 
   <h2>4. Service Level Agreement</h2>
@@ -557,7 +562,7 @@ export class EnterpriseContractService {
   ${contract.customTerms ? `
   <h2>6. Additional Terms</h2>
   <div class="section">
-    <p>${contract.customTerms}</p>
+    <p>${esc(contract.customTerms)}</p>
   </div>
   ` : ''}
 
@@ -572,7 +577,7 @@ export class EnterpriseContractService {
     <div class="signature-line">
       <hr>
       <p>For Client</p>
-      <p>Name: ${contract.signedBy || '_________________'}</p>
+      <p>Name: ${esc(contract.signedBy) || '_________________'}</p>
       <p>Title: _________________</p>
       <p>Date: ${contract.signedAt ? formatDate(contract.signedAt) : '_________________'}</p>
     </div>

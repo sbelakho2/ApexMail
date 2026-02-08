@@ -24,9 +24,22 @@ const PORT = parseInt(process.env.AI_PORT || '3012', 10);
 const HOST = process.env.AI_HOST || '0.0.0.0';
 
 // Model configuration from environment
-const MODELS_TO_LOAD = process.env.AI_MODELS 
-    ? JSON.parse(process.env.AI_MODELS)
-    : [];
+// FIX-500-017: Wrap JSON.parse in try-catch to prevent crash on malformed AI_MODELS env
+let MODELS_TO_LOAD: ModelConfig[] = [];
+if (process.env.AI_MODELS) {
+    try {
+        MODELS_TO_LOAD = JSON.parse(process.env.AI_MODELS);
+    } catch (e) {
+        logger.error('Failed to parse AI_MODELS env variable', { error: e instanceof Error ? e.message : String(e) });
+    }
+}
+
+interface ModelConfig {
+    name: string;
+    path: string;
+    priority: number;
+    warmupPrompt?: string;
+}
 
 // Export all modules for programmatic use
 export * from './types.js';
@@ -42,6 +55,11 @@ export { app } from './routes.js';
 
 // Global bootstrap instance
 let bootstrap: ServiceBootstrap | null = null;
+// FIX-500-392: Track initialization failure to report unhealthy status
+let initFailed = false;
+
+/** Returns true if the AI service failed to initialize */
+export function isInitFailed(): boolean { return initFailed; }
 
 /**
  * Start the AI service with warm-up
@@ -74,9 +92,12 @@ async function startService(): Promise<void> {
         const readiness = bootstrap.getReadiness();
         logger.info(`Service initialized in ${readiness.startupTime}ms`);
     } catch (error) {
-        logger.error('Warm-up failed, starting without pre-loaded models', { error: error instanceof Error ? error.message : String(error) });
+        // FIX-500-392: Mark service as unhealthy so /health returns 503
+        // instead of silently serving with no models loaded
+        logger.error('Warm-up failed, starting in degraded mode', { error: error instanceof Error ? error.message : String(error) });
         bootstrap = new ServiceBootstrap();
         bootstrap.setupSignalHandlers();
+        initFailed = true;
     }
 
     logger.info(`Binding to ${HOST}:${PORT}`);
@@ -114,8 +135,20 @@ export function getBootstrap(): ServiceBootstrap | null {
 }
 
 // Start server if running directly
-// Check if this module is the entry point
-const isMainModule = typeof require !== 'undefined' && require.main === module;
+// FIX-500-190: Robust entry point detection — works for both CJS and ESM
+const isMainModule = (() => {
+    // CJS: require.main check
+    try {
+        if (typeof require !== 'undefined' && require.main === module) return true;
+    } catch {
+        // ESM environment — require not available
+    }
+    // Suffix match as fallback (handles ts-node, compiled output, etc.)
+    const arg = process.argv[1] ?? '';
+    return arg.endsWith('/ai/src/index.js') ||
+        arg.endsWith('/ai/src/index.ts') ||
+        arg.endsWith('/ai/dist/index.js');
+})();
 
 if (isMainModule) {
     startService().catch(error => {

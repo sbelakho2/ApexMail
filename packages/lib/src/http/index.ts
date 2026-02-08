@@ -210,8 +210,10 @@ export class HttpClient {
           circuitBreaker.recordFailure();
           
           if (attempt < retries) {
+            // FIX-500-374: Add randomized jitter to prevent thundering herd
+            const jitter = Math.random() * baseRetryDelay * 0.5;
             const delay = Math.min(
-              baseRetryDelay * Math.pow(2, attempt),
+              baseRetryDelay * Math.pow(2, attempt) + jitter,
               maxRetryDelay
             );
             await this.sleep(delay);
@@ -242,8 +244,10 @@ export class HttpClient {
         circuitBreaker.recordFailure();
 
         if (attempt < retries) {
+          // FIX-500-374: Add randomized jitter to prevent thundering herd
+          const jitter = Math.random() * baseRetryDelay * 0.5;
           const delay = Math.min(
-            baseRetryDelay * Math.pow(2, attempt),
+            baseRetryDelay * Math.pow(2, attempt) + jitter,
             maxRetryDelay
           );
           await this.sleep(delay);

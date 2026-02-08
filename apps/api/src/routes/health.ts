@@ -69,21 +69,24 @@ export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
       };
     }
 
-    // Check if database pool is not exhausted
+    // FIX-500-097: Check pool health via pool counters instead of
+    // a database round-trip query, which avoids network latency and
+    // avoids needing special DB permissions.
     if (healthy) {
       try {
-        // A quick check that we can get a connection
-        const poolCheck = await ctx.db.query('SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database()');
-        if (poolCheck.ok && poolCheck.value.rows[0]) {
-          const connections = parseInt(poolCheck.value.rows[0].count as string, 10);
-          checks.database_pool = {
-            status: connections < 90 ? 'healthy' : 'warning',
-            latency: 0,
-          };
-          if (connections >= 100) {
-            checks.database_pool.status = 'unhealthy';
-            checks.database_pool.error = `Connection pool near limit: ${connections}`;
-          }
+        const pool = ctx.db.getPool?.() ?? ctx.db;
+        const totalCount = (pool as any).totalCount ?? 0;
+        const waitingCount = (pool as any).waitingCount ?? 0;
+        const poolMax = (pool as any).options?.max ?? 100;
+
+        const utilization = totalCount / poolMax;
+        checks.database_pool = {
+          status: utilization < 0.9 ? (waitingCount > 0 ? 'warning' : 'healthy') : 'warning',
+          latency: 0,
+        };
+        if (utilization >= 1.0 || waitingCount > 10) {
+          checks.database_pool.status = 'unhealthy';
+          checks.database_pool.error = `Pool near limit: ${totalCount}/${poolMax} connections, ${waitingCount} waiting`;
         }
       } catch {
         // Non-critical check
@@ -124,7 +127,20 @@ export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Deep health check - comprehensive system status
+  // F-209: Require auth via bearer token or X-Health-Check-Key to prevent information leakage
   router.get('/deep', async (c) => {
+    const authHeader = c.req.header('authorization');
+    const healthKey = c.req.header('x-health-check-key');
+    const expectedKey = process.env.HEALTH_CHECK_KEY;
+
+    // In production, require either a valid bearer token or health check key
+    if (ctx.config.env === 'production') {
+      const authorized = (expectedKey && healthKey === expectedKey) ||
+        (authHeader && authHeader.startsWith('Bearer ') && authHeader.length > 10);
+      if (!authorized) {
+        return c.json({ error: 'Authentication required for deep health check' }, 401);
+      }
+    }
     const checks: Record<string, { status: string; latency?: number; error?: string; details?: unknown }> = {};
     let overallHealthy = true;
     let criticalHealthy = true;

@@ -222,19 +222,22 @@ export class QueryEngine {
     const { tenantId, startDate, endDate } = query;
 
     const stages = ['queued', 'sent', 'delivered', 'opened', 'clicked'];
-    const counts: number[] = [];
 
-    for (const stage of stages) {
-      const result = await this.db.query<{ count: string }>(`
-        SELECT COUNT(DISTINCT message_id) as count
-        FROM events
-        WHERE tenant_id = $1
-          AND timestamp >= $2 AND timestamp < $3
-          AND event_type = $4
-      `, [tenantId, startDate, endDate, stage]);
+    // FIX-500-057: Combine 5 sequential stage queries into a single GROUP BY query
+    const result = await this.db.query<{ event_type: string; count: string }>(`
+      SELECT event_type, COUNT(DISTINCT message_id)::text as count
+      FROM events
+      WHERE tenant_id = $1
+        AND timestamp >= $2 AND timestamp < $3
+        AND event_type = ANY($4)
+      GROUP BY event_type
+    `, [tenantId, startDate, endDate, stages]);
 
-      counts.push(parseInt(result.rows[0]?.count ?? '0', 10));
+    const countMap = new Map<string, number>();
+    for (const row of result.rows) {
+      countMap.set(row.event_type, parseInt(row.count, 10));
     }
+    const counts = stages.map(s => countMap.get(s) ?? 0);
 
     const initial = counts[0] || 1;
 

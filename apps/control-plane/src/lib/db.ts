@@ -27,14 +27,24 @@ export async function getPool(): Promise<Pool> {
 }
 
 /**
+ * FIX-500-243: Close the DB connection pool for graceful shutdown.
+ */
+export async function closePool(): Promise<void> {
+    if (pool) {
+        await pool.end();
+        pool = null;
+    }
+}
+
+/**
  * Helper to run a query with automatic client release.
  * Returns the rows from the query result.
  */
-export async function query<T extends Record<string, unknown>>(
+export async function query<T = Record<string, unknown>>(
     sql: string,
     params?: unknown[]
 ): Promise<T[]> {
     const dbPool = await getPool();
-    const result = await dbPool.query<T>(sql, params);
-    return result.rows;
+    const result = await dbPool.query(sql, params);
+    return result.rows as T[];
 }

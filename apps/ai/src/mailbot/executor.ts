@@ -44,6 +44,21 @@ interface CommandDefinition {
 }
 
 /**
+ * Pending action with creation timestamp for TTL enforcement
+ */
+interface PendingEntry {
+    action: MailbotAction;
+    createdAt: number;
+}
+
+/** Max time a pending action can remain unconfirmed (15 minutes) */
+const PENDING_ACTION_TTL_MS = 15 * 60 * 1000;
+/** Interval between expired-action sweeps (60 seconds) */
+const PENDING_SWEEP_INTERVAL_MS = 60 * 1000;
+/** Maximum number of pending actions kept in memory */
+const MAX_PENDING_ACTIONS = 10_000;
+
+/**
  * Mailbot Executor
  * 
  * Processes natural language commands and translates them into
@@ -51,10 +66,36 @@ interface CommandDefinition {
  */
 export class MailbotExecutor {
     private commands: CommandDefinition[];
-    private pendingActions: Map<string, MailbotAction> = new Map();
+    private pendingActions: Map<string, PendingEntry> = new Map();
+    private sweepInterval: NodeJS.Timeout | null = null;
 
     constructor() {
         this.commands = this.initializeCommands();
+        // Periodically purge expired pending actions
+        this.sweepInterval = setInterval(() => this.sweepExpired(), PENDING_SWEEP_INTERVAL_MS);
+        if (this.sweepInterval.unref) this.sweepInterval.unref();
+    }
+
+    /**
+     * Destroy the executor, cleaning up the sweep interval
+     */
+    destroy(): void {
+        if (this.sweepInterval) {
+            clearInterval(this.sweepInterval);
+            this.sweepInterval = null;
+        }
+    }
+
+    /**
+     * Sweep expired pending actions
+     */
+    private sweepExpired(): void {
+        const now = Date.now();
+        for (const [id, entry] of this.pendingActions.entries()) {
+            if (now - entry.createdAt >= PENDING_ACTION_TTL_MS) {
+                this.pendingActions.delete(id);
+            }
+        }
     }
 
     /**
@@ -86,7 +127,21 @@ export class MailbotExecutor {
             // Check if confirmation is required
             if (parsedCommand.definition.requiresConfirmation) {
                 const confirmationId = this.generateConfirmationId();
-                this.pendingActions.set(confirmationId, action);
+
+                // Enforce pending actions cap — evict oldest if full
+                if (this.pendingActions.size >= MAX_PENDING_ACTIONS) {
+                    let oldestId: string | null = null;
+                    let oldestTime = Infinity;
+                    for (const [id, entry] of this.pendingActions.entries()) {
+                        if (entry.createdAt < oldestTime) {
+                            oldestTime = entry.createdAt;
+                            oldestId = id;
+                        }
+                    }
+                    if (oldestId) this.pendingActions.delete(oldestId);
+                }
+
+                this.pendingActions.set(confirmationId, { action, createdAt: Date.now() });
 
                 return {
                     success: true,
@@ -119,12 +174,22 @@ export class MailbotExecutor {
      * Confirm a pending action
      */
     confirmAction(confirmationId: string): MailbotResponse {
-        const action = this.pendingActions.get(confirmationId);
+        const entry = this.pendingActions.get(confirmationId);
 
-        if (!action) {
+        if (!entry) {
             return {
                 success: false,
                 message: 'No pending action found with that confirmation ID.',
+                latencyMs: 0,
+            };
+        }
+
+        // Check TTL
+        if (Date.now() - entry.createdAt >= PENDING_ACTION_TTL_MS) {
+            this.pendingActions.delete(confirmationId);
+            return {
+                success: false,
+                message: 'This pending action has expired. Please re-issue the command.',
                 latencyMs: 0,
             };
         }
@@ -133,8 +198,8 @@ export class MailbotExecutor {
 
         return {
             success: true,
-            message: this.buildSuccessMessage(action),
-            action,
+            message: this.buildSuccessMessage(entry.action),
+            action: entry.action,
             requiresConfirmation: false,
             latencyMs: 0,
         };
@@ -144,9 +209,9 @@ export class MailbotExecutor {
      * Cancel a pending action
      */
     cancelAction(confirmationId: string): MailbotResponse {
-        const action = this.pendingActions.get(confirmationId);
+        const entry = this.pendingActions.get(confirmationId);
 
-        if (!action) {
+        if (!entry) {
             return {
                 success: false,
                 message: 'No pending action found with that confirmation ID.',
@@ -158,7 +223,7 @@ export class MailbotExecutor {
 
         return {
             success: true,
-            message: `Action cancelled: ${action.type}`,
+            message: `Action cancelled: ${entry.action.type}`,
             latencyMs: 0,
         };
     }

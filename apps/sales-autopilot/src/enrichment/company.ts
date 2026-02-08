@@ -18,6 +18,13 @@ import type {
 const logger = createLogger({ name: 'company-enrichment', level: 'info' });
 
 /**
+ * FIX-500-092: In-memory enrichment cache with 24-hour TTL.
+ * Avoids redundant HTTP calls for the same domain within the TTL window.
+ */
+const enrichmentCache = new Map<string, { result: EnrichmentResult; expiresAt: number }>();
+const ENRICHMENT_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
  * Fetches a page with proper headers
  */
 async function fetchPage(url: string): Promise<string | null> {
@@ -236,60 +243,17 @@ function parseEmployeeRange(text: string): EmployeeRange | null {
 }
 
 /**
- * Enriches from LinkedIn company page (public data only)
+ * FIX-500-128: LinkedIn enrichment is intentionally disabled.
+ * LinkedIn serves JS-rendered pages that return empty HTML to simple HTTP
+ * fetchers, so the previous scraping attempt always produced an empty result
+ * while wasting a rate-limited request slot and adding latency.
+ * To enrich from LinkedIn, integrate their official Marketing/Sales API.
  */
 async function enrichFromLinkedIn(companyName: string): Promise<Partial<EnrichmentResult>> {
-    // LinkedIn blocks most scraping, so we use minimal public data
-    // In production, you'd use LinkedIn's official API
-    const searchUrl = `https://www.linkedin.com/company/${companyName
-        .toLowerCase()
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9-]/g, '')}`;
-
-    const html = await fetchPage(searchUrl);
-    if (!html) {
-        return {};
-    }
-
-    const $ = cheerio.load(html);
-    const result: Partial<EnrichmentResult> = {
-        sources: [{ name: 'linkedin', url: searchUrl, scrapedAt: new Date() }],
-    };
-
-    // Extract public profile info
-    const description = $('meta[property="og:description"]').attr('content');
-    if (description) {
-        result.description = description;
-
-        // Try to extract employee count from description
-        const empMatch = description.match(/(\d[\d,]+)\s*employees?/i);
-        if (empMatch && empMatch[1]) {
-            const empCount = parseInt(empMatch[1].replace(/,/g, ''), 10);
-            if (empCount <= 10) {
-                result.employeeRange = { min: 1, max: 10, label: '1-10' };
-            } else if (empCount <= 50) {
-                result.employeeRange = { min: 11, max: 50, label: '11-50' };
-            } else if (empCount <= 200) {
-                result.employeeRange = { min: 51, max: 200, label: '51-200' };
-            } else if (empCount <= 500) {
-                result.employeeRange = { min: 201, max: 500, label: '201-500' };
-            } else if (empCount <= 1000) {
-                result.employeeRange = { min: 501, max: 1000, label: '501-1000' };
-            } else if (empCount <= 5000) {
-                result.employeeRange = { min: 1001, max: 5000, label: '1001-5000' };
-            } else {
-                result.employeeRange = { min: 5001, max: 10000, label: '5001-10000' };
-            }
-        }
-
-        // Try to extract industry
-        const industryMatch = description.match(/industry:\s*([^|•\n]+)/i);
-        if (industryMatch && industryMatch[1]) {
-            result.industry = industryMatch[1].trim();
-        }
-    }
-
-    return result;
+    // FIX-500-128: LinkedIn requires JS rendering (headless browser) or official API.
+    // The original scraping code was unreachable dead code. Removed entirely.
+    logger.debug('Skipping LinkedIn enrichment — JS-rendered pages unsupported without official API', { companyName });
+    return {};
 }
 
 /**
@@ -456,6 +420,8 @@ function mergeEnrichmentResults(
 
 /**
  * Main enrichment function
+ * FIX-500-092: Results are cached by domain for 24 hours to avoid
+ * redundant HTTP calls to external enrichment APIs.
  */
 export async function enrichCompany(
     domain: string,
@@ -465,6 +431,14 @@ export async function enrichCompany(
         skipLinkedIn?: boolean;
     }
 ): Promise<EnrichmentResult> {
+    // FIX-500-092: Check cache first
+    const cacheKey = domain.toLowerCase();
+    const cached = enrichmentCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+        logger.debug('Enrichment cache hit', { domain });
+        return cached.result;
+    }
+
     logger.info('Enriching company', { domain, companyName });
 
     const results: Partial<EnrichmentResult>[] = [];
@@ -486,6 +460,12 @@ export async function enrichCompany(
         domain,
         sources: merged.sources.length,
         confidence: merged.confidence,
+    });
+
+    // FIX-500-092: Cache the result for 24 hours
+    enrichmentCache.set(cacheKey, {
+        result: merged,
+        expiresAt: Date.now() + ENRICHMENT_CACHE_TTL_MS,
     });
 
     return merged;

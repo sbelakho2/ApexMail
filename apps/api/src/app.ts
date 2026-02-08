@@ -26,7 +26,7 @@ import { csrfProtection } from './middleware/csrf.js';
 import { trustedProxyMiddleware } from './middleware/trusted-proxy.js';
 
 import { healthRoutes } from './routes/health.js';
-import { authRoutes } from './routes/auth.js';
+import { authRoutes, publicAuthRoutes } from './routes/auth.js';
 import { messagesRoutes } from './routes/messages.js';
 import { domainsRoutes } from './routes/domains.js';
 import { templatesRoutes } from './routes/templates.js';
@@ -133,13 +133,16 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
 
   // F-217: Sanitize request bodies — reject null bytes (\u0000) which cause
   // errors in PostgreSQL text/varchar columns and can be used for injection.
+  // FIX-500-004: Clone the request before reading to avoid consuming the body
+  // stream. Previously `c.req.text()` consumed it, causing downstream
+  // `c.req.json()` to fail with an empty-body error on valid POST/PUT/PATCH.
   app.use('*', async (c, next) => {
     const contentType = c.req.header('content-type') ?? '';
     if (
       (c.req.method === 'POST' || c.req.method === 'PUT' || c.req.method === 'PATCH') &&
       contentType.includes('application/json')
     ) {
-      const rawBody = await c.req.text();
+      const rawBody = await c.req.raw.clone().text();
       if (rawBody.includes('\u0000')) {
         return c.json({ error: 'Request body contains invalid null bytes' }, 400);
       }
@@ -191,9 +194,10 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
 
   // Auth login route MUST be outside auth middleware (users need to obtain JWT)
   // Rate limit login separately to prevent brute-force
+  // FIX-500-162: Only /login is public; /me, /api-keys, /logout, /refresh are authenticated
   const publicAuth = new Hono<AppEnv>();
   publicAuth.use('*', rateLimiter(ctx));
-  publicAuth.route('/auth', authRoutes(ctx));
+  publicAuth.route('/auth', publicAuthRoutes(ctx));
   app.route('/v1', publicAuth);
 
   // API routes with authentication
@@ -209,9 +213,14 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
   api.use('*', rateLimiter(ctx));
 
   // Idempotency for mutation endpoints
+  // FIX-500-487: Apply to all mutation-capable routes, not just /messages
   api.use('/messages/*', idempotencyMiddleware(ctx));
+  api.use('/domains/*', idempotencyMiddleware(ctx));
+  api.use('/templates/*', idempotencyMiddleware(ctx));
+  api.use('/suppressions/*', idempotencyMiddleware(ctx));
 
   // Mount API routes (auth routes excluded — mounted above without auth)
+  api.route('/auth', authRoutes(ctx)); // FIX-500-162: Authenticated auth routes (/me, /api-keys, /logout, /refresh)
   api.route('/messages', messagesRoutes(ctx));
   api.route('/domains', domainsRoutes(ctx));
   api.route('/templates', templatesRoutes(ctx));
@@ -240,6 +249,10 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
  * Marks a route as deprecated by adding standard Deprecation and Sunset headers.
  * Usage:
  *   router.get('/old-endpoint', deprecated('2025-03-01'), handler);
+ *
+ * FIX-500-462: This middleware is defined and exported but not yet applied to
+ * any route. It is ready for use when API versioning or endpoint migrations
+ * require sunset signaling. No routes are currently deprecated.
  *
  * @param sunsetDate - ISO 8601 date string when the endpoint will be removed
  * @param link - Optional URL to documentation for the replacement endpoint

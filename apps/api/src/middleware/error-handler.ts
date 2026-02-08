@@ -108,6 +108,22 @@ export function errorHandler(logger: Logger): ErrorHandler<AppEnv> {
       }, 400);
     }
 
+    // FIX-500-161: Handle JSON SyntaxError — malformed request body should be 400
+    if (err instanceof SyntaxError && 'body' in err) {
+      logger.warn('Malformed JSON in request body', {
+        requestId,
+        error: err.message,
+      });
+
+      return c.json({
+        error: {
+          code: 'INVALID_JSON',
+          message: 'Malformed JSON in request body',
+        },
+        requestId,
+      }, 400);
+    }
+
     // Handle unknown errors
     // SECURITY FIX: Only log stack traces internally, never expose in response
     logger.error('Unhandled error', {

@@ -24,7 +24,8 @@ const PROTO_PATH = path.resolve(
     '../../../services/mail-server/crates/mail-proto/proto/mail.proto',
 );
 
-// Load proto definition lazily (once)
+// FIX-500-375: Proto definition is loaded lazily and cached at module level (singleton pattern).
+// getGrpcObject() only calls loadSync on the first invocation; subsequent calls return the cached object.
 let _packageDef: protoLoader.PackageDefinition | null = null;
 let _grpcObject: grpc.GrpcObject | null = null;
 

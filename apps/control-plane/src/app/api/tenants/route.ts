@@ -22,9 +22,13 @@ const DEMO_TENANTS = [
     { id: 'tenant-8', name: 'Old Company', domain: 'oldcompany.biz', email: 'info@oldcompany.biz', plan: 'starter', status: 'churned', riskLevel: 'low', metrics: { emailsSentMonth: 0, emailsSentTotal: 234000, domainsVerified: 1, apiKeys: 0, teamMembers: 1 }, billing: { mrr: 0, nextBillingDate: null, paymentMethod: null }, createdAt: new Date(Date.now() - 31536000000).toISOString(), lastActiveAt: new Date(Date.now() - 7776000000).toISOString() },
 ];
 
-export async function GET() {
+export async function GET(request: Request) {
     try {
-        // TODO: Replace with DB query once tenants table schema is finalized
+        // FIX-500-302: Add pagination support
+        const url = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
+        const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
+
         const rows = await query<{
             id: string;
             name: string;
@@ -45,7 +49,8 @@ export async function GET() {
                 COALESCE(t.last_active_at, t.created_at) as last_active_at
             FROM tenants t
             ORDER BY t.created_at DESC
-        `);
+            LIMIT $1 OFFSET $2
+        `, [limit, offset]);
 
         if (rows.length === 0) {
             // Return demo data when DB is empty (development)
@@ -148,7 +153,10 @@ export async function PATCH(request: Request) {
 }
 
 /**
- * DELETE /api/tenants — Delete a tenant
+ * DELETE /api/tenants — Soft-delete a tenant
+ * 
+ * FIX-500-014: Hard-deleting a tenant orphans messages, subscriptions,
+ * GDPR requests, and other foreign-keyed data. Use soft-delete instead.
  */
 export async function DELETE(request: Request) {
     try {
@@ -159,8 +167,20 @@ export async function DELETE(request: Request) {
             return NextResponse.json({ error: 'Tenant ID is required' }, { status: 400 });
         }
 
-        await query('DELETE FROM tenants WHERE id = $1', [id]);
-        return NextResponse.json({ success: true, message: `Tenant ${id} deleted` });
+        // Soft-delete: mark as deleted instead of removing the row
+        const result = await query(
+            `UPDATE tenants SET status = 'deleted', suspended = true, updated_at = NOW(),
+             metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+             WHERE id = $1 AND status != 'deleted'
+             RETURNING id`,
+            [id, JSON.stringify({ deletedAt: new Date().toISOString() })]
+        );
+
+        if (!result || result.length === 0) {
+            return NextResponse.json({ error: 'Tenant not found or already deleted' }, { status: 404 });
+        }
+
+        return NextResponse.json({ success: true, message: `Tenant ${id} soft-deleted` });
     } catch (error) {
         console.error('Tenants DELETE error:', error);
         return NextResponse.json({ error: 'Failed to delete tenant' }, { status: 500 });

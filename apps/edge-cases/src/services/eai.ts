@@ -6,6 +6,7 @@
 
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
+import dns from 'dns'; // FIX-500-407: Static import instead of dynamic
 import punycode from 'punycode/';
 import { UNICODE_NORMALIZATION } from '../config.js';
 
@@ -353,8 +354,7 @@ export class EAIService {
     }
 
     try {
-      const { promises: dns } = await import('dns');
-      const mxRecords = await dns.resolveMx(domain);
+      const mxRecords = await dns.promises.resolveMx(domain);
       const hasMX = mxRecords && mxRecords.length > 0;
       
       // Cache for 1 hour
@@ -364,8 +364,7 @@ export class EAIService {
     } catch (error) {
       // If MX lookup fails, try A record
       try {
-        const { promises: dns } = await import('dns');
-        await dns.resolve4(domain);
+        await dns.promises.resolve4(domain);
         await this.redis.setex(cacheKey, 3600, '1');
         return true;
       } catch {
@@ -409,8 +408,10 @@ export class EAIService {
       console.error('Error checking EAI support:', error);
     }
 
-    // Default to unknown (assume support)
-    return true;
+    // FIX-500-403: Default to false (no support) — sending UTF-8 addresses
+    // to a server that doesn't support SMTPUTF8 will cause delivery failures.
+    // It's safer to fall back to ASCII encoding than to assume support.
+    return false;
   }
 
   /**

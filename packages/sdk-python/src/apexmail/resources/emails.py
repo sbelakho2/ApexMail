@@ -6,12 +6,37 @@ API operations for sending and managing emails.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from ..exceptions import ValidationError
 from ..models import Email, EmailListResponse, EmailStatus, SendEmailResponse
 
 if TYPE_CHECKING:
     from ..client import ApexMail, AsyncApexMail
+
+# FIX-500-287: Basic email format validation
+_EMAIL_REGEX = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+# FIX-500-291: ID format validation
+_ID_REGEX = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
+
+# FIX-500-286: Maximum batch size
+_MAX_BATCH_SIZE = 1000
+
+
+def _validate_email(email: str, field: str) -> None:
+    """Validate email format."""
+    if not _EMAIL_REGEX.match(email):
+        raise ValidationError(f'Invalid "{field}" email format: {email}')
+
+
+def _validate_id(resource_id: str, resource_name: str) -> None:
+    """FIX-500-291: Validate resource ID format."""
+    if not resource_id or not _ID_REGEX.match(resource_id):
+        raise ValidationError(
+            f'Invalid {resource_name} ID format: "{resource_id}". '
+            'IDs must be 1-128 alphanumeric characters, hyphens, or underscores.'
+        )
 
 
 class EmailsResource:
@@ -66,6 +91,20 @@ class EmailsResource:
             "subject": subject,
         }
 
+        # FIX-500-287: Validate email formats
+        _validate_email(from_, "from")
+        recipients = to if isinstance(to, list) else [to]
+        for r in recipients:
+            _validate_email(r, "to")
+
+        # FIX-500-288: Body presence check
+        if not html and not text:
+            raise ValidationError('Either "html" or "text" body is required')
+        if html and not html.strip():
+            raise ValidationError('"html" body must not be empty or whitespace-only')
+        if text and not text.strip():
+            raise ValidationError('"text" body must not be empty or whitespace-only')
+
         if html:
             payload["html"] = html
         if text:
@@ -87,7 +126,8 @@ class EmailsResource:
         if metadata:
             payload["metadata"] = metadata
 
-        data = self._client._request("POST", "/emails", json=payload)
+        # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
+        data = self._client._request("POST", "/emails", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
     def batch(
@@ -103,6 +143,12 @@ class EmailsResource:
         Returns:
             List of SendEmailResponse objects
         """
+        # FIX-500-286: Validate batch size
+        if not emails:
+            raise ValidationError('"emails" list must not be empty')
+        if len(emails) > _MAX_BATCH_SIZE:
+            raise ValidationError(f'Maximum {_MAX_BATCH_SIZE} emails per batch, got {len(emails)}')
+
         # Convert from_ to from in each email
         processed = []
         for email in emails:
@@ -124,6 +170,7 @@ class EmailsResource:
         Returns:
             Email details
         """
+        _validate_id(email_id, 'email')
         data = self._client._request("GET", f"/emails/{email_id}")
         return Email(**data["email"])
 
@@ -185,6 +232,7 @@ class EmailsResource:
         Returns:
             Updated email details
         """
+        _validate_id(email_id, 'email')
         data = self._client._request("POST", f"/emails/{email_id}/cancel")
         return Email(**data["email"])
 
@@ -220,6 +268,20 @@ class AsyncEmailsResource:
             "subject": subject,
         }
 
+        # FIX-500-287: Validate email formats
+        _validate_email(from_, "from")
+        recipients = to if isinstance(to, list) else [to]
+        for r in recipients:
+            _validate_email(r, "to")
+
+        # FIX-500-288: Body presence check
+        if not html and not text:
+            raise ValidationError('Either "html" or "text" body is required')
+        if html and not html.strip():
+            raise ValidationError('"html" body must not be empty or whitespace-only')
+        if text and not text.strip():
+            raise ValidationError('"text" body must not be empty or whitespace-only')
+
         if html:
             payload["html"] = html
         if text:
@@ -241,11 +303,18 @@ class AsyncEmailsResource:
         if metadata:
             payload["metadata"] = metadata
 
-        data = await self._client._request("POST", "/emails", json=payload)
+        # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
+        data = await self._client._request("POST", "/emails", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
     async def batch(self, emails: list[dict[str, Any]]) -> list[SendEmailResponse]:
         """Send multiple emails in a batch asynchronously."""
+        # FIX-500-286: Validate batch size
+        if not emails:
+            raise ValidationError('"emails" list must not be empty')
+        if len(emails) > _MAX_BATCH_SIZE:
+            raise ValidationError(f'Maximum {_MAX_BATCH_SIZE} emails per batch, got {len(emails)}')
+
         processed = []
         for email in emails:
             processed_email = {**email}
@@ -258,6 +327,7 @@ class AsyncEmailsResource:
 
     async def get(self, email_id: str) -> Email:
         """Get email details by ID asynchronously."""
+        _validate_id(email_id, 'email')
         data = await self._client._request("GET", f"/emails/{email_id}")
         return Email(**data["email"])
 
@@ -296,5 +366,6 @@ class AsyncEmailsResource:
 
     async def cancel(self, email_id: str) -> Email:
         """Cancel a scheduled email asynchronously."""
+        _validate_id(email_id, 'email')
         data = await self._client._request("POST", f"/emails/{email_id}/cancel")
         return Email(**data["email"])

@@ -35,12 +35,14 @@ export function createObservabilityRoutes(
     const service = c.req.query('service');
     const operation = c.req.query('operation');
     const minDuration = c.req.query('minDuration') 
-      ? parseInt(c.req.query('minDuration')!) 
+      ? parseInt(c.req.query('minDuration')!) || undefined
       : undefined;
-    const tags = c.req.query('tags') 
-      ? JSON.parse(c.req.query('tags')!) 
-      : undefined;
-    const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) : 100;
+    let tags: Record<string, string> | undefined;
+    if (c.req.query('tags')) {
+      try { tags = JSON.parse(c.req.query('tags')!); }
+      catch { return c.json({ error: 'Invalid tags JSON' }, 400); }
+    }
+    const limit = c.req.query('limit') ? parseInt(c.req.query('limit')!) || 100 : 100;
 
     const result = await tracing.searchTraces({
       startTime,
@@ -60,21 +62,8 @@ export function createObservabilityRoutes(
   });
 
   /**
-   * Get trace by ID
-   */
-  app.get('/traces/:traceId', async (c) => {
-    const traceId = c.req.param('traceId');
-    const result = await tracing.getTrace(traceId);
-
-    if (!result.ok) {
-      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
-    }
-
-    return c.json(result.value);
-  });
-
-  /**
    * Get trace statistics
+   * FIX-500-229: Moved BEFORE /traces/:traceId to prevent route shadowing
    */
   app.get('/traces/stats', async (c) => {
     const startTime = c.req.query('startTime') 
@@ -88,6 +77,21 @@ export function createObservabilityRoutes(
 
     if (!result.ok) {
       return c.json({ error: (result as { ok: false; error: Error }).error.message }, 500);
+    }
+
+    return c.json(result.value);
+  });
+
+  /**
+   * Get trace by ID
+   * FIX-500-229: Moved AFTER /traces/stats so the static path matches first
+   */
+  app.get('/traces/:traceId', async (c) => {
+    const traceId = c.req.param('traceId');
+    const result = await tracing.getTrace(traceId);
+
+    if (!result.ok) {
+      return c.json({ error: (result as { ok: false; error: Error }).error.message }, 404);
     }
 
     return c.json(result.value);
@@ -115,9 +119,11 @@ export function createObservabilityRoutes(
     const endTime = c.req.query('endTime') 
       ? new Date(c.req.query('endTime')!) 
       : new Date();
-    const labels = c.req.query('labels') 
-      ? JSON.parse(c.req.query('labels')!) 
-      : undefined;
+    let labels: Record<string, string> | undefined;
+    if (c.req.query('labels')) {
+      try { labels = JSON.parse(c.req.query('labels')!); }
+      catch { return c.json({ error: 'Invalid labels JSON' }, 400); }
+    }
 
     const result = await metrics.queryMetrics({
       name,

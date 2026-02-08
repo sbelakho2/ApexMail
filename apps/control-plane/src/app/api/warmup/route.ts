@@ -1,74 +1,202 @@
 /**
- * IP Warmer API
- * 
- * Returns IP warmup pools, IPs, and schedules.
- * Used by the /ip-warmer page.
+ * IP Warmup API
+ *
+ * FIX-500-141: DB-backed warmup management — no demo data.
+ * Queries ip_pools, ip_pool_addresses, and isp_warmup_schedules tables
+ * (created in migration 002).
  */
 
 import { NextResponse } from 'next/server';
+import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// TODO: Replace with real IP warmup service/DB queries
-const DEMO_WARMUP_SCHEDULES: Record<string, { schedule: number[]; maxDay: number; maxLimit: number }> = {
-    gmail: { schedule: [50, 100, 200, 400, 800, 1500, 2500, 4000, 6000, 8000, 10000, 15000, 20000, 30000], maxDay: 13, maxLimit: 30000 },
-    microsoft: { schedule: [100, 200, 400, 800, 1500, 3000, 5000, 8000, 12000, 18000, 25000, 35000, 50000], maxDay: 12, maxLimit: 50000 },
-    yahoo: { schedule: [50, 100, 200, 400, 800, 1500, 2500, 4000, 6000, 8000, 10000, 15000, 20000], maxDay: 12, maxLimit: 20000 },
-    apple: { schedule: [75, 150, 300, 600, 1200, 2400, 4000, 6000, 9000, 12000, 16000, 22000, 30000], maxDay: 12, maxLimit: 30000 },
-    default: { schedule: [100, 200, 400, 800, 1500, 3000, 5000, 8000, 12000, 18000, 25000, 35000, 50000, 75000, 100000], maxDay: 14, maxLimit: 100000 },
-};
+interface PoolRow {
+    id: string;
+    name: string;
+    description: string | null;
+    warmup_enabled: boolean;
+    warmup_started_at: string | null;
+    warmup_day: number;
+    daily_limit: number | null;
+    status: string;
+    created_at: string;
+    updated_at: string;
+}
 
-const DEMO_POOLS = [
-    { id: 'pool-1', name: 'Primary Shared Pool', tenantId: 'system', ipCount: 8, activeIPs: 6, totalDailyLimit: 45000, totalDailySent: 32400, utilizationPercent: 72 },
-    { id: 'pool-2', name: 'Enterprise Dedicated', tenantId: 'tenant-1', ipCount: 4, activeIPs: 4, totalDailyLimit: 120000, totalDailySent: 89500, utilizationPercent: 75 },
-    { id: 'pool-3', name: 'Newsletter Pool', tenantId: 'tenant-2', ipCount: 2, activeIPs: 2, totalDailyLimit: 25000, totalDailySent: 18200, utilizationPercent: 73 },
-    { id: 'pool-4', name: 'Transactional Pool', tenantId: 'system', ipCount: 3, activeIPs: 3, totalDailyLimit: 85000, totalDailySent: 71000, utilizationPercent: 84 },
-];
+interface AddressRow {
+    id: string;
+    pool_id: string;
+    ip_address: string;
+    hostname: string | null;
+    ptr_verified: boolean;
+    warmup_enabled: boolean;
+    warmup_started_at: string | null;
+    warmup_day: number;
+    daily_limit: number | null;
+    daily_sent: number;
+    last_reset_at: string | null;
+    reputation_score: number | null;
+    status: string;
+    created_at: string;
+    updated_at: string;
+}
 
-const DEMO_IPS: Record<string, Array<{
-    id: string; ipAddress: string; poolId: string; warmupDay: number;
-    dailyLimit: number; dailySent: number; warmupStartedAt: string | null;
-    status: string; isFullyWarmed: boolean; nextDayLimit: number | null; utilizationPercent: number;
-}>> = {
-    'pool-1': [
-        { id: 'ip-1', ipAddress: '198.51.100.1', poolId: 'pool-1', warmupDay: 10, dailyLimit: 12000, dailySent: 9600, warmupStartedAt: new Date(Date.now() - 864000000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 18000, utilizationPercent: 80 },
-        { id: 'ip-2', ipAddress: '198.51.100.2', poolId: 'pool-1', warmupDay: 8, dailyLimit: 8000, dailySent: 5600, warmupStartedAt: new Date(Date.now() - 691200000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 12000, utilizationPercent: 70 },
-        { id: 'ip-3', ipAddress: '198.51.100.3', poolId: 'pool-1', warmupDay: 6, dailyLimit: 5000, dailySent: 4200, warmupStartedAt: new Date(Date.now() - 518400000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 8000, utilizationPercent: 84 },
-        { id: 'ip-4', ipAddress: '198.51.100.4', poolId: 'pool-1', warmupDay: 14, dailyLimit: 100000, dailySent: 13000, warmupStartedAt: new Date(Date.now() - 1209600000).toISOString(), status: 'active', isFullyWarmed: true, nextDayLimit: null, utilizationPercent: 13 },
-        { id: 'ip-5', ipAddress: '198.51.100.5', poolId: 'pool-1', warmupDay: 3, dailyLimit: 800, dailySent: 0, warmupStartedAt: new Date(Date.now() - 259200000).toISOString(), status: 'paused', isFullyWarmed: false, nextDayLimit: 1500, utilizationPercent: 0 },
-        { id: 'ip-6', ipAddress: '198.51.100.6', poolId: 'pool-1', warmupDay: 0, dailyLimit: 100, dailySent: 0, warmupStartedAt: null, status: 'inactive', isFullyWarmed: false, nextDayLimit: 200, utilizationPercent: 0 },
-    ],
-    'pool-2': [
-        { id: 'ip-7', ipAddress: '203.0.113.1', poolId: 'pool-2', warmupDay: 14, dailyLimit: 100000, dailySent: 78000, warmupStartedAt: new Date(Date.now() - 1209600000).toISOString(), status: 'active', isFullyWarmed: true, nextDayLimit: null, utilizationPercent: 78 },
-        { id: 'ip-8', ipAddress: '203.0.113.2', poolId: 'pool-2', warmupDay: 14, dailyLimit: 100000, dailySent: 82000, warmupStartedAt: new Date(Date.now() - 1209600000).toISOString(), status: 'active', isFullyWarmed: true, nextDayLimit: null, utilizationPercent: 82 },
-        { id: 'ip-9', ipAddress: '203.0.113.3', poolId: 'pool-2', warmupDay: 11, dailyLimit: 25000, dailySent: 18500, warmupStartedAt: new Date(Date.now() - 950400000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 35000, utilizationPercent: 74 },
-        { id: 'ip-10', ipAddress: '203.0.113.4', poolId: 'pool-2', warmupDay: 9, dailyLimit: 18000, dailySent: 11000, warmupStartedAt: new Date(Date.now() - 777600000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 25000, utilizationPercent: 61 },
-    ],
-    'pool-3': [
-        { id: 'ip-11', ipAddress: '192.0.2.1', poolId: 'pool-3', warmupDay: 12, dailyLimit: 50000, dailySent: 35000, warmupStartedAt: new Date(Date.now() - 1036800000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 75000, utilizationPercent: 70 },
-        { id: 'ip-12', ipAddress: '192.0.2.2', poolId: 'pool-3', warmupDay: 7, dailyLimit: 8000, dailySent: 6200, warmupStartedAt: new Date(Date.now() - 604800000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 12000, utilizationPercent: 78 },
-    ],
-    'pool-4': [
-        { id: 'ip-13', ipAddress: '198.18.0.1', poolId: 'pool-4', warmupDay: 14, dailyLimit: 100000, dailySent: 92000, warmupStartedAt: new Date(Date.now() - 1209600000).toISOString(), status: 'active', isFullyWarmed: true, nextDayLimit: null, utilizationPercent: 92 },
-        { id: 'ip-14', ipAddress: '198.18.0.2', poolId: 'pool-4', warmupDay: 13, dailyLimit: 75000, dailySent: 58000, warmupStartedAt: new Date(Date.now() - 1123200000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 100000, utilizationPercent: 77 },
-        { id: 'ip-15', ipAddress: '198.18.0.3', poolId: 'pool-4', warmupDay: 10, dailyLimit: 18000, dailySent: 14000, warmupStartedAt: new Date(Date.now() - 864000000).toISOString(), status: 'active', isFullyWarmed: false, nextDayLimit: 25000, utilizationPercent: 78 },
-    ],
-};
+interface ScheduleRow {
+    id: string;
+    isp_name: string;
+    mx_patterns: string[];
+    warmup_schedule: number[];
+    notes: string | null;
+    created_at: string;
+    updated_at: string;
+}
 
 export async function GET() {
     try {
-        // TODO: Replace with real IP warmup service queries
+        const [pools, addresses, schedules] = await Promise.all([
+            query<PoolRow>(
+                `SELECT id, name, description, warmup_enabled, warmup_started_at,
+                        warmup_day, daily_limit, status, created_at, updated_at
+                 FROM ip_pools
+                 ORDER BY name ASC`
+            ),
+            query<AddressRow>(
+                `SELECT id, pool_id, ip_address, hostname, ptr_verified,
+                        warmup_enabled, warmup_started_at, warmup_day,
+                        daily_limit, daily_sent, last_reset_at,
+                        reputation_score, status, created_at, updated_at
+                 FROM ip_pool_addresses
+                 ORDER BY pool_id, ip_address`
+            ),
+            query<ScheduleRow>(
+                `SELECT id, isp_name, mx_patterns, warmup_schedule, notes,
+                        created_at, updated_at
+                 FROM isp_warmup_schedules
+                 ORDER BY isp_name ASC`
+            ),
+        ]);
+
+        const addressesByPool = new Map<string, AddressRow[]>();
+        for (const a of addresses) {
+            const arr = addressesByPool.get(a.pool_id) ?? [];
+            arr.push(a);
+            addressesByPool.set(a.pool_id, arr);
+        }
+
         return NextResponse.json({
-            pools: DEMO_POOLS,
-            schedules: DEMO_WARMUP_SCHEDULES,
-            ips: DEMO_IPS,
+            pools: pools.map((p) => ({
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                warmupEnabled: p.warmup_enabled,
+                warmupStartedAt: p.warmup_started_at,
+                warmupDay: p.warmup_day,
+                dailyLimit: p.daily_limit,
+                status: p.status,
+                createdAt: p.created_at,
+                updatedAt: p.updated_at,
+                addresses: (addressesByPool.get(p.id) ?? []).map((a) => ({
+                    id: a.id,
+                    ipAddress: a.ip_address,
+                    hostname: a.hostname,
+                    ptrVerified: a.ptr_verified,
+                    warmupEnabled: a.warmup_enabled,
+                    warmupStartedAt: a.warmup_started_at,
+                    warmupDay: a.warmup_day,
+                    dailyLimit: a.daily_limit,
+                    dailySent: a.daily_sent,
+                    lastResetAt: a.last_reset_at,
+                    reputationScore: a.reputation_score,
+                    status: a.status,
+                })),
+            })),
+            schedules: schedules.map((s) => ({
+                id: s.id,
+                ispName: s.isp_name,
+                mxPatterns: s.mx_patterns,
+                warmupSchedule: s.warmup_schedule,
+                notes: s.notes,
+            })),
         });
     } catch (error) {
-        console.error('IP Warmer API error:', error);
-        return NextResponse.json({
-            pools: DEMO_POOLS,
-            schedules: DEMO_WARMUP_SCHEDULES,
-            ips: DEMO_IPS,
-        });
+        console.error('Warmup API error:', error);
+        return NextResponse.json({ error: 'Failed to fetch warmup data' }, { status: 500 });
+    }
+}
+
+export async function POST(request: Request) {
+    try {
+        const body = await request.json();
+        const { poolId, action } = body;
+
+        if (!poolId) {
+            return NextResponse.json({ error: 'Pool ID required' }, { status: 400 });
+        }
+
+        if (action === 'start') {
+            const updated = await query<PoolRow>(
+                `UPDATE ip_pools
+                 SET warmup_enabled = true,
+                     warmup_started_at = COALESCE(warmup_started_at, NOW()),
+                     warmup_day = COALESCE(warmup_day, 0),
+                     updated_at = NOW()
+                 WHERE id = $1
+                 RETURNING *`,
+                [poolId]
+            );
+            if (updated.length === 0) {
+                return NextResponse.json({ error: 'Pool not found' }, { status: 404 });
+            }
+            await query(
+                `UPDATE ip_pool_addresses
+                 SET warmup_enabled = true,
+                     warmup_started_at = COALESCE(warmup_started_at, NOW()),
+                     warmup_day = COALESCE(warmup_day, 0),
+                     updated_at = NOW()
+                 WHERE pool_id = $1`,
+                [poolId]
+            );
+            return NextResponse.json({ success: true, pool: updated[0] });
+        }
+
+        if (action === 'pause') {
+            const updated = await query<PoolRow>(
+                `UPDATE ip_pools
+                 SET warmup_enabled = false, updated_at = NOW()
+                 WHERE id = $1
+                 RETURNING *`,
+                [poolId]
+            );
+            if (updated.length === 0) {
+                return NextResponse.json({ error: 'Pool not found' }, { status: 404 });
+            }
+            return NextResponse.json({ success: true, pool: updated[0] });
+        }
+
+        if (action === 'reset') {
+            const updated = await query<PoolRow>(
+                `UPDATE ip_pools
+                 SET warmup_day = 0, warmup_started_at = NOW(), updated_at = NOW()
+                 WHERE id = $1
+                 RETURNING *`,
+                [poolId]
+            );
+            if (updated.length === 0) {
+                return NextResponse.json({ error: 'Pool not found' }, { status: 404 });
+            }
+            await query(
+                `UPDATE ip_pool_addresses
+                 SET warmup_day = 0, warmup_started_at = NOW(), daily_sent = 0, updated_at = NOW()
+                 WHERE pool_id = $1`,
+                [poolId]
+            );
+            return NextResponse.json({ success: true, pool: updated[0] });
+        }
+
+        return NextResponse.json({ error: 'Unknown action. Use: start, pause, reset' }, { status: 400 });
+    } catch (error) {
+        console.error('Warmup POST error:', error);
+        return NextResponse.json({ error: 'Failed to update warmup' }, { status: 500 });
     }
 }

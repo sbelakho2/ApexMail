@@ -730,12 +730,14 @@ export class LeadScoringModel {
      * Loads model from storage
      */
     static fromJSON(json: string): LeadScoringModel {
-        const data = JSON.parse(json);
+        let data: { learningRate?: number; trees?: DecisionStump[]; featureImportance?: Record<string, number> };
+        try { data = JSON.parse(json); }
+        catch (e) { throw new Error(`Failed to deserialize LeadScoringModel: ${e instanceof Error ? e.message : String(e)}`); }
         const model = new LeadScoringModel({
             learningRate: data.learningRate,
         });
-        model.trees = data.trees;
-        model.featureImportance = new Map(Object.entries(data.featureImportance));
+        model.trees = data.trees ?? [];
+        model.featureImportance = new Map(Object.entries(data.featureImportance ?? {}));
         return model;
     }
 }

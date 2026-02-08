@@ -107,11 +107,38 @@ export class AlertingService {
   private silences: Map<string, Silence> = new Map();
   private activeAlerts: Map<string, Alert> = new Map();
   private evaluationInterval: NodeJS.Timeout | null = null;
-  private notificationCooldowns: Map<string, number> = new Map();
+
+  /** Max entries in each local-cache Map to prevent unbounded growth */
+  private static readonly MAX_LOCAL_RULES = 10_000;
+  private static readonly MAX_LOCAL_CHANNELS = 1_000;
+  private static readonly MAX_LOCAL_SILENCES = 10_000;
+  private static readonly MAX_LOCAL_ALERTS = 50_000;
+  /** Redis key prefix for notification cooldowns */
+  private static readonly COOLDOWN_PREFIX = 'alert:cooldown:';
+
+  /**
+   * FIX-500-186: Track consecutive evaluation failures per rule.
+   * After MAX_CONSECUTIVE_FAILURES, the rule is temporarily disabled until a
+   * successful evaluation resets the counter.
+   */
+  private readonly ruleFailureCounts = new Map<string, number>();
+  private static readonly MAX_CONSECUTIVE_FAILURES = 5;
 
   constructor(db: Pool, redis: Redis) {
     this.db = db;
     this.redis = redis;
+  }
+
+  /**
+   * Enforce a size cap on a Map by evicting the oldest entry (first key).
+   * Uses insertion-order semantics of ES2015 Maps as a simple FIFO eviction.
+   */
+  private enforceMapCap<K, V>(map: Map<K, V>, max: number): void {
+    while (map.size > max) {
+      const firstKey = map.keys().next().value;
+      if (firstKey !== undefined) map.delete(firstKey);
+      else break;
+    }
   }
 
   /**
@@ -185,6 +212,7 @@ export class AlertingService {
       ]);
 
       this.rules.set(id, fullRule);
+      this.enforceMapCap(this.rules, AlertingService.MAX_LOCAL_RULES);
 
       logger.info(`[Alerting] Created rule: ${rule.name}`);
 
@@ -242,6 +270,7 @@ export class AlertingService {
       ]);
 
       this.rules.set(id, updatedRule);
+      this.enforceMapCap(this.rules, AlertingService.MAX_LOCAL_RULES);
 
       return { ok: true, value: updatedRule };
     } catch (error) {
@@ -281,6 +310,7 @@ export class AlertingService {
       `, [id, channel.name, channel.type, JSON.stringify(channel.config), channel.enabled, fullChannel.createdAt]);
 
       this.channels.set(id, fullChannel);
+      this.enforceMapCap(this.channels, AlertingService.MAX_LOCAL_CHANNELS);
 
       logger.info(`[Alerting] Created channel: ${channel.name}`);
 
@@ -351,6 +381,7 @@ export class AlertingService {
     try {
       await this.saveAlert(alert);
       this.activeAlerts.set(id, alert);
+      this.enforceMapCap(this.activeAlerts, AlertingService.MAX_LOCAL_ALERTS);
 
       // Send notifications
       if (alert.status === AlertStatus.FIRING) {
@@ -449,6 +480,7 @@ export class AlertingService {
       ]);
 
       this.silences.set(id, fullSilence);
+      this.enforceMapCap(this.silences, AlertingService.MAX_LOCAL_SILENCES);
 
       // Check and silence matching active alerts
       for (const alert of this.activeAlerts.values()) {
@@ -743,12 +775,37 @@ export class AlertingService {
   }
 
   private async evaluateRules(): Promise<void> {
+    // FIX-500-187: Acquire PostgreSQL advisory lock to prevent multiple instances
+    // from evaluating rules concurrently (avoiding duplicate alerts).
+    const ADVISORY_LOCK_ID = 867530987; // arbitrary stable integer for alerting
+    const lockResult = await this.db.query<{ acquired: boolean }>(
+      'SELECT pg_try_advisory_lock($1) AS acquired',
+      [ADVISORY_LOCK_ID],
+    );
+    if (!lockResult.rows[0]?.acquired) {
+      logger.debug('[Alerting] Another instance holds the evaluation lock, skipping');
+      return;
+    }
+
+    try {
     for (const rule of this.rules.values()) {
       if (!rule.enabled) continue;
+
+      // FIX-500-186: Skip rules that have failed too many times consecutively
+      const failCount = this.ruleFailureCounts.get(rule.id) ?? 0;
+      if (failCount >= AlertingService.MAX_CONSECUTIVE_FAILURES) {
+        logger.warn(`[Alerting] Rule ${rule.name} skipped — ${failCount} consecutive failures (circuit-open)`, { ruleId: rule.id });
+        continue;
+      }
 
       try {
         const result = await this.evaluateExpression(rule.expression);
         
+        // FIX-500-186: Reset failure counter on success
+        if (failCount > 0) {
+          this.ruleFailureCounts.delete(rule.id);
+        }
+
         if (result.shouldFire) {
           // Check if there's already an active alert for this rule
           const existingAlert = Array.from(this.activeAlerts.values())
@@ -775,8 +832,15 @@ export class AlertingService {
           }
         }
       } catch (error) {
-        logger.error(`[Alerting] Failed to evaluate rule ${rule.name}:`, { error: error instanceof Error ? error.message : String(error) });
+        // FIX-500-186: Track consecutive failures per rule
+        const prevFails = this.ruleFailureCounts.get(rule.id) ?? 0;
+        this.ruleFailureCounts.set(rule.id, prevFails + 1);
+        logger.error(`[Alerting] Failed to evaluate rule ${rule.name} (${prevFails + 1}/${AlertingService.MAX_CONSECUTIVE_FAILURES}):`, { error: error instanceof Error ? error.message : String(error) });
       }
+    }
+    } finally {
+      // FIX-500-187: Release advisory lock
+      await this.db.query('SELECT pg_advisory_unlock($1)', [ADVISORY_LOCK_ID]);
     }
   }
 
@@ -800,6 +864,12 @@ export class AlertingService {
     const operator = matchResult[3] ?? '>';
     const thresholdStr = matchResult[4] ?? '0';
     const threshold = parseFloat(thresholdStr);
+
+    // FIX-500-272: Whitelist aggregation function to prevent SQL injection
+    const ALLOWED_AGGS = new Set(['sum', 'avg', 'min', 'max', 'count']);
+    if (!ALLOWED_AGGS.has(aggregation.toLowerCase())) {
+      return { shouldFire: false, value: 0, threshold: 0, labels: {} }; // Invalid aggregation
+    }
 
     // Query metric value from database
     try {
@@ -832,13 +902,20 @@ export class AlertingService {
   }
 
   private async sendNotifications(alert: Alert, type: 'fired' | 'resolved' = 'fired'): Promise<void> {
-    // Check cooldown
-    const cooldownKey = `${alert.ruleId}:${type}`;
-    const lastNotification = this.notificationCooldowns.get(cooldownKey) || 0;
+    // Check cooldown via Redis (automatic TTL expiry — no in-memory Map growth)
+    const cooldownKey = `${AlertingService.COOLDOWN_PREFIX}${alert.ruleId}:${type}`;
     const cooldownMs = config.alerting.cooldownMinutes * 60 * 1000;
-    
-    if (Date.now() - lastNotification < cooldownMs) {
-      return;
+
+    try {
+      const existing = await this.redis.get(cooldownKey);
+      if (existing) {
+        const lastTs = parseInt(existing, 10);
+        if (Date.now() - lastTs < cooldownMs) {
+          return;
+        }
+      }
+    } catch {
+      // If Redis is unavailable, fall through and send (better noisy than silent)
     }
 
     const rule = this.rules.get(alert.ruleId);
@@ -848,16 +925,31 @@ export class AlertingService {
       const channel = this.channels.get(channelId);
       if (!channel || !channel.enabled) continue;
 
-      try {
-        await this.sendToChannel(channel, alert, type);
-        alert.notificationsSent++;
-        alert.lastNotificationAt = new Date();
-      } catch (error) {
-        logger.error(`[Alerting] Failed to send to channel ${channel.name}:`, { error: error instanceof Error ? error.message : String(error) });
+      // FIX-500-474: Retry alert notification with exponential backoff
+      const MAX_ALERT_RETRIES = 3;
+      for (let attempt = 0; attempt < MAX_ALERT_RETRIES; attempt++) {
+        try {
+          await this.sendToChannel(channel, alert, type);
+          alert.notificationsSent++;
+          alert.lastNotificationAt = new Date();
+          break;
+        } catch (error) {
+          if (attempt === MAX_ALERT_RETRIES - 1) {
+            logger.error(`[Alerting] Failed to send to channel ${channel.name} after ${MAX_ALERT_RETRIES} attempts:`, { error: error instanceof Error ? error.message : String(error) });
+          } else {
+            await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt)));
+          }
+        }
       }
     }
 
-    this.notificationCooldowns.set(cooldownKey, Date.now());
+    // Record cooldown in Redis with TTL (auto-expires — no unbounded map)
+    try {
+      const ttlSeconds = Math.ceil(cooldownMs / 1000);
+      await this.redis.setex(cooldownKey, ttlSeconds, String(Date.now()));
+    } catch {
+      // best-effort
+    }
   }
 
   private async sendToChannel(channel: NotificationChannel, alert: Alert, type: string): Promise<void> {

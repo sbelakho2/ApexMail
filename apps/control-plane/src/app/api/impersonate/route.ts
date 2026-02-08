@@ -14,6 +14,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
+import { query } from '@/lib/db';
 
 const IMPERSONATION_TOKEN_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -70,18 +71,39 @@ export async function POST(request: NextRequest) {
                 { status: 400 }
             );
         }
+
+        // FIX-500-305: Validate that tenantId corresponds to an actual tenant
+        const tenantRows = await query<{ id: string }>(
+            `SELECT id FROM tenants WHERE id = $1 AND status != 'deleted'`,
+            [tenantId]
+        );
+        if (!tenantRows || tenantRows.length === 0) {
+            return NextResponse.json(
+                { error: 'Tenant not found or has been deleted' },
+                { status: 404 }
+            );
+        }
         
-        // Extract operator info from session (simplified - decode the session)
-        let operatorId = 'unknown';
-        let operatorName = 'Control Plane Operator';
+        // FIX-500-010: Reject impersonation if session cannot be decoded.
+        // Previously this silently fell through with operatorId='unknown',
+        // issuing a valid impersonation token with no audit trail of who
+        // performed the impersonation — a security risk.
+        let operatorId: string;
+        let operatorName: string;
         
         try {
             const [payload] = cpSession.split('.');
+            if (!payload) throw new Error('Empty session payload');
             const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
-            operatorId = decoded.sub || 'unknown';
+            if (!decoded.sub) throw new Error('Session missing operator ID (sub)');
+            operatorId = decoded.sub;
             operatorName = decoded.name || 'Control Plane Operator';
-        } catch {
-            // Use defaults if session decode fails
+        } catch (sessionErr) {
+            console.error('[IMPERSONATION] Failed to decode operator session:', sessionErr);
+            return NextResponse.json(
+                { error: 'Invalid or expired control plane session' },
+                { status: 401 }
+            );
         }
         
         // Generate the impersonation token

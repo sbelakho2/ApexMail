@@ -5,25 +5,49 @@ export function cn(...inputs: ClassValue[]) {
     return twMerge(clsx(inputs));
 }
 
+/**
+ * FIX-500-096: Cache Intl formatters at module level.
+ * Creating new Intl.DateTimeFormat / NumberFormat per call is expensive
+ * because the constructor parses locale data and options each time.
+ */
+const dateFormatter = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+});
+
+const numberFormatter = new Intl.NumberFormat('en-US');
+
+/** Cache keyed by currency code — FIX-500-443: capped at 50 entries to prevent unbounded growth */
+const MAX_CURRENCY_FORMATTERS = 50;
+const currencyFormatters = new Map<string, Intl.NumberFormat>();
+
+function getCurrencyFormatter(currency: string): Intl.NumberFormat {
+    let fmt = currencyFormatters.get(currency);
+    if (!fmt) {
+        // FIX-500-443: Evict oldest entry if at capacity
+        if (currencyFormatters.size >= MAX_CURRENCY_FORMATTERS) {
+            const oldest = currencyFormatters.keys().next().value;
+            if (oldest !== undefined) currencyFormatters.delete(oldest);
+        }
+        fmt = new Intl.NumberFormat('en-US', { style: 'currency', currency });
+        currencyFormatters.set(currency, fmt);
+    }
+    return fmt;
+}
+
 export function formatDate(date: string | Date): string {
-    return new Intl.DateTimeFormat('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    }).format(new Date(date));
+    return dateFormatter.format(new Date(date));
 }
 
 export function formatCurrency(amount: number, currency = 'EUR'): string {
-    return new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency,
-    }).format(amount);
+    return getCurrencyFormatter(currency).format(amount);
 }
 
 export function formatNumber(num: number): string {
-    return new Intl.NumberFormat('en-US').format(num);
+    return numberFormatter.format(num);
 }
 
 export function formatPercentage(value: number): string {

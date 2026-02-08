@@ -29,6 +29,9 @@ export interface DunningConfig {
   gracePeriodDays: number;        // Days to retain queued messages after hard suspend
 }
 
+// FIX-500-362: TODO: Move dunning schedule configuration to a database table (e.g., dunning_config)
+// so it can be updated at runtime per-tenant without redeployment.
+// Current in-memory defaults are used as fallbacks when no DB config exists.
 const DEFAULT_CONFIG: DunningConfig = {
   retryScheduleDays: [1, 3, 7, 14],
   softSuspendAfterDays: 7,

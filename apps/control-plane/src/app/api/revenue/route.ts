@@ -92,10 +92,7 @@ export async function GET() {
         });
     } catch (error) {
         console.error('Revenue API error:', error);
-        return NextResponse.json({
-            stats: DEMO_STATS,
-            monthlyData: DEMO_MONTHLY,
-            revenueByPlan: DEMO_BY_PLAN,
-        });
+        // FIX-500-298: Return 500 instead of masking errors with demo data
+        return NextResponse.json({ error: 'Failed to fetch revenue data' }, { status: 500 });
     }
 }

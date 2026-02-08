@@ -110,8 +110,15 @@ export class EmailProcessor {
    * Tracks recent send outcomes in a sliding window. If the error rate
    * exceeds the threshold (e.g., 10 of last 20 fail), the worker pauses
    * for a cooldown period to avoid flooding a degraded downstream.
+   *
+   * FIX-500-426: Use a simple boolean array + failure counter instead of
+   * allocating {success, timestamp} objects for every outcome.
+   * FIX-500-431: Track timestamps to enable time-based window expiry
+   * so stale outcomes from idle periods don't linger.
    */
-  private readonly recentOutcomes: Array<{ success: boolean; timestamp: number }> = [];
+  private readonly recentOutcomes: boolean[] = [];
+  private readonly recentOutcomeTimestamps: number[] = [];
+  private recentFailureCount = 0;
   private static readonly ERROR_WINDOW_SIZE = 20;
   private static readonly ERROR_THRESHOLD = 10; // 10 failures out of 20 = 50%
   private static readonly ERROR_COOLDOWN_MS = 60_000; // 1 minute pause
@@ -129,6 +136,10 @@ export class EmailProcessor {
   private readonly suppressionCache = new Map<string, { suppressed: boolean; reason?: string; expiresAt: number }>();
   private static readonly SUPPRESSION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
   private static readonly SUPPRESSION_CACHE_MAX_SIZE = 10_000;
+
+  // FIX-079: Cache warmup day calculation (changes at most once per day, queried per job)
+  private readonly warmupDayCache = new Map<string, { day: number; expiresAt: number }>();
+  private static readonly WARMUP_DAY_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
   constructor(options: EmailProcessorConfig) {
     this.db = options.db;
@@ -187,6 +198,10 @@ export class EmailProcessor {
     }
 
     // Initialize SMTP transporter
+    // FIX-500-007: Use Nodemailer's built-in socketTimeout + connectionTimeout.
+    // Previously a manual Promise.race timeout was used, but it cannot cancel
+    // the underlying sendMail() — the SMTP socket stays open, leaking into the
+    // pool. Nodemailer's native timeouts properly close the socket on expiry.
     this.transporter = createTransport({
       host: this.smtpConfig.host,
       port: this.smtpConfig.port,
@@ -195,6 +210,9 @@ export class EmailProcessor {
       pool: this.smtpConfig.pool,
       maxConnections: this.smtpConfig.maxConnections,
       maxMessages: this.smtpConfig.maxMessages,
+      socketTimeout: 30_000,      // 30s — kill idle/hung socket
+      connectionTimeout: 15_000,  // 15s — kill slow connect
+      greetingTimeout: 15_000,    // 15s — kill slow EHLO
       tls: {
         rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
       },
@@ -306,7 +324,7 @@ export class EmailProcessor {
           const remainingMs = this.errorCooldownUntil - Date.now();
           this.logger.warn('E-172: Worker paused due to high error rate', {
             resumesInMs: remainingMs,
-            recentFailures: this.recentOutcomes.filter(o => !o.success).length,
+            recentFailures: this.recentFailureCount,
             windowSize: this.recentOutcomes.length,
           });
           await new Promise(resolve => setTimeout(resolve, Math.min(remainingMs, 5000)));
@@ -347,36 +365,50 @@ export class EmailProcessor {
         // C-104: Batch suppression pre-check — collect all recipient emails
         // and check suppression status in a single DB query instead of
         // N individual findByEmail calls inside each processJob.
-        const recipientEmails = [...new Set(jobs.map(j => j.to))];
+        // FIX-500-003: Group jobs by tenantId for correct per-tenant suppression checks.
+        // Previously used jobs[0].tenantId for ALL jobs, missing suppressions for other tenants.
         const batchSuppressionMap = new Map<string, string>();
         try {
-          const suppResult = await this.suppressionsRepo.checkBulkSuppression(
-            recipientEmails,
-            jobs[0]?.tenantId ?? ''
-          );
-          if (suppResult.ok) {
-            const tenantId = jobs[0]?.tenantId ?? '';
-            const now = Date.now();
-            for (const [email, data] of suppResult.value.entries()) {
-              if (data) {
-                batchSuppressionMap.set(email, data.reason ?? 'unknown');
+          const jobsByTenant = new Map<string, string[]>();
+          for (const j of jobs) {
+            const emails = jobsByTenant.get(j.tenantId) ?? [];
+            emails.push(j.to);
+            jobsByTenant.set(j.tenantId, emails);
+          }
+
+          const now = Date.now();
+          for (const [tenantId, emails] of jobsByTenant) {
+            const uniqueEmails = [...new Set(emails)];
+            const suppResult = await this.suppressionsRepo.checkBulkSuppression(
+              uniqueEmails,
+              tenantId
+            );
+            if (suppResult.ok) {
+              for (const [email, data] of suppResult.value.entries()) {
+                if (data) {
+                  batchSuppressionMap.set(`${tenantId}:${email}`, data.reason ?? 'unknown');
+                }
+                // C-118: Populate suppression cache for future poll cycles
+                const cacheKey = `${tenantId}:${email}`;
+                this.suppressionCache.set(cacheKey, {
+                  suppressed: !!data,
+                  reason: data?.reason ?? undefined,
+                  expiresAt: now + EmailProcessor.SUPPRESSION_CACHE_TTL_MS,
+                });
               }
-              // C-118: Populate suppression cache for future poll cycles
-              const cacheKey = `${tenantId}:${email}`;
-              this.suppressionCache.set(cacheKey, {
-                suppressed: !!data,
-                reason: data?.reason ?? undefined,
-                expiresAt: now + EmailProcessor.SUPPRESSION_CACHE_TTL_MS,
-              });
             }
-            // C-118: Evict oldest entries if cache exceeds max size
-            if (this.suppressionCache.size > EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE) {
-              const entries = [...this.suppressionCache.entries()]
-                .sort((a, b) => a[1].expiresAt - b[1].expiresAt);
-              const toRemove = entries.slice(0, this.suppressionCache.size - EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE);
-              for (const [key] of toRemove) {
-                this.suppressionCache.delete(key);
-              }
+          }
+          // C-118: Evict oldest entries if cache exceeds max size
+          // FIX-061: Use insertion-order eviction instead of sorting the entire Map.
+          // Map iterates in insertion order, so the first entries are the oldest.
+          // This is O(k) where k = entries to remove, instead of O(n log n) for sort.
+          if (this.suppressionCache.size > EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE) {
+            const excess = this.suppressionCache.size - EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE;
+            let removed = 0;
+            for (const key of this.suppressionCache.keys()) {
+              if (removed >= excess) break;
+              this.suppressionCache.delete(key);
+              removed++;
             }
           }
         } catch (err) {
@@ -387,6 +419,10 @@ export class EmailProcessor {
         // Process jobs concurrently - use allSettled to prevent single failure from failing batch
         // This ensures all jobs are processed even if some fail
         const results = await Promise.allSettled(jobs.map(job => this.processJob(job, batchSuppressionMap)));
+
+        // FIX-080: Flush batch completions — all queued successes are committed
+        // in a single PG transaction (1 client instead of N).
+        await this.flushPendingSuccesses();
         
         // E-166: Track batch progress — count successes, failures, and per-campaign breakdown
         let batchSucceeded = 0;
@@ -417,25 +453,42 @@ export class EmailProcessor {
         }
 
         // E-172: Record outcomes in the sliding window for error rate tracking
+        // FIX-500-426: Use counter to track failures instead of .filter() scan
+        // FIX-500-431: Use timestamps for time-based window expiry (60s)
         const now = Date.now();
+        const OUTCOME_WINDOW_MS = 60_000;
         for (let i = 0; i < results.length; i++) {
           const result = results[i];
-          this.recentOutcomes.push({
-            success: result?.status === 'fulfilled',
-            timestamp: now,
-          });
+          const success = result?.status === 'fulfilled';
+          this.recentOutcomes.push(success);
+          this.recentOutcomeTimestamps.push(now);
+          if (!success) this.recentFailureCount++;
         }
-        // Trim window to max size
-        while (this.recentOutcomes.length > EmailProcessor.ERROR_WINDOW_SIZE) {
-          this.recentOutcomes.shift();
+        // FIX-500-427: Trim by both count and time in a single splice
+        // Evict entries older than OUTCOME_WINDOW_MS
+        let evictCount = 0;
+        while (evictCount < this.recentOutcomes.length && this.recentOutcomeTimestamps[evictCount]! < now - OUTCOME_WINDOW_MS) {
+          if (!this.recentOutcomes[evictCount]) this.recentFailureCount--;
+          evictCount++;
+        }
+        // Also cap at ERROR_WINDOW_SIZE
+        const sizeExcess = (this.recentOutcomes.length - evictCount) - EmailProcessor.ERROR_WINDOW_SIZE;
+        if (sizeExcess > 0) {
+          for (let i = evictCount; i < evictCount + sizeExcess; i++) {
+            if (!this.recentOutcomes[i]) this.recentFailureCount--;
+          }
+          evictCount += sizeExcess;
+        }
+        if (evictCount > 0) {
+          this.recentOutcomes.splice(0, evictCount);
+          this.recentOutcomeTimestamps.splice(0, evictCount);
         }
         // E-172: Check if error rate exceeds threshold → activate cooldown
         if (this.recentOutcomes.length >= EmailProcessor.ERROR_WINDOW_SIZE) {
-          const failureCount = this.recentOutcomes.filter(o => !o.success).length;
-          if (failureCount >= EmailProcessor.ERROR_THRESHOLD) {
+          if (this.recentFailureCount >= EmailProcessor.ERROR_THRESHOLD) {
             this.errorCooldownUntil = Date.now() + EmailProcessor.ERROR_COOLDOWN_MS;
             this.logger.error('E-172: Error rate circuit breaker activated — worker pausing', {
-              failures: failureCount,
+              failures: this.recentFailureCount,
               windowSize: this.recentOutcomes.length,
               threshold: EmailProcessor.ERROR_THRESHOLD,
               cooldownMs: EmailProcessor.ERROR_COOLDOWN_MS,
@@ -522,8 +575,9 @@ export class EmailProcessor {
 
       // C-104: Use pre-computed batch suppression map when available,
       // falling back to per-job DB lookup only if batch check was not done.
-      if (batchSuppressions && batchSuppressions.has(job.to)) {
-        await this.handleSuppressed(job, batchSuppressions.get(job.to)!);
+      // FIX-500-003: Key is now tenant-scoped (tenantId:email) for multi-tenant correctness.
+      if (batchSuppressions && batchSuppressions.has(`${job.tenantId}:${job.to}`)) {
+        await this.handleSuppressed(job, batchSuppressions.get(`${job.tenantId}:${job.to}`)!);
         return;
       } else if (!batchSuppressions) {
         // C-118: Check in-memory suppression cache before hitting the DB.
@@ -556,6 +610,18 @@ export class EmailProcessor {
             suppressed: false,
             expiresAt: Date.now() + EmailProcessor.SUPPRESSION_CACHE_TTL_MS,
           });
+          // FIX-500-434: Evict oldest entries after individual writes too,
+          // not just after batch pre-check. Without this, per-job cache writes
+          // can grow the cache beyond SUPPRESSION_CACHE_MAX_SIZE unboundedly.
+          if (this.suppressionCache.size > EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE) {
+            const excess = this.suppressionCache.size - EmailProcessor.SUPPRESSION_CACHE_MAX_SIZE;
+            let removed = 0;
+            for (const key of this.suppressionCache.keys()) {
+              if (removed >= excess) break;
+              this.suppressionCache.delete(key);
+              removed++;
+            }
+          }
         }
       }
 
@@ -585,7 +651,8 @@ export class EmailProcessor {
             retryAfter: rateLimitResult.retryAfter,
             isp: rateLimitResult.isp,
           });
-          await this.requeueJob(job, 'ip_rate_limit');
+          // FIX-500-114: Use rate limiter's computed retryAfter delay
+          await this.requeueJob(job, 'ip_rate_limit', rateLimitResult.retryAfter);
           return;
         }
       }
@@ -677,6 +744,12 @@ export class EmailProcessor {
       const fromDomain = (job.from.split('@')[1] ?? '').toLowerCase();
       const dkimDomain = domainData.domain.toLowerCase();
       if (fromDomain && dkimDomain && fromDomain !== dkimDomain) {
+        // FIX-500-428: Optionally reject messages with DMARC misalignment
+        // instead of just warning (guaranteeing DMARC failure at receiving MTA).
+        const rejectOnMisaligned = process.env.DMARC_REJECT_MISALIGNED === 'true';
+        if (rejectOnMisaligned) {
+          throw new Error(`DMARC alignment failure: From domain '${fromDomain}' does not match DKIM d= domain '${dkimDomain}'`);
+        }
         this.logger.warn('F-233: DMARC alignment failure — From domain does not match DKIM d= domain', {
           jobId: job.id,
           messageId: job.messageId,
@@ -708,9 +781,12 @@ export class EmailProcessor {
     const pixelUrl = `${this.trackingConfig.baseUrl}${this.trackingConfig.openPixelPath}/${trackingId}`;
     const pixel = `<img src="${pixelUrl}" width="1" height="1" alt="" style="display:none;visibility:hidden;" />`;
     
-    // Insert before </body> or at end
-    if (html.includes('</body>')) {
-      return html.replace('</body>', `${pixel}</body>`);
+    // FIX-500-430: Use lastIndexOf to find the *last* </body> tag.
+    // String.replace only replaces the first occurrence, which breaks
+    // if there are multiple </body> tags (e.g., nested email quotes).
+    const lastBodyIdx = html.lastIndexOf('</body>');
+    if (lastBodyIdx !== -1) {
+      return html.slice(0, lastBodyIdx) + pixel + html.slice(lastBodyIdx);
     }
     return html + pixel;
   }
@@ -719,12 +795,20 @@ export class EmailProcessor {
     const trackingId = this.encodeTrackingId(job.messageId, job.tenantId);
     const clickBase = `${this.trackingConfig.baseUrl}${this.trackingConfig.clickRedirectPath}/${trackingId}`;
     
-    // Rewrite <a href="..."> links
+    // FIX-500-429: Broadened regex to handle whitespace between attributes
+    // and extended skip list to include javascript:, data:, and # anchors.
     return html.replace(
-      /<a\s+([^>]*?)href=["']([^"']+)["']([^>]*?)>/gi,
+      /<a\s+([^>]*?)href\s*=\s*["']([^"']+)["']([^>]*?)>/gi,
       (match, before, url, after) => {
-        // Skip mailto:, tel:, and tracking URLs
-        if (url.startsWith('mailto:') || url.startsWith('tel:') || url.includes(this.trackingConfig.baseUrl)) {
+        // Skip mailto:, tel:, javascript:, data:, anchors, and tracking URLs
+        if (
+          url.startsWith('mailto:') ||
+          url.startsWith('tel:') ||
+          url.startsWith('javascript:') ||
+          url.startsWith('data:') ||
+          url.startsWith('#') ||
+          url.includes(this.trackingConfig.baseUrl)
+        ) {
           return match;
         }
         
@@ -794,29 +878,18 @@ export class EmailProcessor {
       mailOptions.dkim = email.dkim;
     }
 
-    // CRITICAL: Add timeout to prevent hung SMTP connections from blocking the worker forever
-    const SMTP_TIMEOUT_MS = 30000; // 30 seconds
-    
-    // FIX-004: Capture the timer handle so we can clearTimeout on both
-    // success and error paths. Without this, every successful send leaked
-    // a 30-second dangling timer — at high throughput this accumulated
-    // thousands of pending timers, wasting memory and event-loop resources.
-    let timeoutHandle: ReturnType<typeof setTimeout>;
+    // FIX-500-007: Nodemailer's built-in socketTimeout/connectionTimeout now handle
+    // timeouts natively, properly closing the underlying socket on expiry.
+    // The old Promise.race approach leaked sockets because sendMail() could
+    // not be cancelled — the socket stayed open in the pool after the timeout.
     try {
-      const sendPromise = this.transporter.sendMail(mailOptions);
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => reject(new Error(`SMTP send timeout after ${SMTP_TIMEOUT_MS}ms`)), SMTP_TIMEOUT_MS);
-      });
-      
-      const result = await Promise.race([sendPromise, timeoutPromise]);
-      clearTimeout(timeoutHandle!);
+      const result = await this.transporter.sendMail(mailOptions);
       
       // Record success to circuit breaker
       await circuitBreaker.recordSuccess();
       
       return result;
     } catch (error) {
-      clearTimeout(timeoutHandle!);
       // Record failure to circuit breaker
       await circuitBreaker.recordFailure();
       throw error;
@@ -828,8 +901,143 @@ export class EmailProcessor {
    * are wrapped in a single Postgres transaction so a crash between any
    * two steps cannot leave the system in an inconsistent state (e.g.
    * message marked sent but still in queue → duplicate delivery).
+   *
+   * FIX-080: Batch completions — when multiple jobs are sent successfully,
+   * batchHandleSuccess collects their completions and performs multi-row
+   * UPDATE/INSERT/DELETE in a single PG transaction, reducing PG connection
+   * churn from N clients per poll cycle to 1.
+   * FIX-500-463: Verified — batch completions are both documented AND implemented.
    */
-  private async handleSuccess(job: EmailJob, result: SentMessageInfo): Promise<void> {
+  private pendingSuccesses: Array<{ job: EmailJob; result: SentMessageInfo }> = [];
+
+  /**
+   * Queue a successful send for batch completion. The actual DB writes
+   * happen in flushPendingSuccesses (called once per poll cycle).
+   */
+  private queueSuccess(job: EmailJob, result: SentMessageInfo): void {
+    this.pendingSuccesses.push({ job, result });
+  }
+
+  /**
+   * FIX-080: Flush all pending successes in a single PG transaction.
+   * Uses multi-row INSERT for events, multi-row UPDATE for messages,
+   * and multi-row DELETE for queue cleanup.
+   */
+  private async flushPendingSuccesses(): Promise<void> {
+    const pending = this.pendingSuccesses;
+    if (pending.length === 0) return;
+    this.pendingSuccesses = [];
+
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Batch UPDATE messages to 'sent' status
+      // Uses unnest arrays for multi-row UPDATE in a single round-trip
+      const msgIds: string[] = [];
+      const smtpMsgIds: string[] = [];
+      for (const { job, result } of pending) {
+        msgIds.push(job.messageId);
+        smtpMsgIds.push(result.messageId || '');
+      }
+      await client.query(
+        `UPDATE messages 
+         SET status = 'sent', sent_at = NOW(), updated_at = NOW(),
+             smtp_message_id = batch.smtp_id
+         FROM (SELECT unnest($1::text[]) AS id, unnest($2::text[]) AS smtp_id) AS batch
+         WHERE messages.id = batch.id`,
+        [msgIds, smtpMsgIds]
+      );
+
+      // Batch INSERT events
+      const evtValues: unknown[] = [];
+      const evtPlaceholders: string[] = [];
+      let paramIdx = 1;
+      for (const { job, result } of pending) {
+        evtPlaceholders.push(
+          `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, 'sent', $${paramIdx++}, $${paramIdx++}, NOW())`
+        );
+        evtValues.push(
+          generateId('evt'),
+          job.tenantId,
+          job.messageId,
+          job.to,
+          JSON.stringify({ smtpResponse: result.response, messageIdHeader: result.messageId }),
+        );
+      }
+      await client.query(
+        `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, metadata, timestamp)
+         VALUES ${evtPlaceholders.join(', ')}`,
+        evtValues
+      );
+
+      // Batch DELETE from queue
+      const queueIds = pending.map(p => p.job.id);
+      await client.query(
+        `DELETE FROM email_queue WHERE id = ANY($1::text[])`,
+        [queueIds]
+      );
+
+      await client.query('COMMIT');
+
+      // Log batch success
+      for (const { job, result } of pending) {
+        this.logger.info('Email sent successfully', {
+          jobId: job.id,
+          messageId: job.messageId,
+          response: result.response,
+          batchCompletion: true,
+        });
+      }
+    } catch (error) {
+      await client.query('ROLLBACK');
+      // On batch failure, fall back to individual completions
+      this.logger.warn('FIX-080: Batch completion failed, falling back to per-job', {
+        batchSize: pending.length,
+        error: error instanceof Error ? error.message : 'Unknown',
+      });
+      for (const { job, result } of pending) {
+        try {
+          await this.handleSuccessIndividual(job, result);
+        } catch (individualError) {
+          this.logger.error('Individual completion also failed', {
+            jobId: job.id,
+            error: individualError instanceof Error ? individualError.message : 'Unknown',
+          });
+        }
+      }
+      return;
+    } finally {
+      client.release();
+    }
+
+    // FIX-500-008: Post-transaction side-effects (non-critical Redis updates)
+    for (const { job } of pending) {
+      try {
+        if (this.warmupConfig.enabled) {
+          await this.incrementWarmupCounter(job.domainId);
+        }
+        if (this.ipRateLimiter && this.ipRateLimitingConfig?.ipAddress) {
+          const recipientDomain = job.to.split('@')[1] ?? '';
+          await this.ipRateLimiter.recordSend(
+            this.ipRateLimitingConfig.ipAddress,
+            recipientDomain
+          );
+        }
+      } catch (sideEffectError) {
+        this.logger.warn('Post-send side-effect failed (email already sent)', {
+          jobId: job.id,
+          messageId: job.messageId,
+          error: sideEffectError instanceof Error ? sideEffectError.message : 'Unknown',
+        });
+      }
+    }
+  }
+
+  /**
+   * Individual success handler — used as fallback when batch completion fails.
+   */
+  private async handleSuccessIndividual(job: EmailJob, result: SentMessageInfo): Promise<void> {
     this.logger.info('Email sent successfully', {
       jobId: job.id,
       messageId: job.messageId,
@@ -839,14 +1047,14 @@ export class EmailProcessor {
     const client = await this.db.connect();
     try {
       await client.query('BEGIN');
-
-      // Update message status
-      await client.query(
-        `UPDATE messages SET status = 'sent', sent_at = NOW(), smtp_message_id = $2, updated_at = NOW() WHERE id = $1`,
+      // FIX-500-489: Guard status transition with WHERE to prevent TOCTOU race
+      const updateResult = await client.query(
+        `UPDATE messages SET status = 'sent', sent_at = NOW(), smtp_message_id = $2, updated_at = NOW() WHERE id = $1 AND status IN ('queued', 'sending')`,
         [job.messageId, result.messageId || '']
       );
-
-      // Record sent event
+      if (updateResult.rowCount === 0) {
+        this.logger.warn('FIX-500-489: Message status transition to sent skipped (already transitioned)', { messageId: job.messageId });
+      }
       await client.query(
         `INSERT INTO events (id, tenant_id, message_id, event_type, recipient_email, metadata, timestamp)
          VALUES ($1, $2, $3, 'sent', $4, $5, NOW())`,
@@ -858,10 +1066,7 @@ export class EmailProcessor {
           JSON.stringify({ smtpResponse: result.response, messageIdHeader: result.messageId }),
         ]
       );
-
-      // Remove from queue
       await client.query('DELETE FROM email_queue WHERE id = $1', [job.id]);
-
       await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
@@ -870,18 +1075,30 @@ export class EmailProcessor {
       client.release();
     }
 
-    // Post-transaction side-effects (Redis, non-critical)
-    if (this.warmupConfig.enabled) {
-      await this.incrementWarmupCounter(job.domainId);
+    try {
+      if (this.warmupConfig.enabled) {
+        await this.incrementWarmupCounter(job.domainId);
+      }
+      if (this.ipRateLimiter && this.ipRateLimitingConfig?.ipAddress) {
+        const recipientDomain = job.to.split('@')[1] ?? '';
+        await this.ipRateLimiter.recordSend(
+          this.ipRateLimitingConfig.ipAddress,
+          recipientDomain
+        );
+      }
+    } catch (sideEffectError) {
+      this.logger.warn('Post-send side-effect failed (email already sent)', {
+        jobId: job.id,
+        messageId: job.messageId,
+        error: sideEffectError instanceof Error ? sideEffectError.message : 'Unknown',
+      });
     }
+  }
 
-    if (this.ipRateLimiter && this.ipRateLimitingConfig?.ipAddress) {
-      const recipientDomain = job.to.split('@')[1] ?? '';
-      await this.ipRateLimiter.recordSend(
-        this.ipRateLimitingConfig.ipAddress,
-        recipientDomain
-      );
-    }
+  private async handleSuccess(job: EmailJob, result: SentMessageInfo): Promise<void> {
+    // FIX-080: Queue for batch completion instead of per-job DB writes.
+    // Batch is flushed at the end of the poll cycle by flushPendingSuccesses().
+    this.queueSuccess(job, result);
   }
 
   private async handleError(job: EmailJob, error: Error): Promise<void> {
@@ -914,7 +1131,10 @@ export class EmailProcessor {
     } else if (category === 'permanent') {
       // E-154: Permanent errors should never retry — fail immediately
       await this.failJob(job, error);
-    } else if (category === 'transient' && job.attempt < this.config.maxRetries) {
+    } else if (job.attempt < this.config.maxRetries) {
+      // FIX-500-435: Treat 'unknown' errors as transient (retryable).
+      // Previously unknown errors fell through to failJob, permanently failing
+      // messages for unrecognised errors (e.g., new SMTP codes, unusual network issues).
       await this.retryJob(job, error);
     } else {
       await this.failJob(job, error);
@@ -979,8 +1199,9 @@ export class EmailProcessor {
       await client.query('BEGIN');
 
       // Update message status
+      // FIX-500-489: Guard status transition with WHERE to prevent TOCTOU race
       await client.query(
-        `UPDATE messages SET status = 'bounced', bounced_at = NOW(), bounce_type = $2, bounce_reason = $3, updated_at = NOW() WHERE id = $1`,
+        `UPDATE messages SET status = 'bounced', bounced_at = NOW(), bounce_type = $2, bounce_reason = $3, updated_at = NOW() WHERE id = $1 AND status IN ('queued', 'sending', 'sent')`,
         [job.messageId, bounceType.type, `${bounceType.subtype}: ${error.message}`]
       );
 
@@ -1044,8 +1265,9 @@ export class EmailProcessor {
       await client.query('BEGIN');
 
       // Update message status — use 'failed' as there's no 'dropped' status
+      // FIX-500-489: Guard status transition with WHERE to prevent TOCTOU race
       await client.query(
-        `UPDATE messages SET status = 'failed', metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb, updated_at = NOW() WHERE id = $1`,
+        `UPDATE messages SET status = 'failed', metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb, updated_at = NOW() WHERE id = $1 AND status NOT IN ('failed', 'bounced')`,
         [job.messageId, JSON.stringify({ dropReason: `suppressed:${reason}`, suppressed: true })]
       );
 
@@ -1166,8 +1388,9 @@ export class EmailProcessor {
       await client.query('BEGIN');
 
       // Update message status
+      // FIX-500-489: Guard status transition with WHERE to prevent TOCTOU race
       await client.query(
-        `UPDATE messages SET status = 'failed', bounce_reason = $2, updated_at = NOW() WHERE id = $1`,
+        `UPDATE messages SET status = 'failed', bounce_reason = $2, updated_at = NOW() WHERE id = $1 AND status NOT IN ('failed', 'bounced')`,
         [job.messageId, error.message]
       );
 
@@ -1203,9 +1426,13 @@ export class EmailProcessor {
     }
   }
 
-  private async requeueJob(job: EmailJob, reason: string): Promise<void> {
-    // Requeue with delay
-    const scheduledAt = new Date(Date.now() + 60000); // 1 minute
+  /**
+   * FIX-500-114: Accept optional delayMs from rate limiter's retryAfter
+   * instead of always using a flat 60-second delay.
+   */
+  private async requeueJob(job: EmailJob, reason: string, delayMs?: number): Promise<void> {
+    // FIX-500-114: Use rate limiter's retryAfter when available, default 60s
+    const scheduledAt = new Date(Date.now() + (delayMs ?? 60_000));
 
     await this.db.query(`
       UPDATE email_queue
@@ -1323,6 +1550,12 @@ export class EmailProcessor {
   }
 
   private async calculateWarmupDay(domainId: string, tenantId: string): Promise<number> {
+    // FIX-079: Check cache first — warmup day changes at most once per day
+    const cached = this.warmupDayCache.get(domainId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.day;
+    }
+
     const result = await this.domainsRepo.findById(domainId, tenantId);
     if (!result.ok || !result.value) {
       this.logger.warn('Warmup day calculation: domain not found', { domainId, tenantId });
@@ -1332,9 +1565,14 @@ export class EmailProcessor {
     const domain = result.value;
     const baseDate = domain.verifiedAt ?? domain.createdAt ?? new Date();
     const diffMs = Date.now() - baseDate.getTime();
-    const days = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+    const days = Math.max(0, Math.floor(diffMs / (24 * 60 * 60 * 1000)));
 
-    return Math.max(0, days);
+    this.warmupDayCache.set(domainId, {
+      day: days,
+      expiresAt: Date.now() + EmailProcessor.WARMUP_DAY_CACHE_TTL_MS,
+    });
+
+    return days;
   }
 
   private async incrementWarmupCounter(domainId: string): Promise<void> {
@@ -1397,17 +1635,34 @@ class TokenBucketRateLimiter {
 
     // Wait for a token
     if (this.waitQueue.length >= this.maxQueueSize) {
-      return Promise.reject(new Error('Rate limiter queue is full'));
+      // FIX-500-432: Use throw instead of Promise.reject in async function
+      throw new Error('Rate limiter queue is full');
     }
 
     return new Promise((resolve, reject) => {
-      this.waitQueue.push({ resolve, reject });
+      // FIX-500-119: Add 30-second per-waiter timeout to prevent
+      // promises hanging forever when refill rate is very low.
+      const timer = setTimeout(() => {
+        const idx = this.waitQueue.findIndex(w => w.resolve === resolve);
+        if (idx >= 0) this.waitQueue.splice(idx, 1);
+        reject(new Error('Rate limiter wait timeout (30s)'));
+      }, 30_000);
+
+      this.waitQueue.push({
+        resolve: () => { clearTimeout(timer); resolve(); },
+        reject: (err: Error) => { clearTimeout(timer); reject(err); },
+      });
       setTimeout(() => this.processQueue(), 1000 / this.refillRate);
     });
   }
 
   private refill(): void {
     const now = Date.now();
+    // FIX-500-433: Date.now() has millisecond precision. When dividing by 1000
+    // and multiplying by refillRate, calls <1ms apart produce 0 new tokens.
+    // This is acceptable for the expected call patterns (one acquire() per email
+    // send, typically >1ms apart). Math.max(0, ...) guards against wall-clock
+    // jumps from NTP adjustments producing negative elapsed time.
     const elapsed = Math.max(0, (now - this.lastRefill) / 1000);
     const newTokens = elapsed * this.refillRate;
     

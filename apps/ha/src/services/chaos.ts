@@ -145,6 +145,11 @@ export class ChaosEngineeringService {
    * Enable chaos engineering
    */
   enable(): void {
+    // FIX-500-338: Prevent enabling chaos in production
+    if (process.env.NODE_ENV === 'production' && !process.env.CHAOS_FORCE_ENABLE) {
+      logger.warn('[Chaos] Cannot enable in production without CHAOS_FORCE_ENABLE=true');
+      return;
+    }
     this.enabled = true;
     logger.info('[Chaos] Service enabled');
   }
@@ -425,16 +430,24 @@ export class ChaosEngineeringService {
 
       const result = await this.db.query(query, params);
 
-      const experiments: Experiment[] = result.rows.map(row => ({
-        id: row.id,
-        config: JSON.parse(row.config),
-        status: row.status,
-        startedAt: row.started_at ? new Date(row.started_at) : null,
-        endedAt: row.ended_at ? new Date(row.ended_at) : null,
-        startedBy: row.started_by || 'system',
-        results: row.results ? JSON.parse(row.results) : this.createEmptyResults(),
-        abortReason: row.abort_reason,
-      }));
+      const experiments: Experiment[] = result.rows.map(row => {
+        let config: Experiment['config'];
+        let results: Experiment['results'];
+        try { config = JSON.parse(row.config); }
+        catch { config = {} as Experiment['config']; }
+        try { results = row.results ? JSON.parse(row.results) : this.createEmptyResults(); }
+        catch { results = this.createEmptyResults(); }
+        return {
+          id: row.id,
+          config,
+          status: row.status,
+          startedAt: row.started_at ? new Date(row.started_at) : null,
+          endedAt: row.ended_at ? new Date(row.ended_at) : null,
+          startedBy: row.started_by || 'system',
+          results,
+          abortReason: row.abort_reason,
+        };
+      });
 
       return {
         ok: true,
@@ -745,9 +758,11 @@ export class ChaosEngineeringService {
       `);
 
       for (const row of result.rows) {
-        const config = JSON.parse(row.config);
-        const scheduledAt = new Date(config.scheduledAt);
-        if (scheduledAt > new Date()) {
+        let config: { scheduledAt?: string };
+        try { config = JSON.parse(row.config); }
+        catch { continue; }
+        const scheduledAt = new Date(config.scheduledAt ?? '');
+        if (!isNaN(scheduledAt.getTime()) && scheduledAt > new Date()) {
           await this.scheduleExperiment(row.id, scheduledAt);
         }
       }
@@ -817,6 +832,9 @@ export class ChaosEngineeringService {
       cleanup();
     }
     this.injectedFaults.clear();
+
+    // FIX-500-242: Clear activeExperiments to release completed/aborted experiment objects
+    this.activeExperiments.clear();
 
     logger.info('[Chaos] Service shut down');
   }

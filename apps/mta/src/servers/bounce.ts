@@ -116,6 +116,10 @@ export class BounceServer {
     callback: (err?: Error) => void
   ): void {
     // Accept mail to VERP addresses or bounce addresses
+    if (!address.address) {
+      callback(new Error('550 Missing recipient address'));
+      return;
+    }
     const email = address.address.toLowerCase();
     
     // Check if it's a VERP address for our domain
@@ -629,6 +633,27 @@ export class BounceServer {
         subtype = EXCLUDED.subtype,
         updated_at = NOW()
     `, [suppressionId, tenantId, email.toLowerCase(), reason, subtype]);
+  }
+
+  /**
+   * FIX-500-366: Cleanup old unmatched bounces in bounded batches
+   * Prevents unbounded table growth. Should be called periodically (e.g., daily cron).
+   */
+  async cleanupUnmatchedBounces(retentionDays = 30, batchSize = 1000): Promise<number> {
+    const result = await this.db.query<{ id: string }>(`
+      DELETE FROM unmatched_bounces
+      WHERE id IN (
+        SELECT id FROM unmatched_bounces
+        WHERE created_at < NOW() - INTERVAL '1 day' * $1
+        LIMIT $2
+      )
+      RETURNING id
+    `, [retentionDays, batchSize]);
+    const deleted = result.rowCount ?? 0;
+    if (deleted > 0) {
+      this.logger.info('Cleaned up unmatched bounces', { deleted, retentionDays });
+    }
+    return deleted;
   }
 
   private async queueBounceWebhook(tenantId: string, data: Record<string, unknown>): Promise<void> {

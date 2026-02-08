@@ -13,6 +13,7 @@ import {
     Alert,
 } from '../types.js';
 import { EventEmitter } from 'events';
+import crypto from 'node:crypto';
 import pino from 'pino';
 
 const logger = pino({ name: 'incident-manager' });
@@ -64,6 +65,7 @@ export class IncidentManager extends EventEmitter {
 
     constructor(config: IncidentManagerConfig) {
         super();
+        this.setMaxListeners(50); // FIX-500-332: Prevent maxListeners warning
         this.config = config;
     }
 
@@ -79,7 +81,7 @@ export class IncidentManager extends EventEmitter {
         relatedAlertIds?: string[];
     }): Incident {
         const incident: Incident = {
-            id: `inc-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: `inc-${crypto.randomUUID()}`,
             title: params.title,
             description: params.description,
             severity: params.severity,
@@ -289,7 +291,7 @@ export class IncidentManager extends EventEmitter {
         if (!timeline) return;
 
         const fullEvent: IncidentTimelineEntry = {
-            id: `evt-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+            id: `evt-${crypto.randomUUID()}`,
             timestamp: new Date(),
             ...event,
         };
@@ -367,9 +369,10 @@ export class IncidentManager extends EventEmitter {
         // Move to history
         this.incidentHistory.push(incident);
         
-        // Prevent unbounded growth of incident history
-        if (this.incidentHistory.length > IncidentManager.MAX_INCIDENT_HISTORY_SIZE) {
-            this.incidentHistory = this.incidentHistory.slice(-IncidentManager.MAX_INCIDENT_HISTORY_SIZE);
+        // FIX-500-328: Use splice for in-place trimming instead of copying entire array
+        const excess = this.incidentHistory.length - IncidentManager.MAX_INCIDENT_HISTORY_SIZE;
+        if (excess > 0) {
+            this.incidentHistory.splice(0, excess);
         }
         
         // MEM-009 FIX: Clean up all related maps to prevent memory leaks

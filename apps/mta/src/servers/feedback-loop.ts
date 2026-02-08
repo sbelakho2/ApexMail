@@ -266,6 +266,10 @@ export class FeedbackLoopServer {
     callback: (err?: Error) => void
   ): void {
     // Accept mail to FBL addresses
+    if (!address.address) {
+      callback(new Error('550 Missing recipient address'));
+      return;
+    }
     const email = address.address.toLowerCase();
     
     if (this.isFblAddress(email)) {

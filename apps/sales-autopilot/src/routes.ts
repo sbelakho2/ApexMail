@@ -25,7 +25,7 @@ import * as inbox from './inbox/index.js';
 import * as crm from './crm/index.js';
 import * as calendar from './calendar/index.js';
 import * as ads from './ads/index.js';
-import type { Lead, LeadFilters, LeadStatus, PipelineStage, MeetingType, PromoType, PromoPlacement, TaskType, TaskPriority } from './types.js';
+import type { LeadFilters, LeadStatus, PipelineStage, MeetingType, PromoType, PromoPlacement, TaskType, TaskPriority } from './types.js';
 
 // Type validation helpers
 const LEAD_STATUSES: readonly LeadStatus[] = [
@@ -133,13 +133,23 @@ app.post('/api/v1/discovery/run', async (c) => {
         tenantId: body.tenantId,
         sources: body.sources,
         categories: body.categories,
-        maxPagesPerSource: body.maxPagesPerSource || 3,
+        // FIX-500-315: Cap maxPagesPerSource to prevent unbounded scraping
+        maxPagesPerSource: Math.min(Math.max(body.maxPagesPerSource || 3, 1), 100),
     });
 
     // Store leads in CRM
-    for (const lead of result.leads) {
-        if (lead.id && lead.tenantId && lead.companyName && lead.domain) {
-            await crm.storeLead(lead as Lead);
+    // FIX-500-179: Per-item try/catch so one bad lead doesn't abort the entire batch
+    // FIX-500-325: scrapedToLeads now returns Lead[] — no unsafe cast needed
+    const storeErrors: Array<{ index: number; error: string }> = [];
+    for (let i = 0; i < result.leads.length; i++) {
+        const lead = result.leads[i];
+        if (lead && lead.id && lead.tenantId && lead.companyName && lead.domain) {
+            try {
+                await crm.storeLead(lead);
+            } catch (err) {
+                storeErrors.push({ index: i, error: err instanceof Error ? err.message : String(err) });
+                logger.warn('Failed to store discovered lead', { index: i, leadId: lead.id, error: err });
+            }
         }
     }
 
@@ -202,6 +212,15 @@ app.post('/api/v1/enrichment/batch', async (c) => {
         clearbitApiKey?: string;
     }>();
 
+    // FIX-500-178: Enforce batch size limit to prevent resource exhaustion
+    const MAX_BATCH_SIZE = 100;
+    if (!body.companies || body.companies.length > MAX_BATCH_SIZE) {
+        return c.json(
+            { success: false, error: `Batch size must be between 1 and ${MAX_BATCH_SIZE} companies` },
+            400
+        );
+    }
+
     const results = await enrichment.batchEnrichCompanies(body.companies, {
         clearbitApiKey: body.clearbitApiKey,
     });
@@ -242,8 +261,16 @@ app.post('/api/v1/scoring/calculate', async (c) => {
 
     const score = enrichment.calculateLeadScore(lead, enrichmentData, activities);
 
-    // Update lead score
-    await crm.updateLead(body.leadId, { score: score.totalScore });
+    // FIX-500-129: Persist enrichment data back to the lead record so future
+    // lookups benefit from the fetched information instead of discarding it.
+    const enrichmentUpdates: Record<string, unknown> = { score: score.totalScore };
+    if (enrichmentData) {
+        if (enrichmentData.industry) enrichmentUpdates.industry = enrichmentData.industry;
+        if (enrichmentData.technologies?.length) enrichmentUpdates.technologies = enrichmentData.technologies;
+        if (enrichmentData.socialProfiles?.length) enrichmentUpdates.socialProfiles = enrichmentData.socialProfiles;
+        if (enrichmentData.employeeRange) enrichmentUpdates.employeeCount = enrichmentData.employeeRange.label;
+    }
+    await crm.updateLead(body.leadId, enrichmentUpdates);
 
     return c.json({ success: true, data: score });
 });
@@ -263,7 +290,8 @@ app.post('/api/v1/scoring/calculate', async (c) => {
  */
 app.get('/api/v1/scoring/top/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
-    const limit = parseInt(c.req.query('limit') || '10', 10);
+    // FIX-500-020: Cap limit to prevent oversized responses
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '10', 10) || 10, 1), 100);
 
     const leads = await crm.filterLeads(tenantId, {});
 
@@ -301,17 +329,51 @@ app.get('/api/v1/scoring/top/:tenantId', async (c) => {
 
     const topLeads = enrichment.getTopLeads(scoredLeads, limit);
 
-    const topLeadDetails = await Promise.all(
-        topLeads.map(async (item) => ({
-            lead: await crm.getLead(item.leadId),
-            score: item.score,
-        }))
-    );
+    /**
+     * FIX-500-090: Build a Map from the already-fetched leads array instead
+     * of issuing N individual crm.getLead() calls per top lead.
+     */
+    const leadById = new Map(leads.map(l => [l.id, l]));
+    const topLeadDetails = topLeads.map((item) => ({
+        lead: leadById.get(item.leadId) ?? null,
+        score: item.score,
+    }));
 
     return c.json({
         success: true,
         data: topLeadDetails,
     });
+});
+
+// FIX-500-123: Wire getLeadsNeedingAttention — it was exported but never called.
+app.get('/api/v1/scoring/attention/:tenantId', async (c) => {
+    const tenantId = c.req.param('tenantId');
+    const minScore = parseInt(c.req.query('minScore') || '50', 10);
+    const daysSinceContact = parseInt(c.req.query('days') || '7', 10);
+
+    const leads = await crm.filterLeads(tenantId, {});
+
+    // Batch-fetch activities and score all leads
+    const activitiesMap = new Map<string, Awaited<ReturnType<typeof crm.getLeadActivities>>>();
+    await Promise.all(
+        leads.map(async (lead) => {
+            const activities = await crm.getLeadActivities(lead.id);
+            activitiesMap.set(lead.id, activities);
+        })
+    );
+
+    const scoredLeads = enrichment.bulkScoreLeads(
+        leads,
+        new Map(),
+        activitiesMap
+    );
+
+    const attentionLeads = enrichment.getLeadsNeedingAttention(leads, scoredLeads, {
+        minScore,
+        daysSinceContact,
+    });
+
+    return c.json({ success: true, data: attentionLeads });
 });
 
 // ============================================
@@ -489,6 +551,46 @@ app.post('/api/v1/inbox/process', async (c) => {
                 await campaigns.recordEngagement(relevantEnrollment.id, 'replied');
             }
         }
+    }
+
+    // FIX-500-127: Persist the classified inbox message to the database.
+    // Previously the message was only returned in the HTTP response.
+    try {
+        const pool = (await import('./db.js')).getDbPool();
+        await pool.query(
+            `INSERT INTO autopilot_inbox_messages (
+                id, tenant_id, lead_id, campaign_id, message_id, in_reply_to,
+                from_address, to_addresses, cc_addresses, subject,
+                text_body, html_body, classification, sentiment_label,
+                suggested_action, processed, processed_at, received_at, created_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())
+            ON CONFLICT (id) DO NOTHING`,
+            [
+                message.id,
+                message.tenantId,
+                message.leadId,
+                message.campaignId,
+                message.messageId,
+                message.inReplyTo,
+                JSON.stringify(message.from),
+                JSON.stringify(message.to),
+                JSON.stringify(message.cc),
+                message.subject,
+                message.textBody,
+                message.htmlBody,
+                message.classification,
+                message.sentiment?.label ?? null,
+                message.suggestedAction?.type ?? null,
+                message.processed,
+                message.processedAt,
+                message.receivedAt,
+            ]
+        );
+    } catch (dbErr) {
+        logger.warn('Failed to persist inbox message — response still returned', {
+            messageId: message.id,
+            error: dbErr instanceof Error ? dbErr.message : String(dbErr),
+        });
     }
 
     return c.json({ success: true, data: message });
@@ -670,6 +772,28 @@ app.get('/api/v1/pipeline/:tenantId', async (c) => {
     return c.json({ success: true, data: { pipeline, stats } });
 });
 
+// FIX-500-124: Wire getOverdueTasks, getLeadsNeedingFollowUp, getRottenLeads — all
+// were exported from pipeline.ts but never surfaced via API endpoints.
+
+app.get('/api/v1/pipeline/:tenantId/overdue-tasks', async (c) => {
+    const tenantId = c.req.param('tenantId');
+    const tasks = await crm.getOverdueTasks(tenantId);
+    return c.json({ success: true, data: tasks });
+});
+
+app.get('/api/v1/pipeline/:tenantId/needs-follow-up', async (c) => {
+    const tenantId = c.req.param('tenantId');
+    const days = parseInt(c.req.query('days') || '7', 10);
+    const leads = await crm.getLeadsNeedingFollowUp(tenantId, days);
+    return c.json({ success: true, data: leads });
+});
+
+app.get('/api/v1/pipeline/:tenantId/rotten-leads', async (c) => {
+    const tenantId = c.req.param('tenantId');
+    const leads = await crm.getRottenLeads(tenantId);
+    return c.json({ success: true, data: leads });
+});
+
 // ============================================
 // Calendar Routes
 // ============================================
@@ -705,7 +829,7 @@ app.post('/api/v1/calendar/book', async (c) => {
 
     const meetingType: MeetingType = isMeetingType(body.meetingType) ? body.meetingType : 'demo';
 
-    const slot = calendar.bookSlot(
+    const slot = await calendar.bookSlot(
         body.slotId,
         body.leadId,
         body.bookedBy,
@@ -735,7 +859,7 @@ app.post('/api/v1/calendar/cancel/:slotId', async (c) => {
     const slotId = c.req.param('slotId');
     const body = await c.req.json<{ reason?: string }>();
 
-    const slot = calendar.cancelBooking(slotId, body.reason);
+    const slot = await calendar.cancelBooking(slotId, body.reason);
 
     if (!slot) {
         return c.json({ success: false, error: 'Slot not found' }, 404);
@@ -748,23 +872,20 @@ app.get('/api/v1/calendar/ics/:slotId', async (c) => {
     const slotId = c.req.param('slotId');
     const organizerEmail = c.req.query('email') || 'noreply@apexmail.ee';
 
-    // This would need the actual slot data
-    // For now, create a mock slot with proper typing
-    const mockSlot: {
-        id: string;
-        startTime: Date;
-        endTime: Date;
-        meetingType: MeetingType;
-        meetingLink: string;
-    } = {
-        id: slotId,
-        startTime: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        endTime: new Date(Date.now() + 24 * 60 * 60 * 1000 + 30 * 60 * 1000),
-        meetingType: 'demo',
-        meetingLink: `https://meet.apexmail.ee/${slotId}`,
-    };
+    // FIX-500-126: Look up the actual booking from the calendar module
+    // instead of fabricating mock slot data.
+    const actualSlot = calendar.getSlot(slotId);
+    if (!actualSlot) {
+        return c.json({ success: false, error: 'Slot not found' }, 404);
+    }
 
-    const ics = calendar.generateIcsFile(mockSlot, organizerEmail);
+    const ics = calendar.generateIcsFile({
+        id: actualSlot.id,
+        startTime: actualSlot.startTime,
+        endTime: actualSlot.endTime,
+        meetingType: actualSlot.meetingType,
+        meetingLink: actualSlot.meetingLink,
+    }, organizerEmail);
 
     return new Response(ics, {
         headers: {
@@ -798,7 +919,7 @@ app.post('/api/v1/promos', async (c) => {
         return c.json({ success: false, error: 'Invalid promo placement' }, 400);
     }
 
-    const promo = ads.createPromoConfig(body.tenantId, {
+    const promo = await ads.createPromoConfig(body.tenantId, {
         name: body.name,
         type: body.type,
         placement: body.placement,
@@ -814,34 +935,52 @@ app.post('/api/v1/promos', async (c) => {
 
 app.get('/api/v1/promos/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
-    const promos = ads.getActivePromos(tenantId);
+    const promos = await ads.getActivePromos(tenantId);
 
     return c.json({ success: true, data: promos });
 });
 
 app.get('/api/v1/promos/analytics/:tenantId', async (c) => {
     const tenantId = c.req.param('tenantId');
-    const analytics = ads.getPromoAnalytics(tenantId);
+    const analytics = await ads.getPromoAnalytics(tenantId);
 
     return c.json({ success: true, data: analytics });
 });
 
 app.post('/api/v1/promos/track/click/:promoId', async (c) => {
     const promoId = c.req.param('promoId');
-    ads.recordClick(promoId);
+
+    // FIX-500-311: Check promo exists before recording
+    const exists = await ads.recordClick(promoId);
+    if (!exists) {
+        return c.json({ success: false, error: 'Promo not found' }, 404);
+    }
 
     return c.json({ success: true });
 });
 
 app.post('/api/v1/promos/track/conversion/:promoId', async (c) => {
     const promoId = c.req.param('promoId');
-    ads.recordConversion(promoId);
+
+    // FIX-500-311: Check promo exists before recording
+    const exists = await ads.recordConversion(promoId);
+    if (!exists) {
+        return c.json({ success: false, error: 'Promo not found' }, 404);
+    }
 
     return c.json({ success: true });
 });
 
 // Error handler
+// FIX-500-177: Return 400 for SyntaxError (malformed JSON) instead of generic 500
 app.onError((err, c) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+        logger.warn('Malformed JSON in request body', { error: err.message });
+        return c.json(
+            { success: false, error: 'Malformed JSON in request body' },
+            400
+        );
+    }
     logger.error('API error', { error: err.message, stack: err.stack });
     return c.json(
         { success: false, error: 'Internal server error' },

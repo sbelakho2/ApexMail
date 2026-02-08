@@ -1,12 +1,16 @@
 /**
  * Robots.txt Parser Service
  * Ensures ethical scraping by respecting robots.txt directives
+ *
+ * FIX-500-154: Raw robots.txt text cached in Redis (L2) with 1hr TTL.
+ * Local Map serves as L1 cache. On L1 miss, check Redis before fetching.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
 const robotsParser = require('robots-parser') as (url: string, txt: string) => RobotsParser;
 import { createLogger } from '@apexmail/lib/logger';
 import { config } from '../config.js';
+import { getRedisClient } from '../redis.js';
 
 const logger = createLogger({ name: 'robots-service', level: 'info' });
 
@@ -23,11 +27,14 @@ interface RobotsCache {
 
 const robotsCache = new Map<string, RobotsCache>();
 const CACHE_TTL_MS = 3600000; // 1 hour
+const REDIS_KEY_PREFIX = 'robots:';
 
 /**
  * Fetches and parses robots.txt for a given domain
+ * FIX-500-154: Checks Redis L2 cache before making HTTP request.
  */
 export async function fetchRobotsTxt(domain: string): Promise<RobotsParser> {
+    // L1: local cache
     const cached = robotsCache.get(domain);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
         return cached.parser;
@@ -35,6 +42,22 @@ export async function fetchRobotsTxt(domain: string): Promise<RobotsParser> {
 
     const robotsUrl = `https://${domain}/robots.txt`;
 
+    // L2: Redis cache
+    try {
+        const redis = getRedisClient();
+        const redisKey = `${REDIS_KEY_PREFIX}${domain}`;
+        const cachedTxt = await redis.get(redisKey);
+        if (cachedTxt !== null) {
+            const parser = robotsParser(robotsUrl, cachedTxt);
+            robotsCache.set(domain, { parser, fetchedAt: Date.now() });
+            logger.debug('Loaded robots.txt from Redis cache', { domain });
+            return parser;
+        }
+    } catch {
+        // Redis unavailable — continue to HTTP fetch
+    }
+
+    // L3: HTTP fetch
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), config.scraper.timeoutMs);
@@ -55,6 +78,14 @@ export async function fetchRobotsTxt(domain: string): Promise<RobotsParser> {
 
         const parser = robotsParser(robotsUrl, robotsTxt);
         robotsCache.set(domain, { parser, fetchedAt: Date.now() });
+
+        // FIX-500-154: Cache raw text in Redis with TTL
+        try {
+            const redis = getRedisClient();
+            await redis.set(`${REDIS_KEY_PREFIX}${domain}`, robotsTxt, 'EX', Math.floor(CACHE_TTL_MS / 1000));
+        } catch {
+            // Redis unavailable — local cache is sufficient
+        }
 
         logger.debug('Fetched robots.txt', { domain, statusCode: response.status });
 
@@ -121,11 +152,25 @@ export async function getSitemapUrls(domain: string): Promise<string[]> {
 
 /**
  * Clears the robots.txt cache for a specific domain or all domains
+ * FIX-500-154: Also clears Redis cache.
  */
-export function clearRobotsCache(domain?: string): void {
+export async function clearRobotsCache(domain?: string): Promise<void> {
     if (domain) {
         robotsCache.delete(domain);
+        try {
+            const redis = getRedisClient();
+            await redis.del(`${REDIS_KEY_PREFIX}${domain}`);
+        } catch { /* Redis unavailable */ }
     } else {
         robotsCache.clear();
+        try {
+            const redis = getRedisClient();
+            let cursor = '0';
+            do {
+                const [newCursor, keys] = await redis.scan(cursor, 'MATCH', `${REDIS_KEY_PREFIX}*`, 'COUNT', '100');
+                cursor = newCursor;
+                if (keys.length > 0) await redis.del(...keys);
+            } while (cursor !== '0');
+        } catch { /* Redis unavailable */ }
     }
 }

@@ -271,8 +271,9 @@ export class MetricsService {
   /**
    * C-092: Record multiple metrics in a single batched INSERT for efficiency.
    * Avoids per-metric round-trips to the database.
+   * FIX-500-449: Made public so callers can batch metrics in a single round-trip.
    */
-  private async recordMetricsBatch(values: MetricValue[]): Promise<Result<void>> {
+  async recordMetricsBatch(values: MetricValue[]): Promise<Result<void>> {
     if (values.length === 0) return { ok: true, value: undefined };
 
     try {
@@ -344,7 +345,24 @@ export class MetricsService {
     interval?: string;
   }): Promise<Result<{ series: { name: string; values: { time: Date; value: number }[] }[] }, Error>> {
     try {
+      // FIX-500-271/272: Whitelist aggregation and interval to prevent SQL injection
+      const ALLOWED_AGGS = new Set(['SUM', 'AVG', 'MIN', 'MAX', 'COUNT']);
+      const ALLOWED_INTERVALS = new Set(['hour', 'day', 'week', 'month', 'quarter', 'year']);
       const agg = options.aggregation.toUpperCase();
+      if (!ALLOWED_AGGS.has(agg)) {
+        return Result.err(new Error(`Invalid aggregation: ${options.aggregation}`));
+      }
+      if (options.interval && !ALLOWED_INTERVALS.has(options.interval)) {
+        return Result.err(new Error(`Invalid interval: ${options.interval}`));
+      }
+      // FIX-500-272: Sanitize groupBy labels to prevent injection via labels->>'...'
+      if (options.groupBy?.length) {
+        for (const g of options.groupBy) {
+          if (!/^[a-zA-Z0-9_]+$/.test(g)) {
+            return Result.err(new Error(`Invalid groupBy label: ${g}`));
+          }
+        }
+      }
       const query = `
         SELECT 
           ${agg}(value) as value,
@@ -440,7 +458,16 @@ export class MetricsService {
       }
 
       if (options.aggregation && options.interval) {
+        // FIX-500-271/272: Whitelist aggregation and interval to prevent SQL injection
+        const ALLOWED_AGGS_2 = new Set(['SUM', 'AVG', 'MIN', 'MAX', 'COUNT']);
+        const ALLOWED_INTERVALS_2 = new Set(['hour', 'day', 'week', 'month', 'quarter', 'year']);
         const agg = options.aggregation.toUpperCase();
+        if (!ALLOWED_AGGS_2.has(agg)) {
+          return Result.err(new Error(`Invalid aggregation: ${options.aggregation}`));
+        }
+        if (!ALLOWED_INTERVALS_2.has(options.interval)) {
+          return Result.err(new Error(`Invalid interval: ${options.interval}`));
+        }
         query = `
           SELECT 
             name,

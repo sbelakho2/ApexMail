@@ -567,8 +567,11 @@ export class AuditService {
   private async flushBuffer(): Promise<void> {
     if (this.buffer.length === 0) return;
 
-    const eventsToFlush = [...this.buffer];
-    this.buffer = [];
+    // FIX-500-422: Use splice(0) for atomic swap instead of spread-copy + reassign.
+    // The spread-copy pattern ([...this.buffer]; this.buffer = []) has a race:
+    // if logEvent() pushes between the spread and the assignment, the event is lost.
+    // splice(0) atomically removes and returns all elements in a single operation.
+    const eventsToFlush = this.buffer.splice(0);
 
     try {
       // Batch insert
@@ -604,8 +607,10 @@ export class AuditService {
       `, values.flat());
     } catch (error) {
       logger.error('[Audit] Failed to flush buffer:', { error: error instanceof Error ? error.message : String(error) });
-      // Re-add events to buffer
-      this.buffer = [...eventsToFlush, ...this.buffer];
+      // FIX-500-423: Use unshift to prepend into the *existing* buffer array.
+      // Previously [...eventsToFlush, ...this.buffer] created a new array, racing
+      // with concurrent logEvent() pushes that would be lost.
+      this.buffer.unshift(...eventsToFlush);
     }
   }
 

@@ -10,6 +10,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { secureHeaders } from 'hono/secure-headers';
+import { bodyLimit } from 'hono/body-limit'; // FIX-500-394
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 
@@ -26,15 +27,15 @@ const aiLogger = {
     },
 };
 
-import { InferenceEngine, EmbeddingsService } from './inference/index.js';
+import { InferenceEngine, EmbeddingsService, getSharedEngine } from './inference/index.js';
 import { ChatbotAssistant, IntentDetector } from './chatbot/index.js';
 import { MailbotExecutor } from './mailbot/index.js';
 import { STOOptimizer } from './sto/index.js';
 import { ContentGenerator } from './content/index.js';
 import { PredictiveAnalytics } from './analytics/index.js';
 
-// Initialize services
-const inference = new InferenceEngine();
+// FIX-500-099: Use shared engine instead of creating a new instance
+const inference = getSharedEngine();
 const embeddings = new EmbeddingsService();
 const chatbot = new ChatbotAssistant();
 const intentDetector = new IntentDetector();
@@ -62,6 +63,7 @@ const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
 const RATE_LIMIT_MAX_REQUESTS = 60; // 60 requests per minute per tenant
 
 // Periodically clean up expired rate limit entries to prevent memory leak
+// FIX-500-232: .unref() so this interval doesn't block graceful process exit
 setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of rateLimitStore) {
@@ -69,13 +71,15 @@ setInterval(() => {
             rateLimitStore.delete(key);
         }
     }
-}, RATE_LIMIT_WINDOW_MS);
+}, RATE_LIMIT_WINDOW_MS).unref();
 
 // ========================================
 // MIDDLEWARE
 // ========================================
 
 app.use('*', logger());
+// FIX-500-394: Reject oversized request bodies (1 MB default)
+app.use('*', bodyLimit({ maxSize: 1024 * 1024 }));
 app.use('*', cors({
     origin: ['http://localhost:3000', 'https://apexmail.app'],
     credentials: true,
@@ -173,19 +177,44 @@ app.get('/', (c) => {
     });
 });
 
-app.get('/health', (c) => {
+app.get('/health', async (c) => {
+    // FIX-500-017: Report actual service readiness instead of hardcoded values.
+    // Lazy-import to avoid circular dependency with index.ts.
+    try {
+        const { getBootstrap, isInitFailed } = await import('./index.js');
+
+        // FIX-500-392: If initialization failed, report unhealthy immediately
+        if (isInitFailed()) {
+            return c.json({
+                status: 'unhealthy',
+                ready: false,
+                reason: 'Service initialization failed',
+                uptime: process.uptime(),
+            }, 503);
+        }
+
+        const bootstrap = getBootstrap();
+        if (bootstrap) {
+            const readiness = bootstrap.getReadiness();
+            const status = readiness.ready && readiness.healthCheckPassing ? 'healthy' : 'degraded';
+            return c.json({
+                status,
+                ready: readiness.ready,
+                modelsLoaded: readiness.modelsLoaded,
+                cacheConnected: readiness.cacheConnected,
+                healthCheckPassing: readiness.healthCheckPassing,
+                startupTime: readiness.startupTime,
+                uptime: readiness.uptime,
+            }, status === 'healthy' ? 200 : 503);
+        }
+    } catch {
+        // Bootstrap not available yet — report startup state
+    }
     return c.json({
-        status: 'healthy',
-        services: {
-            inference: 'ready',
-            chatbot: 'ready',
-            mailbot: 'ready',
-            sto: 'ready',
-            content: 'ready',
-            analytics: 'ready',
-        },
+        status: 'starting',
+        ready: false,
         uptime: process.uptime(),
-    });
+    }, 503);
 });
 
 // ========================================

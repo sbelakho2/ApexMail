@@ -45,15 +45,28 @@ export const config = {
   redisDb: parseInt(process.env.REDIS_DB ?? '0', 10),
 
   // Redis (Sentinel for HA)
-  redisSentinels: process.env.REDIS_SENTINELS?.split(',').map(s => {
+  redisSentinels: process.env.REDIS_SENTINELS?.split(',').filter(s => s.includes(':')).map(s => {
     const [host, port] = s.split(':');
-    return { host, port: parseInt(port ?? '26379', 10) };
+    return { host: host || 'localhost', port: parseInt(port ?? '26379', 10) || 26379 };
   }),
   redisSentinelMaster: process.env.REDIS_SENTINEL_MASTER ?? 'mymaster',
 
   // API Keys
-  internalApiKey: process.env.INTERNAL_API_KEY ?? 'internal-key',
-  adminApiKey: process.env.ADMIN_API_KEY ?? 'admin-key',
+  // FIX-500-028: Reject hardcoded default keys in production
+  internalApiKey: (() => {
+    const key = process.env.INTERNAL_API_KEY ?? 'internal-key';
+    if (key === 'internal-key' && (process.env.NODE_ENV === 'production')) {
+      throw new Error('INTERNAL_API_KEY must be set in production — default key is insecure');
+    }
+    return key;
+  })(),
+  adminApiKey: (() => {
+    const key = process.env.ADMIN_API_KEY ?? 'admin-key';
+    if (key === 'admin-key' && (process.env.NODE_ENV === 'production')) {
+      throw new Error('ADMIN_API_KEY must be set in production — default key is insecure');
+    }
+    return key;
+  })(),
   
   // CORS
   corsOrigins: (process.env.CORS_ORIGINS ?? '*').split(','),

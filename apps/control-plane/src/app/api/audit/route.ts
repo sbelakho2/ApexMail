@@ -86,6 +86,7 @@ export async function GET(request: NextRequest) {
         })));
     } catch (error) {
         console.error('Audit API error:', error);
-        return NextResponse.json(DEMO_AUDIT_LOGS);
+        // FIX-500-298: Return 500 instead of masking errors with demo data
+        return NextResponse.json({ error: 'Failed to fetch audit logs' }, { status: 500 });
     }
 }

@@ -102,6 +102,11 @@ export class MetricsServer {
     return new Promise((resolve, reject) => {
       this.server = createServer((req, res) => this.handleRequest(req, res));
 
+      // FIX-500-174: Set request/headers timeouts to prevent slowloris attacks
+      this.server.requestTimeout = 10_000;   // 10s for entire request
+      this.server.headersTimeout = 5_000;    // 5s for headers
+      this.server.keepAliveTimeout = 5_000;  // 5s keep-alive
+
       this.server.on('error', (error) => {
         this.logger.error('Metrics server error', { error });
         reject(error);
@@ -121,7 +126,15 @@ export class MetricsServer {
         return;
       }
 
+      // FIX-500-175: Force-close connections after a timeout to avoid hanging on shutdown
+      const forceTimeout = setTimeout(() => {
+        this.logger.warn('Metrics server close timed out, forcing shutdown');
+        this.server?.closeAllConnections?.();
+        resolve();
+      }, 5_000);
+
       this.server.close(() => {
+        clearTimeout(forceTimeout);
         this.logger.info('Metrics server stopped');
         resolve();
       });
@@ -186,7 +199,9 @@ export class MetricsServer {
               cumulative += buckets.get(bucket) ?? 0;
               lines.push(`${metric.name}_bucket{${labelPart}le="${bucket}"} ${cumulative}`);
             }
-            lines.push(`${metric.name}_bucket{${labelPart}le="+Inf"} ${cumulative}`);
+            // FIX-500-173: +Inf bucket = total observations (count), not just sum of defined buckets
+            const totalCount = metric.counts?.get(labelKey) ?? 0;
+            lines.push(`${metric.name}_bucket{${labelPart}le="+Inf"} ${totalCount}`);
 
             const sum = metric.sums?.get(labelKey) ?? 0;
             const count = metric.counts?.get(labelKey) ?? 0;
@@ -267,6 +282,8 @@ export class MetricsServer {
     }
 
     // Find the right bucket and increment
+    // FIX-500-173: Handle values that exceed the largest bucket.
+    // Previously values > 10s were not counted in any bucket.
     const buckets = metric.buckets!.get(labelKey)!;
     for (const bucket of HISTOGRAM_BUCKETS) {
       if (value <= bucket) {
@@ -274,6 +291,8 @@ export class MetricsServer {
         break;
       }
     }
+    // FIX-500-173: Overflow values (> max bucket) are still counted in sum and count
+    // and appear in the +Inf bucket via formatMetrics
 
     // Update sum and count
     metric.sums!.set(labelKey, (metric.sums!.get(labelKey) ?? 0) + value);

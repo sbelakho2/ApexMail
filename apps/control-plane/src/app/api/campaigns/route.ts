@@ -62,9 +62,13 @@ const DEMO_CAMPAIGNS = [
     },
 ];
 
-export async function GET() {
+export async function GET(request: Request) {
     try {
-        // TODO: Replace with DB query when campaigns table is available
+        // FIX-500-302: Add pagination support
+        const url = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
+        const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
+
         const rows = await query<{
             id: string;
             name: string;
@@ -76,7 +80,8 @@ export async function GET() {
             SELECT id, name, status, stats, created_at, started_at
             FROM campaigns
             ORDER BY created_at DESC
-        `);
+            LIMIT $1 OFFSET $2
+        `, [limit, offset]);
 
         if (rows.length === 0) {
             return NextResponse.json(DEMO_CAMPAIGNS);
@@ -96,6 +101,7 @@ export async function GET() {
         })));
     } catch (error) {
         console.error('Campaigns API error:', error);
-        return NextResponse.json(DEMO_CAMPAIGNS);
+        // FIX-500-018: Return 500 instead of masking errors with demo data
+        return NextResponse.json({ error: 'Failed to fetch campaigns' }, { status: 500 });
     }
 }

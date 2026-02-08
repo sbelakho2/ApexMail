@@ -38,6 +38,40 @@ const scheduledJobs = new Map<string, CronJob>();
 const enrollmentIndex = new Map<string, string>(); // 'campaignId|leadId' -> enrollmentId
 
 /**
+ * FIX-500-100: Secondary indexes for O(1) lookups instead of O(n) linear scans.
+ */
+/** tenantId -> Set of campaignIds */
+const campaignsByTenant = new Map<string, Set<string>>();
+/** leadId -> Set of enrollmentIds */
+const enrollmentsByLead = new Map<string, Set<string>>();
+
+/**
+ * FIX-500-246: Periodic eviction of completed/exited enrollments from in-memory Maps.
+ * Since these are also persisted to Postgres via the repository, completed enrollments
+ * can safely be evicted from the cache to prevent unbounded memory growth.
+ */
+const ENROLLMENT_EVICTION_INTERVAL = 10 * 60 * 1000; // Every 10 minutes
+setInterval(() => {
+  const terminalStatuses = new Set(['completed', 'exited', 'unsubscribed']);
+  let evicted = 0;
+  for (const [id, enrollment] of enrollments) {
+    if (terminalStatuses.has(enrollment.status)) {
+      enrollments.delete(id);
+      enrollmentIndex.delete(`${enrollment.campaignId}|${enrollment.leadId}`);
+      const leadSet = enrollmentsByLead.get(enrollment.leadId);
+      if (leadSet) {
+        leadSet.delete(id);
+        if (leadSet.size === 0) enrollmentsByLead.delete(enrollment.leadId);
+      }
+      evicted++;
+    }
+  }
+  if (evicted > 0) {
+    logger.info('Evicted terminal enrollments from cache', { evicted, remaining: enrollments.size });
+  }
+}, ENROLLMENT_EVICTION_INTERVAL).unref();
+
+/**
  * IMP-006: Optional Postgres-backed repository. When wired in via
  * `setCampaignRepository()`, all campaign/enrollment mutations are
  * persisted to the database. The in-memory Maps act as a write-through
@@ -71,6 +105,10 @@ export async function hydrateCaches(): Promise<void> {
     const dbCampaigns = await repo.getAllCampaigns();
     for (const campaign of dbCampaigns) {
       campaigns.set(campaign.id, campaign);
+      // FIX-500-100: Populate tenant secondary index
+      let tenantSet = campaignsByTenant.get(campaign.tenantId);
+      if (!tenantSet) { tenantSet = new Set(); campaignsByTenant.set(campaign.tenantId, tenantSet); }
+      tenantSet.add(campaign.id);
     }
 
     const dbEnrollments = await repo.getAllActiveEnrollments();
@@ -78,6 +116,10 @@ export async function hydrateCaches(): Promise<void> {
       enrollments.set(enrollment.id, enrollment);
       // Rebuild the composite-key dedup index
       enrollmentIndex.set(`${enrollment.campaignId}|${enrollment.leadId}`, enrollment.id);
+      // FIX-500-100: Populate lead secondary index
+      let leadSet = enrollmentsByLead.get(enrollment.leadId);
+      if (!leadSet) { leadSet = new Set(); enrollmentsByLead.set(enrollment.leadId, leadSet); }
+      leadSet.add(enrollment.id);
     }
 
     logger.info('Hydrated drip-engine caches from DB', {
@@ -124,6 +166,11 @@ export async function createCampaign(
 
     campaigns.set(campaign.id, campaign);
 
+    // FIX-500-100: Maintain tenant secondary index
+    let tenantSet = campaignsByTenant.get(tenantId);
+    if (!tenantSet) { tenantSet = new Set(); campaignsByTenant.set(tenantId, tenantSet); }
+    tenantSet.add(campaign.id);
+
     // FIX-003: Await DB persistence instead of fire-and-forget.
     // Previously .catch() swallowed errors silently — the caller got
     // success while the DB write may have failed entirely.
@@ -132,6 +179,8 @@ export async function createCampaign(
             await repo.createCampaign(campaign);
         } catch (err) {
             logger.error('Failed to persist campaign to DB', { campaignId: campaign.id, error: err });
+            // FIX-500-494: Re-throw so caller knows the persist failed
+            throw err;
         }
     }
 
@@ -421,12 +470,17 @@ export async function enrollLead(
     enrollments.set(enrollment.id, enrollment);
     // FIX-011: Maintain composite index for O(1) dedup
     enrollmentIndex.set(enrollmentKey, enrollment.id);
+    // FIX-500-100: Maintain lead secondary index
+    let leadSet = enrollmentsByLead.get(lead.id);
+    if (!leadSet) { leadSet = new Set(); enrollmentsByLead.set(lead.id, leadSet); }
+    leadSet.add(enrollment.id);
 
     // Update campaign stats
     campaign.stats.totalEnrolled++;
     campaign.stats.activeCount++;
 
     // FIX-003: Await DB persistence instead of fire-and-forget
+    // FIX-500-312/313: Re-throw DB persist failures so callers know the write failed
     if (repo) {
         try {
             await Promise.all([
@@ -435,6 +489,7 @@ export async function enrollLead(
             ]);
         } catch (err) {
             logger.error('Failed to persist enrollment to DB', { enrollmentId: enrollment.id, error: err });
+            throw err;
         }
     }
 
@@ -486,6 +541,7 @@ export async function processEnrollmentStep(
         campaign.stats.completedCount++;
 
         // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
+        // FIX-500-312: Re-throw to propagate DB persist failure
         if (repo) {
             try {
                 await Promise.all([
@@ -494,6 +550,7 @@ export async function processEnrollmentStep(
                 ]);
             } catch (err) {
                 logger.error('Failed to persist enrollment completion', { error: err });
+                throw err;
             }
         }
 
@@ -526,6 +583,7 @@ export async function processEnrollmentStep(
             campaign.stats.exitedCount++;
 
             // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
+            // FIX-500-313: Re-throw to propagate DB persist failure
             if (repo) {
                 try {
                     await Promise.all([
@@ -534,6 +592,7 @@ export async function processEnrollmentStep(
                     ]);
                 } catch (err) {
                     logger.error('Failed to persist enrollment exit', { error: err });
+                    throw err;
                 }
             }
 
@@ -709,6 +768,7 @@ export async function processEnrollmentStep(
         enrollment.nextStepAt = calculateNextStepTime(nextStep.delay);
 
         // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
+        // FIX-500-312: Re-throw to propagate DB persist failure
         if (repo) {
             try {
                 await Promise.all([
@@ -722,6 +782,7 @@ export async function processEnrollmentStep(
                 ]);
             } catch (err) {
                 logger.error('Failed to persist enrollment step', { error: err });
+                throw err;
             }
         }
 
@@ -740,6 +801,7 @@ export async function processEnrollmentStep(
         campaign.stats.completedCount++;
 
         // B-036 / E-137: Await persistence instead of fire-and-forget .catch()
+        // FIX-500-313: Re-throw to propagate DB persist failure
         if (repo) {
             try {
                 await Promise.all([
@@ -755,6 +817,7 @@ export async function processEnrollmentStep(
                 ]);
             } catch (err) {
                 logger.error('Failed to persist enrollment completion', { error: err });
+                throw err;
             }
         }
 
@@ -762,16 +825,9 @@ export async function processEnrollmentStep(
     }
 }
 
-// C-089: Compile known variable replacement regexes once at module level
-const VARIABLE_PATTERNS: Record<string, RegExp> = {
-    '{{lead.company_name}}': /\{\{lead\.company_name\}\}/g,
-    '{{lead.domain}}': /\{\{lead\.domain\}\}/g,
-    '{{lead.email}}': /\{\{lead\.email\}\}/g,
-    '{{lead.first_name}}': /\{\{lead\.first_name\}\}/g,
-    '{{lead.industry}}': /\{\{lead\.industry\}\}/g,
-    '{{lead.website}}': /\{\{lead\.website\}\}/g,
-    '{{unsubscribe_link}}': /\{\{unsubscribe_link\}\}/g,
-};
+// FIX-500-321: Removed compiled /g regexes. The /g flag makes .test() stateful
+// (advances lastIndex), causing alternating true/false. replaceAll() with
+// literal strings is used instead — simpler and no stateful pitfall.
 
 /**
  * Replaces template variables in content
@@ -785,7 +841,7 @@ function replaceVariables(
         '{{lead.company_name}}': lead.companyName || '',
         '{{lead.domain}}': lead.domain || '',
         '{{lead.email}}': lead.email || '',
-        '{{lead.first_name}}': extractFirstName(lead.email) || '',
+        '{{lead.first_name}}': extractFirstName(lead) || '',
         '{{lead.industry}}': lead.industry || '',
         '{{lead.website}}': lead.website || '',
         '{{unsubscribe_link}}': `https://apexmail.ee/unsubscribe/${enrollment.id}`,
@@ -793,11 +849,8 @@ function replaceVariables(
 
     let result = content;
     for (const [key, value] of Object.entries(variables)) {
-        const pattern = VARIABLE_PATTERNS[key];
-        if (pattern) {
-            pattern.lastIndex = 0; // reset stateful /g regex
-            result = result.replace(pattern, value);
-        }
+        // FIX-500-321: Use replaceAll with literal string instead of /g regex
+        result = result.replaceAll(key, value);
     }
 
     // Replace custom fields
@@ -806,8 +859,10 @@ function replaceVariables(
         const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
         for (const [key, value] of Object.entries(lead.customFields)) {
             if (BLOCKED_KEYS.has(key)) continue;
+            // FIX-500-033: Escape regex special characters in key to prevent ReDoS
+            const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             result = result.replace(
-                new RegExp(`{{lead.custom.${key}}}`, 'g'),
+                new RegExp(`{{lead.custom.${escapedKey}}}`, 'g'),
                 String(value)
             );
         }
@@ -817,18 +872,46 @@ function replaceVariables(
 }
 
 /**
- * Extracts first name from email (basic heuristic)
+ * Extracts first name, preferring enrichment/custom field data over email heuristic
+ * FIX-500-324: Check lead's customFields and other properties for real names
+ * before falling back to the email-based heuristic which produces garbage
+ * like "Support" or "Info" for generic addresses.
  */
-function extractFirstName(email: string | null): string | null {
+function extractFirstName(lead: Lead): string | null {
+    // 1. Check customFields for a real first name
+    if (lead.customFields) {
+        const firstName = lead.customFields['firstName'] ?? lead.customFields['first_name'];
+        if (typeof firstName === 'string' && firstName.trim().length > 0) {
+            return firstName.trim();
+        }
+        // Check full name and take the first part
+        const fullName = lead.customFields['name'] ?? lead.customFields['fullName'] ?? lead.customFields['contactName'];
+        if (typeof fullName === 'string' && fullName.trim().length > 0) {
+            const parts = fullName.trim().split(/\s+/);
+            if (parts[0]) return parts[0];
+        }
+    }
+
+    // 2. Fall back to email heuristic (but skip generic addresses)
+    const email = lead.email;
     if (!email) return null;
 
     const local = email.split('@')[0];
     if (!local) return null;
 
-    // Try common patterns: firstname.lastname, firstname_lastname, firstnamelastname
+    // Skip generic/role-based addresses that produce meaningless names
+    const GENERIC_PREFIXES = new Set([
+        'info', 'support', 'admin', 'hello', 'contact', 'sales', 'team',
+        'help', 'billing', 'noreply', 'no-reply', 'office', 'mail',
+        'service', 'webmaster', 'postmaster', 'enquiries', 'feedback',
+    ]);
+    const lowerLocal = local.toLowerCase();
+    if (GENERIC_PREFIXES.has(lowerLocal)) return null;
+
+    // Try common patterns: firstname.lastname, firstname_lastname
     const parts = local.split(/[._]/);
     const firstName = parts[0];
-    if (firstName && firstName.length > 0) {
+    if (firstName && firstName.length > 1) {
         return firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
     }
 
@@ -837,16 +920,22 @@ function extractFirstName(email: string | null): string | null {
 
 /**
  * Gets enrollments ready to process
+ * FIX-500-091: For in-memory usage this still scans the enrollments map,
+ * but uses a straightforward iteration — the alternative (a separate
+ * time-sorted data structure) adds complexity beyond what is needed.
+ * For production, use a DB query: WHERE status='active' AND next_step_at <= NOW().
  */
 export function getReadyEnrollments(): CampaignEnrollment[] {
     const now = new Date();
+    const results: CampaignEnrollment[] = [];
 
-    return Array.from(enrollments.values()).filter(
-        (e) =>
-            e.status === 'active' &&
-            e.nextStepAt !== null &&
-            e.nextStepAt <= now
-    );
+    for (const e of enrollments.values()) {
+        if (e.status === 'active' && e.nextStepAt !== null && e.nextStepAt <= now) {
+            results.push(e);
+        }
+    }
+
+    return results;
 }
 
 /**
@@ -858,11 +947,19 @@ export function getCampaign(campaignId: string): DripCampaign | null {
 
 /**
  * Gets all campaigns for a tenant
+ * FIX-500-100: Uses secondary index campaignsByTenant for O(k) lookup
+ * instead of O(n) full scan (where k = campaigns for this tenant).
  */
 export function getTenantCampaigns(tenantId: string): DripCampaign[] {
-    return Array.from(campaigns.values()).filter(
-        (c) => c.tenantId === tenantId
-    );
+    const ids = campaignsByTenant.get(tenantId);
+    if (!ids || ids.size === 0) return [];
+
+    const results: DripCampaign[] = [];
+    for (const id of ids) {
+        const campaign = campaigns.get(id);
+        if (campaign) results.push(campaign);
+    }
+    return results;
 }
 
 /**
@@ -874,16 +971,27 @@ export function getEnrollment(enrollmentId: string): CampaignEnrollment | null {
 
 /**
  * Gets lead enrollments
+ * FIX-500-100: Uses secondary index enrollmentsByLead for O(k) lookup
+ * instead of O(n) full scan (where k = enrollments for this lead).
  */
 export function getLeadEnrollments(leadId: string): CampaignEnrollment[] {
-    return Array.from(enrollments.values()).filter(
-        (e) => e.leadId === leadId
-    );
+    const ids = enrollmentsByLead.get(leadId);
+    if (!ids || ids.size === 0) return [];
+
+    const results: CampaignEnrollment[] = [];
+    for (const id of ids) {
+        const enrollment = enrollments.get(id);
+        if (enrollment) results.push(enrollment);
+    }
+    return results;
 }
 
 /**
  * B-035 / E-137: Records engagement event.
  * Made async and awaits persistence instead of fire-and-forget.
+ * FIX-500-308: Use atomic DB increment for campaign stats instead of
+ * persisting the full in-memory stats blob (which loses updates under
+ * concurrent writes).
  */
 export async function recordEngagement(
     enrollmentId: string,
@@ -911,6 +1019,8 @@ export async function recordEngagement(
     }
 
     // FIX-009 + B-035: Persist engagement to DB — await instead of fire-and-forget
+    // FIX-500-308: Use atomic SQL increment for the stats column instead of
+    // overwriting the entire JSON blob (which causes lost updates under concurrency).
     if (repo) {
         try {
             await repo.updateEnrollment(enrollmentId, {
@@ -918,7 +1028,7 @@ export async function recordEngagement(
                 emailsClicked: enrollment.emailsClicked,
                 replied: enrollment.replied,
             });
-            await repo.updateCampaign(enrollment.campaignId, { stats: campaign.stats });
+            await repo.incrementCampaignStat(enrollment.campaignId, event);
         } catch (err) {
             logger.error('Failed to persist engagement', { error: err, enrollmentId, event });
         }
@@ -1004,6 +1114,7 @@ export async function resumeEnrollment(enrollmentId: string): Promise<boolean> {
 
 /**
  * Starts the campaign processor job
+ * FIX-500-310: Process enrollments in parallel batches instead of sequentially.
  */
 export function startCampaignProcessor(
     getLeadById: (id: string) => Promise<Lead | null>,
@@ -1014,29 +1125,35 @@ export function startCampaignProcessor(
         textBody: string;
     }) => Promise<{ messageId: string }>
 ): void {
+    const CONCURRENCY = 10;
+
     const job = new CronJob('*/1 * * * *', async () => {
         const readyEnrollments = getReadyEnrollments();
 
         logger.debug('Processing enrollments', { count: readyEnrollments.length });
 
-        for (const enrollment of readyEnrollments) {
-            try {
-                const lead = await getLeadById(enrollment.leadId);
-                if (!lead) {
-                    logger.warn('Lead not found for enrollment', {
-                        enrollmentId: enrollment.id,
-                        leadId: enrollment.leadId,
-                    });
-                    continue;
-                }
+        // FIX-500-310: Process in parallel batches of CONCURRENCY
+        for (let i = 0; i < readyEnrollments.length; i += CONCURRENCY) {
+            const batch = readyEnrollments.slice(i, i + CONCURRENCY);
+            await Promise.all(batch.map(async (enrollment) => {
+                try {
+                    const lead = await getLeadById(enrollment.leadId);
+                    if (!lead) {
+                        logger.warn('Lead not found for enrollment', {
+                            enrollmentId: enrollment.id,
+                            leadId: enrollment.leadId,
+                        });
+                        return;
+                    }
 
-                await processEnrollmentStep(enrollment.id, lead, sendEmail);
-            } catch (error) {
-                logger.error('Error processing enrollment', {
-                    enrollmentId: enrollment.id,
-                    error,
-                });
-            }
+                    await processEnrollmentStep(enrollment.id, lead, sendEmail);
+                } catch (error) {
+                    logger.error('Error processing enrollment', {
+                        enrollmentId: enrollment.id,
+                        error,
+                    });
+                }
+            }));
         }
     });
 

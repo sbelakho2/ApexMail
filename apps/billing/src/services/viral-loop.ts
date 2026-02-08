@@ -114,6 +114,9 @@ export class ViralLoopService {
 
     if (!result.ok) return Result.err(result.error);
 
+    if (result.value.rows.length === 0) {
+      return Result.err(new Error('INSERT RETURNING produced no rows'));
+    }
     const attributionId = result.value.rows[0]!.id;
 
     // Cache attribution for 30 days

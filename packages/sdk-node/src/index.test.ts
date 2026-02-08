@@ -255,7 +255,7 @@ describe('ApexMail SDK', () => {
                 json: async () => ({
                     id: 'webhook_123',
                     url: 'https://example.com/webhook',
-                    events: ['email.delivered'],
+                    events: ['message.delivered'],
                     active: true,
                     secret: 'whsec_xxx',
                 }),
@@ -263,7 +263,7 @@ describe('ApexMail SDK', () => {
 
             const webhook = await client.webhooks.create({
                 url: 'https://example.com/webhook',
-                events: ['email.delivered'],
+                events: ['message.delivered'],
             });
 
             expect(webhook.id).toBe('webhook_123');
@@ -275,15 +275,15 @@ describe('ApexMail SDK', () => {
                 ok: true,
                 json: async () => ({
                     id: 'webhook_123',
-                    events: ['email.bounced'],
+                    events: ['message.bounced'],
                 }),
             });
 
             const webhook = await client.webhooks.update('webhook_123', {
-                events: ['email.bounced'],
+                events: ['message.bounced'],
             });
 
-            expect(webhook.events).toContain('email.bounced');
+            expect(webhook.events).toContain('message.bounced');
         });
     });
 
@@ -414,12 +414,19 @@ describe('ApexMail SDK', () => {
             }
         }, 15000); // Increase timeout for retries
 
+        // FIX-500-458: Mock all retries (1 initial + 3 retries) for 500 errors
         it('should throw ApexMailError on other errors', async () => {
-            mockFetch.mockResolvedValueOnce({
+            const mock500 = {
                 ok: false,
                 status: 500,
+                headers: { get: () => null },
                 json: async () => ({ message: 'Internal server error', code: 'SERVER_ERROR' }),
-            });
+            };
+            mockFetch
+                .mockResolvedValueOnce(mock500)
+                .mockResolvedValueOnce(mock500)
+                .mockResolvedValueOnce(mock500)
+                .mockResolvedValueOnce(mock500);
 
             await expect(client.emails.send({
                 from: 'a@example.com',
@@ -427,6 +434,6 @@ describe('ApexMail SDK', () => {
                 subject: 'Test',
                 html: '<p>Hi</p>',
             })).rejects.toThrow(ApexMailError);
-        });
+        }, 15000);
     });
 });

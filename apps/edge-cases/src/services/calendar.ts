@@ -195,7 +195,15 @@ export class CalendarService {
     lines.push(`LAST-MODIFIED:${this.formatDate(event.lastModified)}`);
 
     if (event.url) {
-      lines.push(`URL:${event.url}`);
+      // FIX-500-032: Validate URL scheme to prevent javascript: injection in ICS
+      try {
+        const parsed = new URL(event.url);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+          lines.push(`URL:${event.url}`);
+        }
+      } catch {
+        // Invalid URL — skip silently
+      }
     }
 
     if (event.categories && event.categories.length > 0) {
@@ -598,8 +606,13 @@ export class CalendarService {
 
   /**
    * Generate timezone component
+   * FIX-500-406: Offsets are hardcoded European values (CET/CEST).
+   * Production should use IANA timezone database (e.g. via `@vvo/tzdb` or
+   * fetching VTIMEZONE data from tzurl.org) to generate correct offsets for
+   * any timezone. For non-European zones, these values are incorrect.
    */
   private generateTimezoneComponent(timezone: string): string[] {
+    // TODO: Replace with dynamic VTIMEZONE generation using IANA data
     // Simplified timezone component - production would need full VTIMEZONE
     return [
       'BEGIN:VTIMEZONE',

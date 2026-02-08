@@ -86,7 +86,9 @@ export function createApp(deps: AppDependencies) {
       if (!keyData) {
         return c.json({ error: 'Invalid API key' }, 401);
       }
-      const parsed = JSON.parse(keyData);
+      let parsed: { accountId: string; scopes: string[] };
+      try { parsed = JSON.parse(keyData); }
+      catch { return c.json({ error: 'Corrupted API key data' }, 500); }
       c.set('accountId', parsed.accountId);
       c.set('scopes', parsed.scopes || []);
     } else if (authHeader?.startsWith('Bearer ')) {
@@ -96,7 +98,9 @@ export function createApp(deps: AppDependencies) {
       if (!sessionData) {
         return c.json({ error: 'Invalid or expired token' }, 401);
       }
-      const session = JSON.parse(sessionData);
+      let session: { accountId: string; userId: string; scopes: string[] };
+      try { session = JSON.parse(sessionData); }
+      catch { return c.json({ error: 'Corrupted session data' }, 500); }
       c.set('accountId', session.accountId);
       c.set('userId', session.userId);
       c.set('scopes', session.scopes || []);

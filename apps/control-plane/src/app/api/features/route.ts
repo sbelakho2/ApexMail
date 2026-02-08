@@ -1,46 +1,142 @@
 /**
  * Feature Flags API
- * 
- * Returns feature flags and tenant overrides.
- * Used by the /features page.
+ *
+ * FIX-500-139: DB-backed feature flag management — no demo data.
+ * Queries feature_flags + feature_flag_overrides tables.
  */
 
 import { NextResponse } from 'next/server';
+import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// TODO: Replace with DB query against a feature_flags table
-const DEMO_FLAGS = [
-    { id: 'f1', key: 'ai_reply_suggestions', name: 'AI Reply Suggestions', description: 'Show AI-generated reply suggestions in compose view', type: 'percentage', enabled: true, percentage: 25, category: 'beta', createdAt: '2025-01-15T00:00:00Z', updatedAt: '2025-01-20T14:30:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f2', key: 'advanced_analytics', name: 'Advanced Analytics', description: 'Enhanced analytics dashboard with ML-powered insights', type: 'percentage', enabled: true, percentage: 50, category: 'beta', createdAt: '2025-01-10T00:00:00Z', updatedAt: '2025-01-18T10:15:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f3', key: 'smart_scheduling', name: 'Smart Send Time', description: 'AI-optimized send time recommendations', type: 'boolean', enabled: true, category: 'core', createdAt: '2024-12-01T00:00:00Z', updatedAt: '2025-01-05T09:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f4', key: 'webhook_v2', name: 'Webhook API v2', description: 'New webhook payload format with additional metadata', type: 'allowlist', enabled: true, allowlist: ['tenant-001', 'tenant-002', 'tenant-003'], category: 'beta', createdAt: '2025-01-08T00:00:00Z', updatedAt: '2025-01-19T16:45:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f5', key: 'email_preview_render', name: 'Email Preview Rendering', description: 'Server-side email preview rendering', type: 'boolean', enabled: true, category: 'core', createdAt: '2024-11-15T00:00:00Z', updatedAt: '2024-12-10T11:30:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f6', key: 'bulk_import_v2', name: 'Bulk Import v2', description: 'New bulk contact import with streaming support', type: 'percentage', enabled: true, percentage: 75, category: 'beta', createdAt: '2025-01-05T00:00:00Z', updatedAt: '2025-01-17T08:20:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f7', key: 'experimental_editor', name: 'Experimental Email Editor', description: 'Next-gen drag-and-drop email editor', type: 'allowlist', enabled: true, allowlist: ['tenant-001'], category: 'experimental', createdAt: '2025-01-20T00:00:00Z', updatedAt: '2025-01-20T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f8', key: 'ks_disable_sends', name: '[KS] Disable All Sends', description: 'KILLSWITCH: Immediately halt all email sending', type: 'boolean', enabled: false, category: 'killswitch', createdAt: '2024-10-01T00:00:00Z', updatedAt: '2024-10-01T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f9', key: 'ks_disable_webhooks', name: '[KS] Disable Webhooks', description: 'KILLSWITCH: Stop all webhook deliveries', type: 'boolean', enabled: false, category: 'killswitch', createdAt: '2024-10-01T00:00:00Z', updatedAt: '2024-10-01T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-    { id: 'f10', key: 'ks_maintenance_mode', name: '[KS] Maintenance Mode', description: 'KILLSWITCH: Show maintenance page to all users', type: 'boolean', enabled: false, category: 'killswitch', createdAt: '2024-10-01T00:00:00Z', updatedAt: '2024-10-01T00:00:00Z', updatedBy: 'admin@apexmail.io' },
-];
+interface FlagRow {
+    id: string;
+    key: string;
+    name: string;
+    description: string;
+    type: string;
+    enabled: boolean;
+    percentage: number | null;
+    allowlist: string[] | null;
+    category: string;
+    updated_by: string | null;
+    created_at: string;
+    updated_at: string;
+}
 
-const DEMO_OVERRIDES = [
-    { tenantId: 'tenant-001', tenantName: 'Acme Corp', flagKey: 'ai_reply_suggestions', value: true, reason: 'Early beta partner', createdAt: '2025-01-15T00:00:00Z' },
-    { tenantId: 'tenant-002', tenantName: 'TechStart Inc', flagKey: 'ai_reply_suggestions', value: true, reason: 'Requested beta access', createdAt: '2025-01-16T00:00:00Z' },
-    { tenantId: 'tenant-005', tenantName: 'Legacy Systems Ltd', flagKey: 'bulk_import_v2', value: false, reason: 'Uses legacy API integration', createdAt: '2025-01-10T00:00:00Z' },
-];
+interface OverrideRow {
+    id: string;
+    tenant_id: string;
+    tenant_name: string | null;
+    flag_key: string;
+    value: boolean;
+    reason: string | null;
+    created_at: string;
+}
 
 export async function GET() {
     try {
-        // TODO: Replace with real feature_flags + feature_flag_overrides queries
+        const [flags, overrides] = await Promise.all([
+            query<FlagRow>(
+                `SELECT id, key, name, description, type, enabled, percentage,
+                        allowlist, category, updated_by, created_at, updated_at
+                 FROM feature_flags
+                 ORDER BY category, name`
+            ),
+            query<OverrideRow>(
+                `SELECT id, tenant_id, tenant_name, flag_key, value, reason, created_at
+                 FROM feature_flag_overrides
+                 ORDER BY created_at DESC`
+            ),
+        ]);
+
         return NextResponse.json({
-            flags: DEMO_FLAGS,
-            overrides: DEMO_OVERRIDES,
+            flags: flags.map((f) => ({
+                id: f.id,
+                key: f.key,
+                name: f.name,
+                description: f.description,
+                type: f.type,
+                enabled: f.enabled,
+                percentage: f.percentage,
+                allowlist: f.allowlist,
+                category: f.category,
+                updatedBy: f.updated_by,
+                createdAt: f.created_at,
+                updatedAt: f.updated_at,
+            })),
+            overrides: overrides.map((o) => ({
+                tenantId: o.tenant_id,
+                tenantName: o.tenant_name,
+                flagKey: o.flag_key,
+                value: o.value,
+                reason: o.reason,
+                createdAt: o.created_at,
+            })),
         });
     } catch (error) {
         console.error('Features API error:', error);
-        return NextResponse.json({
-            flags: DEMO_FLAGS,
-            overrides: DEMO_OVERRIDES,
-        });
+        return NextResponse.json({ error: 'Failed to fetch feature flags' }, { status: 500 });
+    }
+}
+
+export async function POST(request: Request) {
+    try {
+        const body = await request.json();
+        const { key, name, description, type, enabled, percentage, allowlist, category } = body as {
+            key: string; name: string; description?: string; type?: string;
+            enabled?: boolean; percentage?: number; allowlist?: string[]; category?: string;
+        };
+        if (!key || !name) {
+            return NextResponse.json({ error: 'key and name are required' }, { status: 400 });
+        }
+        const rows = await query<FlagRow>(
+            `INSERT INTO feature_flags (key, name, description, type, enabled, percentage, allowlist, category)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [key, name, description || '', type || 'boolean', enabled ?? false,
+             percentage ?? null, allowlist ? JSON.stringify(allowlist) : null, category || 'core']
+        );
+        if (rows.length === 0) {
+            return NextResponse.json({ error: 'Failed to create flag' }, { status: 500 });
+        }
+        return NextResponse.json(rows[0], { status: 201 });
+    } catch (error) {
+        console.error('Features POST error:', error);
+        return NextResponse.json({ error: 'Failed to create feature flag' }, { status: 500 });
+    }
+}
+
+export async function PATCH(request: Request) {
+    try {
+        const body = await request.json();
+        const { id, enabled, percentage, allowlist } = body as {
+            id: string; enabled?: boolean; percentage?: number; allowlist?: string[];
+        };
+        if (!id) {
+            return NextResponse.json({ error: 'Flag ID is required' }, { status: 400 });
+        }
+
+        const sets: string[] = ['updated_at = NOW()'];
+        const values: unknown[] = [];
+        let idx = 1;
+
+        if (enabled !== undefined) { sets.push(`enabled = $${idx++}`); values.push(enabled); }
+        if (percentage !== undefined) { sets.push(`percentage = $${idx++}`); values.push(percentage); }
+        if (allowlist !== undefined) { sets.push(`allowlist = $${idx++}`); values.push(JSON.stringify(allowlist)); }
+
+        values.push(id);
+        const rows = await query<FlagRow>(
+            `UPDATE feature_flags SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`,
+            values
+        );
+        if (rows.length === 0) {
+            return NextResponse.json({ error: 'Flag not found' }, { status: 404 });
+        }
+        return NextResponse.json(rows[0]);
+    } catch (error) {
+        console.error('Features PATCH error:', error);
+        return NextResponse.json({ error: 'Failed to update feature flag' }, { status: 500 });
     }
 }

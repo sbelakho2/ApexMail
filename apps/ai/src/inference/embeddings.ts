@@ -71,6 +71,24 @@ export class EmbeddingsService {
     private maxVectorStoreSize: number;
     private initialized: boolean = false;
 
+    /**
+     * FIX-500-389: Safely increment accessCounter and re-normalize when
+     * approaching Number.MAX_SAFE_INTEGER to prevent counter overflow.
+     */
+    private nextAccessCounter(): number {
+        this.accessCounter++;
+        if (this.accessCounter > Number.MAX_SAFE_INTEGER / 2) {
+            // Re-normalize: sort entries by current counter value and reassign sequential values
+            const sorted = Array.from(this.accessOrder.entries())
+                .sort((a, b) => a[1] - b[1]);
+            this.accessCounter = 0;
+            for (const [key] of sorted) {
+                this.accessOrder.set(key, ++this.accessCounter);
+            }
+        }
+        return this.accessCounter;
+    }
+
     constructor(config?: Partial<EmbeddingConfig>, maxStoreSize?: number) {
         this.config = { ...DEFAULT_EMBEDDING_CONFIG, ...config };
         this.maxVectorStoreSize = maxStoreSize ?? DEFAULT_MAX_VECTOR_STORE_SIZE;
@@ -114,23 +132,33 @@ export class EmbeddingsService {
 
     /**
      * Generate embeddings for multiple texts
+     * FIX-500-393: Limit concurrency to avoid overwhelming the inference engine.
+     * Process in chunks of MAX_CONCURRENT_EMBEDDINGS instead of all at once.
      */
     async embedBatch(texts: string[]): Promise<EmbeddingResult[]> {
         if (!this.initialized) {
             await this.initialize();
         }
 
+        const MAX_CONCURRENT_EMBEDDINGS = 10;
         const truncatedTexts = texts.map((t) => this.truncateText(t));
-        const results = await this.engine.embedBatch(truncatedTexts);
+        const allResults: EmbeddingResult[] = [];
 
-        if (this.config.normalize) {
-            return results.map((r) => ({
-                ...r,
-                embedding: this.normalize(r.embedding),
-            }));
+        for (let i = 0; i < truncatedTexts.length; i += MAX_CONCURRENT_EMBEDDINGS) {
+            const chunk = truncatedTexts.slice(i, i + MAX_CONCURRENT_EMBEDDINGS);
+            const results = await this.engine.embedBatch(chunk);
+
+            if (this.config.normalize) {
+                allResults.push(...results.map((r) => ({
+                    ...r,
+                    embedding: this.normalize(r.embedding),
+                })));
+            } else {
+                allResults.push(...results);
+            }
         }
 
-        return results;
+        return allResults;
     }
 
     /**
@@ -156,8 +184,9 @@ export class EmbeddingsService {
             text,
         });
         
-        // AI-004: Update access order
-        this.accessOrder.set(id, ++this.accessCounter);
+        // FIX-500-088: Delete+re-insert to push to end of Map iteration order (MRU)
+        this.accessOrder.delete(id);
+        this.accessOrder.set(id, this.nextAccessCounter());
     }
 
     /**
@@ -183,8 +212,9 @@ export class EmbeddingsService {
                 text: entries[i].text,
             });
             
-            // AI-004: Update access order
-            this.accessOrder.set(entries[i].id, ++this.accessCounter);
+            // FIX-500-088: Delete+re-insert for LRU ordering
+            this.accessOrder.delete(entries[i].id);
+            this.accessOrder.set(entries[i].id, this.nextAccessCounter());
         }
     }
 
@@ -199,6 +229,8 @@ export class EmbeddingsService {
 
     /**
      * Search for similar vectors
+     * FIX-500-086: Use a bounded min-heap to avoid sorting the entire results
+     * array. We keep at most topK items and discard worse candidates early.
      */
     async search(
         query: string,
@@ -207,26 +239,73 @@ export class EmbeddingsService {
     ): Promise<SearchResult[]> {
         const queryEmbedding = await this.embed(query);
 
-        const results: SearchResult[] = [];
+        // Bounded min-heap: keep the topK highest scores.
+        // Heap stores items in min-score-first order so we can discard the
+        // weakest candidate in O(log k) instead of sorting O(n log n).
+        const heap: SearchResult[] = [];
+        let heapMinScore = -Infinity;
+
+        const pushHeap = (item: SearchResult) => {
+            heap.push(item);
+            // Bubble up
+            let i = heap.length - 1;
+            while (i > 0) {
+                const parent = (i - 1) >> 1;
+                if (heap[parent].score <= heap[i].score) break;
+                [heap[parent], heap[i]] = [heap[i], heap[parent]];
+                i = parent;
+            }
+        };
+
+        const popHeap = (): SearchResult => {
+            const top = heap[0];
+            const last = heap.pop()!;
+            if (heap.length > 0) {
+                heap[0] = last;
+                // Sift down
+                let i = 0;
+                while (true) {
+                    let smallest = i;
+                    const l = 2 * i + 1, r = 2 * i + 2;
+                    if (l < heap.length && heap[l].score < heap[smallest].score) smallest = l;
+                    if (r < heap.length && heap[r].score < heap[smallest].score) smallest = r;
+                    if (smallest === i) break;
+                    [heap[smallest], heap[i]] = [heap[i], heap[smallest]];
+                    i = smallest;
+                }
+            }
+            return top;
+        };
 
         for (const entry of this.vectorStore.values()) {
             const score = this.cosineSimilarity(queryEmbedding.embedding, entry.vector);
 
-            if (score >= threshold) {
-                results.push({
-                    id: entry.id,
-                    score,
-                    metadata: entry.metadata,
-                    text: entry.text,
-                });
+            if (score < threshold) continue;
+
+            // Early skip: if heap is full and this score can't beat the min, skip
+            if (heap.length >= topK && score <= heapMinScore) continue;
+
+            pushHeap({
+                id: entry.id,
+                score,
+                metadata: entry.metadata,
+                text: entry.text,
+            });
+
+            if (heap.length > topK) {
+                popHeap();
             }
+            heapMinScore = heap.length > 0 ? heap[0].score : -Infinity;
         }
 
-        // Sort by score descending
-        results.sort((a, b) => b.score - a.score);
+        // Extract items from heap in descending score order
+        const results: SearchResult[] = [];
+        while (heap.length > 0) {
+            results.push(popHeap());
+        }
+        results.reverse();
 
-        // Return top K
-        return results.slice(0, topK);
+        return results;
     }
 
     /**
@@ -263,29 +342,25 @@ export class EmbeddingsService {
     getVector(id: string): VectorEntry | undefined {
         const entry = this.vectorStore.get(id);
         if (entry) {
-            // AI-004: Update access order on read
-            this.accessOrder.set(id, ++this.accessCounter);
+            // FIX-500-088: Delete+re-insert to push to end of Map (MRU position)
+            this.accessOrder.delete(id);
+            this.accessOrder.set(id, this.nextAccessCounter());
         }
         return entry;
     }
 
     /**
-     * AI-004 FIX: Evict least recently used entry from vector store
+     * FIX-500-088: Evict least recently used entry using Map insertion-order.
+     * Instead of O(n) scanning the accessOrder map, we track the LRU id
+     * directly by iterating the Map (which yields in insertion order).
+     * On access we delete+re-insert so most-recently-used goes to the end.
      */
     private evictLRU(): void {
-        if (this.vectorStore.size === 0) return;
-        
-        let lruId: string | null = null;
-        let lruOrder = Infinity;
-        
-        for (const [id, order] of this.accessOrder) {
-            if (order < lruOrder && this.vectorStore.has(id)) {
-                lruOrder = order;
-                lruId = id;
-            }
-        }
-        
-        if (lruId) {
+        if (this.accessOrder.size === 0) return;
+
+        // The first key from the Map iterator is the least-recently-used
+        const lruId = this.accessOrder.keys().next().value as string;
+        if (lruId !== undefined) {
             this.vectorStore.delete(lruId);
             this.accessOrder.delete(lruId);
         }
@@ -300,9 +375,11 @@ export class EmbeddingsService {
 
     /**
      * Get all vectors
+     * FIX-500-388: Return IterableIterator to avoid copying the entire map
+     * into an array. Callers can spread into an array if needed.
      */
-    getAllVectors(): VectorEntry[] {
-        return Array.from(this.vectorStore.values());
+    getAllVectors(): IterableIterator<VectorEntry> {
+        return this.vectorStore.values();
     }
 
     /**
@@ -378,6 +455,8 @@ export class EmbeddingsService {
 
     /**
      * Export store to JSON
+     * FIX-500-087: For large stores, use exportStoreNDJSON() to avoid
+     * serializing the entire map into a single string.
      */
     exportStore(): string {
         const entries = Array.from(this.vectorStore.entries());
@@ -385,11 +464,56 @@ export class EmbeddingsService {
     }
 
     /**
+     * FIX-500-087: Export store as newline-delimited JSON (NDJSON).
+     * Each line is a self-contained JSON object, avoiding the need to hold
+     * the entire serialised store in a single string.
+     */
+    exportStoreNDJSON(): string {
+        const lines: string[] = [];
+        for (const [key, entry] of this.vectorStore) {
+            lines.push(JSON.stringify({ key, entry }));
+        }
+        return lines.join('\n');
+    }
+
+    /**
+     * FIX-500-087: Import store from NDJSON format.
+     */
+    importStoreNDJSON(ndjson: string): void {
+        const lines = ndjson.split('\n').filter(line => line.trim().length > 0);
+        this.vectorStore.clear();
+        this.accessOrder.clear();
+        this.accessCounter = 0;
+        for (const line of lines) {
+            let entry: { key: string; entry: VectorEntry };
+            try { entry = JSON.parse(line) as { key: string; entry: VectorEntry }; }
+            catch { continue; }
+            this.vectorStore.set(entry.key, entry.entry);
+            this.accessOrder.set(entry.key, this.nextAccessCounter());
+        }
+    }
+
+    /**
      * Import store from JSON
+     * FIX-500-387: Wrap JSON.parse in try-catch to avoid crash on corrupt data
      */
     importStore(json: string): void {
-        const entries: Array<[string, VectorEntry]> = JSON.parse(json);
+        let entries: Array<[string, VectorEntry]>;
+        try {
+            entries = JSON.parse(json);
+        } catch {
+            throw new Error('Failed to parse vector store JSON: invalid format');
+        }
+        if (!Array.isArray(entries)) {
+            throw new Error('Failed to parse vector store JSON: expected array of entries');
+        }
         this.vectorStore = new Map(entries);
+        // Reset LRU tracking for imported data
+        this.accessOrder.clear();
+        this.accessCounter = 0;
+        for (const [key] of entries) {
+            this.accessOrder.set(key, this.nextAccessCounter());
+        }
     }
 
     /**

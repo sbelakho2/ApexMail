@@ -72,6 +72,8 @@ export class FailoverService {
   private failureCount: Map<string, number> = new Map();
   private lastFailover: Map<string, Date> = new Map();
   private failoverHistory: FailoverEvent[] = [];
+  // FIX-500-241: Cap failover history to prevent unbounded memory growth
+  private static readonly MAX_FAILOVER_HISTORY = 1000;
   private configs: Map<string, FailoverConfig> = new Map();
   private monitorInterval: NodeJS.Timeout | null = null;
   private listeners: Set<(event: FailoverEvent) => void> = new Set();
@@ -79,6 +81,17 @@ export class FailoverService {
   // HA-001 FIX: State machine lock for atomic state transitions
   private stateTransitionLock: Promise<void> = Promise.resolve();
   private stateTransitionInProgress = false;
+
+  /**
+   * FIX-500-241: Push a failover event with bounded history size.
+   * Trims oldest entries when the history exceeds MAX_FAILOVER_HISTORY.
+   */
+  private pushFailoverEvent(event: FailoverEvent): void {
+    this.failoverHistory.push(event);
+    if (this.failoverHistory.length > FailoverService.MAX_FAILOVER_HISTORY) {
+      this.failoverHistory = this.failoverHistory.slice(-FailoverService.MAX_FAILOVER_HISTORY);
+    }
+  }
 
   constructor(db: Pool, redis: Redis, healthCheck: HealthCheckService) {
     this.db = db;
@@ -97,7 +110,7 @@ export class FailoverService {
   private async atomicStateTransition(
     expectedStates: FailoverState[],
     newState: FailoverState,
-    operation: () => Promise<void>
+    operation: (fencingToken?: number) => Promise<void>
   ): Promise<{ success: boolean; error?: string }> {
     // Wait for any pending transition to complete
     await this.stateTransitionLock;
@@ -130,11 +143,14 @@ export class FailoverService {
           error: 'Another node is performing a state transition. Please wait.'
         };
       }
+
+      // FIX-500-336: Acquire monotonic fencing token to prevent stale operations
+      const fencingToken = await this.redis.incr('ha:fencing-token');
       
       try {
-        // Execute the state transition operation
+        // Execute the state transition operation with fencing token
         this.state = newState;
-        await operation();
+        await operation(fencingToken);
         return { success: true };
       } catch (error) {
         // On failure, transition to manual intervention
@@ -144,8 +160,14 @@ export class FailoverService {
           error: error instanceof Error ? error.message : String(error)
         };
       } finally {
-        // Release distributed lock
-        await this.redis.del(lockKey);
+        // FIX-500-183: Use Lua compare-and-delete to release the distributed lock.
+        // Plain DEL could delete another node's lock if ours expired during operation.
+        await this.redis.eval(
+          `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`,
+          1,
+          lockKey,
+          lockValue,
+        );
       }
     } finally {
       this.stateTransitionInProgress = false;
@@ -344,7 +366,7 @@ export class FailoverService {
       event.error = transitionResult.error ?? 'State transition failed';
       event.completedAt = new Date();
       event.duration = event.completedAt.getTime() - event.startedAt.getTime();
-      this.failoverHistory.push(event);
+      this.pushFailoverEvent(event);
       return { ok: false, error: new Error(transitionResult.error) };
     }
     
@@ -374,7 +396,7 @@ export class FailoverService {
 
       this.state = FailoverState.FAILED_OVER;
       this.lastFailover.set(componentName, new Date());
-      this.failoverHistory.push(event);
+      this.pushFailoverEvent(event);
       this.notifyListeners(event);
 
       // Store in database for audit
@@ -394,7 +416,7 @@ export class FailoverService {
       event.duration = event.completedAt.getTime() - event.startedAt.getTime();
 
       this.state = FailoverState.MANUAL_INTERVENTION;
-      this.failoverHistory.push(event);
+      this.pushFailoverEvent(event);
       this.notifyListeners(event);
 
       // Send critical alert
@@ -678,7 +700,7 @@ export class FailoverService {
       event.duration = event.completedAt.getTime() - event.startedAt.getTime();
 
       this.state = FailoverState.NORMAL;
-      this.failoverHistory.push(event);
+      this.pushFailoverEvent(event);
       this.notifyListeners(event);
 
       await this.storeFailoverEvent(event);
@@ -695,7 +717,7 @@ export class FailoverService {
       event.duration = event.completedAt.getTime() - event.startedAt.getTime();
 
       this.state = FailoverState.MANUAL_INTERVENTION;
-      this.failoverHistory.push(event);
+      this.pushFailoverEvent(event);
       this.notifyListeners(event);
 
       await this.sendAlert('failback_failed', event);
@@ -718,8 +740,8 @@ export class FailoverService {
     }
 
     // Parse endpoints
-    const [origHost, origPort] = originalPrimary.endpoint.split(':');
-    const [currHost, currPort] = currentPrimary.endpoint.split(':');
+    const [origHost, origPort = '5432'] = originalPrimary.endpoint.split(':');
+    const [currHost, currPort = '5432'] = currentPrimary.endpoint.split(':');
 
     // Step 1: Acquire failback lock to prevent concurrent operations (FENCING)
     const lockKey = `ha:failback:lock:${event.component}`;
@@ -733,7 +755,7 @@ export class FailoverService {
       // This prevents split-brain by ensuring only one primary can accept writes
       const origPool = new Pool({
         host: origHost,
-        port: parseInt(origPort, 10),
+        port: parseInt(origPort, 10) || 5432,
         database: config.dbName,
         user: config.dbUser,
         password: config.dbPassword,
@@ -822,7 +844,7 @@ export class FailoverService {
       // Step 4: Fence the current primary (stop accepting writes)
       const currPool = new Pool({
         host: currHost,
-        port: parseInt(currPort, 10),
+        port: parseInt(currPort, 10) || 5432,
         database: config.dbName,
         user: config.dbUser,
         password: config.dbPassword,
@@ -853,7 +875,7 @@ export class FailoverService {
       logger.info('[Failback] Promoting original primary...');
       
       // Step 6: Update connection configuration
-      await this.updateDatabaseEndpoint(origHost, parseInt(origPort, 10));
+      await this.updateDatabaseEndpoint(origHost, parseInt(origPort, 10) || 5432);
 
       // Step 7: Publish failback event with STONITH-like fencing verification
       await this.redis.publish('ha:failback:database', JSON.stringify({
@@ -868,8 +890,13 @@ export class FailoverService {
       event.metadata.fencingCompleted = true;
 
     } finally {
-      // Release failback lock
-      await this.redis.del(lockKey);
+      // FIX-500-183: Use Lua compare-and-delete for failback lock release too
+      await this.redis.eval(
+        `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`,
+        1,
+        lockKey,
+        event.id,
+      );
     }
   }
 
@@ -886,8 +913,8 @@ export class FailoverService {
     const primaryTarget = dbConfig.targets[0];
     const standbyTarget = dbConfig.targets[1];
 
-    const [primaryHost, primaryPort] = primaryTarget.endpoint.split(':');
-    const [standbyHost, standbyPort] = standbyTarget.endpoint.split(':');
+    const [primaryHost, primaryPort = '5432'] = primaryTarget.endpoint.split(':');
+    const [standbyHost, standbyPort = '5432'] = standbyTarget.endpoint.split(':');
 
     let primaryIsWritable = false;
     let standbyIsWritable = false;
@@ -895,7 +922,7 @@ export class FailoverService {
     // Check primary
     const primaryPool = new Pool({
       host: primaryHost,
-      port: parseInt(primaryPort, 10),
+      port: parseInt(primaryPort, 10) || 5432,
       database: config.dbName,
       user: config.dbUser,
       password: config.dbPassword,
@@ -920,7 +947,7 @@ export class FailoverService {
     // Check standby
     const standbyPool = new Pool({
       host: standbyHost,
-      port: parseInt(standbyPort, 10),
+      port: parseInt(standbyPort, 10) || 5432,
       database: config.dbName,
       user: config.dbUser,
       password: config.dbPassword,
@@ -1140,10 +1167,10 @@ export class FailoverService {
         throw new Error('No primary target configured for failback');
       }
       
-      const [host, port] = primaryTarget.endpoint.split(':');
+      const [host, port = '5432'] = primaryTarget.endpoint.split(':');
       const checkPool = new Pool({
         host,
-        port: parseInt(port, 10),
+        port: parseInt(port, 10) || 5432,
         database: config.dbName,
         user: config.dbUser,
         password: config.dbPassword,

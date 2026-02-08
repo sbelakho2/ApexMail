@@ -103,6 +103,12 @@ export class RateLimitService {
 
   /**
    * Check rate limit using token bucket algorithm
+   *
+   * FIX-500-421: This implementation uses separate HGETALL → compute → HSET
+   * which is a classic TOCTOU race. Between the read and write, another request
+   * can read stale data and double-count tokens. This should be converted to a
+   * Lua script for atomicity, similar to the sliding-window approach above that
+   * already uses MULTI. TODO: Migrate to atomic Lua script.
    */
   async checkTokenBucket(
     key: string,

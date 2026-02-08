@@ -8,6 +8,12 @@
  * - Protocol validation (HTTPS required in production)
  * 
  * SSRF-002 FIX: Implements proper URL validation with DNS rebinding protection
+ *
+ * FIX-500-499: SECURITY NOTE — The GET /api/proxy endpoint allows authenticated
+ * control-plane users to make arbitrary HTTP GET requests through the server.
+ * While SSRF protections are in place, this remains an elevated attack surface.
+ * Consider restricting to an allowlist of destination hosts in production, or
+ * removing the GET handler entirely if only POST is needed.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -142,6 +148,9 @@ const BLOCKED_HOSTNAME_PATTERNS = [
     '.localdomain',
     '.cluster.local',
     '.svc.cluster.local',
+    '.corp',       // FIX-500-306: Block .corp suffix (was only blocking exact 'corp')
+    '.intranet',   // FIX-500-306: Block common internal domain suffixes
+    '.lan',        // FIX-500-306: Block .lan suffix
 ];
 
 /**

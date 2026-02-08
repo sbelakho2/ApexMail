@@ -309,9 +309,15 @@ export class UCBBandit<T = unknown> {
 
     /**
      * Deserialize bandit state
+     * FIX-500-189: Wrap JSON.parse in try/catch with meaningful error.
      */
     static deserialize<T>(json: string): UCBBandit<T> {
-        const data = JSON.parse(json);
+        let data: any;
+        try {
+            data = JSON.parse(json);
+        } catch (err) {
+            throw new Error(`UCBBandit.deserialize: invalid JSON — ${err instanceof Error ? err.message : String(err)}`);
+        }
         const bandit = new UCBBandit<T>(data.config);
         bandit.totalPulls = data.totalPulls;
 

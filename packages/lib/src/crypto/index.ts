@@ -582,8 +582,64 @@ export function timingSafeCompareBuffers(a: Buffer, b: Buffer): boolean {
 const AES_256_CBC_KEY_LENGTH = 32;
 const AES_256_CBC_IV_LENGTH = 16;
 
+// ============================================
+// AES-256-GCM Functions (Authenticated Encryption)
+// FIX-500-034: Preferred over CBC — provides authenticated encryption
+// ============================================
+
+const GCM_SCRYPT_KEY_LENGTH = 32;
+const GCM_SCRYPT_IV_LENGTH = 12;
+
+/**
+ * Encrypt text using AES-256-GCM with scrypt-derived key.
+ * Format: salt:iv:authTag:ciphertext (all hex-encoded)
+ * Uses random salt per operation for unique key derivation.
+ */
+export function encryptAES256GCM(
+  plaintext: string,
+  encryptionKey: string,
+): string {
+  const salt = randomBytes(16);
+  const key = deriveKeySync(encryptionKey, salt, GCM_SCRYPT_KEY_LENGTH);
+  const iv = randomBytes(GCM_SCRYPT_IV_LENGTH);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag();
+  return salt.toString('hex') + ':' + iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted;
+}
+
+/**
+ * Decrypt text encrypted with AES-256-GCM.
+ * Expects format: salt:iv:authTag:ciphertext (all hex-encoded)
+ */
+export function decryptAES256GCM(
+  ciphertext: string,
+  encryptionKey: string,
+): Result<string, Error> {
+  try {
+    const parts = ciphertext.split(':');
+    if (parts.length !== 4) {
+      return Result.err(new Error('Invalid AES-256-GCM ciphertext format'));
+    }
+    const [saltHex, ivHex, authTagHex, encrypted] = parts;
+    const salt = Buffer.from(saltHex!, 'hex');
+    const iv = Buffer.from(ivHex!, 'hex');
+    const authTag = Buffer.from(authTagHex!, 'hex');
+    const key = deriveKeySync(encryptionKey, salt, GCM_SCRYPT_KEY_LENGTH);
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(encrypted!, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return Result.ok(decrypted);
+  } catch (error) {
+    return Result.err(error instanceof Error ? error : new Error('AES-256-GCM decryption failed'));
+  }
+}
+
 /**
  * Derive a key synchronously using scrypt (for config encryption)
+ * WARNING: Blocks the event loop. Use deriveKeyAsync for request-path code.
  */
 export function deriveKeySync(
   password: string,
@@ -592,6 +648,24 @@ export function deriveKeySync(
 ): Buffer {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   return require('node:crypto').scryptSync(password, salt, keyLength);
+}
+
+/**
+ * FIX-500-373: Async key derivation using scrypt — does NOT block the event loop.
+ * Prefer this over deriveKeySync in request handlers and other hot paths.
+ */
+export function deriveKeyAsync(
+  password: string,
+  salt: string | Buffer,
+  keyLength: number = AES_256_CBC_KEY_LENGTH
+): Promise<Buffer> {
+  const { scrypt } = require('node:crypto');
+  return new Promise<Buffer>((resolve, reject) => {
+    scrypt(password, salt, keyLength, (err: Error | null, key: Buffer) => {
+      if (err) reject(err);
+      else resolve(key);
+    });
+  });
 }
 
 /**

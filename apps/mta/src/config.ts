@@ -50,6 +50,9 @@ export interface MTAConfig {
   dkim: {
     selector: string;
     defaultKeyPath?: string;
+    // FIX-500-021: Support per-domain DKIM key resolution
+    // Keys are loaded lazily from keyDirectory/{domain}/dkim.pem
+    keyDirectory?: string;
   };
   
   spf: {
@@ -182,6 +185,8 @@ export function loadConfig(): MTAConfig {
     dkim: {
       selector: process.env.DKIM_SELECTOR ?? 'apexmail',
       defaultKeyPath: process.env.DKIM_DEFAULT_KEY_PATH,
+      // FIX-500-021: Per-domain key directory for tenant isolation
+      keyDirectory: process.env.DKIM_KEY_DIRECTORY,
     },
     
     spf: {

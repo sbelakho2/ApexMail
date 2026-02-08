@@ -565,9 +565,21 @@ export async function request<T>(options: RequestOptions): Promise<T> {
 `;
   }
 
+  /**
+   * FIX-500-414: Escape single quotes and backslashes in template interpolations
+   * to prevent syntax errors or injection in generated TypeScript code.
+   */
+  private escapeForTemplate(value: string): string {
+    return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  }
+
   private generateCommandFile(command: CliCommand): string {
+    // FIX-500-414: Escape all user-provided values
+    const safeName = this.escapeForTemplate(command.name);
+    const safeDescription = this.escapeForTemplate(command.description);
+
     return `/**
- * ${command.name} command
+ * ${safeName} command
  */
 
 import { Command } from 'commander';
@@ -576,15 +588,18 @@ import ora from 'ora';
 import { request } from '../http.js';
 import { formatOutput } from '../utils/output.js';
 
-export const ${command.name}Command = new Command('${command.name}')
-  .description('${command.description}')
+export const ${safeName}Command = new Command('${safeName}')
+  .description('${safeDescription}')
 ${command.options.map(opt => {
+  const safeFlag = this.escapeForTemplate(opt.flag);
+  const safeDesc = this.escapeForTemplate(opt.description);
   if (opt.type === 'boolean') {
-    return `  .option('${opt.flag}', '${opt.description}')`;
+    return `  .option('${safeFlag}', '${safeDesc}')`;
   } else if (opt.defaultValue !== undefined) {
-    return `  .option('${opt.flag}', '${opt.description}', '${opt.defaultValue}')`;
+    const safeDefault = this.escapeForTemplate(String(opt.defaultValue));
+    return `  .option('${safeFlag}', '${safeDesc}', '${safeDefault}')`;
   } else {
-    return `  .option('${opt.flag}', '${opt.description}')`;
+    return `  .option('${safeFlag}', '${safeDesc}')`;
   }
 }).join('\n')}
   .action(async (options, cmd) => {
@@ -593,7 +608,7 @@ ${command.options.map(opt => {
     try {
       const globalOpts = cmd.optsWithGlobals();
       
-      // TODO: Implement ${command.name} command logic
+      // TODO: Implement ${safeName} command logic
       spinner.text = 'Processing...';
       
       // Example API call

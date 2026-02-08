@@ -13,6 +13,7 @@
  */
 
 import { serve } from '@hono/node-server';
+import { Pool } from 'pg';
 import { createLogger } from '@apexmail/lib';
 
 // Export all modules
@@ -57,8 +58,9 @@ export interface OpsConfig {
 
 /**
  * Creates and configures all ops services
+ * FIX-500-155/156: Accepts optional DB pool for persistent storage.
  */
-export function createOpsServices(config: OpsConfig): OpsServices {
+export function createOpsServices(config: OpsConfig, db?: Pool): OpsServices {
     // Metrics Collector (needs to be created first for SLOManager)
     const metrics = new MetricsCollector({
         prefix: 'apexmail',
@@ -98,7 +100,7 @@ export function createOpsServices(config: OpsConfig): OpsServices {
         supportUrl: `mailto:${config.supportEmail}`,
         timezone: 'UTC',
         allowSubscriptions: true,
-    });
+    }, db);
 
     // Trust Center Service
     const trustCenter = new TrustCenterService({
@@ -107,7 +109,7 @@ export function createOpsServices(config: OpsConfig): OpsServices {
         legalEntity: `${config.companyName}, Inc.`,
         supportEmail: config.supportEmail,
         dpoEmail: config.dpoEmail,
-    });
+    }, db);
 
     // Health Checker
     const health = new HealthChecker({
@@ -265,25 +267,38 @@ export async function main(): Promise<void> {
 
     logger.info('Starting ops services', { config: { ...config, tracingEndpoint: '***' } });
 
-    const services = createOpsServices(config);
+    // FIX-500-155/156: Create DB pool for persistent storage
+    const db = new Pool({
+        host: process.env.DB_HOST || 'localhost',
+        port: parseInt(process.env.DB_PORT || '5432'),
+        database: process.env.DB_NAME || 'apexmail',
+        user: process.env.DB_USER || 'postgres',
+        password: process.env.DB_PASSWORD || '',
+        max: 5,
+    });
+
+    const services = createOpsServices(config, db);
+
+    // FIX-500-155/156: Load persistent state from DB
+    await services.statusPage.loadFromDb();
+    await services.trustCenter.loadFromDb();
+
     startOpsServer(services, config.port);
 
     // Graceful shutdown
-    process.on('SIGTERM', async () => {
-        logger.info('Received SIGTERM, shutting down');
+    // FIX-500-236/238/239: Extract shared shutdown logic and include alertManager.stop()
+    const shutdown = async (signal: string) => {
+        logger.info(`Received ${signal}, shutting down`);
+        services.alerts.stop();
         services.health.stop();
         services.slo.stop();
         await services.tracing.shutdown();
+        await db.end();
         process.exit(0);
-    });
+    };
 
-    process.on('SIGINT', async () => {
-        logger.info('Received SIGINT, shutting down');
-        services.health.stop();
-        services.slo.stop();
-        await services.tracing.shutdown();
-        process.exit(0);
-    });
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 // Run if executed directly

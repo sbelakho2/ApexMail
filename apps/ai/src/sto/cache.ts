@@ -101,8 +101,9 @@ export class STOCache {
 
     /**
      * Store multiple patterns efficiently
+     * FIX-500-395: Renamed from storePatternssBatch (double 's' typo)
      */
-    async storePatternssBatch(patterns: Array<{ subscriberId: string; pattern: EngagementPattern }>): Promise<void> {
+    async storePatternsBatch(patterns: Array<{ subscriberId: string; pattern: EngagementPattern }>): Promise<void> {
         if (!this.redis || patterns.length === 0) return;
 
         const pipeline = this.redis.pipeline();
@@ -138,16 +139,18 @@ export class STOCache {
         const results = await this.redis.zrevrange(key, 0, count - 1);
 
         return results.map(r => {
-            const parsed = JSON.parse(r);
+            let parsed: Record<string, unknown>;
+            try { parsed = JSON.parse(r); }
+            catch { return null; }
             return {
                 ...parsed,
-                timestamp: new Date(parsed.timestamp),
-                sentAt: parsed.sentAt ? new Date(parsed.sentAt) : undefined,
-                openedAt: parsed.openedAt ? new Date(parsed.openedAt) : undefined,
-                clickedAt: parsed.clickedAt ? new Date(parsed.clickedAt) : undefined,
-                lastEngagement: parsed.lastEngagement ? new Date(parsed.lastEngagement) : undefined,
+                timestamp: new Date(parsed.timestamp as string),
+                sentAt: parsed.sentAt ? new Date(parsed.sentAt as string) : undefined,
+                openedAt: parsed.openedAt ? new Date(parsed.openedAt as string) : undefined,
+                clickedAt: parsed.clickedAt ? new Date(parsed.clickedAt as string) : undefined,
+                lastEngagement: parsed.lastEngagement ? new Date(parsed.lastEngagement as string) : undefined,
             };
-        });
+        }).filter(Boolean) as EngagementPattern[];
     }
 
     /**
@@ -172,16 +175,18 @@ export class STOCache {
                 const [err, data] = results[i] || [];
                 if (!err && Array.isArray(data)) {
                     const patterns = (data as string[]).map(r => {
-                        const parsed = JSON.parse(r);
+                        let parsed: Record<string, unknown>;
+                        try { parsed = JSON.parse(r); }
+                        catch { return null; }
                         return {
                             ...parsed,
-                            timestamp: new Date(parsed.timestamp),
-                            sentAt: parsed.sentAt ? new Date(parsed.sentAt) : undefined,
-                            openedAt: parsed.openedAt ? new Date(parsed.openedAt) : undefined,
-                            clickedAt: parsed.clickedAt ? new Date(parsed.clickedAt) : undefined,
-                            lastEngagement: parsed.lastEngagement ? new Date(parsed.lastEngagement) : undefined,
+                            timestamp: new Date(parsed.timestamp as string),
+                            sentAt: parsed.sentAt ? new Date(parsed.sentAt as string) : undefined,
+                            openedAt: parsed.openedAt ? new Date(parsed.openedAt as string) : undefined,
+                            clickedAt: parsed.clickedAt ? new Date(parsed.clickedAt as string) : undefined,
+                            lastEngagement: parsed.lastEngagement ? new Date(parsed.lastEngagement as string) : undefined,
                         };
-                    });
+                    }).filter(Boolean) as EngagementPattern[];
                     map.set(subscriberIds[i], patterns);
                 }
             }
@@ -234,13 +239,15 @@ export class STOCache {
 
         if (!data) return null;
 
-        const parsed = JSON.parse(data);
+        let parsed: Record<string, unknown>[];
+        try { parsed = JSON.parse(data); }
+        catch { return null; }
         return parsed.map((r: Record<string, unknown>) => ({
             ...r,
             sendTime: new Date(r.sendTime as string),
             optimalSendTime: r.optimalSendTime ? new Date(r.optimalSendTime as string) : undefined,
             alternativeTimes: (r.alternativeTimes as string[] | undefined)?.map((t: string) => new Date(t)),
-        }));
+        })) as STORecommendation[];
     }
 
     /**
@@ -270,7 +277,7 @@ export class STOCache {
         const field = `${day}:${hour}`;
         const current = await this.redis.hget(key, field);
         
-        const aggregate = current ? JSON.parse(current) : { sends: 0, opens: 0, clicks: 0 };
+        const aggregate = current ? (() => { try { return JSON.parse(current); } catch { return { sends: 0, opens: 0, clicks: 0 }; } })() : { sends: 0, opens: 0, clicks: 0 };
         aggregate.sends += stats.sends;
         aggregate.opens += stats.opens;
         aggregate.clicks += stats.clicks;
@@ -290,7 +297,8 @@ export class STOCache {
 
         const map = new Map<string, { sends: number; opens: number; clicks: number }>();
         for (const [field, value] of Object.entries(data)) {
-            map.set(field, JSON.parse(value));
+            try { map.set(field, JSON.parse(value)); }
+            catch { /* skip corrupt entry */ }
         }
 
         return map;
@@ -374,19 +382,32 @@ export class STOCache {
 
     /**
      * Clear all STO cache data
+     * FIX-500-396: Accumulate keys from SCAN then pipeline DEL for efficiency
      */
     async clearAll(): Promise<void> {
         if (!this.redis) return;
 
         // C-062: Use SCAN instead of KEYS to avoid blocking Redis
+        const allKeys: string[] = [];
         let cursor = '0';
         do {
             const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', `${this.config.keyPrefix}*`, 'COUNT', 200);
             cursor = nextCursor;
-            if (keys.length > 0) {
-                await this.redis.del(...keys);
-            }
+            allKeys.push(...keys);
         } while (cursor !== '0');
+
+        // Pipeline DEL in batches
+        if (allKeys.length > 0) {
+            const BATCH_SIZE = 500;
+            for (let i = 0; i < allKeys.length; i += BATCH_SIZE) {
+                const batch = allKeys.slice(i, i + BATCH_SIZE);
+                const pipeline = this.redis.pipeline();
+                for (const key of batch) {
+                    pipeline.del(key);
+                }
+                await pipeline.exec();
+            }
+        }
     }
 
     // ========================================

@@ -13,6 +13,7 @@ import {
     ErrorBudgetIncident,
     MetricQuery,
 } from '../types.js';
+import crypto from 'node:crypto';
 import { MetricsCollector } from '../metrics/collector.js';
 import { EventEmitter } from 'events';
 
@@ -37,6 +38,7 @@ export class SLOManager extends EventEmitter {
 
     constructor(metricsCollector: MetricsCollector, config: Partial<SLOManagerConfig> = {}) {
         super();
+        this.setMaxListeners(50); // FIX-500-332: Prevent maxListeners warning
         this.metricsCollector = metricsCollector;
         this.config = {
             refreshIntervalMs: 60000, // 1 minute
@@ -143,7 +145,7 @@ export class SLOManager extends EventEmitter {
 
         const newIncident: ErrorBudgetIncident = {
             ...incident,
-            id: `incident-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: `incident-${crypto.randomUUID()}`,
         };
 
         state.incidents.push(newIncident);

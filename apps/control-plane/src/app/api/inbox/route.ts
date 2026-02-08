@@ -1,30 +1,146 @@
 /**
  * Inbox Sentinel API
- * 
- * Returns classified incoming email replies from campaigns.
- * Used by the /inbox page.
+ *
+ * FIX-500-141: DB-backed inbox message management — no demo data.
+ * Queries autopilot_inbox_messages table.
  */
 
 import { NextResponse } from 'next/server';
+import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// TODO: Replace with DB query against a campaign_replies or inbox table
-const DEMO_MESSAGES = [
-    { id: '1', from: 'john@techcorp.io', fromName: 'John Smith', subject: 'Re: Quick question about your email infrastructure', preview: "Hi Alex, thanks for reaching out! We're actually looking to switch providers and would love to schedule a call...", receivedAt: new Date(Date.now() - 1800000).toISOString(), classification: 'interested', confidence: 0.95, campaignId: 'camp-1', campaignName: 'SaaS Founders Outreach', leadId: 'lead-1', read: false, starred: true },
-    { id: '2', from: 'jane@startup.com', fromName: 'Jane Doe', subject: 'Re: Following up on email deliverability', preview: "I appreciate the follow-up, but we're not looking to change our email provider at this time...", receivedAt: new Date(Date.now() - 3600000).toISOString(), classification: 'not_interested', confidence: 0.88, campaignId: 'camp-1', campaignName: 'SaaS Founders Outreach', leadId: 'lead-2', read: true, starred: false },
-    { id: '3', from: 'mike@enterprise.co', fromName: 'Mike Johnson', subject: 'Re: Enterprise email at scale', preview: "I'm out of the office until January 15th with limited access to email. For urgent matters...", receivedAt: new Date(Date.now() - 7200000).toISOString(), classification: 'out_of_office', confidence: 0.99, campaignId: 'camp-2', campaignName: 'Enterprise Nurture', leadId: 'lead-3', read: true, starred: false },
-    { id: '4', from: 'sarah@growth.io', fromName: 'Sarah Williams', subject: 'Re: Thanks for checking out ApexMail!', preview: "What's the pricing for your team plan? We have about 50 users and send around 100k emails monthly...", receivedAt: new Date(Date.now() - 14400000).toISOString(), classification: 'question', confidence: 0.82, campaignId: 'camp-3', campaignName: 'Product Hunt Follow-up', leadId: 'lead-4', read: false, starred: false },
-    { id: '5', from: 'no-reply@spam.net', fromName: 'Marketing Team', subject: 'Re: Your email', preview: "Click here to claim your prize! You've been selected for...", receivedAt: new Date(Date.now() - 21600000).toISOString(), classification: 'spam', confidence: 0.97, campaignId: null, campaignName: null, leadId: null, read: true, starred: false },
-    { id: '6', from: 'tom@newcompany.dev', fromName: 'Tom Harris', subject: 'Re: Quick question', preview: 'Please remove me from your mailing list...', receivedAt: new Date(Date.now() - 28800000).toISOString(), classification: 'unsubscribe', confidence: 0.91, campaignId: 'camp-1', campaignName: 'SaaS Founders Outreach', leadId: 'lead-5', read: true, starred: false },
-];
+interface InboxRow {
+    id: string;
+    tenant_id: string | null;
+    message_id: string | null;
+    from_address: string;
+    to_address: string;
+    subject: string;
+    body_preview: string | null;
+    classification: string;
+    confidence: number;
+    action_taken: string | null;
+    is_read: boolean;
+    is_archived: boolean;
+    received_at: string;
+    created_at: string;
+}
 
-export async function GET() {
+export async function GET(request: Request) {
     try {
-        // TODO: Replace with real inbox/campaign_replies query
-        return NextResponse.json(DEMO_MESSAGES);
+        const { searchParams } = new URL(request.url);
+        const classification = searchParams.get('classification');
+        const archived = searchParams.get('archived') === 'true';
+        const limit = Math.min(parseInt(searchParams.get('limit') ?? '50', 10), 200);
+
+        let sql = `SELECT id, tenant_id, message_id, from_address, to_address,
+                           subject, body_preview, classification, confidence,
+                           action_taken, is_read, is_archived, received_at, created_at
+                    FROM autopilot_inbox_messages
+                    WHERE is_archived = $1`;
+        const params: unknown[] = [archived];
+        let paramIdx = 2;
+
+        if (classification) {
+            sql += ` AND classification = $${paramIdx}`;
+            params.push(classification);
+            paramIdx++;
+        }
+
+        sql += ` ORDER BY received_at DESC LIMIT $${paramIdx}`;
+        params.push(limit);
+
+        const rows = await query<InboxRow>(sql, params);
+
+        return NextResponse.json(rows.map((r) => ({
+            id: r.id,
+            tenantId: r.tenant_id,
+            messageId: r.message_id,
+            from: r.from_address,
+            to: r.to_address,
+            subject: r.subject,
+            bodyPreview: r.body_preview,
+            classification: r.classification,
+            confidence: r.confidence,
+            actionTaken: r.action_taken,
+            isRead: r.is_read,
+            isArchived: r.is_archived,
+            receivedAt: r.received_at,
+            createdAt: r.created_at,
+        })));
     } catch (error) {
         console.error('Inbox API error:', error);
-        return NextResponse.json(DEMO_MESSAGES);
+        return NextResponse.json({ error: 'Failed to fetch inbox messages' }, { status: 500 });
+    }
+}
+
+export async function PATCH(request: Request) {
+    try {
+        const body = await request.json();
+        const { id, isRead, isArchived, actionTaken } = body;
+
+        if (!id) {
+            return NextResponse.json({ error: 'Message id required' }, { status: 400 });
+        }
+
+        const setClauses: string[] = [];
+        const params: unknown[] = [];
+        let paramIdx = 1;
+
+        if (typeof isRead === 'boolean') {
+            setClauses.push(`is_read = $${paramIdx}`);
+            params.push(isRead);
+            paramIdx++;
+        }
+        if (typeof isArchived === 'boolean') {
+            setClauses.push(`is_archived = $${paramIdx}`);
+            params.push(isArchived);
+            paramIdx++;
+        }
+        if (actionTaken !== undefined) {
+            setClauses.push(`action_taken = $${paramIdx}`);
+            params.push(actionTaken);
+            paramIdx++;
+        }
+
+        if (setClauses.length === 0) {
+            return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
+        }
+
+        params.push(id);
+        const updated = await query<InboxRow>(
+            `UPDATE autopilot_inbox_messages SET ${setClauses.join(', ')}
+             WHERE id = $${paramIdx}
+             RETURNING id, tenant_id, message_id, from_address, to_address,
+                       subject, body_preview, classification, confidence,
+                       action_taken, is_read, is_archived, received_at, created_at`,
+            params
+        );
+
+        if (updated.length === 0) {
+            return NextResponse.json({ error: 'Message not found' }, { status: 404 });
+        }
+
+        const r = updated[0];
+        return NextResponse.json({
+            id: r.id,
+            tenantId: r.tenant_id,
+            messageId: r.message_id,
+            from: r.from_address,
+            to: r.to_address,
+            subject: r.subject,
+            bodyPreview: r.body_preview,
+            classification: r.classification,
+            confidence: r.confidence,
+            actionTaken: r.action_taken,
+            isRead: r.is_read,
+            isArchived: r.is_archived,
+            receivedAt: r.received_at,
+            createdAt: r.created_at,
+        });
+    } catch (error) {
+        console.error('Inbox PATCH error:', error);
+        return NextResponse.json({ error: 'Failed to update message' }, { status: 500 });
     }
 }

@@ -26,6 +26,7 @@ const ALLOWED_SCOPES = [
   'suppressions:read',
   'suppressions:write',
   'events:read',
+  'events:write',
   'templates:read',
   'templates:write',
   'analytics:read',
@@ -42,14 +43,17 @@ const createApiKeySchema = z.object({
   expiresAt: z.string().datetime().optional(),
 });
 
-export function authRoutes(ctx: AppContext): Hono<AppEnv> {
-  const router = new Hono<AppEnv>();
+/**
+ * FIX-500-162: Public auth routes (no authentication required).
+ * Only the login endpoint should be accessible without a JWT/API key.
+ */
+export function publicAuthRoutes(ctx: AppContext): Hono<AppEnv> {
+  const publicRouter = new Hono<AppEnv>();
   const usersRepo = new UsersRepository(ctx.db);
-  const apiKeysRepo = new ApiKeysRepository(ctx.db);
   const auditRepo = new AuditLogsRepository(ctx.db);
 
-  // Login - Get JWT token
-  router.post('/login', async (c) => {
+  // Login - Get JWT token (public — users need this to obtain a JWT)
+  publicRouter.post('/login', async (c) => {
     const body = await c.req.json();
     const { email, password, tenantId } = loginSchema.parse(body);
     const logger = c.get('logger');
@@ -137,6 +141,19 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
       },
     });
   });
+
+  return publicRouter;
+}
+
+/**
+ * FIX-500-162: Authenticated auth routes (require valid JWT/API key).
+ * /me, /api-keys, /logout, /refresh, /csrf-token must be behind auth middleware.
+ */
+export function authRoutes(ctx: AppContext): Hono<AppEnv> {
+  const router = new Hono<AppEnv>();
+  const usersRepo = new UsersRepository(ctx.db);
+  const apiKeysRepo = new ApiKeysRepository(ctx.db);
+  const auditRepo = new AuditLogsRepository(ctx.db);
 
   // Get current user
   router.get('/me', async (c) => {

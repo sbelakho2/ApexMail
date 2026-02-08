@@ -31,6 +31,8 @@ export interface ApexMailConfig {
     timeout?: number;
     /** Custom fetch implementation */
     fetch?: typeof fetch;
+    /** FIX-500-276: Enable debug logging */
+    debug?: boolean;
 }
 
 export interface EmailAddress {
@@ -74,6 +76,8 @@ export interface SendEmailOptions {
     tags?: Array<{ name: string; value: string }>;
     /** Schedule send time (ISO 8601) */
     scheduledAt?: string | Date;
+    /** FIX-500-274: Idempotency key to prevent duplicate sends */
+    idempotencyKey?: string;
 }
 
 export interface SendEmailResponse {
@@ -176,14 +180,26 @@ export interface Webhook {
     createdAt: string;
 }
 
+// FIX-500-295: Aligned event names across Node and Python SDKs
+// FIX-500-459: Uses message.* prefix to match API server event types
 export type WebhookEvent = 
-    | 'email.sent'
-    | 'email.delivered'
-    | 'email.opened'
-    | 'email.clicked'
-    | 'email.bounced'
-    | 'email.complained'
-    | 'email.failed';
+    | 'message.accepted'
+    | 'message.queued'
+    | 'message.sending'
+    | 'message.sent'
+    | 'message.delivered'
+    | 'message.opened'
+    | 'message.clicked'
+    | 'message.bounced'
+    | 'message.complained'
+    | 'message.failed'
+    | 'message.deferred'
+    | 'message.dropped'
+    | 'message.unsubscribed'
+    | 'domain.verified'
+    | 'domain.failed'
+    | 'suppression.added'
+    | '*';
 
 export interface CreateWebhookOptions {
     url: string;
@@ -278,6 +294,18 @@ export class RateLimitError extends ApexMailError {
 }
 
 // ============================================================================
+// Helpers
+// ============================================================================
+
+// FIX-500-275: ID format validation
+const ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+function validateId(id: string, resourceName: string): void {
+    if (!id || !ID_REGEX.test(id)) {
+        throw new ValidationError(`Invalid ${resourceName} ID format: "${id}". IDs must be 1-128 alphanumeric characters, hyphens, or underscores.`);
+    }
+}
+
+// ============================================================================
 // HTTP Client with Retry Logic
 // ============================================================================
 
@@ -302,11 +330,18 @@ class HttpClient {
     private timeout: number;
     private fetchFn: typeof fetch;
     private retryConfig: RetryConfig;
+    private debug: boolean; // FIX-500-276
 
     constructor(config: ApexMailConfig) {
-        this.baseUrl = config.baseUrl || 'https://api.apexmail.ee';
+        // FIX-500-283: Validate baseUrl
+        const baseUrl = (config.baseUrl || 'https://api.apexmail.ee').replace(/\/+$/, '');
+        if (!/^https?:\/\/.+/.test(baseUrl)) {
+            throw new ValidationError(`Invalid baseUrl: "${config.baseUrl}". Must start with https:// or http://`);
+        }
+        this.baseUrl = baseUrl;
         this.apiKey = config.apiKey;
         this.timeout = config.timeout || 30000;
+        this.debug = config.debug || false;
         // C-135: Node.js 18+ global fetch (undici) uses HTTP keep-alive by
         // default, so connections are reused across requests automatically.
         // Custom fetch implementations should enable keep-alive similarly.
@@ -314,12 +349,14 @@ class HttpClient {
         this.retryConfig = DEFAULT_RETRY_CONFIG;
     }
 
+    // FIX-500-274: Support idempotency key header
     async request<T>(
         method: string,
         path: string,
-        body?: unknown
+        body?: unknown,
+        options?: { idempotencyKey?: string }
     ): Promise<T> {
-        return this.requestWithRetry<T>(method, path, body, 0);
+        return this.requestWithRetry<T>(method, path, body, 0, options);
     }
 
     /**
@@ -334,20 +371,32 @@ class HttpClient {
         method: string,
         path: string,
         body: unknown,
-        attempt: number
+        attempt: number,
+        options?: { idempotencyKey?: string }
     ): Promise<T> {
         const url = `${this.baseUrl}${path}`;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
+        // FIX-500-276: Debug logging
+        if (this.debug) {
+            console.debug(`[ApexMail] ${method} ${path}${attempt > 0 ? ` (retry ${attempt})` : ''}`);
+        }
+
         try {
-            const response = await this.fetchFn(url, {
-                method,
-                headers: {
+            // FIX-500-274: Include Idempotency-Key header when provided
+            const headers: Record<string, string> = {
                     'Authorization': `Bearer ${this.apiKey}`,
                     'Content-Type': 'application/json',
                     'User-Agent': '@apexmail/node/1.0.0',
-                },
+            };
+            if (options?.idempotencyKey) {
+                headers['Idempotency-Key'] = options.idempotencyKey;
+            }
+
+            const response = await this.fetchFn(url, {
+                method,
+                headers,
                 body: body ? JSON.stringify(body) : undefined,
                 signal: controller.signal,
             });
@@ -361,7 +410,7 @@ class HttpClient {
                 if (attempt < this.retryConfig.maxRetries) {
                     const delay = Math.min(retryAfter * 1000, this.retryConfig.maxDelayMs);
                     await this.sleep(delay);
-                    return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                    return this.requestWithRetry<T>(method, path, body, attempt + 1, options);
                 }
                 
                 throw new RateLimitError(retryAfter);
@@ -387,7 +436,12 @@ class HttpClient {
                     delay = this.calculateBackoff(attempt);
                 }
                 await this.sleep(delay);
-                return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                return this.requestWithRetry<T>(method, path, body, attempt + 1, options);
+            }
+
+            // FIX-500-276: Debug logging for response
+            if (this.debug) {
+                console.debug(`[ApexMail] ${method} ${path} → ${response.status}`);
             }
 
             const data = await response.json().catch(() => ({})) as Record<string, unknown>;
@@ -409,7 +463,7 @@ class HttpClient {
                 if (attempt < this.retryConfig.maxRetries) {
                     const delay = this.calculateBackoff(attempt);
                     await this.sleep(delay);
-                    return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                    return this.requestWithRetry<T>(method, path, body, attempt + 1, options);
                 }
                 throw new ApexMailError('Request timeout', 408, 'TIMEOUT_ERROR');
             }
@@ -424,7 +478,7 @@ class HttpClient {
                 if (attempt < this.retryConfig.maxRetries) {
                     const delay = this.calculateBackoff(attempt);
                     await this.sleep(delay);
-                    return this.requestWithRetry<T>(method, path, body, attempt + 1);
+                    return this.requestWithRetry<T>(method, path, body, attempt + 1, options);
                 }
             }
 
@@ -553,6 +607,14 @@ class EmailsApi {
             throw new ValidationError('Either "html" or "text" body is required');
         }
 
+        // FIX-500-281: Reject whitespace-only bodies
+        if (options.html && !options.html.trim()) {
+            throw new ValidationError('"html" body must not be empty or whitespace-only');
+        }
+        if (options.text && !options.text.trim()) {
+            throw new ValidationError('"text" body must not be empty or whitespace-only');
+        }
+
         // Email format: from
         const fromEmail = typeof options.from === 'string' ? options.from : options.from.email;
         if (!EmailsApi.EMAIL_REGEX.test(fromEmail)) {
@@ -599,7 +661,10 @@ class EmailsApi {
     async send(options: SendEmailOptions): Promise<SendEmailResponse> {
         // F-246: Validate inputs before making the API call
         this.validateSendOptions(options);
-        return this.client.post<SendEmailResponse>('/v1/emails', this.normalizeEmail(options));
+        // FIX-500-274: Thread idempotencyKey as a header
+        return this.client.request<SendEmailResponse>('POST', '/v1/emails', this.normalizeEmail(options), 
+            options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined
+        );
     }
 
     /**
@@ -642,6 +707,7 @@ class EmailsApi {
      * Get email by ID
      */
     async get(id: string): Promise<Email> {
+        validateId(id, 'email');
         return this.client.get<Email>(`/v1/emails/${id}`);
     }
 
@@ -663,30 +729,37 @@ class EmailsApi {
      * Cancel a scheduled email
      */
     async cancel(id: string): Promise<void> {
+        validateId(id, 'email');
         await this.client.post(`/v1/emails/${id}/cancel`);
     }
 
     private normalizeEmail(options: SendEmailOptions): Record<string, unknown> {
-        return {
+        const result: Record<string, unknown> = {
             from: this.normalizeRecipient(options.from),
             to: this.normalizeRecipients(options.to),
-            cc: options.cc ? this.normalizeRecipients(options.cc) : undefined,
-            bcc: options.bcc ? this.normalizeRecipients(options.bcc) : undefined,
-            replyTo: options.replyTo ? this.normalizeRecipient(options.replyTo) : undefined,
             subject: options.subject,
-            html: options.html,
-            text: options.text,
-            attachments: options.attachments?.map(a => ({
+        };
+        // FIX-500-282: Only include defined fields to avoid sending nulls
+        if (options.cc) result.cc = this.normalizeRecipients(options.cc);
+        if (options.bcc) result.bcc = this.normalizeRecipients(options.bcc);
+        if (options.replyTo) result.replyTo = this.normalizeRecipient(options.replyTo);
+        if (options.html) result.html = options.html;
+        if (options.text) result.text = options.text;
+        if (options.attachments) {
+            result.attachments = options.attachments.map(a => ({
                 filename: a.filename,
                 content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
                 contentType: a.contentType,
-            })),
-            headers: options.headers,
-            tags: options.tags,
-            scheduledAt: options.scheduledAt instanceof Date 
-                ? options.scheduledAt.toISOString() 
-                : options.scheduledAt,
-        };
+            }));
+        }
+        if (options.headers) result.headers = options.headers;
+        if (options.tags) result.tags = options.tags;
+        if (options.scheduledAt) {
+            result.scheduledAt = options.scheduledAt instanceof Date
+                ? options.scheduledAt.toISOString()
+                : options.scheduledAt;
+        }
+        return result;
     }
 
     private normalizeRecipient(recipient: EmailRecipient): EmailAddress {
@@ -719,20 +792,27 @@ class DomainsApi {
      * Get domain by ID
      */
     async get(id: string): Promise<Domain> {
+        validateId(id, 'domain');
         return this.client.get<Domain>(`/v1/domains/${id}`);
     }
 
     /**
      * List all domains
+     * FIX-500-278: Support pagination
      */
-    async list(): Promise<{ data: Domain[] }> {
-        return this.client.get<{ data: Domain[] }>('/v1/domains');
+    async list(options?: { limit?: number; offset?: number }): Promise<{ data: Domain[] }> {
+        const params = new URLSearchParams();
+        if (options?.limit) params.set('limit', options.limit.toString());
+        if (options?.offset) params.set('offset', options.offset.toString());
+        const query = params.toString();
+        return this.client.get<{ data: Domain[] }>(`/v1/domains${query ? `?${query}` : ''}`);
     }
 
     /**
      * Verify domain DNS records
      */
     async verify(id: string): Promise<Domain> {
+        validateId(id, 'domain');
         return this.client.post<Domain>(`/v1/domains/${id}/verify`);
     }
 
@@ -740,6 +820,7 @@ class DomainsApi {
      * Delete a domain
      */
     async delete(id: string): Promise<void> {
+        validateId(id, 'domain');
         await this.client.delete(`/v1/domains/${id}`);
     }
 }
@@ -764,15 +845,21 @@ class ApiKeysApi {
 
     /**
      * List all API keys
+     * FIX-500-279: Support pagination
      */
-    async list(): Promise<{ data: ApiKey[] }> {
-        return this.client.get<{ data: ApiKey[] }>('/v1/api-keys');
+    async list(options?: { limit?: number; offset?: number }): Promise<{ data: ApiKey[] }> {
+        const params = new URLSearchParams();
+        if (options?.limit) params.set('limit', options.limit.toString());
+        if (options?.offset) params.set('offset', options.offset.toString());
+        const query = params.toString();
+        return this.client.get<{ data: ApiKey[] }>(`/v1/api-keys${query ? `?${query}` : ''}`);
     }
 
     /**
      * Revoke an API key
      */
     async revoke(id: string): Promise<void> {
+        validateId(id, 'API key');
         await this.client.delete(`/v1/api-keys/${id}`);
     }
 }
@@ -794,20 +881,27 @@ class WebhooksApi {
      * Get webhook by ID
      */
     async get(id: string): Promise<Webhook> {
+        validateId(id, 'webhook');
         return this.client.get<Webhook>(`/v1/webhooks/${id}`);
     }
 
     /**
      * List all webhooks
+     * FIX-500-280: Support pagination
      */
-    async list(): Promise<{ data: Webhook[] }> {
-        return this.client.get<{ data: Webhook[] }>('/v1/webhooks');
+    async list(options?: { limit?: number; offset?: number }): Promise<{ data: Webhook[] }> {
+        const params = new URLSearchParams();
+        if (options?.limit) params.set('limit', options.limit.toString());
+        if (options?.offset) params.set('offset', options.offset.toString());
+        const query = params.toString();
+        return this.client.get<{ data: Webhook[] }>(`/v1/webhooks${query ? `?${query}` : ''}`);
     }
 
     /**
      * Update webhook
      */
     async update(id: string, options: Partial<CreateWebhookOptions>): Promise<Webhook> {
+        validateId(id, 'webhook');
         return this.client.patch<Webhook>(`/v1/webhooks/${id}`, options);
     }
 
@@ -815,6 +909,7 @@ class WebhooksApi {
      * Delete webhook
      */
     async delete(id: string): Promise<void> {
+        validateId(id, 'webhook');
         await this.client.delete(`/v1/webhooks/${id}`);
     }
 }
@@ -835,6 +930,17 @@ class AnalyticsApi {
         }
         if (options?.to) {
             params.set('to', options.to instanceof Date ? options.to.toISOString() : options.to);
+        }
+        // FIX-500-284: Validate date range
+        if (options?.from && options?.to) {
+            const fromMs = options.from instanceof Date ? options.from.getTime() : new Date(options.from).getTime();
+            const toMs = options.to instanceof Date ? options.to.getTime() : new Date(options.to).getTime();
+            if (isNaN(fromMs) || isNaN(toMs)) {
+                throw new ValidationError('Invalid date format in analytics "from" or "to"');
+            }
+            if (fromMs >= toMs) {
+                throw new ValidationError('Analytics "from" date must be before "to" date');
+            }
         }
         if (options?.groupBy) params.set('groupBy', options.groupBy);
         if (options?.tag) params.set('tag', options.tag);

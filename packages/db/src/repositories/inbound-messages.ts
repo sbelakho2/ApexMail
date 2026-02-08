@@ -349,20 +349,35 @@ export class InboundMessagesRepository {
     // Cleanup
     // -------------------------------------------------------------------------
 
-    async cleanupOld(olderThanDays: number = 30): Promise<{ inbound: number; bounces: number; complaints: number }> {
+    // FIX-500-052: Batch deletes with LIMIT to avoid long-running table locks
+    async cleanupOld(olderThanDays: number = 30, batchSize: number = 1000): Promise<{ inbound: number; bounces: number; complaints: number }> {
         const cutoff = new Date();
         cutoff.setDate(cutoff.getDate() - olderThanDays);
 
-        const [inbound, bounces, complaints] = await Promise.all([
-            this.pool.query(`DELETE FROM inbound_messages WHERE received_at < $1`, [cutoff]),
-            this.pool.query(`DELETE FROM unmatched_bounces WHERE created_at < $1`, [cutoff]),
-            this.pool.query(`DELETE FROM unmatched_complaints WHERE created_at < $1`, [cutoff])
-        ]);
+        const batchDelete = async (table: string, col: string): Promise<number> => {
+            let total = 0;
+            while (true) {
+                const result = await this.pool.query<{ count: string }>(
+                    `WITH deleted AS (
+                        DELETE FROM ${table}
+                        WHERE id IN (
+                            SELECT id FROM ${table} WHERE ${col} < $1 LIMIT $2
+                        )
+                        RETURNING 1
+                    ) SELECT COUNT(*) as count FROM deleted`,
+                    [cutoff, batchSize]
+                );
+                const n = parseInt(result.rows[0]?.count ?? '0', 10);
+                total += n;
+                if (n < batchSize) break;
+            }
+            return total;
+        };
 
         return {
-            inbound: inbound.rowCount ?? 0,
-            bounces: bounces.rowCount ?? 0,
-            complaints: complaints.rowCount ?? 0
+            inbound: await batchDelete('inbound_messages', 'received_at'),
+            bounces: await batchDelete('unmatched_bounces', 'created_at'),
+            complaints: await batchDelete('unmatched_complaints', 'created_at'),
         };
     }
 

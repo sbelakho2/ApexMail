@@ -38,6 +38,19 @@ export function createOpsRoutes(services: OpsServices): Hono {
     app.use('*', honoLogger());
     app.use('*', timing());
 
+    // FIX-500-026: Auth middleware for all non-health ops routes
+    app.use('/api/*', async (c, next) => {
+        const apiKey = c.req.header('x-api-key') || c.req.header('authorization')?.replace('Bearer ', '');
+        const expectedKey = process.env.OPS_API_KEY || process.env.INTERNAL_API_KEY;
+        if (!expectedKey) {
+            return c.json({ error: 'OPS_API_KEY not configured' }, 500);
+        }
+        if (!apiKey || apiKey !== expectedKey) {
+            return c.json({ error: 'Unauthorized' }, 401);
+        }
+        await next();
+    });
+
     // Health endpoints
     app.get('/health', async (c) => {
         const overall = services.health.getOverallHealth();
@@ -112,8 +125,8 @@ export function createOpsRoutes(services: OpsServices): Hono {
     });
 
     app.get('/alerts/history', (c) => {
-        const limit = parseInt(c.req.query('limit') || '50');
-        const offset = parseInt(c.req.query('offset') || '0');
+        const limit = parseInt(c.req.query('limit') || '50', 10) || 50;
+        const offset = parseInt(c.req.query('offset') || '0', 10) || 0;
         const history = services.alerts.getAlertHistory({ limit, offset });
         return c.json({ alerts: history });
     });
@@ -158,8 +171,8 @@ export function createOpsRoutes(services: OpsServices): Hono {
     });
 
     app.get('/incidents/history', (c) => {
-        const limit = parseInt(c.req.query('limit') || '50');
-        const offset = parseInt(c.req.query('offset') || '0');
+        const limit = parseInt(c.req.query('limit') || '50', 10) || 50;
+        const offset = parseInt(c.req.query('offset') || '0', 10) || 0;
         const history = services.incidents.getHistory({ limit, offset });
         return c.json({ incidents: history });
     });
@@ -235,8 +248,8 @@ export function createOpsRoutes(services: OpsServices): Hono {
     });
 
     app.get('/status/incidents', (c) => {
-        const limit = parseInt(c.req.query('limit') || '10');
-        const offset = parseInt(c.req.query('offset') || '0');
+        const limit = parseInt(c.req.query('limit') || '10', 10) || 10;
+        const offset = parseInt(c.req.query('offset') || '0', 10) || 0;
         const includeResolved = c.req.query('includeResolved') !== 'false';
         const incidents = services.statusPage.getIncidentHistory({
             limit,
@@ -312,7 +325,7 @@ export function createOpsRoutes(services: OpsServices): Hono {
 
     // Tracing endpoints
     app.get('/traces', (c) => {
-        const limit = parseInt(c.req.query('limit') || '20');
+        const limit = parseInt(c.req.query('limit') || '20', 10) || 20;
         const traces = services.tracing.getRecentTraces(limit);
         return c.json({ traces });
     });

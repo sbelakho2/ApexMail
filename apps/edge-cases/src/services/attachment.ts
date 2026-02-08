@@ -56,10 +56,16 @@ export interface AttachmentStats {
  */
 export class AttachmentService {
   private pool: Pool;
+  private readonly redis: Redis; // FIX-500-413: Store Redis for caching scan results
 
-  constructor(pool: Pool, _redis: Redis) {
+  constructor(pool: Pool, redis: Redis) {
     this.pool = pool;
-    void _redis; // Reserved for future caching
+    this.redis = redis;
+  }
+
+  /** Expose Redis for subclasses / testing */
+  protected getRedis(): Redis {
+    return this.redis;
   }
 
   /**

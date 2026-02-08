@@ -420,41 +420,51 @@ export class CircuitBreakerService {
   }
 
   private async persistCircuitState(circuit: CircuitData): Promise<void> {
-    const key = `circuit:${circuit.config.name}`;
-    await this.redis.hset(key, {
-      state: circuit.state,
-      failures: circuit.failures,
-      successes: circuit.successes,
-      consecutiveSuccesses: circuit.consecutiveSuccesses,
-      totalRequests: circuit.totalRequests,
-      rejectedRequests: circuit.rejectedRequests,
-      lastFailure: circuit.lastFailure?.toISOString() ?? '',
-      lastSuccess: circuit.lastSuccess?.toISOString() ?? '',
-      lastStateChange: circuit.lastStateChange.toISOString(),
-      openedAt: circuit.openedAt?.toISOString() ?? '',
-      halfOpenAt: circuit.halfOpenAt?.toISOString() ?? '',
-      closedAt: circuit.closedAt?.toISOString() ?? '',
-    });
+    // FIX-500-340: Handle Redis connection failures gracefully
+    try {
+      const key = `circuit:${circuit.config.name}`;
+      await this.redis.hset(key, {
+        state: circuit.state,
+        failures: circuit.failures,
+        successes: circuit.successes,
+        consecutiveSuccesses: circuit.consecutiveSuccesses,
+        totalRequests: circuit.totalRequests,
+        rejectedRequests: circuit.rejectedRequests,
+        lastFailure: circuit.lastFailure?.toISOString() ?? '',
+        lastSuccess: circuit.lastSuccess?.toISOString() ?? '',
+        lastStateChange: circuit.lastStateChange.toISOString(),
+        openedAt: circuit.openedAt?.toISOString() ?? '',
+        halfOpenAt: circuit.halfOpenAt?.toISOString() ?? '',
+        closedAt: circuit.closedAt?.toISOString() ?? '',
+      });
+    } catch (err) {
+      logger.warn('FIX-500-340: Failed to persist circuit state to Redis, continuing with in-memory only', { err, circuit: circuit.config.name });
+    }
   }
 
   private async loadCircuitStates(): Promise<void> {
     for (const circuit of this.circuits.values()) {
-      const key = `circuit:${circuit.config.name}`;
-      const data = await this.redis.hgetall(key);
+      // FIX-500-340: Handle Redis connection failures gracefully
+      try {
+        const key = `circuit:${circuit.config.name}`;
+        const data = await this.redis.hgetall(key);
 
-      if (data && Object.keys(data).length > 0) {
-        circuit.state = data.state as CircuitState;
-        circuit.failures = parseInt(data.failures) || 0;
-        circuit.successes = parseInt(data.successes) || 0;
-        circuit.consecutiveSuccesses = parseInt(data.consecutiveSuccesses) || 0;
-        circuit.totalRequests = parseInt(data.totalRequests) || 0;
-        circuit.rejectedRequests = parseInt(data.rejectedRequests) || 0;
-        circuit.lastFailure = data.lastFailure ? new Date(data.lastFailure) : null;
-        circuit.lastSuccess = data.lastSuccess ? new Date(data.lastSuccess) : null;
-        circuit.lastStateChange = new Date(data.lastStateChange);
-        circuit.openedAt = data.openedAt ? new Date(data.openedAt) : null;
-        circuit.halfOpenAt = data.halfOpenAt ? new Date(data.halfOpenAt) : null;
-        circuit.closedAt = data.closedAt ? new Date(data.closedAt) : null;
+        if (data && Object.keys(data).length > 0) {
+          circuit.state = data.state as CircuitState;
+          circuit.failures = parseInt(data.failures) || 0;
+          circuit.successes = parseInt(data.successes) || 0;
+          circuit.consecutiveSuccesses = parseInt(data.consecutiveSuccesses) || 0;
+          circuit.totalRequests = parseInt(data.totalRequests) || 0;
+          circuit.rejectedRequests = parseInt(data.rejectedRequests) || 0;
+          circuit.lastFailure = data.lastFailure ? new Date(data.lastFailure) : null;
+          circuit.lastSuccess = data.lastSuccess ? new Date(data.lastSuccess) : null;
+          circuit.lastStateChange = new Date(data.lastStateChange);
+          circuit.openedAt = data.openedAt ? new Date(data.openedAt) : null;
+          circuit.halfOpenAt = data.halfOpenAt ? new Date(data.halfOpenAt) : null;
+          circuit.closedAt = data.closedAt ? new Date(data.closedAt) : null;
+        }
+      } catch (err) {
+        logger.warn('FIX-500-340: Failed to load circuit state from Redis, using defaults', { err, circuit: circuit.config.name });
       }
     }
   }

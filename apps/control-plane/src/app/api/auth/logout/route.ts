@@ -18,9 +18,5 @@ export async function POST() {
     return response;
 }
 
-export async function GET() {
-    // Also support GET for simple logout links
-    const response = NextResponse.redirect(new URL('/login', process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3020'));
-    response.cookies.delete(CONTROL_PLANE_SESSION_COOKIE);
-    return response;
-}
+// FIX-500-030: GET logout removed — enables CSRF via <img src="/api/auth/logout">.
+// Logout MUST be POST-only to require an intentional action.

@@ -8,7 +8,13 @@
  * - Graceful shutdown
  */
 
+// FIX-500-130: The planned `services/pattern-store.ts` (RedisPatternStore) was
+// never created. Pattern data is stored in-memory within STOOptimizer and
+// EmbeddingStore. If Redis-backed pattern persistence is needed, implement it
+// as a new module under `src/services/` and wire it here during bootstrap.
+
 import { EventEmitter } from 'events';
+import { Redis } from 'ioredis';
 import { ModelLifecycleManager, InferenceCircuitBreaker, InferenceQueue } from './inference/lifecycle.js';
 import { InferenceEngine } from './inference/engine.js';
 
@@ -94,6 +100,7 @@ export class ServiceBootstrap extends EventEmitter {
     private engines: Map<string, InferenceEngine> = new Map();
     private shutdownHandlers: Array<() => Promise<void>> = [];
     private isShuttingDown = false;
+    private redisClient: Redis | null = null;
 
     constructor(config?: Partial<WarmupConfig>) {
         super();
@@ -282,22 +289,33 @@ export class ServiceBootstrap extends EventEmitter {
         console.log('🔌 Connecting to cache...');
         
         try {
-            // In production, initialize actual Redis connection
-            // For now, just validate the URL
             if (!this.config.redisUrl) {
                 throw new Error('Redis URL not configured');
             }
 
-            // Simulate cache connection (actual implementation would use ioredis)
-            await new Promise(resolve => setTimeout(resolve, 100));
+            this.redisClient = new Redis(this.config.redisUrl, {
+                keyPrefix: 'ai:',
+                maxRetriesPerRequest: 3,
+                lazyConnect: true,
+            });
+            await this.redisClient.connect();
+            await this.redisClient.ping();
             
             console.log('✅ Cache connected');
             this.emit('cache:connected' as BootstrapEvent);
         } catch (error) {
             console.error('❌ Cache connection failed:', error);
+            this.redisClient = null;
             this.emit('cache:error' as BootstrapEvent, error);
-            throw error;
+            // Don't throw — allow service to run without cache
         }
+    }
+
+    /**
+     * Get the Redis client (if connected)
+     */
+    getRedisClient(): Redis | null {
+        return this.redisClient;
     }
 
     /**
@@ -444,6 +462,14 @@ export class ServiceBootstrap extends EventEmitter {
             // Clear queue
             this.requestQueue.clear();
 
+            // Close Redis connection
+            if (this.redisClient) {
+                try {
+                    await this.redisClient.quit();
+                    this.redisClient = null;
+                } catch { /* best-effort */ }
+            }
+
             console.log('✅ Shutdown complete');
         } catch (error) {
             console.error('❌ Shutdown error:', error);
@@ -457,21 +483,23 @@ export class ServiceBootstrap extends EventEmitter {
     setupSignalHandlers(): void {
         const signals: NodeJS.Signals[] = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
 
+        // FIX-500-391: Use process.once to avoid registering duplicate handlers
+        // if setupSignalHandlers() is called more than once
         for (const signal of signals) {
-            process.on(signal, async () => {
+            process.once(signal, async () => {
                 console.log(`\n📬 Received ${signal}`);
                 await this.shutdown();
                 process.exit(0);
             });
         }
 
-        process.on('uncaughtException', async (error) => {
+        process.once('uncaughtException', async (error) => {
             console.error('Uncaught exception:', error);
             await this.shutdown();
             process.exit(1);
         });
 
-        process.on('unhandledRejection', async (reason) => {
+        process.once('unhandledRejection', async (reason) => {
             console.error('Unhandled rejection:', reason);
             // Don't exit on unhandled rejection, but log it
         });
@@ -514,5 +542,7 @@ export function quickStart(options?: {
     return bootstrap;
 }
 
-// Export singleton for convenience
-export const serviceBootstrap = new ServiceBootstrap();
+// FIX-500-134: Removed dead module-level `serviceBootstrap` singleton.
+// `index.ts` calls `createServiceBootstrap()` which creates and initializes
+// its own instance. The previous un-initialized singleton was never used
+// externally and only consumed memory.

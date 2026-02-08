@@ -59,8 +59,9 @@ function sampleGamma(alpha: number): number {
     const d = alpha - 1 / 3;
     const c = 1 / Math.sqrt(9 * d);
     
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    // FIX-500-386: Cap iterations to prevent infinite loop on pathological RNG sequences
+    const MAX_ITERATIONS = 1000;
+    for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
         let x: number;
         let v: number;
         
@@ -80,6 +81,9 @@ function sampleGamma(alpha: number): number {
             return d * v;
         }
     }
+
+    // FIX-500-386: Fallback — return the mean of the Gamma distribution
+    return alpha;
 }
 
 /**
@@ -329,14 +333,23 @@ export class ThompsonSampler<T = unknown> {
 
     /**
      * Get the probability that each arm is the best
+     * FIX-500-089: Reduced default from 10K to 1K samples to avoid blocking
+     * the event loop. Made async and yields every 500 iterations.
      */
-    getProbabilityBest(numSamples: number = 10000): Map<string, number> {
+    async getProbabilityBest(numSamples: number = 1000): Promise<Map<string, number>> {
         const counts = new Map<string, number>();
         for (const arm of this.arms.values()) {
             counts.set(arm.id, 0);
         }
 
+        const YIELD_INTERVAL = 500;
+
         for (let i = 0; i < numSamples; i++) {
+            // FIX-500-089: Yield to event loop periodically
+            if (i > 0 && i % YIELD_INTERVAL === 0) {
+                await new Promise<void>(resolve => setImmediate(resolve));
+            }
+
             let bestId: string | null = null;
             let bestSample = -Infinity;
 
@@ -366,13 +379,14 @@ export class ThompsonSampler<T = unknown> {
 
     /**
      * Check if we have enough evidence to declare a winner
+     * FIX-500-089: Now async, reduced from 10K to 1K samples
      */
-    hasSignificantWinner(threshold: number = 0.95): {
+    async hasSignificantWinner(threshold: number = 0.95): Promise<{
         hasWinner: boolean;
         winnerId: string | null;
         probability: number;
-    } {
-        const probs = this.getProbabilityBest(10000);
+    }> {
+        const probs = await this.getProbabilityBest(1000);
         
         let bestId: string | null = null;
         let bestProb = 0;
@@ -439,9 +453,15 @@ export class ThompsonSampler<T = unknown> {
 
     /**
      * Deserialize bandit state
+     * FIX-500-189: Wrap JSON.parse in try/catch with meaningful error.
      */
     static deserialize<T>(json: string): ThompsonSampler<T> {
-        const data = JSON.parse(json);
+        let data: any;
+        try {
+            data = JSON.parse(json);
+        } catch (err) {
+            throw new Error(`ThompsonSampler.deserialize: invalid JSON — ${err instanceof Error ? err.message : String(err)}`);
+        }
         const sampler = new ThompsonSampler<T>(data.config);
         
         for (const [id, arm] of data.arms) {
@@ -496,6 +516,10 @@ export class ThompsonSampler<T = unknown> {
         this.pullHistory = this.pullHistory.filter(
             h => h.timestamp.getTime() > cutoff
         );
+        // FIX-500-250: Hard cap to prevent unbounded growth if maxAgeMs is very large
+        if (this.pullHistory.length > 10000) {
+            this.pullHistory = this.pullHistory.slice(-10000);
+        }
     }
 }
 

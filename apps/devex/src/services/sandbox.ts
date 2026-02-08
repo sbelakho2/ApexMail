@@ -127,13 +127,29 @@ export class SandboxService {
   private db: Pool;
   private environments: Map<string, SandboxEnvironment>;
   private capturedEmails: Map<string, CapturedEmail[]>;
-  private stats: Map<string, SandboxStats>;
+  // FIX-500-342: Cap in-memory captured emails to prevent unbounded growth
+  private static readonly MAX_CAPTURES_PER_SANDBOX = 10_000;
+  private static readonly MAX_SANDBOX_ENVIRONMENTS = 1_000;
 
   constructor(db: Pool) {
     this.db = db;
     this.environments = new Map();
     this.capturedEmails = new Map();
-    this.stats = new Map();
+  }
+
+  /**
+   * FIX-500-410: Evict oldest environments when Map exceeds cap
+   */
+  private evictEnvironmentsIfNeeded(): void {
+    while (this.environments.size > SandboxService.MAX_SANDBOX_ENVIRONMENTS) {
+      const firstKey = this.environments.keys().next().value;
+      if (firstKey !== undefined) {
+        this.environments.delete(firstKey);
+        this.capturedEmails.delete(firstKey);
+      } else {
+        break;
+      }
+    }
   }
 
   /**
@@ -148,6 +164,11 @@ export class SandboxService {
     expiresInHours?: number
   ): Promise<Result<SandboxEnvironment>> {
     try {
+      // FIX-500-342: Cap total sandbox environments to prevent unbounded growth
+      if (this.environments.size >= SandboxService.MAX_SANDBOX_ENVIRONMENTS) {
+        return { ok: false, error: new Error(`Maximum sandbox environments (${SandboxService.MAX_SANDBOX_ENVIRONMENTS}) reached`) };
+      }
+
       const id = `sbx_${generateUUID().replace(/-/g, '')}`;
       
       const environment: SandboxEnvironment = {
@@ -181,7 +202,13 @@ export class SandboxService {
 
       this.environments.set(id, environment);
       this.capturedEmails.set(id, []);
-      this.stats.set(id, this.createEmptyStats());
+      this.evictEnvironmentsIfNeeded(); // FIX-500-410
+
+      // FIX-500-150: Initialize stats in DB instead of in-memory Map
+      await this.db.query(
+        `INSERT INTO sandbox_stats (sandbox_id) VALUES ($1) ON CONFLICT (sandbox_id) DO NOTHING`,
+        [id]
+      );
 
       return { ok: true, value: environment };
     } catch (error) {
@@ -222,6 +249,7 @@ export class SandboxService {
       };
 
       this.environments.set(id, environment);
+      this.evictEnvironmentsIfNeeded(); // FIX-500-410
       return { ok: true, value: environment };
     } catch (error) {
       return { ok: false, error: error as Error };
@@ -295,10 +323,10 @@ export class SandboxService {
     try {
       await this.db.query(`DELETE FROM sandbox_environments WHERE id = $1`, [id]);
       await this.db.query(`DELETE FROM sandbox_captured_emails WHERE sandbox_id = $1`, [id]);
+      await this.db.query(`DELETE FROM sandbox_stats WHERE sandbox_id = $1`, [id]);
 
       this.environments.delete(id);
       this.capturedEmails.delete(id);
-      this.stats.delete(id);
 
       return { ok: true, value: undefined };
     } catch (error) {
@@ -395,13 +423,31 @@ export class SandboxService {
       // Update in-memory cache
       const emails = this.capturedEmails.get(sandboxId) ?? [];
       emails.push(captured);
+      // FIX-500-411: Use splice instead of while+shift for O(1) trimming
+      if (emails.length > SandboxService.MAX_CAPTURES_PER_SANDBOX) {
+        const excess = emails.length - SandboxService.MAX_CAPTURES_PER_SANDBOX;
+        emails.splice(0, excess);
+      }
       this.capturedEmails.set(sandboxId, emails);
 
-      // Update stats
-      const stats = this.stats.get(sandboxId) ?? this.createEmptyStats();
-      stats.emailsCaptured++;
-      if (settings.forwardTo) stats.emailsForwarded++;
-      this.stats.set(sandboxId, stats);
+      // FIX-500-411: Also cap total number of sandbox keys in capturedEmails
+      if (this.capturedEmails.size > SandboxService.MAX_SANDBOX_ENVIRONMENTS) {
+        const firstKey = this.capturedEmails.keys().next().value;
+        if (firstKey !== undefined && firstKey !== sandboxId) {
+          this.capturedEmails.delete(firstKey);
+        }
+      }
+
+      // FIX-500-150/412: Atomically update stats in DB via ON CONFLICT DO UPDATE
+      await this.db.query(
+        `INSERT INTO sandbox_stats (sandbox_id, emails_captured, emails_forwarded, updated_at)
+         VALUES ($1, 1, $2, NOW())
+         ON CONFLICT (sandbox_id) DO UPDATE
+         SET emails_captured = sandbox_stats.emails_captured + 1,
+             emails_forwarded = sandbox_stats.emails_forwarded + $2,
+             updated_at = NOW()`,
+        [sandboxId, settings.forwardTo ? 1 : 0]
+      );
 
       // Forward if configured
       if (settings.forwardTo) {
@@ -411,7 +457,14 @@ export class SandboxService {
       // Trigger webhook if configured
       if (settings.webhookUrl) {
         await this.triggerWebhook(settings.webhookUrl, 'email.captured', captured);
-        stats.webhooksTriggered++;
+        await this.db.query(
+          `INSERT INTO sandbox_stats (sandbox_id, webhooks_triggered, updated_at)
+           VALUES ($1, 1, NOW())
+           ON CONFLICT (sandbox_id) DO UPDATE
+           SET webhooks_triggered = sandbox_stats.webhooks_triggered + 1,
+               updated_at = NOW()`,
+          [sandboxId]
+        );
       }
 
       return { ok: true, value: captured };
@@ -583,30 +636,30 @@ export class SandboxService {
   }
 
   /**
-   * Get sandbox statistics
+   * Get sandbox statistics — FIX-500-150: fully DB-backed via sandbox_stats table
    */
   async getStats(sandboxId: string): Promise<Result<SandboxStats>> {
     try {
-      // Get stats from database
       const result = await this.db.query(`
-        SELECT 
-          COUNT(*) as emails_captured,
-          COUNT(*) FILTER (WHERE simulated_events::text LIKE '%delivered%') as simulated_deliveries,
-          COUNT(*) FILTER (WHERE simulated_events::text LIKE '%bounced%') as simulated_bounces,
-          COUNT(*) FILTER (WHERE simulated_events::text LIKE '%complained%') as simulated_complaints
-        FROM sandbox_captured_emails
+        SELECT emails_captured, emails_forwarded, simulated_deliveries,
+               simulated_bounces, simulated_complaints, webhooks_triggered, api_calls
+        FROM sandbox_stats
         WHERE sandbox_id = $1
       `, [sandboxId]);
+
+      if (result.rows.length === 0) {
+        return { ok: true, value: this.createEmptyStats() };
+      }
 
       const row = result.rows[0];
       const stats: SandboxStats = {
         emailsCaptured: parseInt(row.emails_captured) || 0,
-        emailsForwarded: 0,  // Would need separate tracking
+        emailsForwarded: parseInt(row.emails_forwarded) || 0,
         simulatedDeliveries: parseInt(row.simulated_deliveries) || 0,
         simulatedBounces: parseInt(row.simulated_bounces) || 0,
         simulatedComplaints: parseInt(row.simulated_complaints) || 0,
-        webhooksTriggered: 0,  // Would need separate tracking
-        apiCalls: 0,  // Would need separate tracking
+        webhooksTriggered: parseInt(row.webhooks_triggered) || 0,
+        apiCalls: parseInt(row.api_calls) || 0,
       };
 
       return { ok: true, value: stats };
@@ -644,10 +697,15 @@ export class SandboxService {
       // Simulate based on endpoint
       const response = this.getSimulatedResponse(endpoint, method, body, settings);
 
-      // Update stats
-      const stats = this.stats.get(sandboxId) ?? this.createEmptyStats();
-      stats.apiCalls++;
-      this.stats.set(sandboxId, stats);
+      // FIX-500-150: Update stats in DB instead of in-memory Map
+      await this.db.query(
+        `INSERT INTO sandbox_stats (sandbox_id, api_calls, updated_at)
+         VALUES ($1, 1, NOW())
+         ON CONFLICT (sandbox_id) DO UPDATE
+         SET api_calls = sandbox_stats.api_calls + 1,
+             updated_at = NOW()`,
+        [sandboxId]
+      );
 
       return { ok: true, value: { ...response, delay } };
     } catch (error) {
@@ -1057,6 +1115,14 @@ export class SandboxService {
         )
       `);
 
+      // Delete stats for expired sandboxes
+      await this.db.query(`
+        DELETE FROM sandbox_stats
+        WHERE sandbox_id IN (
+          SELECT id FROM sandbox_environments WHERE expires_at < NOW()
+        )
+      `);
+
       // Delete expired sandboxes
       const result = await this.db.query(`
         DELETE FROM sandbox_environments WHERE expires_at < NOW()
@@ -1067,7 +1133,6 @@ export class SandboxService {
       for (const row of result.rows) {
         this.environments.delete(row.id);
         this.capturedEmails.delete(row.id);
-        this.stats.delete(row.id);
       }
 
       return { ok: true, value: { deleted: result.rowCount ?? 0 } };

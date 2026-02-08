@@ -11,8 +11,10 @@
  * Customers cannot use this client even if they have access to the code.
  */
 
-const AUTOPILOT_API_URL = process.env.NEXT_PUBLIC_AUTOPILOT_API_URL || 'http://localhost:3010';
-const COMPLIANCE_API_URL = process.env.NEXT_PUBLIC_COMPLIANCE_API_URL || 'http://localhost:3011';
+// FIX-500-036: Removed NEXT_PUBLIC_ prefix — these are server-side only.
+// NEXT_PUBLIC_ exposes values to the client-side JS bundle, leaking internal URLs.
+const AUTOPILOT_API_URL = process.env.AUTOPILOT_API_URL || process.env.NEXT_PUBLIC_AUTOPILOT_API_URL || 'http://localhost:3010';
+const COMPLIANCE_API_URL = process.env.COMPLIANCE_API_URL || process.env.NEXT_PUBLIC_COMPLIANCE_API_URL || 'http://localhost:3011';
 
 // Control Plane API key (server-side only)
 const CONTROL_PLANE_API_KEY = process.env.CONTROL_PLANE_API_KEY;
@@ -45,30 +47,86 @@ function getAuthHeaders(): HeadersInit {
 
 /**
  * Makes an authenticated request to Control Plane APIs
+ * FIX-500-299: Added response.ok check
+ * FIX-500-300: Added AbortController timeout
+ * FIX-500-301: Added retry logic with exponential backoff
  */
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const MAX_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 30000;
+
 async function controlPlaneFetch(url: string, options: RequestInit = {}): Promise<Response> {
     validateControlPlaneUrl(url);
-    
-    const response = await fetch(url, {
-        ...options,
-        headers: {
-            ...getAuthHeaders(),
-            ...options.headers,
-        },
-        // Include credentials for session-based auth
-        credentials: 'include',
-    });
-    
-    // Check for auth errors
-    if (response.status === 401) {
-        throw new Error('Control Plane authentication failed. Please log in again.');
+
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        // FIX-500-300: Timeout via AbortController
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+        try {
+            const response = await fetch(url, {
+                ...options,
+                headers: {
+                    ...getAuthHeaders(),
+                    ...options.headers,
+                },
+                credentials: 'include',
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            // Check for auth errors (non-retryable)
+            if (response.status === 401) {
+                throw new Error('Control Plane authentication failed. Please log in again.');
+            }
+            if (response.status === 403) {
+                throw new Error('Access denied. You do not have permission to access this resource.');
+            }
+
+            // FIX-500-301: Retry on retryable status codes
+            if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
+                const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+
+            // FIX-500-299: Check response.ok for general HTTP errors
+            if (!response.ok) {
+                const text = await response.text().catch(() => '');
+                throw new Error(`Control Plane API error ${response.status}: ${text.slice(0, 200)}`);
+            }
+
+            return response;
+        } catch (error) {
+            clearTimeout(timeoutId);
+
+            if (error instanceof Error && error.name === 'AbortError') {
+                lastError = new Error(`Control Plane API request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+                if (attempt < MAX_RETRIES) {
+                    const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+            } else if (error instanceof Error &&
+                       (error.message.includes('ECONNREFUSED') ||
+                        error.message.includes('ECONNRESET') ||
+                        error.message.includes('network'))) {
+                lastError = error;
+                if (attempt < MAX_RETRIES) {
+                    const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+            } else {
+                throw error; // Non-retryable errors (auth, etc.)
+            }
+        }
     }
-    
-    if (response.status === 403) {
-        throw new Error('Access denied. You do not have permission to access this resource.');
-    }
-    
-    return response;
+
+    throw lastError || new Error('Control Plane API request failed after retries');
 }
 
 export interface Lead {

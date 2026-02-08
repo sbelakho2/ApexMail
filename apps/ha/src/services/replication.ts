@@ -27,8 +27,10 @@ function sanitizeIdentifier(name: string, identifierType: string): string {
     throw new Error(`${identifierType} must be a non-empty string`);
   }
   
+  // FIX-500-343: Replace hyphens with underscores instead of stripping
+  const withUnderscores = name.replace(/-/g, '_');
   // Only allow alphanumeric and underscores, PostgreSQL identifier rules
-  const sanitized = name.replace(/[^a-zA-Z0-9_]/g, '');
+  const sanitized = withUnderscores.replace(/[^a-zA-Z0-9_]/g, '');
   
   if (sanitized.length === 0) {
     throw new Error(`${identifierType} must contain valid identifier characters`);

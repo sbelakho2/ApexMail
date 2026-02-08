@@ -94,14 +94,18 @@ export function createEdgeCaseRoutes(
     }
 
     // Convert base64 content to buffers
-    const processedAttachments: Attachment[] = attachmentList.map((att: any) => ({
-      filename: att.filename,
-      contentType: att.contentType || 'application/octet-stream',
-      content: Buffer.from(att.content, 'base64'),
-      size: att.size || Buffer.from(att.content, 'base64').length,
-      disposition: att.disposition || 'attachment',
-      contentId: att.contentId,
-    }));
+    // FIX-500-401: Decode base64 once — previously decoded twice (for content and size)
+    const processedAttachments: Attachment[] = attachmentList.map((att: any) => {
+      const decoded = Buffer.from(att.content, 'base64');
+      return {
+        filename: att.filename,
+        contentType: att.contentType || 'application/octet-stream',
+        content: decoded,
+        size: att.size || decoded.length,
+        disposition: att.disposition || 'attachment',
+        contentId: att.contentId,
+      };
+    });
 
     const result = await attachments.validateAttachments(processedAttachments);
     if (result.ok === false) {
@@ -174,12 +178,22 @@ export function createEdgeCaseRoutes(
   app.post('/calendar/invite', async (c) => {
     const body = await c.req.json();
 
+    // FIX-500-402: Validate date parameters before creating Date objects
+    const startDate = new Date(body.start);
+    const endDate = new Date(body.end);
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      return c.json({ error: 'Invalid start or end date' }, 400);
+    }
+    if (endDate <= startDate) {
+      return c.json({ error: 'End date must be after start date' }, 400);
+    }
+
     const result = await calendar.createInvite({
       summary: body.summary,
       description: body.description,
       location: body.location,
-      start: new Date(body.start),
-      end: new Date(body.end),
+      start: startDate,
+      end: endDate,
       allDay: body.allDay || false,
       timezone: body.timezone,
       organizer: body.organizer,

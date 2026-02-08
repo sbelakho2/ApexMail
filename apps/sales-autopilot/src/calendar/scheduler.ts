@@ -4,6 +4,8 @@
 
 import { createLogger, generateId } from '@apexmail/lib';
 import { config } from '../config.js';
+import { getDbPool } from '../db.js';
+import { recordActivity } from '../crm/pipeline.js';
 import type {
     DemoSlot,
     SchedulingPreferences,
@@ -13,27 +15,133 @@ import type {
 
 const logger = createLogger({ name: 'calendar', level: 'info' });
 
-// In-memory storage for demo
-const slots = new Map<string, DemoSlot>();
+/**
+ * FIX-500-152: L1 in-memory cache backed by Postgres.
+ * All mutations write-through to DB.
+ * FIX-500-248: Capped at MAX_CACHE_SIZE to prevent unbounded growth.
+ */
+const moduleSlots = new Map<string, DemoSlot>();
 const preferences = new Map<string, SchedulingPreferences>();
+const MAX_CACHE_SIZE = 10000;
+
+/**
+ * FIX-500-248: Periodic eviction of past/expired demo slots from the cache.
+ */
+setInterval(() => {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [id, slot] of moduleSlots) {
+        // Evict slots whose endTime is in the past
+        if (slot.endTime && new Date(slot.endTime).getTime() < now) {
+            moduleSlots.delete(id);
+            evicted++;
+        }
+    }
+    // If still over cap, evict oldest entries
+    if (moduleSlots.size > MAX_CACHE_SIZE) {
+        const excess = moduleSlots.size - MAX_CACHE_SIZE;
+        const iter = moduleSlots.keys();
+        for (let i = 0; i < excess; i++) {
+            const key = iter.next().value;
+            if (key) moduleSlots.delete(key);
+        }
+        evicted += excess;
+    }
+    if (preferences.size > MAX_CACHE_SIZE) {
+        const excess = preferences.size - MAX_CACHE_SIZE;
+        const iter = preferences.keys();
+        for (let i = 0; i < excess; i++) {
+            const key = iter.next().value;
+            if (key) preferences.delete(key);
+        }
+    }
+    if (evicted > 0) {
+        logger.info('Evicted expired/excess slots from cache', { evicted, slotsRemaining: moduleSlots.size, prefsRemaining: preferences.size });
+    }
+}, 5 * 60 * 1000).unref(); // Every 5 minutes
+
+/**
+ * FIX-500-125: Retrieve a slot by ID from the module-level store.
+ */
+export function getSlot(slotId: string): DemoSlot | null {
+    return moduleSlots.get(slotId) ?? null;
+}
 
 /**
  * Sets scheduling preferences for a user
+ * FIX-500-152: Write-through to DB.
  */
-export function setSchedulingPreferences(
+export async function setSchedulingPreferences(
     prefs: SchedulingPreferences
-): void {
+): Promise<void> {
     preferences.set(prefs.userId, prefs);
+
+    try {
+        const pool = getDbPool();
+        await pool.query(
+            `INSERT INTO scheduling_preferences (user_id, default_duration, buffer_before, buffer_after,
+             available_days, available_hours, timezone, max_bookings_per_day, min_notice_hours, max_advance_days)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (user_id) DO UPDATE SET
+               default_duration = EXCLUDED.default_duration,
+               buffer_before = EXCLUDED.buffer_before,
+               buffer_after = EXCLUDED.buffer_after,
+               available_days = EXCLUDED.available_days,
+               available_hours = EXCLUDED.available_hours,
+               timezone = EXCLUDED.timezone,
+               max_bookings_per_day = EXCLUDED.max_bookings_per_day,
+               min_notice_hours = EXCLUDED.min_notice_hours,
+               max_advance_days = EXCLUDED.max_advance_days,
+               updated_at = NOW()`,
+            [prefs.userId, prefs.defaultDuration, prefs.bufferBefore, prefs.bufferAfter,
+             prefs.availableDays, JSON.stringify(prefs.availableHours), prefs.timezone,
+             prefs.maxBookingsPerDay, prefs.minNoticeHours, prefs.maxAdvanceDays]
+        );
+    } catch (err) {
+        logger.error('Failed to persist scheduling preferences', { userId: prefs.userId, error: err instanceof Error ? err.message : String(err) });
+    }
+
     logger.info('Set scheduling preferences', { userId: prefs.userId });
 }
 
 /**
  * Gets scheduling preferences for a user
+ * FIX-500-152: Falls back to DB if not in cache.
  */
-export function getSchedulingPreferences(
+export async function getSchedulingPreferences(
     userId: string
-): SchedulingPreferences | null {
-    return preferences.get(userId) || null;
+): Promise<SchedulingPreferences | null> {
+    const cached = preferences.get(userId);
+    if (cached) return cached;
+
+    try {
+        const pool = getDbPool();
+        const { rows } = await pool.query(
+            'SELECT * FROM scheduling_preferences WHERE user_id = $1',
+            [userId]
+        );
+        if (rows.length > 0) {
+            const row = rows[0];
+            const prefs: SchedulingPreferences = {
+                userId: row.user_id,
+                defaultDuration: row.default_duration,
+                bufferBefore: row.buffer_before,
+                bufferAfter: row.buffer_after,
+                availableDays: row.available_days,
+                availableHours: row.available_hours as AvailableHours[],
+                timezone: row.timezone,
+                maxBookingsPerDay: row.max_bookings_per_day,
+                minNoticeHours: row.min_notice_hours,
+                maxAdvanceDays: row.max_advance_days,
+            };
+            preferences.set(userId, prefs);
+            return prefs;
+        }
+    } catch (err) {
+        logger.warn('Failed to load preferences from DB', { userId, error: err instanceof Error ? err.message : String(err) });
+    }
+
+    return null;
 }
 
 /**
@@ -95,6 +203,7 @@ export function createDefaultPreferences(userId: string): SchedulingPreferences 
 
 /**
  * Gets available slots for a user within a date range
+ * FIX-500-314: Cap total generated slots to MAX_GENERATED_SLOTS.
  */
 export function getAvailableSlots(
     userId: string,
@@ -103,6 +212,7 @@ export function getAvailableSlots(
     endDate: Date,
     durationMinutes?: number
 ): DemoSlot[] {
+    const MAX_GENERATED_SLOTS = 500;
     const prefs = preferences.get(userId) || createDefaultPreferences(userId);
     const duration = durationMinutes || prefs.defaultDuration;
     const availableSlots: DemoSlot[] = [];
@@ -124,7 +234,7 @@ export function getAvailableSlots(
     );
 
     // Get existing bookings for the user
-    const existingBookings = Array.from(slots.values()).filter(
+    const existingBookings = Array.from(moduleSlots.values()).filter(
         (s) =>
             s.userId === userId &&
             s.status === 'booked' &&
@@ -145,6 +255,10 @@ export function getAvailableSlots(
         );
 
         if (dayHours && prefs.availableDays.includes(dayOfWeek)) {
+            // FIX-500-314: Pass remaining budget to prevent unbounded generation
+            const remainingBudget = MAX_GENERATED_SLOTS - availableSlots.length;
+            if (remainingBudget <= 0) break;
+
             // Generate slots for this day
             const daySlots = generateDaySlots(
                 currentDate,
@@ -155,7 +269,8 @@ export function getAvailableSlots(
                 existingBookings,
                 userId,
                 tenantId,
-                prefs.timezone
+                prefs.timezone,
+                remainingBudget
             );
 
             // Filter out slots before minBookingTime
@@ -184,6 +299,7 @@ export function getAvailableSlots(
 
 /**
  * Generates time slots for a specific day
+ * FIX-500-314: Accepts a remaining slot budget to prevent unbounded generation.
  */
 function generateDaySlots(
     date: Date,
@@ -194,7 +310,8 @@ function generateDaySlots(
     existingBookings: DemoSlot[],
     userId: string,
     tenantId: string,
-    timezone: string
+    timezone: string,
+    maxSlots: number = 500
 ): DemoSlot[] {
     const slots: DemoSlot[] = [];
 
@@ -209,6 +326,11 @@ function generateDaySlots(
     let currentSlotStart = new Date(startTime);
 
     while (currentSlotStart < endTime) {
+        // FIX-500-314: Stop generating once we hit the cap
+        if (slots.length >= maxSlots) {
+            break;
+        }
+
         const currentSlotEnd = new Date(
             currentSlotStart.getTime() + durationMinutes * 60 * 1000
         );
@@ -235,7 +357,12 @@ function generateDaySlots(
         });
 
         if (!hasConflict) {
-            slots.push({
+            // FIX-500-125: Persist generated slots to the module-level Map.
+            // Previously, generated slots had ephemeral IDs that only existed
+            // in the returned array — bookSlot() looked them up in the Map
+            // and always returned null. Now every generated slot is stored
+            // so it can be found and booked.
+            const newSlot: DemoSlot = {
                 id: generateId('slot'),
                 tenantId,
                 userId,
@@ -250,7 +377,11 @@ function generateDaySlots(
                 notes: null,
                 createdAt: new Date(),
                 updatedAt: new Date(),
-            });
+            };
+            moduleSlots.set(newSlot.id, newSlot);
+            // FIX-500-152: Fire-and-forget persist for generated available slots
+            persistSlot(newSlot).catch(() => { /* best-effort */ });
+            slots.push(newSlot);
         }
 
         currentSlotStart = new Date(
@@ -262,20 +393,70 @@ function generateDaySlots(
 }
 
 /**
- * Books a slot
+ * FIX-500-152: Persist a slot to the DB (upsert).
  */
-export function bookSlot(
+async function persistSlot(slot: DemoSlot): Promise<void> {
+    try {
+        const pool = getDbPool();
+        await pool.query(
+            `INSERT INTO demo_slots (id, tenant_id, user_id, start_time, end_time, timezone, status,
+             booked_by, lead_id, meeting_type, meeting_link, notes, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT (id) DO UPDATE SET
+               status = EXCLUDED.status, booked_by = EXCLUDED.booked_by,
+               lead_id = EXCLUDED.lead_id, meeting_type = EXCLUDED.meeting_type,
+               meeting_link = EXCLUDED.meeting_link, notes = EXCLUDED.notes,
+               updated_at = EXCLUDED.updated_at`,
+            [slot.id, slot.tenantId, slot.userId, slot.startTime, slot.endTime,
+             slot.timezone, slot.status, slot.bookedBy, slot.leadId,
+             slot.meetingType, slot.meetingLink, slot.notes, slot.createdAt, slot.updatedAt]
+        );
+    } catch (err) {
+        logger.error('Failed to persist slot to DB', { slotId: slot.id, error: err instanceof Error ? err.message : String(err) });
+    }
+}
+
+/**
+ * Books a slot
+ * FIX-500-152: Write-through to DB.
+ * FIX-500-309: Use CAS (Compare-And-Swap) pattern — only book if the DB
+ * row's status is still 'available'. This prevents two concurrent requests
+ * from both succeeding on the same slot.
+ */
+export async function bookSlot(
     slotId: string,
     leadId: string,
     bookedBy: string,
     meetingType: MeetingType = 'demo',
     notes?: string
-): DemoSlot | null {
-    const slot = slots.get(slotId);
+): Promise<DemoSlot | null> {
+    const slot = moduleSlots.get(slotId);
     if (!slot || slot.status !== 'available') {
         return null;
     }
 
+    // FIX-500-309: Atomic CAS in the database — only update if still available
+    try {
+        const pool = getDbPool();
+        const casResult = await pool.query(
+            `UPDATE demo_slots
+             SET status = 'booked', lead_id = $2, booked_by = $3,
+                 meeting_type = $4, notes = $5, updated_at = NOW()
+             WHERE id = $1 AND status = 'available'
+             RETURNING *`,
+            [slotId, leadId, bookedBy, meetingType, notes || null]
+        );
+        if ((casResult.rowCount ?? 0) === 0) {
+            // Another request booked it first — update our cache and return null
+            slot.status = 'booked';
+            return null;
+        }
+    } catch (err) {
+        logger.error('Failed CAS booking in DB', { slotId, error: err instanceof Error ? err.message : String(err) });
+        return null;
+    }
+
+    // CAS succeeded — update in-memory cache
     slot.status = 'booked';
     slot.leadId = leadId;
     slot.bookedBy = bookedBy;
@@ -284,7 +465,7 @@ export function bookSlot(
     slot.meetingLink = generateMeetingLink(slot);
     slot.updatedAt = new Date();
 
-    slots.set(slotId, slot);
+    moduleSlots.set(slotId, slot);
 
     logger.info('Booked slot', {
         slotId,
@@ -298,8 +479,9 @@ export function bookSlot(
 
 /**
  * Creates a slot directly (for manual scheduling)
+ * FIX-500-152: Write-through to DB.
  */
-export function createSlot(
+export async function createSlot(
     tenantId: string,
     userId: string,
     startTime: Date,
@@ -310,7 +492,7 @@ export function createSlot(
         bookedBy?: string;
         notes?: string;
     }
-): DemoSlot {
+): Promise<DemoSlot> {
     const slot: DemoSlot = {
         id: generateId('slot'),
         tenantId,
@@ -328,18 +510,20 @@ export function createSlot(
         updatedAt: new Date(),
     };
 
-    slots.set(slot.id, slot);
+    moduleSlots.set(slot.id, slot);
+    await persistSlot(slot);
     return slot;
 }
 
 /**
  * Cancels a booking
+ * FIX-500-152: Write-through to DB.
  */
-export function cancelBooking(
+export async function cancelBooking(
     slotId: string,
     reason?: string
-): DemoSlot | null {
-    const slot = slots.get(slotId);
+): Promise<DemoSlot | null> {
+    const slot = moduleSlots.get(slotId);
     if (!slot || slot.status !== 'booked') {
         return null;
     }
@@ -350,6 +534,8 @@ export function cancelBooking(
         : slot.notes;
     slot.updatedAt = new Date();
 
+    await persistSlot(slot);
+
     logger.info('Cancelled booking', { slotId, reason });
 
     return slot;
@@ -357,13 +543,14 @@ export function cancelBooking(
 
 /**
  * Reschedules a booking
+ * FIX-500-152: Write-through to DB.
  */
-export function rescheduleBooking(
+export async function rescheduleBooking(
     oldSlotId: string,
     newSlotId: string
-): DemoSlot | null {
-    const oldSlot = slots.get(oldSlotId);
-    const newSlot = slots.get(newSlotId);
+): Promise<DemoSlot | null> {
+    const oldSlot = moduleSlots.get(oldSlotId);
+    const newSlot = moduleSlots.get(newSlotId);
 
     if (!oldSlot || oldSlot.status !== 'booked') {
         return null;
@@ -387,6 +574,19 @@ export function rescheduleBooking(
     oldSlot.notes = `Rescheduled to ${newSlot.startTime.toISOString()}`;
     oldSlot.updatedAt = new Date();
 
+    await persistSlot(newSlot);
+    await persistSlot(oldSlot);
+
+    // FIX-500-472: Record CRM activity for the reschedule
+    if (newSlot.leadId) {
+        await recordActivity(newSlot.leadId, {
+            type: 'demo_rescheduled',
+            description: `Demo rescheduled from ${oldSlot.startTime.toISOString()} to ${newSlot.startTime.toISOString()}`,
+            data: { oldSlotId, newSlotId, newTime: newSlot.startTime.toISOString() },
+            userId: null,
+        });
+    }
+
     logger.info('Rescheduled booking', {
         oldSlotId,
         newSlotId,
@@ -398,12 +598,13 @@ export function rescheduleBooking(
 
 /**
  * Marks a meeting as completed
+ * FIX-500-152: Write-through to DB.
  */
-export function completeSlot(
+export async function completeSlot(
     slotId: string,
     notes?: string
-): DemoSlot | null {
-    const slot = slots.get(slotId);
+): Promise<DemoSlot | null> {
+    const slot = moduleSlots.get(slotId);
     if (!slot || slot.status !== 'booked') {
         return null;
     }
@@ -413,6 +614,8 @@ export function completeSlot(
         slot.notes = `${slot.notes || ''}\nNotes: ${notes}`.trim();
     }
     slot.updatedAt = new Date();
+
+    await persistSlot(slot);
 
     return slot;
 }
@@ -426,7 +629,7 @@ export function getUpcomingBookings(
 ): DemoSlot[] {
     const now = new Date();
 
-    return Array.from(slots.values())
+    return Array.from(moduleSlots.values())
         .filter(
             (s) =>
                 s.userId === userId &&
@@ -441,7 +644,7 @@ export function getUpcomingBookings(
  * Gets bookings for a lead
  */
 export function getLeadBookings(leadId: string): DemoSlot[] {
-    return Array.from(slots.values())
+    return Array.from(moduleSlots.values())
         .filter((s) => s.leadId === leadId)
         .sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
 }
@@ -477,7 +680,7 @@ export function generateIcsFile(slot: IcsSlotData, organizerEmail: string): stri
 
     return `BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//ApexMail//Demo Scheduler//EN
+PRODID:-//ApexMail//Calendar Scheduler//EN
 CALSCALE:GREGORIAN
 METHOD:REQUEST
 BEGIN:VEVENT

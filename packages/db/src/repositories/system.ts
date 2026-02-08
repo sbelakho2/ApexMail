@@ -234,12 +234,25 @@ export class SystemRepository {
         }
     }
 
-    async cleanupExpiredIdempotencyRecords(): Promise<number> {
-        const result = await this.pool.query(
-            `DELETE FROM idempotency_keys WHERE expires_at < NOW()`
-        );
-
-        return result.rowCount ?? 0;
+    // FIX-500-051: Batch deletes with LIMIT to avoid long-running table locks
+    async cleanupExpiredIdempotencyRecords(batchSize: number = 1000): Promise<number> {
+        let totalDeleted = 0;
+        while (true) {
+            const result = await this.pool.query<{ count: string }>(
+                `WITH deleted AS (
+                    DELETE FROM idempotency_keys
+                    WHERE id IN (
+                        SELECT id FROM idempotency_keys WHERE expires_at < NOW() LIMIT $1
+                    )
+                    RETURNING 1
+                ) SELECT COUNT(*) as count FROM deleted`,
+                [batchSize]
+            );
+            const deletedCount = parseInt(result.rows[0]?.count ?? '0', 10);
+            totalDeleted += deletedCount;
+            if (deletedCount < batchSize) break;
+        }
+        return totalDeleted;
     }
 
     // -------------------------------------------------------------------------

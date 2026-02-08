@@ -48,6 +48,12 @@ const redis = new Redis({
   // G-216: Namespace isolation — prevent key collisions with other services
   keyPrefix: 'tracking:',
   maxRetriesPerRequest: 3,
+  // FIX-500-347: Add enableReadyCheck and connectTimeout
+  enableReadyCheck: true,
+  connectTimeout: 10000,
+  // F-219: Reject commands immediately when disconnected instead of
+  // queuing them in memory (prevents unbounded memory growth during Redis outages)
+  enableOfflineQueue: false,
   retryStrategy(times: number) {
     if (times > 10) {
       logger.error('Redis connection failed after 10 retries');
@@ -87,7 +93,7 @@ const processor = new EventProcessor({
   redis,
   logger,
   flushIntervalMs: 1000,
-  maxBufferSize: 100,
+  maxBufferSize: 500, // F-218: Increased from 100 for higher throughput ceiling
 });
 
 // =============================================================================
@@ -117,16 +123,28 @@ if (config.metrics.enabled) {
   const metricsApp = new Hono();
   
   metricsApp.get('/metrics', async (c) => {
+    // FIX-071: Pipeline 4 sequential Redis calls into a single round-trip
+    const pipe = redis.pipeline();
+    pipe.get('metrics:tracking:opens');
+    pipe.get('metrics:tracking:clicks');
+    pipe.get('metrics:tracking:unsubscribes');
+    pipe.llen('apexmail:tracking:events:pending');
+    const results = await pipe.exec();
+    const opens = results?.[0]?.[1] ?? 0;
+    const clicks = results?.[1]?.[1] ?? 0;
+    const unsubs = results?.[2]?.[1] ?? 0;
+    const buffered = results?.[3]?.[1] ?? 0;
+
     const metrics = [
       `# HELP tracking_requests_total Total tracking requests`,
       `# TYPE tracking_requests_total counter`,
-      `tracking_requests_total{type="open"} ${await redis.get('metrics:tracking:opens') ?? 0}`,
-      `tracking_requests_total{type="click"} ${await redis.get('metrics:tracking:clicks') ?? 0}`,
-      `tracking_requests_total{type="unsubscribe"} ${await redis.get('metrics:tracking:unsubscribes') ?? 0}`,
+      `tracking_requests_total{type="open"} ${opens}`,
+      `tracking_requests_total{type="click"} ${clicks}`,
+      `tracking_requests_total{type="unsubscribe"} ${unsubs}`,
       '',
       `# HELP tracking_events_buffered Current events in Redis WAL pending flush`,
       `# TYPE tracking_events_buffered gauge`,
-      `tracking_events_buffered ${await redis.llen('apexmail:tracking:events:pending')}`,
+      `tracking_events_buffered ${buffered}`,
       '',
       `# HELP process_uptime_seconds Process uptime`,
       `# TYPE process_uptime_seconds gauge`,
@@ -159,10 +177,11 @@ async function shutdown(signal: string): Promise<void> {
   logger.info('Shutdown initiated', { signal });
 
   // Set a hard timeout to force exit if shutdown hangs
+  // F-220: Increased from 15s to 30s to allow full WAL drain
   const forceTimeout = setTimeout(() => {
     logger.error('Shutdown timeout exceeded, forcing exit');
     process.exit(1);
-  }, 15000);
+  }, 30000);
   forceTimeout.unref();
 
   // Stop accepting new HTTP connections
@@ -185,6 +204,7 @@ async function shutdown(signal: string): Promise<void> {
   // Close database pool
   await db.end();
 
+  clearTimeout(forceTimeout);
   logger.info('Shutdown complete');
   process.exit(0);
 }
@@ -197,10 +217,20 @@ process.on('uncaughtException', (error) => {
   shutdown('uncaughtException').catch(() => process.exit(1));
 });
 
-// D-114: Trigger graceful shutdown on unhandledRejection instead of just logging
+// FIX-500-355: Counter threshold for unhandledRejection (5 within 60s)
+let unhandledRejectionCount = 0;
+const REJECTION_WINDOW_MS = 60_000;
+const REJECTION_THRESHOLD = 5;
+
 process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled rejection — triggering shutdown', { reason: String(reason) });
-  shutdown('unhandledRejection').catch(() => process.exit(1));
+  unhandledRejectionCount++;
+  logger.error('Unhandled rejection', { reason: String(reason), count: unhandledRejectionCount });
+  // Reset counter after window
+  setTimeout(() => { unhandledRejectionCount = Math.max(0, unhandledRejectionCount - 1); }, REJECTION_WINDOW_MS).unref();
+  if (unhandledRejectionCount >= REJECTION_THRESHOLD) {
+    logger.error(`${REJECTION_THRESHOLD} unhandled rejections within window — triggering shutdown`);
+    shutdown('unhandledRejection').catch(() => process.exit(1));
+  }
 });
 
 // =============================================================================

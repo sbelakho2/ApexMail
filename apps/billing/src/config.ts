@@ -78,7 +78,7 @@ export const config = {
     return getConfig().SERVICE_AUTH_TOKEN;
   },
   get port(): number {
-    return parseInt(getConfig().PORT, 10);
+    return parseInt(getConfig().PORT, 10) || 3000;
   },
   get host(): string {
     return getConfig().HOST;
@@ -87,10 +87,10 @@ export const config = {
     return ['http://localhost:3000', 'https://apexmail.ee'];
   },
   get meteringBatchSize(): number {
-    return parseInt(getConfig().METERING_BATCH_SIZE, 10);
+    return parseInt(getConfig().METERING_BATCH_SIZE, 10) || 100;
   },
   get meteringFlushIntervalMs(): number {
-    return parseInt(getConfig().METERING_FLUSH_INTERVAL_MS, 10);
+    return parseInt(getConfig().METERING_FLUSH_INTERVAL_MS, 10) || 10000;
   },
 };
 

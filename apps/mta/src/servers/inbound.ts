@@ -664,6 +664,7 @@ export class InboundServer {
       const linkedMessageId = replyTracking.get(recipientEmail);
 
       // Store inbound message
+      // FIX-500-365: ON CONFLICT prevents duplicate inbound messages if same message delivered twice
       await this.db.query(`
         INSERT INTO inbound_messages (
           id, tenant_id, domain_id, message_id_header, from_address, to_address,
@@ -671,6 +672,7 @@ export class InboundServer {
           received_at, client_ip, session_id, in_reply_to_message_id,
           spf_result, dkim_result, dmarc_result, dmarc_policy, auth_action
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), $13, $14, $15, $16, $17, $18, $19, $20)
+        ON CONFLICT (tenant_id, message_id_header) DO NOTHING
       `, [
         messageId,
         domain.tenant_id,

@@ -5,7 +5,6 @@
  */
 
 import { Hono } from 'hono';
-import { cors } from 'hono/cors';
 import { bodyLimit } from 'hono/body-limit';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
@@ -26,6 +25,20 @@ interface TrackingContext {
 // 1x1 transparent GIF
 const TRANSPARENT_GIF = Buffer.from(config.tracking.pixel.gifBase64, 'base64');
 
+// FIX-062: Pre-compute pixel response headers once at module init instead of
+// rebuilding the same object on every request.
+const PIXEL_HEADERS: Record<string, string> = {
+  'Content-Type': 'image/gif',
+  'Content-Length': TRANSPARENT_GIF.length.toString(),
+  'Cache-Control': config.tracking.pixel.cacheControl,
+  'Pragma': 'no-cache',
+  'Expires': '0',
+  'Vary': '*',
+  'X-Content-Type-Options': 'nosniff',
+  // FIX-500-454: Prevent search engines from indexing tracking pixel URLs
+  'X-Robots-Tag': 'noindex, nofollow',
+};
+
 /**
  * E-190: Bot detection for tracking pixels.
  * Email security scanners (Barracuda, Mimecast, etc.) and email client
@@ -34,30 +47,14 @@ const TRANSPARENT_GIF = Buffer.from(config.tracking.pixel.gifBase64, 'base64');
  *
  * Returns true if the UA matches a known bot/scanner/proxy pattern.
  */
-const BOT_UA_PATTERNS: RegExp[] = [
-  /GoogleImageProxy/i,
-  /YahooMailProxy/i,
-  /Barracuda/i,
-  /Mimecast/i,
-  /FireEye/i,
-  /ProofPoint/i,
-  /Symantec/i,
-  /MessageLabs/i,
-  /Trend\s?Micro/i,
-  /Sophos/i,
-  /\bbot\b/i,
-  /\bcrawler\b/i,
-  /\bscanner\b/i,
-  /\bspider\b/i,
-  /\bprefetch\b/i,
-  /link\s?preview/i,
-  /Microsoft\s?Office/i,
-  /ms-office/i,
-];
+// FIX-063: Single combined regex instead of 18 separate patterns tested via .some().
+// The regex engine can optimize a single alternation internally, and we avoid
+// 18 separate RegExp.test() calls per request.
+const BOT_UA_PATTERN = /GoogleImageProxy|YahooMailProxy|Barracuda|Mimecast|FireEye|ProofPoint|Symantec|MessageLabs|Trend\s?Micro|Sophos|\bbot\b|\bcrawler\b|\bscanner\b|\bspider\b|\bprefetch\b|link\s?preview|Microsoft\s?Office|ms-office/i;
 
 function isBot(userAgent: string | undefined): boolean {
   if (!userAgent) return false;
-  return BOT_UA_PATTERNS.some(pattern => pattern.test(userAgent));
+  return BOT_UA_PATTERN.test(userAgent);
 }
 
 /**
@@ -70,24 +67,46 @@ function isBot(userAgent: string | undefined): boolean {
  * - Domains in the tenant's allowed redirect domains list (from tenant_settings)
  * - The configured fallback URL's domain
  */
+// FIX-500-356: In-memory domain verification cache to avoid Redis round-trips on hot paths
+const domainCache = new Map<string, { result: boolean; expiry: number }>();
+const DOMAIN_CACHE_TTL_MS = 60_000; // 1 minute in-memory, Redis has 5 min
+const DOMAIN_CACHE_MAX_ENTRIES = 10_000;
+
 async function verifyRedirectDomain(
   db: Pool,
   tenantId: string,
   domain: string,
   redis: Redis
 ): Promise<boolean> {
-  // Check cache first (5 minute TTL)
+  // FIX-500-356: Check in-memory cache first
+  const memKey = `${tenantId}:${domain}`;
+  const memCached = domainCache.get(memKey);
+  if (memCached && memCached.expiry > Date.now()) {
+    return memCached.result;
+  }
+
+  // Check Redis cache (5 minute TTL)
   const cacheKey = `redirect_domain:${tenantId}:${domain}`;
   const cached = await redis.get(cacheKey);
   if (cached !== null) {
     return cached === '1';
   }
 
+  // FIX-500-356: Helper to populate both Redis and in-memory cache for positive results
+  const cachePositive = async () => {
+    await redis.setex(cacheKey, 300, '1');
+    if (domainCache.size >= DOMAIN_CACHE_MAX_ENTRIES) {
+      const oldest = domainCache.keys().next().value;
+      if (oldest !== undefined) domainCache.delete(oldest);
+    }
+    domainCache.set(memKey, { result: true, expiry: Date.now() + DOMAIN_CACHE_TTL_MS });
+  };
+
   // Allow the fallback domain
   try {
     const fallbackDomain = new URL(config.tracking.click.fallbackUrl).hostname;
     if (domain === fallbackDomain) {
-      await redis.setex(cacheKey, 300, '1');
+      await cachePositive();
       return true;
     }
   } catch {
@@ -101,7 +120,7 @@ async function verifyRedirectDomain(
   );
 
   if (domainResult.rows.length > 0) {
-    await redis.setex(cacheKey, 300, '1');
+    await cachePositive();
     return true;
   }
 
@@ -116,13 +135,19 @@ async function verifyRedirectDomain(
   
   for (const pattern of allowedDomains) {
     if (matchDomainPattern(domain, pattern)) {
-      await redis.setex(cacheKey, 300, '1');
+      await cachePositive();
       return true;
     }
   }
 
   // Domain not allowed
   await redis.setex(cacheKey, 300, '0');
+  // FIX-500-356: Populate in-memory cache
+  if (domainCache.size >= DOMAIN_CACHE_MAX_ENTRIES) {
+    const oldest = domainCache.keys().next().value;
+    if (oldest !== undefined) domainCache.delete(oldest);
+  }
+  domainCache.set(memKey, { result: false, expiry: Date.now() + DOMAIN_CACHE_TTL_MS });
   return false;
 }
 
@@ -133,13 +158,16 @@ async function verifyRedirectDomain(
  * - "*.example.com" matches "sub.example.com", "a.b.example.com"
  */
 function matchDomainPattern(domain: string, pattern: string): boolean {
-  if (pattern === domain) {
+  // F-212: Case-insensitive domain matching per RFC 4343
+  const d = domain.toLowerCase();
+  const p = pattern.toLowerCase();
+  if (p === d) {
     return true;
   }
   
-  if (pattern.startsWith('*.')) {
-    const suffix = pattern.slice(1); // Remove the '*', keep the '.'
-    return domain.endsWith(suffix) && domain.length > suffix.length;
+  if (p.startsWith('*.')) {
+    const suffix = p.slice(1); // Remove the '*', keep the '.'
+    return d.endsWith(suffix) && d.length > suffix.length;
   }
   
   return false;
@@ -266,17 +294,24 @@ export function createRoutes(ctx: TrackingContext): Hono {
    *   4. Response status — to correlate with error rates
    */
   app.use('*', async (c, next) => {
-    const startTime = Date.now();
+    // FIX-500-446: Use performance.now() for timing instead of Date.now().
+    // performance.now() uses a monotonic clock immune to NTP adjustments,
+    // providing sub-millisecond accuracy for duration measurement.
+    const startTime = performance.now();
     await next();
-    const durationMs = Date.now() - startTime;
+
+    // FIX-500-353: Skip logging for health check endpoints
+    const path = c.req.path;
+    if (path === '/health' || path === '/ready') return;
+
+    const durationMs = Math.round((performance.now() - startTime) * 100) / 100;
     const status = c.res.status;
     const ip = getClientIP(c);
     const userAgent = c.req.header('user-agent') ?? 'unknown';
     // Extract tracking token from path param or query param
-    const pathParts = c.req.path.split('/');
+    const pathParts = path.split('/');
     const trackingToken = pathParts[pathParts.length - 1]?.substring(0, 20) ?? '';
     const method = c.req.method;
-    const path = c.req.path;
 
     logger.info('tracking.request', {
       method,
@@ -293,7 +328,8 @@ export function createRoutes(ctx: TrackingContext): Hono {
   if (config.rateLimit.enabled) {
     app.use('*', async (c, next) => {
       const ip = getClientIP(c);
-      const key = `rl:tracking:${ip}`;
+      // FIX-500-348: Removed redundant 'tracking:' — Redis keyPrefix already adds it
+      const key = `rl:${ip}`;
       const now = Math.floor(Date.now() / 60000); // Current minute
       const windowKey = `${key}:${now}`;
       
@@ -301,12 +337,31 @@ export function createRoutes(ctx: TrackingContext): Hono {
       // without a TTL if the process crashes between the two commands.
       const pipeline = redis.pipeline();
       pipeline.incr(windowKey);
-      pipeline.expire(windowKey, 120); // 2 min TTL (covers current + next window)
+      // FIX-500-350: Only set EXPIRE when key is first created (TTL not yet set)
+      pipeline.pttl(windowKey);
       const results = await pipeline.exec();
       const count = (results?.[0]?.[1] as number) ?? 0;
+      const ttl = (results?.[1]?.[1] as number) ?? -1;
+      // Set TTL only when key is new (ttl == -1 means no expiry set)
+      if (ttl < 0) {
+        await redis.expire(windowKey, 120);
+      }
       
       if (count > config.rateLimit.maxRequestsPerMinute) {
         logger.warn('Rate limit exceeded', { ip, count });
+        // FIX-500-352: Add Retry-After header per RFC 6585
+        c.header('Retry-After', '60');
+        // FIX-500-351: Return transparent GIF for pixel/image paths instead of JSON
+        const path = c.req.path;
+        if (path.includes('/o/') || path.includes('/o.gif') || path.endsWith('.gif')) {
+          // FIX-500-444: Reuse the pre-computed module-level TRANSPARENT_GIF
+          // instead of re-allocating a Buffer on every rate-limited request.
+          return c.body(TRANSPARENT_GIF, 429, {
+            'Content-Type': 'image/gif',
+            'Content-Length': TRANSPARENT_GIF.length.toString(),
+            'Retry-After': '60',
+          });
+        }
         return c.json({ error: 'Rate limit exceeded' }, 429);
       }
       
@@ -328,38 +383,25 @@ export function createRoutes(ctx: TrackingContext): Hono {
     onError: (c) => c.json({ error: 'Request body too large' }, 413),
   }));
 
-  // CORS for pixel (needed for cross-origin image loading)
-  app.use(`${config.tracking.pixel.path}/*`, cors({
-    origin: '*',
-    allowMethods: ['GET'],
-    maxAge: 0,
-  }));
+  // FIX-067: CORS middleware removed from pixel path. Tracking pixels are loaded
+  // via <img> tags which are "simple requests" — browsers never send CORS preflight
+  // for <img>. The middleware was adding unnecessary headers on every pixel request.
 
   // =============================================================================
   // OPEN TRACKING PIXEL
   // =============================================================================
-  
-  app.get(`${config.tracking.pixel.path}/:trackingId`, async (c) => {
-    const trackingId = c.req.param('trackingId');
 
-    // E-148: Validate trackingId parameter before processing
-    if (!trackingId || trackingId.length < 10 || trackingId.length > 4096) {
-      // Return pixel anyway (don't leak info) but skip processing
-      return c.body(TRANSPARENT_GIF, 200, {
-        'Content-Type': 'image/gif',
-        'Content-Length': TRANSPARENT_GIF.length.toString(),
-        'Cache-Control': config.tracking.pixel.cacheControl,
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'X-Content-Type-Options': 'nosniff',
-      });
-    }
+  /**
+   * FIX-500-445: Shared helper for pixel endpoints — eliminates duplicated
+   * validation / bot-detection / open-recording logic between the main pixel
+   * route and the /o.gif alternative.
+   */
+  function handlePixelRequest(trackingId: string | undefined, c: { req: { header: (name: string) => string | undefined } }): void {
+    if (!trackingId || trackingId.length < 10 || trackingId.length > 4096) return;
 
     const userAgent = c.req.header('user-agent');
-    // SECURITY FIX: Use validated IP extraction instead of blindly trusting headers
-    const ipAddress = getClientIP(c);
+    const ipAddress = getClientIP(c as Parameters<typeof getClientIP>[0]);
 
-    // E-190: Detect bots/scanners that pre-fetch tracking pixels
     const botDetected = isBot(userAgent);
     if (botDetected) {
       logger.debug('E-190: Bot detected on open pixel', {
@@ -370,20 +412,15 @@ export function createRoutes(ctx: TrackingContext): Hono {
 
     logger.debug('Open pixel request', { trackingId: trackingId.substring(0, 20) + '...', botDetected });
 
-    // Decode tracking data
     const data = codec.decode(trackingId);
-    
+
     if (data) {
-      // E-190: Skip recording for detected bots to avoid inflating open metrics.
-      // Known scanners (Barracuda, Mimecast, etc.) pre-fetch tracking pixels;
-      // counting those as human opens produces misleading engagement data.
       if (botDetected) {
         logger.info('E-190: Skipping open recording for bot', {
           messageId: data.messageId,
           userAgent,
         });
       } else {
-        // Record open event asynchronously (don't block response)
         processor.recordOpen({
           tenantId: data.tenantId,
           messageId: data.messageId,
@@ -397,6 +434,11 @@ export function createRoutes(ctx: TrackingContext): Hono {
     } else {
       logger.warn('Invalid tracking ID', { trackingId: trackingId.substring(0, 20) + '...' });
     }
+  }
+
+  app.get(`${config.tracking.pixel.path}/:trackingId`, async (c) => {
+    const trackingId = c.req.param('trackingId');
+    handlePixelRequest(trackingId, c);
 
     // F-209: Cache-busting query params (e.g. ?cb=<random>) are accepted and
     // ignored — they make each pixel URL unique so email clients that strip
@@ -404,58 +446,17 @@ export function createRoutes(ctx: TrackingContext): Hono {
     // No explicit handling needed: Hono ignores unknown query params.
 
     // Always return the pixel (even for invalid tracking IDs)
-    return c.body(TRANSPARENT_GIF, 200, {
-      'Content-Type': 'image/gif',
-      'Content-Length': TRANSPARENT_GIF.length.toString(),
-      'Cache-Control': config.tracking.pixel.cacheControl,
-      'Pragma': 'no-cache',
-      'Expires': '0',
-      // F-209: Vary on the full request URI so proxies treat each
-      // cache-busted URL (?cb=xxx) as a distinct resource.
-      'Vary': '*',
-      // Prevent caching in proxies
-      'X-Content-Type-Options': 'nosniff',
-    });
+    // FIX-062: Use pre-computed PIXEL_HEADERS
+    return c.body(TRANSPARENT_GIF, 200, PIXEL_HEADERS);
   });
 
   // Alternative pixel endpoint without path (just base64 encoded data)
   app.get('/o.gif', async (c) => {
     const trackingId = c.req.query('t');
-    
-    // F-215: Validate token — non-empty, reasonable length, same rules as main pixel
-    if (trackingId && trackingId.length >= 10 && trackingId.length <= 4096) {
-      const userAgent = c.req.header('user-agent');
-      // SECURITY FIX: Use validated IP extraction
-      const ipAddress = getClientIP(c);
+    handlePixelRequest(trackingId, c);
 
-      // E-190: Bot detection for alternative pixel endpoint
-      const botDetected = isBot(userAgent);
-      
-      const data = codec.decode(trackingId);
-      
-      if (data && !botDetected) {
-        processor.recordOpen({
-          tenantId: data.tenantId,
-          messageId: data.messageId,
-          recipient: data.recipient,
-          userAgent,
-          ipAddress,
-        }).catch(err => {
-          logger.error('Failed to record open', { error: err instanceof Error ? err.message : 'Unknown' });
-        });
-      }
-    }
-
-    return c.body(TRANSPARENT_GIF, 200, {
-      'Content-Type': 'image/gif',
-      'Content-Length': TRANSPARENT_GIF.length.toString(),
-      'Cache-Control': config.tracking.pixel.cacheControl,
-      'Pragma': 'no-cache',
-      'Expires': '0',
-      // F-209: Vary on full URI for cache-busting query params
-      'Vary': '*',
-      'X-Content-Type-Options': 'nosniff',
-    });
+    // FIX-062: Use pre-computed PIXEL_HEADERS
+    return c.body(TRANSPARENT_GIF, 200, PIXEL_HEADERS);
   });
 
   // =============================================================================
@@ -470,6 +471,7 @@ export function createRoutes(ctx: TrackingContext): Hono {
       logger.warn('Click tracking: invalid trackingId length', {
         length: trackingId?.length ?? 0,
       });
+      c.header('Content-Security-Policy', "frame-ancestors 'none'");
       return c.redirect(config.tracking.click.fallbackUrl, config.tracking.click.redirectStatus as 301 | 302 | 303 | 307 | 308);
     }
 
@@ -489,9 +491,19 @@ export function createRoutes(ctx: TrackingContext): Hono {
     // SECURITY FIX (FIX-041): Prefer the URL from inside the encrypted token
     // over the query parameter, since the query param can be tampered with.
     // The encrypted token's originalUrl is authoritative.
-    let redirectUrl = (data?.originalUrl)
-      ? data.originalUrl
-      : (originalUrl ? decodeURIComponent(originalUrl) : config.tracking.click.fallbackUrl);
+    let redirectUrl: string;
+    if (data?.originalUrl) {
+      redirectUrl = data.originalUrl;
+    } else if (originalUrl) {
+      // F-211: decodeURIComponent can throw URIError on malformed percent-encoding
+      try {
+        redirectUrl = decodeURIComponent(originalUrl);
+      } catch {
+        redirectUrl = config.tracking.click.fallbackUrl;
+      }
+    } else {
+      redirectUrl = config.tracking.click.fallbackUrl;
+    }
 
     // SECURITY: Validate URL to prevent open redirect vulnerability
     // Without proper validation, attackers could use: /click/xxx?r=https://evil.com
@@ -538,12 +550,22 @@ export function createRoutes(ctx: TrackingContext): Hono {
 
       // Also store the link URL for analytics
       if (data.linkId) {
-        redis.hset(`links:${data.tenantId}:${data.messageId}`, data.linkId, redirectUrl).catch(() => {});
+        // F-213: Pipeline hset + expire to add 90-day TTL (prevents unbounded Redis memory growth)
+        // F-214: Log errors instead of silently swallowing
+        const linkKey = `links:${data.tenantId}:${data.messageId}`;
+        const pipe = redis.pipeline();
+        pipe.hset(linkKey, data.linkId, redirectUrl);
+        pipe.expire(linkKey, 86400 * 90);
+        pipe.exec().catch((err) => {
+          logger.error('Failed to store link URL', { error: err instanceof Error ? err.message : 'Unknown' });
+        });
       }
     } else {
       logger.warn('Invalid click tracking ID', { trackingId: trackingId.substring(0, 20) + '...' });
     }
 
+    // FIX-500-455: Prevent click redirect page from being framed (clickjacking protection)
+    c.header('Content-Security-Policy', "frame-ancestors 'none'");
     // Redirect to original URL
     return c.redirect(redirectUrl, config.tracking.click.redirectStatus as 301 | 302 | 303 | 307 | 308);
   });
@@ -562,7 +584,7 @@ export function createRoutes(ctx: TrackingContext): Hono {
       return c.json({ error: 'Invalid token' }, 400);
     }
 
-    const body = await c.req.text();
+    const body = (await c.req.text()).trim();
     const userAgent = c.req.header('user-agent');
     // SECURITY FIX: Use validated IP extraction
     const ipAddress = getClientIP(c);
@@ -573,6 +595,7 @@ export function createRoutes(ctx: TrackingContext): Hono {
     });
 
     // Verify the body contains the expected value
+    // F-210: Body is trimmed above to handle trailing CRLF/whitespace from email clients
     if (body !== 'List-Unsubscribe=One-Click') {
       logger.warn('Invalid unsubscribe body', { body });
       return c.json({ error: 'Invalid request body' }, 400);
@@ -606,10 +629,13 @@ export function createRoutes(ctx: TrackingContext): Hono {
     });
 
     // Queue webhook notification
-    await queueUnsubscribeWebhook(db, data.tenantId, {
+    // F-215: Fire-and-forget — don't block HTTP response for webhook queuing
+    queueUnsubscribeWebhook(db, data.tenantId, {
       recipient: data.recipient,
       method: 'one-click',
       timestamp: new Date().toISOString(),
+    }).catch((err) => {
+      logger.error('Failed to queue unsubscribe webhook', { error: err instanceof Error ? err.message : 'Unknown' });
     });
 
     // Return success (RFC 8058 expects 200)
@@ -657,10 +683,13 @@ export function createRoutes(ctx: TrackingContext): Hono {
         ipAddress,
       });
 
-      await queueUnsubscribeWebhook(db, data.tenantId, {
+      // F-215: Fire-and-forget webhook queuing
+      queueUnsubscribeWebhook(db, data.tenantId, {
         recipient: data.recipient,
         method: 'link-click',
         timestamp: new Date().toISOString(),
+      }).catch((err) => {
+        logger.error('Failed to queue unsubscribe webhook', { error: err instanceof Error ? err.message : 'Unknown' });
       });
 
       return c.html(renderSuccessPage(data.recipient));
@@ -689,33 +718,35 @@ export function createRoutes(ctx: TrackingContext): Hono {
       return c.html(renderErrorPage('Invalid or expired preferences link'));
     }
 
-    // Get current preferences
-    const prefsResult = await db.query<{ category: string; subscribed: boolean }>(`
-      SELECT category, subscribed FROM subscription_preferences
-      WHERE tenant_id = $1 AND email = $2
-    `, [data.tenantId, data.recipient.toLowerCase()]);
+    // FIX-077: Parallel DB queries — preferences, categories, and suppression check
+    // are independent and can be fetched concurrently.
+    const normalizedEmail = data.recipient.toLowerCase();
+    const [prefsResult, categoriesResult, suppressionResult] = await Promise.all([
+      db.query<{ category: string; subscribed: boolean }>(`
+        SELECT category, subscribed FROM subscription_preferences
+        WHERE tenant_id = $1 AND email = $2
+      `, [data.tenantId, normalizedEmail]),
+      db.query<{ name: string; description: string }>(`
+        SELECT name, description FROM email_categories
+        WHERE tenant_id = $1 AND active = true
+        ORDER BY display_order
+      `, [data.tenantId]),
+      db.query(`
+        SELECT 1 FROM suppressions
+        WHERE tenant_id = $1 AND email = $2
+      `, [data.tenantId, normalizedEmail]),
+    ]);
 
     const preferences = new Map(prefsResult.rows.map((r: { category: string; subscribed: boolean }) => [r.category, r.subscribed]));
 
-    // Get available categories for this tenant
-    const categoriesResult = await db.query<{ name: string; description: string }>(`
-      SELECT name, description FROM email_categories
-      WHERE tenant_id = $1 AND active = true
-      ORDER BY display_order
-    `, [data.tenantId]);
-
+    // Categories already fetched in parallel above
     const categories = categoriesResult.rows.map((cat: { name: string; description: string }) => ({
       name: cat.name,
       description: cat.description,
       subscribed: preferences.get(cat.name) ?? true, // Default to subscribed
     }));
 
-    // Check if globally unsubscribed
-    const suppressionResult = await db.query(`
-      SELECT 1 FROM suppressions
-      WHERE tenant_id = $1 AND email = $2
-    `, [data.tenantId, data.recipient.toLowerCase()]);
-
+    // Suppression already fetched in parallel above
     const globallyUnsubscribed = suppressionResult.rows.length > 0;
 
     return c.html(renderPreferencesPage(token, data.recipient, categories, globallyUnsubscribed));
@@ -752,10 +783,13 @@ export function createRoutes(ctx: TrackingContext): Hono {
           updated_at = NOW()
       `, [suppressionId, data.tenantId, email]);
 
-      await queueUnsubscribeWebhook(db, data.tenantId, {
+      // F-215: Fire-and-forget webhook queuing
+      queueUnsubscribeWebhook(db, data.tenantId, {
         recipient: email,
         method: 'preferences-center',
         timestamp: new Date().toISOString(),
+      }).catch((err) => {
+        logger.error('Failed to queue unsubscribe webhook', { error: err instanceof Error ? err.message : 'Unknown' });
       });
 
       return c.redirect(`${config.tracking.preferences.path}/${token}?saved=1`);
@@ -777,28 +811,29 @@ export function createRoutes(ctx: TrackingContext): Hono {
     // would leave preferences in a partial state.
     const categories = Object.keys(body).filter(k => k.startsWith('category_'));
     
-    const client = await db.connect();
-    try {
-      await client.query('BEGIN');
+    // FIX-500-357: Single multi-row INSERT instead of per-category loop
+    if (categories.length > 0) {
+      const values: unknown[] = [];
+      const placeholders: string[] = [];
+      let paramIdx = 1;
       for (const key of categories) {
         const category = key.replace('category_', '');
         const subscribed = body[key] === 'true';
-        
         const prefId = generateId('prf');
-        await client.query(`
-          INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
-          VALUES ($1, $2, $3, $4, $5, NOW())
-          ON CONFLICT (tenant_id, email, category) DO UPDATE SET
-            subscribed = $5,
-            updated_at = NOW()
-        `, [prefId, data.tenantId, email, category, subscribed]);
+        placeholders.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NOW())`);
+        values.push(prefId, data.tenantId, email, category, subscribed);
       }
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      logger.error('Failed to update subscription preferences', { error: err });
-    } finally {
-      client.release();
+      try {
+        await db.query(`
+          INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
+          VALUES ${placeholders.join(', ')}
+          ON CONFLICT (tenant_id, email, category) DO UPDATE SET
+            subscribed = EXCLUDED.subscribed,
+            updated_at = NOW()
+        `, values);
+      } catch (err) {
+        logger.error('Failed to update subscription preferences', { error: err });
+      }
     }
 
     return c.redirect(`${config.tracking.preferences.path}/${token}?saved=1`);
@@ -808,14 +843,22 @@ export function createRoutes(ctx: TrackingContext): Hono {
   // HEALTH CHECK
   // =============================================================================
   
+  // FIX-500-354: Basic liveness check instead of always returning 200
+  let shuttingDown = false;
+  process.once('SIGTERM', () => { shuttingDown = true; });
+  process.once('SIGINT', () => { shuttingDown = true; });
+
   app.get('/health', (c) => {
+    if (shuttingDown) {
+      return c.json({ status: 'shutting_down', service: 'tracking' }, 503);
+    }
     return c.json({ status: 'healthy', service: 'tracking' });
   });
 
   app.get('/ready', async (c) => {
     try {
-      await db.query('SELECT 1');
-      await redis.ping();
+      // FIX-078: Parallel health checks — DB and Redis are independent
+      await Promise.all([db.query('SELECT 1'), redis.ping()]);
       return c.json({ status: 'ready' });
     } catch (error) {
       // E-161: Don't leak internal details (connection strings, stack traces)
@@ -832,34 +875,61 @@ export function createRoutes(ctx: TrackingContext): Hono {
 // HELPER FUNCTIONS
 // =============================================================================
 
+// FIX-500-358: Cache webhook IDs per tenant to avoid DB query on every unsubscribe
+const webhookCache = new Map<string, { ids: string[]; expiry: number }>();
+const WEBHOOK_CACHE_TTL_MS = 60_000; // 1 minute
+const WEBHOOK_CACHE_MAX_ENTRIES = 5_000;
+
 async function queueUnsubscribeWebhook(
   db: Pool,
   tenantId: string,
   data: Record<string, unknown>
 ): Promise<void> {
-  const result = await db.query<{ id: string }>(`
-    SELECT id FROM webhooks
-    WHERE tenant_id = $1 AND enabled = true
-      AND (events @> '"recipient.unsubscribed"'::jsonb OR events @> '"*"'::jsonb)
-  `, [tenantId]);
+  // Check cache first
+  let webhookIds: string[];
+  const cached = webhookCache.get(tenantId);
+  if (cached && cached.expiry > Date.now()) {
+    webhookIds = cached.ids;
+  } else {
+    const result = await db.query<{ id: string }>(`
+      SELECT id FROM webhooks
+      WHERE tenant_id = $1 AND enabled = true
+        AND (events @> '"recipient.unsubscribed"'::jsonb OR events @> '"*"'::jsonb)
+    `, [tenantId]);
+    webhookIds = result.rows.map(r => r.id);
+    // Populate cache
+    if (webhookCache.size >= WEBHOOK_CACHE_MAX_ENTRIES) {
+      const oldest = webhookCache.keys().next().value;
+      if (oldest !== undefined) webhookCache.delete(oldest);
+    }
+    webhookCache.set(tenantId, { ids: webhookIds, expiry: Date.now() + WEBHOOK_CACHE_TTL_MS });
+  }
 
-  for (const webhook of result.rows) {
+  // F-216: Batch all webhook queue inserts into a single multi-row INSERT
+  if (webhookIds.length > 0) {
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    let paramIdx = 1;
+    for (const webhookId of webhookIds) {
+      placeholders.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, 'recipient.unsubscribed', $${paramIdx++}, 'pending', 1, NOW())`);
+      values.push(
+        generateId('whj'),
+        webhookId,
+        tenantId,
+        JSON.stringify({
+          id: generateId('evt'),
+          type: 'recipient.unsubscribed',
+          tenantId,
+          timestamp: new Date().toISOString(),
+          data,
+        }),
+      );
+    }
     await db.query(`
       INSERT INTO webhook_queue (
         id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at
-      ) VALUES ($1, $2, $3, 'recipient.unsubscribed', $4, 'pending', 1, NOW())
-    `, [
-      generateId('whj'),
-      webhook.id,
-      tenantId,
-      JSON.stringify({
-        id: generateId('evt'),
-        type: 'recipient.unsubscribed',
-        tenantId,
-        timestamp: new Date().toISOString(),
-        data,
-      }),
-    ]);
+      ) VALUES ${placeholders.join(', ')}
+    `, values);
   }
 }
 

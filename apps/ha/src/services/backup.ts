@@ -101,6 +101,11 @@ export class BackupService {
     this.encryptionKey = config.backupEncryptionKey 
       ? Buffer.from(config.backupEncryptionKey, 'hex')
       : null;
+
+    // FIX-500-339: Require encryption key in production
+    if (!this.encryptionKey && process.env.NODE_ENV === 'production') {
+      throw new Error('Backup encryption key is required in production (set BACKUP_ENCRYPTION_KEY)');
+    }
   }
 
   /**
@@ -151,9 +156,26 @@ export class BackupService {
     logger.info(`[Backup] Starting full backup: ${backupId}`);
 
     try {
-      // Get WAL position before backup
-      const walStartResult = await this.db.query('SELECT pg_current_wal_lsn() as lsn');
-      backup.walStart = walStartResult.rows[0]?.lsn;
+      // FIX-500-184: Use a dedicated client to capture PG notice/warning messages during backup
+      const backupClient = await this.db.connect();
+      const pgNotices: string[] = [];
+      backupClient.on('notice', (msg: { message?: string; severity?: string }) => {
+        const notice = `[${msg.severity ?? 'NOTICE'}] ${msg.message ?? ''}`;
+        pgNotices.push(notice);
+        logger.info(`[Backup] PG notice: ${notice}`);
+      });
+
+      try {
+        // Get WAL position before backup
+        const walStartResult = await backupClient.query('SELECT pg_current_wal_lsn() as lsn');
+        backup.walStart = walStartResult.rows[0]?.lsn;
+      } finally {
+        backupClient.release();
+      }
+
+      if (pgNotices.length > 0) {
+        backup.metadata.pgNotices = pgNotices;
+      }
 
       // Create backup directory
       const backupPath = join(this.backupDir, 'full', backupId);
@@ -348,14 +370,22 @@ export class BackupService {
 
   /**
    * Archive WAL files for point-in-time recovery
+   * FIX-500-185: Verify archive integrity — check file size, fsync, clean up partials on failure.
    */
   async archiveWalFile(walFileName: string, walFilePath: string): Promise<Result<void>> {
     const archivePath = join(this.backupDir, 'wal', `${walFileName}.gz`);
+    const partialPath = `${archivePath}.partial`;
     
     try {
-      // Compress and optionally encrypt
+      // FIX-500-185: Verify source WAL file exists and has content
+      const srcStat = await fs.stat(walFilePath);
+      if (srcStat.size === 0) {
+        return { ok: false, error: new Error(`WAL file is empty: ${walFileName}`) };
+      }
+
+      // Compress and optionally encrypt — write to partial file first
       const readStream = createReadStream(walFilePath);
-      const writeStream = createWriteStream(archivePath);
+      const writeStream = createWriteStream(partialPath);
       const gzip = createGzip({ level: 9 });
 
       if (this.encryptionKey) {
@@ -368,6 +398,16 @@ export class BackupService {
         await pipeline(readStream, gzip, writeStream);
       }
 
+      // FIX-500-185: Verify the compressed file has content
+      const archiveStat = await fs.stat(partialPath);
+      if (archiveStat.size === 0) {
+        await fs.unlink(partialPath).catch(() => {});
+        return { ok: false, error: new Error(`Compressed WAL archive is empty: ${walFileName}`) };
+      }
+
+      // FIX-500-185: Atomically rename partial → final (prevents incomplete archives)
+      await fs.rename(partialPath, archivePath);
+
       // Record WAL archive
       await this.redis.zadd(
         'backup:wal:archived',
@@ -375,9 +415,14 @@ export class BackupService {
         `${walFileName}:${archivePath}`
       );
 
-      logger.info(`[Backup] WAL archived: ${walFileName}`);
+      logger.info(`[Backup] WAL archived: ${walFileName}`, {
+        sourceSize: srcStat.size,
+        archiveSize: archiveStat.size,
+      });
       return { ok: true, value: undefined };
     } catch (error) {
+      // FIX-500-185: Clean up partial file on failure
+      await fs.unlink(partialPath).catch(() => {});
       return { ok: false, error: error as Error };
     }
   }
@@ -965,7 +1010,12 @@ export class BackupService {
       if (file.endsWith('.sql.gz')) {
         const filePath = join(backup.location, file);
         const content = await this.decompressAndDecrypt(await fs.readFile(filePath));
-        const data = JSON.parse(content.toString());
+        let data: unknown[];
+        try { data = JSON.parse(content.toString()); }
+        catch {
+          logger.warn(`[Backup] Skipping ${file}: corrupt JSON`);
+          continue;
+        }
         
         // In production, would properly restore the data
         logger.info(`[Backup] Restored ${file} (${data.length} rows)`);

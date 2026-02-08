@@ -216,7 +216,7 @@ async function main(): Promise<void> {
       heapTotalMB,
       memUsagePercent: Math.round(memUsagePercent * 100) / 100,
       eventLoopLagMs: loopLagMs,
-      activeProcessors: successes.length,
+      activeProcessors: processors.length,  // FIX-500-118: Use live count, not stale closure
     });
 
     // E-164: Warn when memory usage exceeds 80% of available system memory
@@ -243,10 +243,12 @@ async function main(): Promise<void> {
   // G-205: Periodic stale job recovery — resets jobs stuck in 'processing' state
   // for longer than 30 minutes (e.g., worker crashed mid-processing).
   // Runs every 5 minutes. Uses .unref() so timer doesn't prevent graceful shutdown.
+  // FIX-500-269: Allowlist table names to prevent interpolation risk
+  const STALE_JOB_TABLES = new Set(['email_queue', 'webhook_queue']);
   staleJobRecoveryTimer = setInterval(async () => {
     try {
-      const tables = ['email_queue', 'webhook_queue'];
-      for (const table of tables) {
+      for (const table of STALE_JOB_TABLES) {
+        if (!/^[a-z_]+$/.test(table)) continue; // extra safety: only lowercase alphanumeric + underscore
         const result = await db.query(
           `UPDATE ${table}
            SET status = 'pending', locked_until = NULL, updated_at = NOW()
@@ -260,6 +262,26 @@ async function main(): Promise<void> {
             table,
             count: result.rowCount,
             jobIds: result.rows.map((r: { id: string }) => r.id).slice(0, 10),
+          });
+        }
+      }
+      // FIX-500-106: Also recover stale analytics_queue entries.
+      // Analytics uses processing/processing_at flags instead of status/locked_until.
+      {
+        const result = await db.query(
+          `UPDATE analytics_queue
+           SET processing = false, processing_at = NULL
+           WHERE processing = true
+             AND processing_at IS NOT NULL
+             AND processing_at < NOW() - INTERVAL '30 minutes'
+             AND processed = false
+           RETURNING id`,
+        );
+        if (result.rowCount && result.rowCount > 0) {
+          logger.warn('FIX-500-106: Recovered stale analytics events', {
+            table: 'analytics_queue',
+            count: result.rowCount,
+            eventIds: result.rows.map((r: { id: string }) => r.id).slice(0, 10),
           });
         }
       }
@@ -297,11 +319,6 @@ async function shutdown(signal: string): Promise<void> {
       staleJobRecoveryTimer = null;
     }
 
-    // Stop metrics server
-    if (metricsServer) {
-      await metricsServer.stop();
-    }
-
     // Stop all processors with isolation - one failure doesn't prevent others from stopping
     const stopResults = await Promise.allSettled(processors.map(p => p.stop()));
     
@@ -315,6 +332,12 @@ async function shutdown(signal: string): Promise<void> {
     }
 
     logger.info('All processors stopped');
+
+    // FIX-500-117: Stop metrics server AFTER processors so shutdown
+    // metrics are recorded during the drain phase.
+    if (metricsServer) {
+      await metricsServer.stop();
+    }
 
     // Stop queue notifier
     if (queueNotifier) {
@@ -343,7 +366,9 @@ async function shutdown(signal: string): Promise<void> {
     }
 
     clearTimeout(timeout);
-    process.exit(0);
+    // FIX-500-116: Don't force-exit — let the event loop
+    // drain naturally so finally blocks and pending microtasks complete.
+    logger.info('Graceful shutdown complete');
   } catch (error) {
     logger.error('Error during shutdown', { error });
     clearTimeout(timeout);
@@ -356,9 +381,11 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Uncaught exception handler
+// FIX-500-115: After an uncaught exception the process is in an undefined
+// state. Running async shutdown is unreliable. Log and exit immediately.
 process.on('uncaughtException', (error) => {
-  logger.fatal('Uncaught exception', { error });
-  shutdown('uncaughtException').catch(() => process.exit(1));
+  logger.fatal('Uncaught exception — exiting immediately', { error });
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {

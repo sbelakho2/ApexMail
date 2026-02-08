@@ -1,57 +1,64 @@
 /**
  * Content & CMS API
- * 
- * Returns content items (blog posts, changelogs, docs).
- * Used by the /content page.
+ *
+ * FIX-500-141: DB-backed content management — no demo data.
+ * Queries the content_items table.
  */
 
 import { NextResponse } from 'next/server';
+import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// TODO: Replace with real CMS database or headless CMS integration
-const DEMO_CONTENT = [
-    {
-        id: 'c1', title: 'Introducing AI-Powered Email Insights', slug: 'ai-powered-email-insights',
-        type: 'blog', status: 'published',
-        excerpt: 'Unlock deeper understanding of your email performance with our new AI analytics dashboard.',
-        content: '# AI-Powered Email Insights\n\nWe are excited to announce...',
-        author: 'Sarah Chen', category: 'Product Updates', tags: ['AI', 'Analytics', 'New Feature'],
-        featuredImage: '/images/blog/ai-insights.jpg',
-        publishedAt: '2025-01-18T10:00:00Z', createdAt: '2025-01-15T08:00:00Z', updatedAt: '2025-01-18T09:45:00Z', views: 3420,
-    },
-    {
-        id: 'c2', title: 'Q1 2025 Product Roadmap', slug: 'q1-2025-roadmap',
-        type: 'blog', status: 'scheduled',
-        excerpt: 'A preview of what we have planned for the first quarter of 2025.',
-        content: '# Q1 2025 Product Roadmap\n\nAs we enter the new year...',
-        author: 'Michael Torres', category: 'Company News', tags: ['Roadmap', 'Planning'],
-        scheduledFor: '2025-01-25T09:00:00Z', createdAt: '2025-01-20T14:00:00Z', updatedAt: '2025-01-21T11:30:00Z',
-    },
-    {
-        id: 'c3', title: 'Version 2.4.0 Release Notes', slug: 'v2-4-0-release',
-        type: 'changelog', status: 'published',
-        excerpt: 'New features: Bulk import improvements, Webhook v2 beta, Performance optimizations',
-        content: '## Version 2.4.0\n\n### New Features\n- Bulk import...',
-        author: 'DevOps Team', tags: ['Release', 'v2.4'],
-        publishedAt: '2025-01-15T16:00:00Z', createdAt: '2025-01-15T12:00:00Z', updatedAt: '2025-01-15T15:30:00Z', views: 1856,
-    },
-    {
-        id: 'c4', title: 'Version 2.3.2 Hotfix', slug: 'v2-3-2-hotfix',
-        type: 'changelog', status: 'published',
-        excerpt: 'Fixed: Rate limiting edge case, Webhook retry logic, Dashboard timezone display',
-        content: '## Version 2.3.2\n\n### Bug Fixes\n- Fixed rate limiting...',
-        author: 'DevOps Team', tags: ['Release', 'Hotfix', 'v2.3'],
-        publishedAt: '2025-01-10T12:00:00Z', createdAt: '2025-01-10T09:00:00Z', updatedAt: '2025-01-10T11:45:00Z', views: 892,
-    },
-];
+interface ContentRow {
+    id: string;
+    title: string;
+    slug: string;
+    type: string;
+    status: string;
+    excerpt: string | null;
+    content: string | null;
+    author: string | null;
+    category: string | null;
+    tags: string[];
+    featured_image: string | null;
+    scheduled_for: string | null;
+    published_at: string | null;
+    views: string;
+    created_at: string;
+    updated_at: string;
+}
 
 export async function GET() {
     try {
-        // TODO: Replace with real CMS/content table query
-        return NextResponse.json(DEMO_CONTENT);
+        const rows = await query<ContentRow>(
+            `SELECT id, title, slug, type, status, excerpt, content, author,
+                    category, tags, featured_image, scheduled_for, published_at,
+                    views, created_at, updated_at
+             FROM content_items
+             ORDER BY COALESCE(published_at, created_at) DESC
+             LIMIT 100`
+        );
+        return NextResponse.json(rows.map((r) => ({
+            id: r.id,
+            title: r.title,
+            slug: r.slug,
+            type: r.type,
+            status: r.status,
+            excerpt: r.excerpt,
+            content: r.content,
+            author: r.author,
+            category: r.category,
+            tags: r.tags,
+            featuredImage: r.featured_image,
+            scheduledFor: r.scheduled_for,
+            publishedAt: r.published_at,
+            views: parseInt(String(r.views), 10),
+            createdAt: r.created_at,
+            updatedAt: r.updated_at,
+        })));
     } catch (error) {
         console.error('Content API error:', error);
-        return NextResponse.json(DEMO_CONTENT);
+        return NextResponse.json({ error: 'Failed to fetch content' }, { status: 500 });
     }
 }

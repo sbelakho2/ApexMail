@@ -7,6 +7,7 @@ export {
     getSchedulingPreferences,
     createDefaultPreferences,
     getAvailableSlots,
+    getSlot,
     bookSlot,
     createSlot,
     cancelBooking,

@@ -130,6 +130,9 @@ export class StripeService {
 
       if (!insertResult.ok) return Result.err(insertResult.error);
 
+      if (insertResult.value.rows.length === 0) {
+        return Result.err(new Error('INSERT RETURNING produced no rows'));
+      }
       const row = insertResult.value.rows[0]!;
       
       // If we hit ON CONFLICT, the returned stripe_customer_id is the existing one

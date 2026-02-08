@@ -215,29 +215,25 @@ export class ReputationRepository {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
         try {
-            // Check for recent duplicate alert
-            const existing = await this.pool.query<{ count: string }>(
-                `SELECT COUNT(*) as count FROM reputation_alerts
-                 WHERE tenant_id = $1 AND alert_type = $2
-                 AND created_at > NOW() - INTERVAL '24 hours'
-                 AND acknowledged = false`,
-                [tenantId, data.alertType]
-            );
-
-            if (parseInt(existing.rows[0]?.count ?? '0', 10) > 0) {
-                return err(new Error('Duplicate alert already exists'));
-            }
-
+            // FIX-500-056: Atomic upsert using CTE to prevent TOCTOU race condition
             const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold)
-                 VALUES ($1, $2, $3, $4, $5)
-                 RETURNING *`,
+                `WITH check_existing AS (
+                    SELECT 1 FROM reputation_alerts
+                    WHERE tenant_id = $2 AND alert_type = $3
+                      AND created_at > NOW() - INTERVAL '24 hours'
+                      AND acknowledged = false
+                    LIMIT 1
+                )
+                INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold)
+                SELECT $1, $2, $3, $4, $5
+                WHERE NOT EXISTS (SELECT 1 FROM check_existing)
+                RETURNING *`,
                 [id, tenantId, data.alertType, data.value, data.threshold]
             );
 
             const row = result.rows[0];
             if (!row) {
-                return err(new Error('Failed to create alert'));
+                return err(new Error('Duplicate alert already exists'));
             }
             return ok(this.mapAlertRow(row));
         } catch (error) {

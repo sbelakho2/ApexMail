@@ -2,7 +2,7 @@
  * Templates Repository - Versioned templates with rollback support
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
 
@@ -627,15 +627,19 @@ export class TemplatesRepository {
    */
   async listVersions(
     templateId: string,
+    // FIX-500-053: Add tenantId to scope queries to the owning tenant
+    tenantId?: string,
     options: { limit?: number; offset?: number } = {}
   ): Promise<Result<{ versions: TemplateVersion[]; total: number }, Error>> {
     const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
     const offset = Math.max(0, options.offset ?? 0);
 
-    const countResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM template_versions WHERE template_id = $1`,
-      [templateId]
-    );
+    // FIX-500-053: Join with templates table to enforce tenant_id scoping
+    const countSql = tenantId
+      ? `SELECT COUNT(*) as count FROM template_versions tv JOIN templates t ON tv.template_id = t.id WHERE tv.template_id = $1 AND t.tenant_id = $2`
+      : `SELECT COUNT(*) as count FROM template_versions WHERE template_id = $1`;
+    const countParams = tenantId ? [templateId, tenantId] : [templateId];
+    const countResult = await this.db.query<{ count: string }>(countSql, countParams);
 
     if (!countResult.ok) return countResult;
 
@@ -652,11 +656,13 @@ export class TemplatesRepository {
       changelog: string | null;
     }>(
       `SELECT version, html_content, text_content, subject, variables, created_at, created_by, changelog
-       FROM template_versions
-       WHERE template_id = $1
+       FROM template_versions tv
+       ${tenantId ? 'JOIN templates t ON tv.template_id = t.id' : ''}
+       WHERE tv.template_id = $1
+       ${tenantId ? 'AND t.tenant_id = $2' : ''}
        ORDER BY version DESC
-       LIMIT $2 OFFSET $3`,
-      [templateId, limit, offset]
+       LIMIT $${tenantId ? 3 : 2} OFFSET $${tenantId ? 4 : 3}`,
+      tenantId ? [templateId, tenantId, limit, offset] : [templateId, limit, offset]
     );
 
     if (!result.ok) return result;
@@ -882,13 +888,13 @@ export class TemplatesRepository {
       preheader: row.preheader,
       variables: row.variables,
       defaultData: typeof row.default_data === 'string'
-        ? JSON.parse(row.default_data) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.default_data, {})
         : row.default_data as unknown as Record<string, unknown>,
       engine: row.engine,
       isActive: row.is_active,
       isDefault: row.is_default,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

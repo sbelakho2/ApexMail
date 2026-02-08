@@ -174,10 +174,12 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
                 expect(content).toContain('no-cache');
             });
             
-            it('should have CORS for pixel endpoint', () => {
+            it('should have pixel endpoint with proper headers (CORS removed per FIX-067)', () => {
                 const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('cors');
-                expect(content).toMatch(/origin.*\*/);
+                // FIX-067: CORS removed from pixel path — <img> tags are simple requests.
+                // Pre-computed PIXEL_HEADERS are used instead.
+                expect(content).toContain('PIXEL_HEADERS');
+                expect(content).toMatch(/origin.*\*|PIXEL_HEADERS/);
             });
             
             it('should record open events', () => {

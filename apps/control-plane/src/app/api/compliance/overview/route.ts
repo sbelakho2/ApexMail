@@ -99,6 +99,7 @@ export async function GET() {
         return NextResponse.json(DEMO_OVERVIEW);
     } catch (error) {
         console.error('Compliance API error:', error);
-        return NextResponse.json(DEMO_OVERVIEW);
+        // FIX-500-298: Return 500 instead of masking errors with demo data
+        return NextResponse.json({ error: 'Failed to fetch compliance data' }, { status: 500 });
     }
 }

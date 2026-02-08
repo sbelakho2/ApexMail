@@ -40,7 +40,15 @@ const redis = new Redis(complianceConfig.redis.url);
 // Initialize services
 const riskEngine = new RiskScoringEngine(db, redis);
 const contentScanner = new ContentScanner(db, redis);
+// FIX-500-416: The signingKey is passed as a plain string from config.
+// JavaScript cannot reliably zero-out strings from heap memory.
+// In production, consider using a hardware security module (HSM) or
+// KMS-backed signing via an external service rather than holding keys in-process.
 const auditLogger = new AuditLogger(db, redis, complianceConfig.auditLog.signingKey);
+// FIX-500-417: The encryptionKey is passed as a plain string from config.
+// JavaScript cannot reliably zero-out strings from heap memory.
+// In production, consider using envelope encryption with a KMS-backed master key
+// rather than holding the raw encryption key in-process memory.
 const secretManager = new SecretManager(db, redis, complianceConfig.secrets.encryptionKey);
 const gdprAutomation = new GDPRAutomation(db, redis);
 
@@ -56,8 +64,11 @@ const gdprAutomation = new GDPRAutomation(db, redis);
  */
 async function processGDPRQueue(): Promise<void> {
     const PROCESSING_QUEUE = 'gdpr:requests:processing';
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    // FIX-500-419: Process at most MAX_GDPR_BATCH items per cron tick to avoid
+    // blocking the event loop and starving other cron jobs.
+    const MAX_GDPR_BATCH = 10;
+    let processed = 0;
+    while (processed < MAX_GDPR_BATCH) {
         // Atomically move from main queue to processing queue
         const item = await redis.lmove(
             'gdpr:requests:queue',
@@ -79,6 +90,7 @@ async function processGDPRQueue(): Promise<void> {
             await redis.lrem(PROCESSING_QUEUE, 1, item);
             await redis.lpush('gdpr:requests:failed', item);
         }
+        processed++;
     }
 }
 
@@ -148,15 +160,19 @@ async function verifyAuditChains(): Promise<void> {
         if (!result.valid) {
             logger.error('Audit chain integrity check FAILED', { error: result.error });
             // Alert operations team
-            await redis.lpush(
-                'alerts:queue',
-                JSON.stringify({
-                    type: 'audit_chain_invalid',
-                    error: result.error,
-                    firstInvalidEntry: result.firstInvalidEntry,
-                    timestamp: new Date().toISOString(),
-                })
-            );
+            // FIX-500-480: Fallback to stderr if Redis is unavailable
+            const alertPayload = JSON.stringify({
+                type: 'audit_chain_invalid',
+                error: result.error,
+                firstInvalidEntry: result.firstInvalidEntry,
+                timestamp: new Date().toISOString(),
+            });
+            try {
+                await redis.lpush('alerts:queue', alertPayload);
+            } catch (redisErr) {
+                logger.error('Failed to push audit alert to Redis, writing to stderr', { error: redisErr instanceof Error ? redisErr.message : String(redisErr) });
+                process.stderr.write(`CRITICAL AUDIT ALERT: ${alertPayload}\n`);
+            }
         } else {
             logger.info('Audit chain integrity verified', { entriesChecked: result.entriesChecked });
         }
@@ -167,6 +183,12 @@ async function verifyAuditChains(): Promise<void> {
 
 /**
  * Initialize database schema
+ *
+ * FIX-500-420: This ~245 lines of inline DDL should be extracted into versioned
+ * migration files under apps/compliance/migrations/ (matching the pattern used by
+ * billing, devex, observability, etc.). Inline DDL at startup is fragile and
+ * prevents proper schema versioning, rollbacks, and CI/CD validation.
+ * TODO: Extract to numbered migration files and use the shared migrate tool.
  */
 async function initializeSchema(): Promise<void> {
     await db.query(`
@@ -358,10 +380,13 @@ async function initializeSchema(): Promise<void> {
         );
 
         -- GDPR exports
+        -- FIX-500-181: Use JSONB for structured data, add access_token_hash for secure retrieval
         CREATE TABLE IF NOT EXISTS gdpr_exports (
             request_id VARCHAR(36) PRIMARY KEY,
             filename VARCHAR(255) NOT NULL,
-            data TEXT NOT NULL,
+            data JSONB NOT NULL,
+            access_token_hash VARCHAR(64),
+            expires_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT NOW()
         );
 
@@ -403,29 +428,43 @@ async function initializeSchema(): Promise<void> {
         );
     `);
 
+    // FIX-500-181: Migrate existing gdpr_exports tables to new schema
+    await db.query(`
+        ALTER TABLE gdpr_exports
+            ALTER COLUMN data TYPE JSONB USING data::jsonb;
+    `).catch(() => { /* column already JSONB or table fresh */ });
+    await db.query(`
+        ALTER TABLE gdpr_exports
+            ADD COLUMN IF NOT EXISTS access_token_hash VARCHAR(64),
+            ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
+    `).catch(() => { /* columns already exist */ });
+
     logger.info('Database schema initialized');
 }
 
 /**
  * Start background jobs
+ * FIX-500-180: Store CronJob references so they can be stopped on shutdown.
  */
+const cronJobs: Array<{ name: string; job: InstanceType<typeof CronJob> }> = [];
+
 function startBackgroundJobs(): void {
     // Process GDPR queue every minute
-    new CronJob('* * * * *', processGDPRQueue, null, true);
+    cronJobs.push({ name: 'gdpr-queue', job: new CronJob('* * * * *', processGDPRQueue, null, true) });
 
     // Process secret rotations every hour
-    new CronJob('0 * * * *', processSecretRotations, null, true);
+    cronJobs.push({ name: 'secret-rotations', job: new CronJob('0 * * * *', processSecretRotations, null, true) });
 
     // Process risk assessments every 5 minutes
-    new CronJob('*/5 * * * *', processRiskAssessments, null, true);
+    cronJobs.push({ name: 'risk-assessments', job: new CronJob('*/5 * * * *', processRiskAssessments, null, true) });
 
     // Archive audit logs daily at 2 AM
-    new CronJob('0 2 * * *', archiveAuditLogs, null, true);
+    cronJobs.push({ name: 'archive-audit-logs', job: new CronJob('0 2 * * *', archiveAuditLogs, null, true) });
 
     // Verify audit chain integrity daily at 3 AM
-    new CronJob('0 3 * * *', verifyAuditChains, null, true);
+    cronJobs.push({ name: 'verify-audit-chains', job: new CronJob('0 3 * * *', verifyAuditChains, null, true) });
 
-    logger.info('Background jobs started');
+    logger.info('Background jobs started', { count: cronJobs.length });
 }
 
 /**
@@ -471,6 +510,11 @@ async function start(): Promise<void> {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
     logger.info('Compliance shutting down (SIGTERM)');
+    // FIX-500-180: Stop all CronJobs before closing connections
+    for (const { name, job } of cronJobs) {
+        job.stop();
+        logger.info(`Stopped cron job: ${name}`);
+    }
     await contentScanner.shutdownOCR();
     await db.end();
     await redis.quit();
@@ -479,6 +523,11 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
     logger.info('Compliance shutting down (SIGINT)');
+    // FIX-500-180: Stop all CronJobs before closing connections
+    for (const { name, job } of cronJobs) {
+        job.stop();
+        logger.info(`Stopped cron job: ${name}`);
+    }
     await contentScanner.shutdownOCR();
     await db.end();
     await redis.quit();

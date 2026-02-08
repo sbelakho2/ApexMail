@@ -93,7 +93,8 @@ export class RiskScoringEngine {
         const cached = await this.redis.get(cacheKey);
 
         if (cached) {
-            return JSON.parse(cached);
+            try { return JSON.parse(cached); }
+            catch { await this.redis.del(cacheKey); }
         }
 
         const result = await this.db.query<TenantRiskProfile>(
@@ -749,10 +750,22 @@ export class RiskScoringEngine {
 
     /**
      * Manually trigger reassessment
+     * FIX-500-182: Use Redis NX lock to prevent concurrent reassessments for the same tenant.
      */
     async forceReassessment(tenantId: string): Promise<TenantRiskProfile> {
-        await this.redis.del(`risk:profile:${tenantId}`);
-        return this.assessTenant(tenantId);
+        const lockKey = `risk:reassessment:lock:${tenantId}`;
+        const lockAcquired = await this.redis.set(lockKey, '1', 'EX', 60, 'NX');
+        if (!lockAcquired) {
+            // Another reassessment is in progress — return current profile instead
+            const existing = await this.getProfile(tenantId);
+            if (existing) return existing;
+        }
+        try {
+            await this.redis.del(`risk:profile:${tenantId}`);
+            return await this.assessTenant(tenantId);
+        } finally {
+            await this.redis.del(lockKey).catch(() => {});
+        }
     }
 
     /**

@@ -2,7 +2,7 @@
  * Messages Repository - Outbox with idempotency and full message lifecycle
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid, generateMessageId, generateVerpAddress } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
 
@@ -293,10 +293,14 @@ export class MessagesRepository {
     }
   }
 
-  async findById(id: string, tenantId?: string): Promise<Result<Message | null, Error>> {
+  async findById(id: string, tenantId?: string, options?: { includeBody?: boolean }): Promise<Result<Message | null, Error>> {
+    // FIX-500-043: Conditionally exclude large body columns when not needed
+    const columns = options?.includeBody === false
+      ? 'id, tenant_id, user_id, idempotency_key, message_id, status, from_email, from_name, reply_to, recipients, subject, headers, attachments, template_id, template_data, campaign_id, tags, priority, scheduled_at, sent_at, delivered_at, bounced_at, bounce_type, bounce_reason, mta_message_id, ip_address, sending_domain, attempts, max_attempts, last_attempt_at, next_attempt_at, metadata, created_at, updated_at'
+      : '*';
     const sql = tenantId
-      ? 'SELECT * FROM messages WHERE id = $1 AND tenant_id = $2'
-      : 'SELECT * FROM messages WHERE id = $1';
+      ? `SELECT ${columns} FROM messages WHERE id = $1 AND tenant_id = $2`
+      : `SELECT ${columns} FROM messages WHERE id = $1`;
     const params = tenantId ? [id, tenantId] : [id];
     const result = await this.db.query<{
       id: string;
@@ -396,6 +400,7 @@ export class MessagesRepository {
   }
 
   // A-005: Add optional tenantId for database-level tenant isolation
+  // FIX-500-048: Partial index idx_messages_mta_message_id added in migration 010_performance_indexes.sql
   async findByMtaMessageId(mtaId: string, tenantId?: string): Promise<Result<Message | null, Error>> {
     const sql = tenantId
       ? 'SELECT * FROM messages WHERE mta_message_id = $1 AND tenant_id = $2'
@@ -1007,7 +1012,7 @@ export class MessagesRepository {
       fromName: row.from_name,
       replyTo: row.reply_to,
       recipients: typeof row.recipients === 'string'
-        ? JSON.parse(row.recipients) as EmailRecipient[]
+        ? parseJsonOrDefault<EmailRecipient[]>(row.recipients, [])
         : row.recipients as unknown as EmailRecipient[],
       subject: row.subject,
       htmlBody: null, // Not selected in list projection
@@ -1033,7 +1038,7 @@ export class MessagesRepository {
       lastAttemptAt: row.last_attempt_at,
       nextAttemptAt: row.next_attempt_at,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1089,21 +1094,21 @@ export class MessagesRepository {
       fromName: row.from_name,
       replyTo: row.reply_to,
       recipients: typeof row.recipients === 'string'
-        ? JSON.parse(row.recipients) as EmailRecipient[]
+        ? parseJsonOrDefault<EmailRecipient[]>(row.recipients, [])
         : row.recipients as unknown as EmailRecipient[],
       subject: row.subject,
       htmlBody: row.html_body,
       textBody: row.text_body,
       headers: typeof row.headers === 'string'
-        ? JSON.parse(row.headers) as MessageHeaders
+        ? parseJsonOrDefault<MessageHeaders>(row.headers, { 'Message-ID': '', 'X-ApexMail-ID': row.id, 'X-ApexMail-Tenant': row.tenant_id, 'Return-Path': '' })
         : row.headers as unknown as MessageHeaders,
       attachments: typeof row.attachments === 'string'
-        ? JSON.parse(row.attachments) as EmailAttachment[]
+        ? parseJsonOrDefault<EmailAttachment[]>(row.attachments, [])
         : row.attachments as unknown as EmailAttachment[],
       templateId: row.template_id,
       templateData: row.template_data
         ? (typeof row.template_data === 'string'
-          ? JSON.parse(row.template_data)
+          ? parseJsonOrDefault<Record<string, unknown>>(row.template_data, {})
           : row.template_data) as Record<string, unknown>
         : null,
       campaignId: row.campaign_id,
@@ -1123,7 +1128,7 @@ export class MessagesRepository {
       lastAttemptAt: row.last_attempt_at,
       nextAttemptAt: row.next_attempt_at,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1215,6 +1220,75 @@ export class MessagesRepository {
     }
 
     return Result.ok(stats);
+  }
+
+  /**
+   * FIX-500-145: Archive old delivered/bounced/failed messages to cold storage.
+   *
+   * Moves rows from `messages` into `messages_archive` in batches to avoid
+   * long lock contention (same CTE pattern as purgeOldQueueEntries).
+   * Returns total rows archived.
+   */
+  async archiveOldMessages(
+    olderThanDays: number,
+    options: { batchSize?: number; tenantId?: string } = {}
+  ): Promise<Result<number, Error>> {
+    const batchSize = options.batchSize ?? 1000;
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+
+    let totalArchived = 0;
+
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const conditions = [
+          "status IN ('delivered', 'bounced', 'failed')",
+          'updated_at < $1',
+        ];
+        const values: unknown[] = [cutoffDate];
+        let paramIndex = 2;
+
+        if (options.tenantId) {
+          conditions.push(`tenant_id = $${paramIndex++}`);
+          values.push(options.tenantId);
+        }
+
+        values.push(batchSize);
+
+        const result = await this.db.query<{ count: string }>(
+          `WITH to_archive AS (
+            SELECT id FROM messages
+            WHERE ${conditions.join(' AND ')}
+            LIMIT $${paramIndex}
+          ),
+          archived AS (
+            INSERT INTO messages_archive
+            SELECT m.* FROM messages m JOIN to_archive ta ON m.id = ta.id
+            ON CONFLICT (id) DO NOTHING
+            RETURNING 1
+          ),
+          deleted AS (
+            DELETE FROM messages
+            WHERE id IN (SELECT id FROM to_archive)
+            RETURNING 1
+          )
+          SELECT COUNT(*) as count FROM deleted`,
+          values
+        );
+
+        if (!result.ok) return result;
+
+        const archivedCount = parseInt(result.value.rows[0]?.count ?? '0', 10);
+        totalArchived += archivedCount;
+
+        if (archivedCount < batchSize) break;
+      }
+
+      return Result.ok(totalArchived);
+    } catch (error) {
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   /**

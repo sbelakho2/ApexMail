@@ -113,8 +113,27 @@ export class MultiRegionService {
    * Initialize multi-region service
    */
   async initialize(): Promise<void> {
+    // FIX-500-337: Validate region config before loading
+    const MAX_REGIONS = 20;
+    const REGION_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+    const seen = new Set<string>();
+
     // Load regions from config (config.regions is string[])
     for (const regionId of config.regions) {
+      if (seen.size >= MAX_REGIONS) {
+        logger.warn(`[MultiRegion] Region cap (${MAX_REGIONS}) reached; ignoring remaining regions`);
+        break;
+      }
+      if (!regionId || typeof regionId !== 'string' || !REGION_ID_PATTERN.test(regionId)) {
+        logger.warn(`[MultiRegion] Skipping invalid region ID: ${regionId}`);
+        continue;
+      }
+      if (seen.has(regionId)) {
+        logger.warn(`[MultiRegion] Duplicate region ID ignored: ${regionId}`);
+        continue;
+      }
+      seen.add(regionId);
+
       const isPrimary = regionId === config.primaryRegion;
       const region: RegionInfo = {
         id: regionId,

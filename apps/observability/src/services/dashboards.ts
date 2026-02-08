@@ -8,6 +8,7 @@
  * - Dashboard sharing
  */
 
+import crypto from 'crypto';
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { Result, createLogger } from '@apexmail/lib';
@@ -999,13 +1000,9 @@ export class DashboardService {
     };
   }
 
+  // FIX-500-035: Use cryptographically secure random bytes instead of Math.random
   private generateSnapshotKey(): string {
-    const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let key = '';
-    for (let i = 0; i < 32; i++) {
-      key += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return key;
+    return crypto.randomBytes(24).toString('base64url');
   }
 
   private parseTimeRange(timeRange: TimeRange): { from: Date; to: Date } {

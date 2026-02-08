@@ -326,10 +326,11 @@ SELECT
     COUNT(*) as total_attempts,
     COUNT(*) FILTER (WHERE response_type = 'success') as success_count,
     COUNT(*) FILTER (WHERE is_greylist = true) as greylist_count,
-    ROUND(
+    -- FIX-500-404: COALESCE to prevent NULL/NaN when no rows match
+    COALESCE(ROUND(
         100.0 * COUNT(*) FILTER (WHERE response_type = 'success') / NULLIF(COUNT(*), 0),
         2
-    ) as success_rate
+    ), 0) as success_rate
 FROM edge_delivery_attempts
 WHERE attempt_time >= NOW() - INTERVAL '7 days'
 GROUP BY SUBSTRING(mx_host FROM '@(.+)$')

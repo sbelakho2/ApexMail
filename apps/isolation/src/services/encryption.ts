@@ -22,6 +22,19 @@ import { config } from '../config.js';
 
 const logger = createLogger({ name: 'isolation:encryption' });
 
+/**
+ * Simple hash function for advisory lock IDs (same as audit.ts)
+ */
+function hashCode(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash);
+}
+
 // AES-256-GCM constants
 const ALGORITHM = 'aes-256-gcm';
 const KEY_LENGTH = 32; // 256 bits
@@ -366,33 +379,55 @@ export class EncryptionService {
   }
 
   /**
-   * Rotate encryption key for an organization
+   * Rotate encryption key for an organization.
+   *
+   * FIX-500-425: Wrap rotation in a transaction with an advisory lock to prevent
+   * concurrent rotations for the same org from creating duplicate active keys
+   * or running reencryptData in parallel.
    */
   async rotateKey(organizationId: string): Promise<Result<EncryptionKey>> {
-    // Generate new key
-    const newKeyResult = await this.generateDataKey(organizationId);
-    if (!newKeyResult.ok) return newKeyResult;
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      // Advisory lock scoped to this org — hashCode produces a stable int32
+      await client.query(
+        'SELECT pg_advisory_xact_lock($1)',
+        [hashCode(`encryption:rotate:${organizationId}`)]
+      );
 
-    const newKey = newKeyResult.value;
+      // Generate new key
+      const newKeyResult = await this.generateDataKey(organizationId);
+      if (!newKeyResult.ok) {
+        await client.query('ROLLBACK');
+        return newKeyResult;
+      }
 
-    // Get old active key
-    const oldKeyResult = await this.db.query(`
-      SELECT id FROM iso_encryption_keys
-      WHERE organization_id = $1 AND status = 'retired'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `, [organizationId]);
+      const newKey = newKeyResult.value;
 
-    if (oldKeyResult.rows.length > 0) {
-      const oldKeyId = oldKeyResult.rows[0].id;
+      // Get old active key
+      const oldKeyResult = await client.query(`
+        SELECT id FROM iso_encryption_keys
+        WHERE organization_id = $1 AND status = 'retired'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `, [organizationId]);
 
-      // Re-encrypt data with new key
-      await this.reencryptData(organizationId, oldKeyId, newKey.id);
+      if (oldKeyResult.rows.length > 0) {
+        const oldKeyId = oldKeyResult.rows[0].id;
+        // Re-encrypt data with new key
+        await this.reencryptData(organizationId, oldKeyId, newKey.id);
+      }
+
+      await client.query('COMMIT');
+      logger.info(`[Encryption] Rotated key for org ${organizationId}`);
+
+      return { ok: true, value: newKey };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      return { ok: false, error: error as Error };
+    } finally {
+      client.release();
     }
-
-    logger.info(`[Encryption] Rotated key for org ${organizationId}`);
-
-    return { ok: true, value: newKey };
   }
 
   /**

@@ -25,6 +25,7 @@ export class MetricsCollector {
     private registry: promClient.Registry;
     private metrics: Map<string, promClient.Metric<string>> = new Map();
     private dataStore: Map<string, MetricDataPoint[]> = new Map(); // In-memory store for queries
+    private static readonly MAX_DATA_STORE_KEYS = 100_000;
 
     constructor(config: Partial<MetricsCollectorConfig> = {}) {
         this.config = {
@@ -385,6 +386,13 @@ export class MetricsCollector {
         const cutoff = Date.now() - 24 * 60 * 60 * 1000;
         const filtered = dataPoints.filter((dp) => dp.timestamp.getTime() > cutoff);
         this.dataStore.set(key, filtered);
+
+        // FIX-500-326: Evict oldest keys to prevent unbounded memory growth
+        while (this.dataStore.size > MetricsCollector.MAX_DATA_STORE_KEYS) {
+            const oldest = this.dataStore.keys().next().value;
+            if (oldest !== undefined) this.dataStore.delete(oldest);
+            else break;
+        }
     }
 
     /**
@@ -561,7 +569,11 @@ export class MetricsCollector {
 
         const labels: Record<string, string> = {};
         match[1].split(',').forEach((pair) => {
-            const [k, v] = pair.split('=');
+            // FIX-500-334: Use indexOf to handle values containing '='
+            const eqIdx = pair.indexOf('=');
+            if (eqIdx === -1) return;
+            const k = pair.substring(0, eqIdx);
+            const v = pair.substring(eqIdx + 1);
             labels[k] = v;
         });
 
@@ -638,19 +650,31 @@ export class MetricsCollector {
         }
 
         const metrics = await this.getMetrics();
-        
-        const response = await fetch(
-            `${this.config.pushGatewayUrl}/metrics/job/${jobName}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': this.getContentType() },
-                body: metrics,
-            }
-        );
 
-        if (!response.ok) {
-            throw new Error(`Failed to push metrics: ${response.statusText}`);
+        // FIX-500-335: Retry with exponential backoff (3 attempts)
+        const MAX_RETRIES = 3;
+        let lastError: Error | null = null;
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            try {
+                const response = await fetch(
+                    `${this.config.pushGatewayUrl}/metrics/job/${jobName}`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': this.getContentType() },
+                        body: metrics,
+                    }
+                );
+
+                if (response.ok) return;
+                lastError = new Error(`Failed to push metrics: ${response.statusText}`);
+            } catch (err) {
+                lastError = err instanceof Error ? err : new Error(String(err));
+            }
+            if (attempt < MAX_RETRIES - 1) {
+                await new Promise((r) => setTimeout(r, 2 ** attempt * 500));
+            }
         }
+        throw lastError ?? new Error('Failed to push metrics after retries');
     }
 
     /**

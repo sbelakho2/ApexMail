@@ -207,8 +207,14 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     const category = c.req.query('category');
     const isActive = c.req.query('active');
     const search = c.req.query('search');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+
+    // F-203: Cap search string length to prevent abuse with massive query strings
+    if (search && search.length > 200) {
+      throw ApiError.badRequest('Search query too long (max 200 characters)');
+    }
+
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '50', 10) || 50, 100));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
     const result = await templatesRepo.listByTenant(tenantId, {
       category,
@@ -726,7 +732,15 @@ async function renderTemplate(
   }
 
   // Simple variable replacement for now
-  // In production, you'd use the actual template engine
+  // FIX-500-470: Warn if template specifies an engine other than the default.
+  // Currently all templates are rendered with {{variable}} substitution regardless of engine.
+  if ((template as any).engine && (template as any).engine !== 'handlebars') {
+    // Log a warning so operators know this template's engine field is being ignored
+    console.warn(
+      `[Templates] FIX-500-470: Template engine '${(template as any).engine}' is not implemented; ` +
+      `falling back to default variable substitution`
+    );
+  }
   
   const replaceVariables = (content: string): string => {
     return content.replace(TEMPLATE_VARIABLE_RE, (match, key) => {

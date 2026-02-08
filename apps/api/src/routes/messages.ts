@@ -10,6 +10,10 @@
  *
  * NOTE: The codebase uses resource-named keys ("message", "messages")
  * rather than generic "data". All new endpoints MUST follow this pattern.
+ *
+ * FIX-500-461: Some routes still use { result: ... } or other inconsistent
+ * keys for batch/action responses (e.g. suppressions, templates).
+ * These should be normalized to the standard above in a future pass.
  */
 
 import { Hono } from 'hono';
@@ -118,8 +122,21 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // Verify sending domain is verified
     const sendingDomain = input.from.email.split('@')[1] ?? '';
-    const domainResult = await domainsRepo.findByDomain(sendingDomain, tenantId);
-    
+
+    // Combine all recipients
+    const allRecipients: EmailRecipient[] = [
+      ...input.to.map((r) => ({ ...r, type: r.type ?? 'to' as const })),
+      ...(input.cc ?? []).map((r) => ({ ...r, type: 'cc' as const })),
+      ...(input.bcc ?? []).map((r) => ({ ...r, type: 'bcc' as const })),
+    ];
+
+    // FIX-074: Parallel domain + suppression check — they are independent queries
+    const recipientEmails = allRecipients.map((r) => r.email);
+    const [domainResult, suppressionResult] = await Promise.all([
+      domainsRepo.findByDomain(sendingDomain, tenantId),
+      suppressionsRepo.checkBulkSuppression(recipientEmails, tenantId),
+    ]);
+
     if (!domainResult.ok) {
       throw ApiError.internal('Failed to verify domain');
     }
@@ -130,17 +147,6 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
         'DOMAIN_NOT_VERIFIED'
       );
     }
-
-    // Combine all recipients
-    const allRecipients: EmailRecipient[] = [
-      ...input.to.map((r) => ({ ...r, type: r.type ?? 'to' as const })),
-      ...(input.cc ?? []).map((r) => ({ ...r, type: 'cc' as const })),
-      ...(input.bcc ?? []).map((r) => ({ ...r, type: 'bcc' as const })),
-    ];
-
-    // Check suppressions for all recipients
-    const recipientEmails = allRecipients.map((r) => r.email);
-    const suppressionResult = await suppressionsRepo.checkBulkSuppression(recipientEmails, tenantId);
     
     if (!suppressionResult.ok) {
       throw ApiError.internal('Failed to check suppressions');
@@ -277,10 +283,14 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
       messages.map(m => m.from.email.split('@')[1] ?? '')
     )].filter(Boolean);
 
+    // FIX-073: Parallel domain lookups instead of sequential for loop
     const domainCache = new Map<string, Awaited<ReturnType<typeof domainsRepo.findByDomain>>>();
-    for (const domain of uniqueDomains) {
-      domainCache.set(domain, await domainsRepo.findByDomain(domain, tenantId));
-    }
+    const domainResults = await Promise.all(
+      uniqueDomains.map(domain => domainsRepo.findByDomain(domain, tenantId))
+    );
+    uniqueDomains.forEach((domain, i) => {
+      domainCache.set(domain, domainResults[i]!);
+    });
 
     // Deduplicate recipients across entire batch — one bulk suppression check
     const allBatchRecipientEmails = [...new Set(
@@ -422,9 +432,13 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid message ID format', 'INVALID_ID');
     }
 
+    // FIX-075: Parallel message + events queries — they are independent DB reads
     // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
     // Previously used fetch-then-check pattern which could leak timing information
-    const result = await messagesRepo.findById(messageId, tenantId);
+    const [result, eventsResult] = await Promise.all([
+      messagesRepo.findById(messageId, tenantId),
+      eventsRepo.findByMessageId(messageId, tenantId),
+    ]);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch message');
@@ -436,8 +450,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const message = result.value;
 
-    // Get events for this message (tenant-scoped for isolation)
-    const eventsResult = await eventsRepo.findByMessageId(messageId, tenantId);
+    // Events already fetched in parallel above
     const events = eventsResult.ok ? eventsResult.value : [];
 
     return c.json({
@@ -483,7 +496,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
   // List messages - requires 'messages:read' scope
   router.get('/', requireScopes('messages:read'), async (c) => {
     const tenantId = c.get('tenantId');
-    const status = c.req.query('status') as 'pending' | 'queued' | 'sending' | 'sent' | 'delivered' | 'bounced' | 'deferred' | 'failed' | undefined;
+    const statusParam = c.req.query('status');
     const campaignId = c.req.query('campaignId');
     const startDate = c.req.query('startDate');
     const endDate = c.req.query('endDate');
@@ -491,11 +504,37 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '20', 10) || 20, 100));
     const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
+    // F-195: Validate status enum at runtime
+    const validStatuses = ['pending', 'queued', 'sending', 'sent', 'delivered', 'bounced', 'deferred', 'failed'] as const;
+    let status: typeof validStatuses[number] | undefined;
+    if (statusParam) {
+      if (!validStatuses.includes(statusParam as any)) {
+        throw ApiError.badRequest(`Invalid status. Must be one of: ${validStatuses.join(', ')}`);
+      }
+      status = statusParam as typeof validStatuses[number];
+    }
+
+    // F-196: Validate date parameters for NaN
+    let parsedStartDate: Date | undefined;
+    let parsedEndDate: Date | undefined;
+    if (startDate) {
+      parsedStartDate = new Date(startDate);
+      if (isNaN(parsedStartDate.getTime())) {
+        throw ApiError.badRequest('Invalid startDate format');
+      }
+    }
+    if (endDate) {
+      parsedEndDate = new Date(endDate);
+      if (isNaN(parsedEndDate.getTime())) {
+        throw ApiError.badRequest('Invalid endDate format');
+      }
+    }
+
     const result = await messagesRepo.listByTenant(tenantId, {
       status,
       campaignId,
-      startDate: startDate ? new Date(startDate) : undefined,
-      endDate: endDate ? new Date(endDate) : undefined,
+      startDate: parsedStartDate,
+      endDate: parsedEndDate,
       limit,
       offset,
     });

@@ -327,8 +327,10 @@ export class DataIsolationService {
    * Prevents SQL injection by only allowing alphanumeric chars and underscores
    */
   private sanitizeIdentifier(identifier: string): string {
+    // FIX-500-343: Replace hyphens with underscores instead of stripping them
+    const withUnderscores = identifier.replace(/-/g, '_');
     // Only allow alphanumeric characters and underscores
-    const sanitized = identifier.replace(/[^a-zA-Z0-9_]/g, '');
+    const sanitized = withUnderscores.replace(/[^a-zA-Z0-9_]/g, '');
     
     // Ensure it doesn't start with a number
     if (/^\d/.test(sanitized)) {

@@ -163,7 +163,8 @@ describe('#17 – AI health endpoint checks real state', () => {
     });
 
     it('uses ESM-compatible entry-point detection', () => {
-        expect(index).toMatch(/process\.argv\[1\]\?\.endsWith/);
+        // FIX-500-190: Updated detection uses require.main + arg.endsWith fallback
+        expect(index).toMatch(/arg\.endsWith|process\.argv\[1\]/);
     });
 });
 
@@ -216,9 +217,23 @@ describe('#19 – Enterprise JWT decode security annotation', () => {
         expect(src).toMatch(/fetchOIDCUserInfo|userinfo|JWKS/i);
     });
 
-    it('has a TODO for full OIDC ID-token verification', () => {
-        expect(src).toContain('TODO: Implement full OIDC');
-        expect(src).toContain('JWKS');
+    it('implements JWKS verification via verifyJWTWithJWKS', () => {
+        expect(src).toContain('verifyJWTWithJWKS');
+        expect(src).toContain('jwksUri');
+        expect(src).toContain('fetchJWKS');
+    });
+
+    it('validates JWT signature, issuer, audience, and nonce', () => {
+        expect(src).toContain('signatureValid');
+        expect(src).toContain('expectedIssuer');
+        expect(src).toContain('expectedAudience');
+        expect(src).toContain('expectedNonce');
+    });
+
+    it('caches JWKS keys and handles key rotation', () => {
+        expect(src).toContain('JWKS_CACHE_TTL_MS');
+        expect(src).toContain('forceRefresh');
+        expect(src).toContain('jwksCacheMap');
     });
 });
 

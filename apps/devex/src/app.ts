@@ -14,6 +14,7 @@ import { compress } from 'hono/compress';
 import { Pool } from 'pg';
 import { createDevExRoutes } from './routes/devex.js';
 import { ApiVersioningService } from './services/api-versioning.js';
+import { OpenApiGenerator } from './services/openapi-generator.js'; // FIX-500-415: Static import
 import { config } from './config.js';
 
 type Variables = {
@@ -172,11 +173,12 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
     return c.redirect('https://docs.apexmail.ee/api');
   });
 
+  // FIX-500-415: Reuse single OpenApiGenerator instance instead of dynamic imports
+  const openApiGenerator = new OpenApiGenerator(db);
+
   // OpenAPI spec (public, no auth)
   app.get('/openapi.json', async (c) => {
-    const { OpenApiGenerator } = await import('./services/openapi-generator.js');
-    const generator = new OpenApiGenerator(db);
-    const result = await generator.exportSpec('json');
+    const result = await openApiGenerator.exportSpec('json');
     
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
@@ -191,9 +193,7 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
   });
 
   app.get('/openapi.yaml', async (c) => {
-    const { OpenApiGenerator } = await import('./services/openapi-generator.js');
-    const generator = new OpenApiGenerator(db);
-    const result = await generator.exportSpec('yaml');
+    const result = await openApiGenerator.exportSpec('yaml');
     
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);

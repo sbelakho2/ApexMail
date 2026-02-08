@@ -11,6 +11,7 @@ import {
     AlertChannel,
 } from '../types.js';
 import { EventEmitter } from 'events';
+import crypto from 'node:crypto';
 import pino from 'pino';
 
 const logger = pino({ name: 'alert-manager' });
@@ -56,6 +57,7 @@ export class AlertManager extends EventEmitter {
 
     constructor(config: AlertManagerConfig) {
         super();
+        this.setMaxListeners(50); // FIX-500-332: Prevent maxListeners warning
         this.config = config;
         this.initializeDefaultRules();
         this.initializeDefaultEscalationPolicies();
@@ -269,11 +271,15 @@ export class AlertManager extends EventEmitter {
                     this.deduplicationCache.delete(key);
                 }
             }
-            // Also trim alert history to prevent unbounded growth
-            if (this.alertHistory.length > AlertManager.MAX_ALERT_HISTORY_SIZE) {
-                this.alertHistory = this.alertHistory.slice(-AlertManager.MAX_ALERT_HISTORY_SIZE);
+            // FIX-500-328: Use splice for in-place trimming instead of slice copy
+            const alertExcess = this.alertHistory.length - AlertManager.MAX_ALERT_HISTORY_SIZE;
+            if (alertExcess > 0) {
+                this.alertHistory.splice(0, alertExcess);
             }
         }, 60000); // Clean every minute
+        if (this.deduplicationCleanupInterval) {
+            this.deduplicationCleanupInterval.unref(); // FIX-500-331: Don't block process exit
+        }
     }
 
     /**
@@ -458,7 +464,7 @@ export class AlertManager extends EventEmitter {
         annotations?: Record<string, string>;
     }): Alert {
         const alert: Alert = {
-            id: `alert-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: `alert-${crypto.randomUUID()}`,
             ruleId: 'manual',
             name: params.name,
             description: params.description,
@@ -556,13 +562,14 @@ export class AlertManager extends EventEmitter {
         logger.info({ alertId, silencedBy, duration }, 'Alert silenced');
 
         // Schedule unsilence
-        setTimeout(() => {
+        const silenceTimer = setTimeout(() => {
             if (alert.status === 'silenced') {
                 alert.status = 'firing';
                 this.setupEscalation(alert, alert.severity);
                 this.emit('alert:unsilenced', alert);
             }
         }, duration);
+        silenceTimer.unref(); // FIX-500-331: Don't block process exit
     }
 
     /**
@@ -620,9 +627,10 @@ export class AlertManager extends EventEmitter {
 
         this.notifications.push(notification);
         
-        // Prevent unbounded growth of notification history
-        if (this.notifications.length > AlertManager.MAX_NOTIFICATION_HISTORY_SIZE) {
-            this.notifications = this.notifications.slice(-AlertManager.MAX_NOTIFICATION_HISTORY_SIZE);
+        // FIX-500-327: Use splice to trim in-place instead of copying the entire array
+        const notifExcess = this.notifications.length - AlertManager.MAX_NOTIFICATION_HISTORY_SIZE;
+        if (notifExcess > 0) {
+            this.notifications.splice(0, notifExcess);
         }
         
         this.emit('notification:sent', notification);
@@ -781,6 +789,7 @@ ${alert.endsAt ? `Resolved: ${alert.endsAt.toISOString()}` : ''}
                     this.emit('alert:escalated', { alert: currentAlert, level: level.level });
                 }
             }, level.delayMinutes * 60 * 1000);
+            timer.unref(); // FIX-500-331: Don't block process exit
 
             timers.push(timer);
         }

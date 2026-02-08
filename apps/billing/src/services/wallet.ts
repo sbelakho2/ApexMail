@@ -631,6 +631,9 @@ export class WalletService {
 
     if (!result.ok) return Result.err(result.error);
 
+    if (result.value.rows.length === 0) {
+      return Result.err(new Error('INSERT RETURNING produced no rows'));
+    }
     const row = result.value.rows[0]!;
     let parsedMetadata: Record<string, unknown> = {};
     try {

@@ -297,6 +297,9 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'startDate and endDate required' }, 400);
     }
 
+    // FIX-500-361: DATE_TRUNC intervals are all hardcoded string literals (never user-input).
+    // If granularity ever becomes user-selectable, validate against:
+    // const ALLOWED_DATE_TRUNC_INTERVALS = new Set(['hour', 'day', 'week', 'month', 'quarter', 'year']);
     const result = await ctx.db.query(
       `SELECT 
         DATE_TRUNC('day', paid_at) as date,

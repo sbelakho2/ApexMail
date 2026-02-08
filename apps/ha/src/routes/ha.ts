@@ -29,6 +29,25 @@ type Variables = {
 
 export const haRoutes = new Hono<{ Variables: Variables }>();
 
+// FIX-500-500: Internal API key authentication for sensitive operations.
+// Health endpoints remain public for load balancer probes; failover,
+// backup, restore, and chaos endpoints require X-Internal-Api-Key header.
+const HA_INTERNAL_API_KEY = process.env.HA_INTERNAL_API_KEY || 'ha-internal-key';
+
+const requireInternalAuth = async (c: any, next: () => Promise<void>) => {
+  const apiKey = c.req.header('X-Internal-Api-Key');
+  if (!apiKey || apiKey !== HA_INTERNAL_API_KEY) {
+    return c.json({ error: 'Unauthorized — X-Internal-Api-Key required' }, 401);
+  }
+  await next();
+};
+
+haRoutes.use('/failover/*', requireInternalAuth);
+haRoutes.use('/backups/*', requireInternalAuth);
+haRoutes.use('/restore', requireInternalAuth);
+haRoutes.use('/chaos/*', requireInternalAuth);
+haRoutes.use('/replication/*', requireInternalAuth);
+
 // ===== Health Check Routes =====
 
 haRoutes.get('/health', async (c) => {

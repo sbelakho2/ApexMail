@@ -2,7 +2,7 @@
  * Audit Logs Repository - Hash-chained immutable audit trail
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid } from '@apexmail/lib/id';
 import { createHashChainEntry, verifyHashChain } from '@apexmail/lib/crypto';
 import type { DatabasePool } from '../pool.js';
@@ -450,10 +450,13 @@ export class AuditLogsRepository {
       hash: string;
       timestamp: Date;
     }>(
+      // FIX-500-045: Add LIMIT to prevent unbounded result sets for heavily-audited resources
+      // FIX-500-050: Composite index idx_audit_logs_resource_lookup added in migration 010_performance_indexes.sql
       `SELECT * FROM audit_logs 
        WHERE tenant_id = $1 AND resource_type = $2 AND resource_id = $3
-       ORDER BY timestamp DESC, id DESC`,
-      [tenantId, resourceType, resourceId]
+       ORDER BY timestamp DESC, id DESC
+       LIMIT $4`,
+      [tenantId, resourceType, resourceId, 100]
     );
 
     if (!result.ok) return result;
@@ -557,8 +560,8 @@ export class AuditLogsRepository {
         action: row.action,
         resourceType: row.resource_type,
         resourceId: row.resource_id,
-        changes: row.changes ? JSON.parse(row.changes) : null,
-        metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
+        changes: row.changes ? parseJsonOrDefault(row.changes, null) : null,
+        metadata: typeof row.metadata === 'string' ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {}) : row.metadata,
         timestamp: row.timestamp.toISOString(),
       },
       hash: row.hash,
@@ -788,11 +791,11 @@ export class AuditLogsRepository {
       userAgent: row.user_agent,
       changes: row.changes
         ? (typeof row.changes === 'string'
-          ? JSON.parse(row.changes)
+          ? parseJsonOrDefault<AuditChanges>(row.changes, {} as AuditChanges)
           : row.changes) as AuditChanges
         : null,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       previousHash: row.previous_hash,
       hash: row.hash,

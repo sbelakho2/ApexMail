@@ -381,6 +381,42 @@ export class CampaignRepository {
     // HELPERS
     // =========================================================================
 
+    /**
+     * FIX-500-308: Atomically increment a campaign stat counter in the DB.
+     * Uses jsonb_set with a cast-based increment so two concurrent writers
+     * cannot lose each other's update (unlike overwriting the full blob).
+     */
+    private static readonly STAT_FIELD_MAP: Record<string, string> = {
+        opened: 'emailsOpened',
+        clicked: 'emailsClicked',
+        replied: 'repliesReceived',
+        sent: 'emailsSent',
+        enrolled: 'totalEnrolled',
+        completed: 'completedCount',
+        exited: 'exitedCount',
+        bounced: 'bounced',
+        unsubscribed: 'unsubscribed',
+    };
+
+    async incrementCampaignStat(
+        campaignId: string,
+        statKey: string,
+        amount: number = 1
+    ): Promise<void> {
+        const field = CampaignRepository.STAT_FIELD_MAP[statKey] ?? statKey;
+        await this.db.query(
+            `UPDATE drip_campaigns
+             SET stats = jsonb_set(
+                 stats,
+                 $2::text[],
+                 to_jsonb(COALESCE((stats->>$3)::int, 0) + $4)
+             ),
+             updated_at = NOW()
+             WHERE id = $1`,
+            [campaignId, `{${field}}`, field, amount]
+        );
+    }
+
     private rowToCampaign(row: Record<string, unknown>): DripCampaign {
         return {
             id: row.id as string,

@@ -2,8 +2,13 @@
  * @apexmail/ops - Status Page Service
  * 
  * Public status page for service health and incident communication.
+ * 
+ * FIX-500-155: All Maps backed by Postgres for production persistence.
+ * L1 in-memory cache with write-through to DB on every mutation.
  */
 
+import { Pool } from 'pg';
+import crypto from 'node:crypto';
 import {
     StatusPageData,
     StatusPageComponent,
@@ -36,16 +41,64 @@ interface Subscriber {
 
 export class StatusPageService extends EventEmitter {
     private config: StatusPageConfig;
+    private db: Pool | null;
     private components: Map<string, StatusPageComponent> = new Map();
     private groups: Map<string, StatusPageGroup> = new Map();
     private incidents: Map<string, StatusPageIncident> = new Map();
     private maintenance: Map<string, MaintenanceWindow> = new Map();
     private subscribers: Map<string, Subscriber> = new Map();
+    private dbLoaded = false;
 
-    constructor(config: StatusPageConfig) {
+    constructor(config: StatusPageConfig, db?: Pool) {
         super();
+        this.setMaxListeners(50); // FIX-500-332: Prevent maxListeners warning
         this.config = config;
+        this.db = db ?? null;
         this.initializeDefaultComponents();
+    }
+
+    /**
+     * FIX-500-155: Load state from DB into cache.
+     */
+    async loadFromDb(): Promise<void> {
+        if (!this.db || this.dbLoaded) return;
+        try {
+            // Components
+            const { rows: compRows } = await this.db.query('SELECT * FROM status_page_components ORDER BY sort_order');
+            for (const r of compRows) {
+                const comp: StatusPageComponent = { id: r.id, name: r.name, description: r.description, status: r.status, group: r.group_id, order: r.sort_order, visible: r.visible };
+                this.components.set(comp.id, comp);
+            }
+            // Groups
+            const { rows: grpRows } = await this.db.query('SELECT * FROM status_page_groups ORDER BY sort_order');
+            for (const r of grpRows) {
+                const grp: StatusPageGroup = { id: r.id, name: r.name, description: r.description, status: r.status, order: r.sort_order, components: [] };
+                this.groups.set(grp.id, grp);
+            }
+            // Incidents
+            const { rows: incRows } = await this.db.query('SELECT * FROM status_page_incidents ORDER BY created_at DESC');
+            for (const r of incRows) {
+                const { rows: updRows } = await this.db.query('SELECT * FROM status_page_incident_updates WHERE incident_id = $1 ORDER BY created_at', [r.id]);
+                const updates: StatusPageUpdate[] = updRows.map((u: Record<string, unknown>) => ({ id: u.id as string, status: u.status as string, body: u.body as string, createdAt: new Date(u.created_at as string), author: u.author as string }));
+                const inc: StatusPageIncident = { id: r.id, title: r.title, status: r.status, impact: r.impact, affectedComponents: r.affected_components || [], createdAt: new Date(r.created_at), updatedAt: new Date(r.updated_at), updates, resolvedAt: r.resolved_at ? new Date(r.resolved_at) : undefined };
+                this.incidents.set(inc.id, inc);
+            }
+            // Maintenance
+            const { rows: mntRows } = await this.db.query('SELECT * FROM status_page_maintenance ORDER BY scheduled_start');
+            for (const r of mntRows) {
+                const mnt: MaintenanceWindow = { id: r.id, title: r.title, description: r.description, scheduledStart: new Date(r.scheduled_start), scheduledEnd: new Date(r.scheduled_end), status: r.status, affectedComponents: r.affected_components || [], actualStart: r.actual_start ? new Date(r.actual_start) : undefined, actualEnd: r.actual_end ? new Date(r.actual_end) : undefined };
+                this.maintenance.set(mnt.id, mnt);
+            }
+            // Subscribers
+            const { rows: subRows } = await this.db.query('SELECT * FROM status_page_subscribers');
+            for (const r of subRows) {
+                this.subscribers.set(r.id, { id: r.id, email: r.email, components: r.components || [], subscribedAt: new Date(r.subscribed_at), confirmed: r.confirmed });
+            }
+            this.dbLoaded = true;
+        } catch (err) {
+            // Tables may not exist yet; defaults are fine
+            this.dbLoaded = true;
+        }
     }
 
     /**
@@ -149,22 +202,44 @@ export class StatusPageService extends EventEmitter {
 
     /**
      * Registers a component
+     * FIX-500-155: Write-through to DB.
      */
     registerComponent(component: StatusPageComponent): void {
         this.components.set(component.id, component);
+        if (this.db) {
+            this.db.query(
+                `INSERT INTO status_page_components (id, name, description, status, group_id, sort_order, visible)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
+                   status = EXCLUDED.status, group_id = EXCLUDED.group_id, sort_order = EXCLUDED.sort_order,
+                   visible = EXCLUDED.visible, updated_at = NOW()`,
+                [component.id, component.name, component.description, component.status, component.group, component.order, component.visible]
+            ).catch(() => { /* best-effort */ });
+        }
         this.emit('component:registered', component);
     }
 
     /**
      * Registers a group
+     * FIX-500-155: Write-through to DB.
      */
     registerGroup(group: StatusPageGroup): void {
         this.groups.set(group.id, group);
+        if (this.db) {
+            this.db.query(
+                `INSERT INTO status_page_groups (id, name, description, status, sort_order)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
+                   status = EXCLUDED.status, sort_order = EXCLUDED.sort_order`,
+                [group.id, group.name, group.description, group.status, group.order]
+            ).catch(() => { /* best-effort */ });
+        }
         this.emit('group:registered', group);
     }
 
     /**
      * Updates component status
+     * FIX-500-155: Write-through to DB.
      */
     updateComponentStatus(
         componentId: string,
@@ -176,6 +251,14 @@ export class StatusPageService extends EventEmitter {
 
         const previousStatus = component.status;
         component.status = status;
+
+        // FIX-500-155: Persist status change
+        if (this.db) {
+            this.db.query(
+                'UPDATE status_page_components SET status = $1, updated_at = NOW() WHERE id = $2',
+                [status, componentId]
+            ).catch(() => { /* best-effort */ });
+        }
 
         this.emit('component:status:changed', {
             componentId,
@@ -244,7 +327,7 @@ export class StatusPageService extends EventEmitter {
         message: string;
     }): StatusPageIncident {
         const incident: StatusPageIncident = {
-            id: `incident-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: `incident-${crypto.randomUUID()}`,
             title: params.title,
             status: 'investigating',
             impact: params.impact,
@@ -263,6 +346,23 @@ export class StatusPageService extends EventEmitter {
         };
 
         this.incidents.set(incident.id, incident);
+
+        // FIX-500-155: Persist incident + first update
+        if (this.db) {
+            this.db.query(
+                `INSERT INTO status_page_incidents (id, title, status, impact, affected_components, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [incident.id, incident.title, incident.status, incident.impact, incident.affectedComponents, incident.createdAt, incident.updatedAt]
+            ).catch(() => { /* best-effort */ });
+            const firstUpdate = incident.updates[0];
+            if (firstUpdate) {
+                this.db.query(
+                    `INSERT INTO status_page_incident_updates (id, incident_id, status, body, author, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [firstUpdate.id, incident.id, firstUpdate.status, firstUpdate.body, firstUpdate.author, firstUpdate.createdAt]
+                ).catch(() => { /* best-effort */ });
+            }
+        }
 
         // Update affected component statuses
         for (const componentId of params.affectedComponents) {
@@ -315,6 +415,19 @@ export class StatusPageService extends EventEmitter {
 
         incident.updates.push(update);
 
+        // FIX-500-155: Persist incident update
+        if (this.db) {
+            this.db.query(
+                `UPDATE status_page_incidents SET status = $1, updated_at = $2, resolved_at = $3 WHERE id = $4`,
+                [incident.status, incident.updatedAt, incident.resolvedAt ?? null, incident.id]
+            ).catch(() => { /* best-effort */ });
+            this.db.query(
+                `INSERT INTO status_page_incident_updates (id, incident_id, status, body, author, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [update.id, incidentId, update.status, update.body, update.author, update.createdAt]
+            ).catch(() => { /* best-effort */ });
+        }
+
         this.emit('incident:updated', { incident, update });
         this.notifySubscribersIncident(incident, 'updated');
 
@@ -348,7 +461,7 @@ export class StatusPageService extends EventEmitter {
         affectedComponents: string[];
     }): MaintenanceWindow {
         const maintenance: MaintenanceWindow = {
-            id: `maint-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            id: `maint-${crypto.randomUUID()}`,
             title: params.title,
             description: params.description,
             scheduledStart: params.scheduledStart,
@@ -358,6 +471,16 @@ export class StatusPageService extends EventEmitter {
         };
 
         this.maintenance.set(maintenance.id, maintenance);
+
+        // FIX-500-155: Persist maintenance
+        if (this.db) {
+            this.db.query(
+                `INSERT INTO status_page_maintenance (id, title, description, scheduled_start, scheduled_end, status, affected_components)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [maintenance.id, maintenance.title, maintenance.description, maintenance.scheduledStart, maintenance.scheduledEnd, maintenance.status, maintenance.affectedComponents]
+            ).catch(() => { /* best-effort */ });
+        }
+
         this.emit('maintenance:scheduled', maintenance);
         this.notifySubscribersMaintenance(maintenance);
 
@@ -366,6 +489,7 @@ export class StatusPageService extends EventEmitter {
 
     /**
      * Starts a scheduled maintenance
+     * FIX-500-155: Write-through to DB.
      */
     startMaintenance(maintenanceId: string): void {
         const maintenance = this.maintenance.get(maintenanceId);
@@ -373,6 +497,13 @@ export class StatusPageService extends EventEmitter {
 
         maintenance.status = 'in_progress';
         maintenance.actualStart = new Date();
+
+        if (this.db) {
+            this.db.query(
+                'UPDATE status_page_maintenance SET status = $1, actual_start = $2 WHERE id = $3',
+                [maintenance.status, maintenance.actualStart, maintenanceId]
+            ).catch(() => { /* best-effort */ });
+        }
 
         // Update affected component statuses
         for (const componentId of maintenance.affectedComponents) {
@@ -384,6 +515,7 @@ export class StatusPageService extends EventEmitter {
 
     /**
      * Completes a maintenance window
+     * FIX-500-155: Write-through to DB.
      */
     completeMaintenance(maintenanceId: string): void {
         const maintenance = this.maintenance.get(maintenanceId);
@@ -391,6 +523,13 @@ export class StatusPageService extends EventEmitter {
 
         maintenance.status = 'completed';
         maintenance.actualEnd = new Date();
+
+        if (this.db) {
+            this.db.query(
+                'UPDATE status_page_maintenance SET status = $1, actual_end = $2 WHERE id = $3',
+                [maintenance.status, maintenance.actualEnd, maintenanceId]
+            ).catch(() => { /* best-effort */ });
+        }
 
         // Restore component statuses
         for (const componentId of maintenance.affectedComponents) {
@@ -402,12 +541,21 @@ export class StatusPageService extends EventEmitter {
 
     /**
      * Cancels a scheduled maintenance
+     * FIX-500-155: Write-through to DB.
      */
     cancelMaintenance(maintenanceId: string): void {
         const maintenance = this.maintenance.get(maintenanceId);
         if (!maintenance) return;
 
         maintenance.status = 'cancelled';
+
+        if (this.db) {
+            this.db.query(
+                'UPDATE status_page_maintenance SET status = $1 WHERE id = $2',
+                ['cancelled', maintenanceId]
+            ).catch(() => { /* best-effort */ });
+        }
+
         this.emit('maintenance:cancelled', maintenance);
     }
 
@@ -487,9 +635,10 @@ export class StatusPageService extends EventEmitter {
 
     /**
      * Adds a subscriber
+     * FIX-500-155: Write-through to DB.
      */
     addSubscriber(email: string, components: string[] = []): string {
-        const id = `sub-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const id = `sub-${crypto.randomUUID()}`;
         
         this.subscribers.set(id, {
             id,
@@ -499,27 +648,52 @@ export class StatusPageService extends EventEmitter {
             confirmed: false,
         });
 
+        if (this.db) {
+            this.db.query(
+                'INSERT INTO status_page_subscribers (id, email, components, confirmed) VALUES ($1, $2, $3, false)',
+                [id, email, components]
+            ).catch(() => { /* best-effort */ });
+        }
+
         this.emit('subscriber:added', { id, email });
         return id;
     }
 
     /**
      * Confirms a subscriber
+     * FIX-500-155: Write-through to DB.
      */
     confirmSubscriber(subscriberId: string): boolean {
         const subscriber = this.subscribers.get(subscriberId);
         if (!subscriber) return false;
 
         subscriber.confirmed = true;
+
+        if (this.db) {
+            this.db.query(
+                'UPDATE status_page_subscribers SET confirmed = true WHERE id = $1',
+                [subscriberId]
+            ).catch(() => { /* best-effort */ });
+        }
+
         this.emit('subscriber:confirmed', subscriber);
         return true;
     }
 
     /**
      * Removes a subscriber
+     * FIX-500-155: Write-through to DB.
      */
     removeSubscriber(subscriberId: string): void {
         this.subscribers.delete(subscriberId);
+
+        if (this.db) {
+            this.db.query(
+                'DELETE FROM status_page_subscribers WHERE id = $1',
+                [subscriberId]
+            ).catch(() => { /* best-effort */ });
+        }
+
         this.emit('subscriber:removed', { subscriberId });
     }
 

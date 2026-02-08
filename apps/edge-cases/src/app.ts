@@ -12,6 +12,7 @@ import { compress } from 'hono/compress';
 import { secureHeaders } from 'hono/secure-headers';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import net from 'net'; // FIX-500-407: Static import instead of dynamic
 
 import { createLogger } from '@apexmail/lib';
 import { config } from './config.js';
@@ -130,13 +131,28 @@ export function createApp(): Hono {
       checks.redis = { status: 'unhealthy' };
     }
 
-    // ClamAV health (if enabled)
+    // ClamAV health (if enabled) — FIX-500-149: real TCP PING check
     if (config.clamav.enabled) {
+      const clamStart = Date.now();
       try {
-        // Simple check - just see if we can connect
-        checks.clamav = { status: 'configured' };
+        const clamPong = await new Promise<string>((resolve, reject) => {
+          const socket = new net.Socket();
+          socket.setTimeout(config.clamav.timeout ?? 5000);
+          let data = '';
+          socket.connect(config.clamav.port, config.clamav.host, () => {
+            socket.write('nPING\n');
+          });
+          socket.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+          socket.on('end', () => { socket.destroy(); resolve(data.trim()); });
+          socket.on('timeout', () => { socket.destroy(); reject(new Error('ClamAV timeout')); });
+          socket.on('error', (err: Error) => { socket.destroy(); reject(err); });
+        });
+        checks.clamav = {
+          status: clamPong === 'PONG' ? 'healthy' : 'unhealthy',
+          latency: Date.now() - clamStart,
+        };
       } catch {
-        checks.clamav = { status: 'not available' };
+        checks.clamav = { status: 'unhealthy', latency: Date.now() - clamStart };
       }
     }
     

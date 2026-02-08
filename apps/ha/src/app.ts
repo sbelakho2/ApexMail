@@ -117,6 +117,19 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
+// FIX-500-025: Internal endpoints also require authentication
+// Previously /internal/* was completely unauthenticated
+app.use('/internal/*', async (c, next) => {
+  const apiKey = c.req.header('x-api-key') || c.req.header('authorization')?.replace('Bearer ', '');
+  if (!apiKey) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+  if (apiKey !== config.internalApiKey && apiKey !== config.adminApiKey) {
+    return c.json({ error: 'Invalid API key' }, 403);
+  }
+  await next();
+});
+
 // Root endpoint
 app.get('/', (c) => {
   return c.json({

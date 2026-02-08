@@ -6,7 +6,9 @@
  */
 
 import { InferenceEngine } from '../inference/engine.js';
-import { SentimentAnalyzer } from './sentiment.js';
+import { getSharedEngine } from '../inference/index.js';
+import { sentimentAnalyzer } from './sentiment.js';
+import type { SentimentAnalyzer } from './sentiment.js';
 import type {
     ContentGenerationRequest,
     ContentGenerationResult,
@@ -122,10 +124,13 @@ export class ContentGenerator {
 
     constructor(config?: Partial<ContentGeneratorConfig>) {
         this.config = { ...DEFAULT_CONTENT_CONFIG, ...config };
-        this.engine = new InferenceEngine({
+        // FIX-500-099: Use shared engine instead of creating a new instance
+        this.engine = getSharedEngine({
             temperature: 0.8, // Higher creativity for content
         });
-        this.sentimentAnalyzer = new SentimentAnalyzer();
+        // FIX-500-131: Use canonical singleton instead of creating a new instance.
+        // This shares custom lexicon entries across all callers.
+        this.sentimentAnalyzer = sentimentAnalyzer;
         
         // Add email marketing specific words to lexicon
         this.sentimentAnalyzer.addCustomWords({
@@ -371,7 +376,12 @@ export class ContentGenerator {
         }
 
         // Shuffle for variety
-        return patterns.sort(() => Math.random() - 0.5);
+        // FIX-500-382: Fisher-Yates shuffle instead of biased sort(() => Math.random() - 0.5)
+        for (let i = patterns.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [patterns[i], patterns[j]] = [patterns[j], patterns[i]];
+        }
+        return patterns;
     }
 
     private fillPattern(
@@ -405,27 +415,32 @@ export class ContentGenerator {
         let score = 80; // Start with good score
 
         // Length check
-        if (text.length > 60) {
-            issues.push({
-                type: 'length',
-                severity: 'warning',
-                message: `Subject line is ${text.length} characters (recommended: under 60)`,
-            });
-            score -= 10;
-        } else if (text.length > 70) {
+        // FIX-500-381: Check > 70 first — the old order (> 60 then else-if > 70)
+        // made the > 70 branch unreachable since > 70 is always > 60.
+        if (text.length > 70) {
             issues.push({
                 type: 'length',
                 severity: 'error',
                 message: `Subject line is too long (${text.length} characters)`,
             });
             score -= 20;
+        } else if (text.length > 60) {
+            issues.push({
+                type: 'length',
+                severity: 'warning',
+                message: `Subject line is ${text.length} characters (recommended: under 60)`,
+            });
+            score -= 10;
         }
 
         // Spam words check
+        // FIX-500-400: Use word-boundary regex to avoid false positives
+        // (e.g. "freedom" matching "free", "browse" matching "buy now")
         const spamWords = ['free', 'winner', 'click here', 'act now', 'limited time', 'buy now'];
         const lowerText = text.toLowerCase();
         for (const word of spamWords) {
-            if (lowerText.includes(word)) {
+            const re = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+            if (re.test(lowerText)) {
                 issues.push({
                     type: 'spam',
                     severity: 'warning',
@@ -567,8 +582,12 @@ Write the email body only.`;
         }
 
         // Generate variants
-        const shuffled = patterns.sort(() => Math.random() - 0.5);
-        ctas.push(...shuffled.slice(0, request.variants || 5));
+        // FIX-500-382: Fisher-Yates shuffle instead of biased sort
+        for (let i = patterns.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [patterns[i], patterns[j]] = [patterns[j], patterns[i]];
+        }
+        ctas.push(...patterns.slice(0, request.variants || 5));
 
         // Customize with topic if provided
         if (request.topic) {
@@ -640,8 +659,13 @@ Write only the P.S. line (including "P.S.").`;
         ));
 
         // Spam score
+        // FIX-500-400: Use word-boundary regex to avoid false positives
         const spamWords = ['free', 'winner', 'click', 'buy now', 'limited', 'act now', 'urgent'];
-        const spamCount = spamWords.filter((w) => content.toLowerCase().includes(w)).length;
+        const lowerContent = content.toLowerCase();
+        const spamCount = spamWords.filter((w) => {
+            const re = new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+            return re.test(lowerContent);
+        }).length;
         const spamScore = Math.min(spamCount * 0.1, 1);
 
         // Engagement score based on various factors

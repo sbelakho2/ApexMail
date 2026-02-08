@@ -2,7 +2,7 @@
  * Tenants Repository
  */
 
-import { Result } from '@apexmail/lib';
+import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateTenantId } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
 import { withTransaction } from '../transaction.js';
@@ -201,23 +201,33 @@ export class TenantsRepository {
     });
   }
 
+  // FIX-500-251: Add RETURNING + rowCount check
   async activate(id: string): Promise<Result<void, Error>> {
     const result = await this.db.query(
-      `UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1`,
+      `UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1 RETURNING id`,
       [id]
     );
-    return result.ok ? Result.ok(undefined) : result;
+    if (!result.ok) return result;
+    if (result.value.rowCount === 0) {
+      return Result.err(new Error(`Tenant ${id} not found`));
+    }
+    return Result.ok(undefined);
   }
 
+  // FIX-500-252: Add RETURNING id + rowCount check
   async setLegalHold(id: string, enabled: boolean): Promise<Result<void, Error>> {
     const result = await this.db.query(
       `UPDATE tenants 
        SET settings = jsonb_set(settings, '{legalHold}', $2::jsonb),
            updated_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1 RETURNING id`,
       [id, JSON.stringify(enabled)]
     );
-    return result.ok ? Result.ok(undefined) : result;
+    if (!result.ok) return result;
+    if (result.value.rowCount === 0) {
+      return Result.err(new Error(`Tenant ${id} not found`));
+    }
+    return Result.ok(undefined);
   }
 
   async list(options: {
@@ -307,10 +317,10 @@ export class TenantsRepository {
       plan: row.plan,
       status: row.status,
       settings: typeof row.settings === 'string' 
-        ? JSON.parse(row.settings) as TenantSettings
+        ? parseJsonOrDefault<TenantSettings>(row.settings, {} as TenantSettings)
         : row.settings as unknown as TenantSettings,
       metadata: typeof row.metadata === 'string'
-        ? JSON.parse(row.metadata) as Record<string, unknown>
+        ? parseJsonOrDefault<Record<string, unknown>>(row.metadata, {})
         : row.metadata as unknown as Record<string, unknown>,
       createdAt: row.created_at,
       updatedAt: row.updated_at,

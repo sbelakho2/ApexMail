@@ -28,16 +28,20 @@ from .exceptions import (
 )
 from .models import (
     Attachment,
+    DNSRecord,
     Domain,
+    DomainListResponse,
     DomainStatus,
     Email,
     EmailAddress,
+    EmailListResponse,
     EmailStatus,
     SendEmailRequest,
     SendEmailResponse,
     Tag,
     Webhook,
     WebhookEvent,
+    WebhookListResponse,
 )
 
 __version__ = "1.0.0"
@@ -56,14 +60,18 @@ __all__ = [
     "ValidationError",
     # Models
     "Attachment",
+    "DNSRecord",
     "Domain",
+    "DomainListResponse",
     "DomainStatus",
     "Email",
     "EmailAddress",
+    "EmailListResponse",
     "EmailStatus",
     "SendEmailRequest",
     "SendEmailResponse",
     "Tag",
     "Webhook",
     "WebhookEvent",
+    "WebhookListResponse",
 ]

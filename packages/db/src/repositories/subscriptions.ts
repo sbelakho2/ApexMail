@@ -239,18 +239,26 @@ export class SubscriptionsRepository {
         try {
             await client.query('BEGIN');
 
-            for (const [category, subscribed] of Object.entries(preferences)) {
-                const id = randomUUID().replace(/-/g, '').slice(0, 26);
+            // FIX-500-055: Batch all preferences into a single multi-row INSERT instead of N round-trips
+            const entries = Object.entries(preferences);
+            if (entries.length > 0) {
+                const ids = entries.map(() => randomUUID().replace(/-/g, '').slice(0, 26));
+                const values: unknown[] = [];
+                const placeholders: string[] = [];
+                let paramIdx = 1;
+                for (let i = 0; i < entries.length; i++) {
+                    placeholders.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+                    values.push(ids[i], tenantId, normalizedEmail, entries[i]![0], entries[i]![1]);
+                }
                 const result = await client.query<Record<string, unknown>>(
                     `INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed)
-                     VALUES ($1, $2, $3, $4, $5)
+                     VALUES ${placeholders.join(', ')}
                      ON CONFLICT (tenant_id, email, category)
                      DO UPDATE SET subscribed = EXCLUDED.subscribed, updated_at = NOW()
                      RETURNING *`,
-                    [id, tenantId, normalizedEmail, category, subscribed]
+                    values
                 );
-                const row = result.rows[0];
-                if (row) {
+                for (const row of result.rows) {
                     results.push(this.mapPreferenceRow(row));
                 }
             }

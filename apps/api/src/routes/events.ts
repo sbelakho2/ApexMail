@@ -9,9 +9,47 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv, AppContext } from '../app.js';
-import { EventsRepository, type Event } from '@apexmail/db';
+import { EventsRepository, MessagesRepository, type Event } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
+
+/**
+ * F-191: UUID format regex for route parameter validation.
+ * Prevents malformed IDs from reaching DB queries.
+ */
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * F-192: Validate and clamp date range.
+ * Prevents unbounded queries and NaN dates.
+ */
+function validateEventDateRange(since?: string, until?: string): { startDate?: Date; endDate?: Date } {
+  let startDate: Date | undefined;
+  let endDate: Date | undefined;
+  if (since) {
+    startDate = new Date(since);
+    if (isNaN(startDate.getTime())) {
+      throw ApiError.badRequest('Invalid since date format');
+    }
+  }
+  if (until) {
+    endDate = new Date(until);
+    if (isNaN(endDate.getTime())) {
+      throw ApiError.badRequest('Invalid until date format');
+    }
+  }
+  // Enforce 90-day max range
+  if (startDate && endDate) {
+    const diffMs = endDate.getTime() - startDate.getTime();
+    if (diffMs < 0) {
+      throw ApiError.badRequest('since must be before until');
+    }
+    if (diffMs > 90 * 24 * 60 * 60 * 1000) {
+      throw ApiError.badRequest('Date range cannot exceed 90 days');
+    }
+  }
+  return { startDate, endDate };
+}
 
 const eventTypeSchema = z.enum([
   'queued',
@@ -41,6 +79,7 @@ const batchEventsSchema = z.object({
 export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
   const eventsRepo = new EventsRepository(ctx.db);
+  const messagesRepo = new MessagesRepository(ctx.db);
 
   // List events
   router.get('/', requireScopes('events:read'), async (c) => {
@@ -50,8 +89,13 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const recipientEmail = c.req.query('recipient');
     const since = c.req.query('since');
     const until = c.req.query('until');
-    const limit = parseInt(c.req.query('limit') ?? '100', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '100', 10) || 100, 1000));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
+
+    // F-193: Validate UUID format for messageId if provided
+    if (messageId && !uuidRegex.test(messageId)) {
+      throw ApiError.badRequest('Invalid messageId format', 'INVALID_ID');
+    }
 
     // Validate event type if provided
     if (eventType) {
@@ -61,13 +105,16 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
       }
     }
 
+    // F-192: Validate and clamp date range (NaN check + 90-day cap)
+    const { startDate, endDate } = validateEventDateRange(since, until);
+
     const result = await eventsRepo.listByTenant(tenantId, {
       messageId,
       eventType: eventType as z.infer<typeof eventTypeSchema>,
       recipientEmail,
-      startDate: since ? new Date(since) : undefined,
-      endDate: until ? new Date(until) : undefined,
-      limit: Math.min(limit, 1000),
+      startDate,
+      endDate,
+      limit,
       offset,
     });
 
@@ -103,6 +150,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/message/:messageId', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
+
+    // F-193: Validate UUID format before DB query
+    if (!uuidRegex.test(messageId)) {
+      throw ApiError.badRequest('Invalid message ID format', 'INVALID_ID');
+    }
 
     // SECURITY: Use tenant-scoped query for cross-tenant isolation
     const result = await eventsRepo.findByMessageId(messageId, tenantId);
@@ -142,6 +194,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const eventId = c.req.param('id');
+
+    // F-193: Validate UUID format before DB query
+    if (!uuidRegex.test(eventId)) {
+      throw ApiError.badRequest('Invalid event ID format', 'INVALID_ID');
+    }
 
     // Use tenant-scoped query for database-level isolation
     const result = await eventsRepo.findById(eventId, tenantId);
@@ -183,10 +240,13 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
 
+    // F-192: Validate date range
+    const { startDate, endDate } = validateEventDateRange(since, until);
+
     const result = await eventsRepo.getStats(tenantId, {
       campaignId,
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
+      since: startDate,
+      until: endDate,
     });
 
     if (!result.ok) {
@@ -235,11 +295,14 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid interval. Must be: minute, hour, day, week, month');
     }
 
+    // F-192: Validate date range
+    const { startDate, endDate } = validateEventDateRange(since, until);
+
     const result = await eventsRepo.getTimeSeries(tenantId, {
       campaignId,
       interval: interval as 'minute' | 'hour' | 'day' | 'week' | 'month',
-      since: since ? new Date(since) : new Date(Date.now() - 24 * 60 * 60 * 1000),
-      until: until ? new Date(until) : new Date(),
+      since: startDate ?? new Date(Date.now() - 24 * 60 * 60 * 1000),
+      until: endDate ?? new Date(),
     });
 
     if (!result.ok) {
@@ -263,10 +326,13 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
 
+    // F-192: Validate date range
+    const { startDate, endDate } = validateEventDateRange(since, until);
+
     const result = await eventsRepo.getBounceBreakdown(tenantId, {
       domainId,
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
+      since: startDate,
+      until: endDate,
     });
 
     if (!result.ok) {
@@ -288,9 +354,12 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const since = c.req.query('since');
     const until = c.req.query('until');
 
+    // F-192: Validate date range
+    const { startDate, endDate } = validateEventDateRange(since, until);
+
     const result = await eventsRepo.getStatsByDomain(tenantId, {
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
+      since: startDate,
+      until: endDate,
     });
 
     if (!result.ok) {
@@ -327,12 +396,15 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const since = c.req.query('since');
     const until = c.req.query('until');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '50', 10) || 50, 100));
+
+    // F-192: Validate date range
+    const { startDate, endDate } = validateEventDateRange(since, until);
 
     const result = await eventsRepo.getStatsByCampaign(tenantId, {
-      since: since ? new Date(since) : undefined,
-      until: until ? new Date(until) : undefined,
-      limit: Math.min(limit, 100),
+      since: startDate,
+      until: endDate,
+      limit,
     });
 
     if (!result.ok) {
@@ -375,10 +447,23 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const body = await c.req.json();
     const { events } = batchEventsSchema.parse(body);
 
+    // F-191: Look up recipient emails from messages instead of leaving empty
+    const uniqueMessageIds = [...new Set(events.map(e => e.messageId))];
+    const recipientMap = new Map<string, string>();
+    for (const mid of uniqueMessageIds) {
+      const msgResult = await messagesRepo.findById(mid, tenantId);
+      if (msgResult.ok && msgResult.value) {
+        const firstRecipient = msgResult.value.recipients?.[0];
+        if (firstRecipient) {
+          recipientMap.set(mid, typeof firstRecipient === 'string' ? firstRecipient : firstRecipient.email);
+        }
+      }
+    }
+
     const items = events.map((e) => ({
       tenantId,
       messageId: e.messageId,
-      recipientEmail: '', // Will be filled from message lookup
+      recipientEmail: recipientMap.get(e.messageId) ?? '',
       eventType: e.eventType as 'queued' | 'sending' | 'sent' | 'deferred' | 'delivered' | 'bounced' | 'dropped' | 'opened' | 'clicked' | 'unsubscribed' | 'complained' | 'list_unsubscribe',
       timestamp: e.timestamp ? new Date(e.timestamp) : new Date(),
       metadata: e.metadata,
@@ -409,8 +494,8 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/recipient/:email', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const email = decodeURIComponent(c.req.param('email'));
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = parseInt(c.req.query('limit') ?? '50', 10) || 50;
+    const offset = parseInt(c.req.query('offset') ?? '0', 10) || 0;
 
     // Validate email format with RFC 5321 max length
     const emailSchema = z.string().email().max(254);
@@ -467,6 +552,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/clicks/:messageId', requireScopes('events:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const messageId = c.req.param('messageId');
+
+    // F-193: Validate UUID format before DB query
+    if (!uuidRegex.test(messageId)) {
+      throw ApiError.badRequest('Invalid message ID format', 'INVALID_ID');
+    }
 
     // SECURITY: Use tenant-scoped query to prevent cross-tenant data leak
     const result = await eventsRepo.getLinkStats(messageId, tenantId);

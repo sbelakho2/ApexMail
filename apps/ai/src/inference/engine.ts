@@ -38,6 +38,8 @@ class SimpleTokenizer {
     private vocab: Map<string, number> = new Map();
     private reverseVocab: Map<number, string> = new Map();
     private specialTokens: Map<string, number>;
+    // FIX-500-447: Pre-sorted by length descending so longer tokens match first
+    private sortedSpecialTokens: Array<[string, number]>;
 
     constructor() {
         this.specialTokens = new Map([
@@ -51,13 +53,16 @@ class SimpleTokenizer {
             ['</s>', 2],
         ]);
 
+        // FIX-500-447: Sort by token length descending — ensures '<|assistant|>' matches before '<|end|>'
+        this.sortedSpecialTokens = [...this.specialTokens.entries()].sort((a, b) => b[0].length - a[0].length);
+
         // Initialize basic vocab (simplified - real implementation would load from vocab.json)
         this.initializeVocab();
     }
 
     private initializeVocab(): void {
-        // Add special tokens
-        for (const [token, id] of this.specialTokens) {
+        // Add special tokens (use sorted list for consistency)
+        for (const [token, id] of this.sortedSpecialTokens) {
             this.vocab.set(token, id);
             this.reverseVocab.set(id, token);
         }
@@ -82,9 +87,11 @@ class SimpleTokenizer {
         while (i < text.length) {
             let matched = false;
 
-            // Check for special tokens first
-            for (const [token, id] of this.specialTokens) {
-                if (text.slice(i).startsWith(token)) {
+            // FIX-500-085: Check for special tokens using startsWith with offset
+            // instead of allocating a substring via text.slice(i) on every iteration.
+            // FIX-500-447: Iterate sorted by length descending so longer tokens match first.
+            for (const [token, id] of this.sortedSpecialTokens) {
+                if (text.startsWith(token, i)) {
                     tokens.push(id);
                     i += token.length;
                     matched = true;
@@ -382,7 +389,11 @@ export class InferenceEngine extends EventEmitter {
             normB += b[i] * b[i];
         }
 
-        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+        // FIX-500-383: Guard against division by zero when either vector is all-zeros
+        const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+        if (denominator === 0) return 0;
+
+        return dotProduct / denominator;
     }
 
     /**

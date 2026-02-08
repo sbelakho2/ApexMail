@@ -697,16 +697,22 @@ export class TracingService {
     this.spanBuffer = [];
 
     try {
+      /**
+       * FIX-500-094: Multi-row INSERT instead of per-row loop.
+       * Builds a single INSERT with dynamic VALUES tuples to reduce
+       * round-trips from N to 1.
+       */
+      const COLS_PER_ROW = 13;
+      const valueTuples: string[] = [];
+      const params: unknown[] = [];
+
+      let i = 0;
       for (const span of spansToFlush) {
-        await this.db.query(`
-          INSERT INTO obs_spans (
-            span_id, trace_id, parent_span_id, operation_name, service_name,
-            start_time, end_time, duration_ms, status, status_message,
-            span_kind, attributes, events
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-          )
-        `, [
+        const base = i * COLS_PER_ROW;
+        valueTuples.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13})`
+        );
+        params.push(
           span.spanId,
           span.spanId.substring(0, 32), // Extract trace ID
           span.parentSpanId,
@@ -720,8 +726,17 @@ export class TracingService {
           span.kind,
           JSON.stringify(span.attributes),
           JSON.stringify(span.events),
-        ]);
+        );
+        i++;
       }
+
+      await this.db.query(`
+        INSERT INTO obs_spans (
+          span_id, trace_id, parent_span_id, operation_name, service_name,
+          start_time, end_time, duration_ms, status, status_message,
+          span_kind, attributes, events
+        ) VALUES ${valueTuples.join(', ')}
+      `, params);
     } catch (error) {
       logger.error('[Tracing] Failed to flush span buffer:', { error: error instanceof Error ? error.message : String(error) });
       // Re-add failed spans to buffer
