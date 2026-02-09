@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState } from '@/components/ui/empty-state';
 import { ApexAreaChart, ApexBarChart } from '@/components/charts';
 import { formatNumber } from '@/lib/utils';
 
@@ -78,22 +79,29 @@ export default function ReportsPage() {
                 <ApexAreaChart
                     data={engagement.length > 0 ? engagement : [{ date: 'No data', opens: 0, clicks: 0 }]}
                     xKey="date" title="Engagement Over Time" description="Opens and clicks"
-                    areas={[{ key: 'opens', name: 'Opens', color: '#2563EB' }, { key: 'clicks', name: 'Clicks', color: '#10B981' }]}
+                    areas={[{ key: 'opens', name: 'Opens', color: '#2563eb' }, { key: 'clicks', name: 'Clicks', color: '#16a34a' }]}
                     height={300}
                 />
                 <ApexBarChart
                     data={volume.length > 0 ? volume : [{ date: 'No data', sent: 0 }]}
                     xKey="date" title="Send Volume" description="Emails sent per day"
-                    bars={[{ key: 'sent', name: 'Sent', color: '#2563EB' }]}
+                    bars={[{ key: 'sent', name: 'Sent', color: '#2563eb' }]}
                     height={300}
                 />
             </div>
 
             {!loading && !stats && (
                 <Card>
-                    <CardContent className="flex flex-col items-center justify-center py-16">
-                        <BarChart3 className="h-10 w-10 text-muted-foreground mb-4" />
-                        <p className="text-muted-foreground">Send your first campaign to see reports here.</p>
+                    <CardContent className="py-12">
+                        <EmptyState
+                            icon={BarChart3}
+                            title="No analytics data"
+                            description="Send your first campaign or setup an automation to see detailed delivery and engagement reports."
+                            action={{
+                                label: 'Go to Campaigns',
+                                onClick: () => window.location.href = '/campaigns'
+                            }}
+                        />
                     </CardContent>
                 </Card>
             )}

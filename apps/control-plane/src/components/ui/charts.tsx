@@ -9,11 +9,11 @@
 
 // Chart color palette following design system
 export const CHART_COLORS = {
-    primary: '#3b82f6',    // Blue
-    success: '#10b981',    // Emerald
-    warning: '#f59e0b',    // Amber
-    danger: '#ef4444',     // Red
-    info: '#0ea5e9',       // Sky
+    primary: '#2563eb',    // Brand Blue
+    success: '#16a34a',    // Success Green
+    warning: '#d97706',    // Warning Amber
+    danger: '#dc2626',     // Danger Red
+    info: '#0891b2',       // Info Cyan
     purple: '#8b5cf6',     // Violet
     pink: '#ec4899',       // Pink
     teal: '#14b8a6',       // Teal
@@ -340,7 +340,8 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
                         y1={tick.y}
                         x2={width - padding.right}
                         y2={tick.y}
-                        stroke="#e2e8f0"
+                        stroke="currentColor"
+                        className="text-border"
                         strokeDasharray="4 4"
                     />
                     <text x={padding.left - 8} y={tick.y + 4} textAnchor="end" className="text-xs fill-surface-400">
@@ -407,7 +408,8 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
                         y1={padding.top + chartHeight - t * chartHeight}
                         x2={width - padding.right}
                         y2={padding.top + chartHeight - t * chartHeight}
-                        stroke="#e2e8f0"
+                        stroke="currentColor"
+                        className="text-border"
                         strokeDasharray="4 4"
                     />
                 ))}
@@ -511,7 +513,7 @@ export function HeatMap({ data, width = 500, height = 150 }: HeatMapProps) {
             {/* Cells */}
             {data.map((d, i) => {
                 const intensity = d.value / maxValue;
-                const color = `rgba(59, 130, 246, ${0.1 + intensity * 0.9})`;
+                const color = `rgba(37, 99, 235, ${0.1 + intensity * 0.9})`;
                 return (
                     <rect
                         key={i}
@@ -521,7 +523,7 @@ export function HeatMap({ data, width = 500, height = 150 }: HeatMapProps) {
                         height={cellHeight - 2}
                         rx={2}
                         fill={color}
-                        className="transition-all hover:stroke-blue-600 hover:stroke-1"
+                        className="transition-all hover:stroke-primary hover:stroke-1"
                     >
                         <title>{`${days[d.day]} ${d.hour}:00 - ${d.value} events`}</title>
                     </rect>

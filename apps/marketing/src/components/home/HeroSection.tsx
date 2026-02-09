@@ -53,13 +53,13 @@ export function HeroSection() {
  </div>
 
  {/* Headline */}
- <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 text-surface-900 leading-tight">
+ <h1 className="mb-6 text-surface-900">
                 The Email API That <br />
-                <span className="text-surface-500">Value Your Sleep.</span>
+                <span className="text-surface-500">Values Your Sleep.</span>
               </h1>
 
  {/* subheadline */}
- <p className="text-lg text-surface-600 mb-8 max-w-xl leading-relaxed">
+ <p className="text-surface-600 mb-8 max-w-xl">
                 Send <strong className="text-surface-900 font-semibold">HIPAA & GDPR-ready</strong> transactional emails with clear tracking.
                 Infrastructure designed for developers who prefer stability over buzzwords.
               </p>

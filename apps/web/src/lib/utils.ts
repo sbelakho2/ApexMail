@@ -216,17 +216,14 @@ export function isEmpty(value: unknown): boolean {
  */
 export function randomColor(): string {
     const colors = [
-        '#ef4444', // red
-        '#f97316', // orange
-        '#f59e0b', // amber
-        '#10b981', // emerald
-        '#14b8a6', // teal
-        '#06b6d4', // cyan
-        '#0ea5e9', // sky
-        '#3b82f6', // blue
+        '#2563eb', // brand-500
+        '#16a34a', // success
+        '#d97706', // warning
+        '#dc2626', // danger
+        '#0891b2', // info
         '#8b5cf6', // violet
-        '#d946ef', // fuchsia
-        '#f43f5e', // rose
+        '#1742b4', // brand-700
+        '#64748b', // surface-500
     ];
     return colors[Math.floor(Math.random() * colors.length)];
 }

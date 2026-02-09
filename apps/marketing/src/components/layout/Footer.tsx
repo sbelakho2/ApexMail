@@ -85,11 +85,11 @@ export function Footer() {
 
           {/* Product */}
           <div>
-            <h3 className="text-xs font-bold text-surface-900 mb-4">Product</h3>
-            <ul className="space-y-3">
+            <h3 className="text-xs font-bold text-surface-900 mb-4 uppercase tracking-widest">Product</h3>
+            <ul className="space-y-1">
               {footerLinks.product.map((link) => (
                 <li key={link.name}>
-                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors">
+                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors py-2.5 inline-block">
                     {link.name}
                   </Link>
                 </li>
@@ -99,11 +99,11 @@ export function Footer() {
 
           {/* Developers */}
           <div>
-            <h3 className="text-xs font-bold text-surface-900 mb-4">Developers</h3>
-            <ul className="space-y-3">
+            <h3 className="text-xs font-bold text-surface-900 mb-4 uppercase tracking-widest">Developers</h3>
+            <ul className="space-y-1">
               {footerLinks.developers.map((link) => (
                 <li key={link.name}>
-                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors">
+                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors py-2.5 inline-block">
                     {link.name}
                   </Link>
                 </li>
@@ -113,11 +113,11 @@ export function Footer() {
 
           {/* Resources */}
           <div>
-            <h3 className="text-xs font-bold text-surface-900 mb-4">Resources</h3>
-            <ul className="space-y-3">
+            <h3 className="text-xs font-bold text-surface-900 mb-4 uppercase tracking-widest">Resources</h3>
+            <ul className="space-y-1">
               {footerLinks.resources.map((link) => (
                 <li key={link.name}>
-                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors">
+                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors py-2.5 inline-block">
                     {link.name}
                   </Link>
                 </li>
@@ -127,11 +127,11 @@ export function Footer() {
 
           {/* Company */}
           <div>
-            <h3 className="text-xs font-bold text-surface-900 mb-4">Company</h3>
-            <ul className="space-y-3">
+            <h3 className="text-xs font-bold text-surface-900 mb-4 uppercase tracking-widest">Company</h3>
+            <ul className="space-y-1">
               {footerLinks.company.map((link) => (
                 <li key={link.name}>
-                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors">
+                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors py-2.5 inline-block">
                     {link.name}
                   </Link>
                 </li>
@@ -141,11 +141,11 @@ export function Footer() {
 
           {/* Legal */}
           <div>
-            <h3 className="text-xs font-bold text-surface-900 mb-4">Legal</h3>
-            <ul className="space-y-3">
+            <h3 className="text-xs font-bold text-surface-900 mb-4 uppercase tracking-widest">Legal</h3>
+            <ul className="space-y-1">
               {footerLinks.legal.map((link) => (
                 <li key={link.name}>
-                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors">
+                  <Link href={link.href} className="text-sm font-medium text-surface-600 hover:text-primary-600 transition-colors py-2.5 inline-block">
                     {link.name}
                   </Link>
                 </li>

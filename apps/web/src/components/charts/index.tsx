@@ -24,24 +24,24 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 
 // Color palette for charts
 const CHART_COLORS = {
- primary: 'hsl(var(--primary))',
- secondary: 'hsl(var(--secondary))',
- success: 'hsl(var(--success))',
- warning: 'hsl(var(--warning))',
- error: 'hsl(var(--error))',
- muted: 'hsl(var(--muted))',
- accent: 'hsl(var(--accent))',
+  primary: 'rgb(var(--primary))',
+  secondary: 'rgb(var(--secondary))',
+  success: 'rgb(var(--success))',
+  warning: 'rgb(var(--warning))',
+  error: 'rgb(var(--error))',
+  muted: 'rgb(var(--muted))',
+  accent: 'rgb(var(--accent))',
 } as const;
 
 const COLOR_ARRAY = [
- '#2563EB', // brand-500 (sapphire)
- '#64748B', // slate-500
- '#10B981', // emerald-500 (success)
- '#F59E0B', // amber-500 (warning)
- '#EF4444', // rose-500 (error)
- '#1742B4', // brand-700 (navy)
- '#0EA5E9', // sky-500
- '#8B5CF6', // violet-500
+  '#2563eb', // brand-500 (Primary Blue)
+  '#64748b', // surface-500 (Gray)
+  '#16a34a', // success (Green)
+  '#d97706', // warning (Amber)
+  '#dc2626', // danger (Red)
+  '#1742b4', // brand-700 (Dark Blue)
+  '#0891b2', // info (Cyan)
+  '#8b5cf6', // violet
 ];
 
 // Custom Tooltip component
@@ -54,13 +54,13 @@ function CustomTooltip({
   if (!active || !payload?.length) return null;
 
   return (
-    <div className="rounded-xl border border-surface-200 bg-white/95 backdrop-blur-xl p-4 shadow-xl">
-      <p className="mb-2 text-[13px] font-bold text-surface-900 uppercase tracking-tight">{label}</p>
+    <div className="rounded-lg border border-border bg-card/95 backdrop-blur-xl p-4 shadow-xl">
+      <p className="mb-2 text-[13px] font-bold text-foreground uppercase tracking-tight">{label}</p>
       {payload.map((entry, index) => (
         <p key={index} className="text-sm font-medium flex items-center gap-2" style={{ color: entry.color }}>
           <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
           <span>{entry.name}:</span>
-          <span className="font-bold tabular-nums text-surface-900">
+          <span className="font-bold tabular-nums text-foreground">
             {formatter ? formatter(entry.value as number) : entry.value}
           </span>
         </p>

@@ -24,7 +24,7 @@ export function CTASection() {
  className="text-center"
  >
  {/* Headline */}
- <h2 className="text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
+ <h2 className="mb-6">
  <span className="text-surface-900">Ready to Ship</span>
  <br />
  <span className="text-primary-500">Better Email?</span>
@@ -49,7 +49,7 @@ export function CTASection() {
        <div className="w-6 h-6 rounded bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
          <feature.icon className="w-4 h-4" />
        </div>
-       <span className="text-surface-600 text-sm font-medium">{feature.text}</span>
+       <span className="text-surface-600 text-sm font-bold uppercase tracking-wide">{feature.text}</span>
      </motion.div>
    ))}
  </div>
@@ -63,14 +63,14 @@ export function CTASection() {
  >
    <Link
      href="https://app.apexmail.ee/signup"
-     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors w-full sm:w-auto"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors w-full sm:w-auto shadow-lg shadow-primary-500/20"
    >
      Deploy to Production
      <ArrowRight className="w-4 h-4 ml-2" />
    </Link>
    <Link
      href="/contact"
-     className="inline-flex items-center justify-center px-8 py-4 text-base font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors w-full sm:w-auto"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors w-full sm:w-auto"
    >
      Book Architecture Review
    </Link>
@@ -81,18 +81,18 @@ export function CTASection() {
  initial={{ opacity: 0 }}
  animate={inView ? { opacity: 1 } : {}}
  transition={{ delay: 0.6 }}
- className="flex flex-wrap items-center justify-center gap-6 text-surface-500 text-sm font-medium"
+ className="flex flex-wrap items-center justify-center gap-6 text-surface-600 text-xs font-bold uppercase tracking-widest"
  >
  <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
  99.99% Uptime SLA
  </span>
  <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-primary-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-primary-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
  SOC 2 Certified
  </span>
  <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-primary-500"></span>
+ <span className="w-1.5 h-1.5 rounded-full bg-primary-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
  GDPR Compliant
  </span>
  <span className="flex items-center gap-2">

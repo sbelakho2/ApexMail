@@ -204,7 +204,7 @@ export function LiveAPIConsole() {
                 <button
                   onClick={handleCopy}
                   aria-label={copied ? 'Copied to clipboard' : 'Copy cURL command'}
-                  className="flex items-center gap-1.5 text-xs font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-2 py-1 rounded border border-surface-200 hover:bg-surface-50"
+                  className="flex items-center gap-1.5 text-xs font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-3 h-10 rounded border border-surface-200 hover:bg-surface-50"
                 >
                   {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   {copied ? 'Copied' : 'Copy'}
@@ -269,14 +269,14 @@ export function LiveAPIConsole() {
             </div>
 
             {/* Language Tabs */}
-            <div className="flex items-center gap-1 mb-6 border-b border-surface-100 pb-1">
+            <div className="flex items-center gap-1 mb-6 border-b border-surface-100 pb-0">
               {languages.map((lang) => (
                 <button
                   key={lang.id}
                   onClick={() => setSelectedLanguage(lang.id)}
                   aria-label={`Show ${lang.name} example`}
                   className={cn(
-                    'px-4 py-2 text-xs font-bold transition-colors relative',
+                    'px-4 py-4 text-xs font-bold transition-colors relative',
                     selectedLanguage === lang.id
                       ? 'text-surface-900'
                       : 'text-surface-400 hover:text-surface-600'

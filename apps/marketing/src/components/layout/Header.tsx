@@ -69,7 +69,7 @@ export function Header() {
                   onMouseEnter={() => setActiveDropdown(item.name)}
                   onMouseLeave={() => setActiveDropdown(null)}
                 >
-                  <button className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
+                  <button className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
                     {item.name}
                     <ChevronDown className={cn('w-4 h-4 transition-transform duration-150', activeDropdown === item.name && 'rotate-180')} />
                   </button>
@@ -102,7 +102,7 @@ export function Header() {
                   </AnimatePresence>
                 </div>
               ) : (
-                <Link key={item.name} href={item.href} className="px-3 py-2 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
+                <Link key={item.name} href={item.href} className="px-3 py-2.5 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
                   {item.name}
                 </Link>
               )
@@ -111,7 +111,7 @@ export function Header() {
 
           {/* CTA Buttons */}
           <div className="hidden lg:flex items-center gap-3">
-            <Link href="https://app.apexmail.ee/login" className="text-sm font-semibold text-surface-600 hover:text-surface-900 transition-colors px-3 py-2 hover:bg-surface-50 rounded-lg">
+            <Link href="https://app.apexmail.ee/login" className="text-sm font-semibold text-surface-600 hover:text-surface-900 transition-colors px-3 py-2.5 hover:bg-surface-50 rounded-lg">
               Sign In
             </Link>
             <Link href="https://app.apexmail.ee/signup" className="btn-primary text-sm shadow-sm">
@@ -121,9 +121,10 @@ export function Header() {
 
           {/* Mobile Menu Button */}
           <button
-            className="lg:hidden p-2 text-surface-600 hover:text-surface-900 rounded-lg hover:bg-surface-50 transition-colors"
+            className="lg:hidden p-2 text-surface-600 hover:text-surface-900 rounded-lg hover:bg-surface-50 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+            aria-expanded={mobileMenuOpen}
           >
             {mobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
           </button>
@@ -149,7 +150,7 @@ export function Header() {
                         <Link
                           key={subItem.name}
                           href={subItem.href}
-                          className="flex items-center gap-3 p-3 rounded-lg hover:bg-surface-50 transition-colors"
+                          className="flex items-center gap-3 p-3.5 rounded-lg hover:bg-surface-50 transition-colors"
                           onClick={() => setMobileMenuOpen(false)}
                         >
                           <subItem.icon className="w-5 h-5 text-surface-500" />
@@ -162,7 +163,7 @@ export function Header() {
                   <Link
                     key={item.name}
                     href={item.href}
-                    className="block px-3 py-2 text-surface-900 font-medium hover:bg-surface-50 rounded-lg text-sm"
+                    className="block px-3 py-3 text-surface-900 font-medium hover:bg-surface-50 rounded-lg text-sm"
                     onClick={() => setMobileMenuOpen(false)}
                   >
                     {item.name}

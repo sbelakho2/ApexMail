@@ -34,8 +34,9 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
                     </div>
                     <button
                         onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                        className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-lg transition-colors"
+                        className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-lg transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
                         aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+                        aria-expanded={mobileMenuOpen}
                     >
                         {mobileMenuOpen ? (
                             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

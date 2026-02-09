@@ -104,11 +104,11 @@ function LoadingOverlay({ isLoading = true, text, children }: LoadingOverlayProp
   return (
     <div className="relative">
       {children && <div className="opacity-50 pointer-events-none blur-sm transition-all duration-300">{children}</div>}
-      <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/50 backdrop-blur-sm z-50 rounded-xl transition-all duration-300">
-        <div className="premium-card p-4 rounded-full shadow-lg bg-white">
+      <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/50 backdrop-blur-sm z-50 rounded-xl transition-all duration-300">
+        <div className="premium-card p-4 rounded-full shadow-lg bg-card">
             <Spinner size="lg" />
         </div>
-        {text && <p className="mt-4 text-[13px] font-bold uppercase tracking-widest text-surface-500">{text}</p>}
+        {text && <p className="mt-4 text-[13px] font-bold uppercase tracking-widest text-muted-foreground">{text}</p>}
       </div>
     </div>
   );

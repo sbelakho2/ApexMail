@@ -3,14 +3,37 @@
 @tailwind utilities;
 
 :root {
+  /* Core Brand Colors (Style Guide v1) */
+  --brand-50: 239 246 255;
+  --brand-100: 219 234 254;
+  --brand-200: 191 219 254;
+  --brand-300: 147 197 253;
+  --brand-400: 96 165 250;
   --brand-500: 37 99 235;
+  --brand-600: 29 78 216;
   --brand-700: 23 66 180;
-  
+  --brand-800: 30 64 175;
+  --brand-900: 30 58 138;
+
+  /* Surfaces */
+  --surface-50: 248 250 252;
+  --surface-100: 241 245 249;
+  --surface-200: 226 232 240;
+  --surface-300: 203 213 225;
+  --surface-400: 148 163 184;
+  --surface-500: 100 116 139;
+  --surface-600: 71 85 105;
+  --surface-700: 51 65 85;
+  --surface-800: 30 41 59;
+  --surface-900: 15 23 42;
+
+  /* Semantic Colors */
   --success: 22 163 74;
   --warning: 217 119 6;
   --danger: 220 38 38;
   --info: 8 145 178;
 
+  /* Spacing */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -19,6 +42,7 @@
   --space-8: 32px;
   --space-12: 48px;
 
+  /* Radius */
   --radius-sm: 10px;
   --radius-md: 12px;
   --radius-lg: 18px;
@@ -31,6 +55,18 @@
   --surface: 15 23 42;
   --card-dark: 18 26 42;
   --divider-dark: 31 41 55;
+
+  /* Surface Colors - Dark Mode */
+  --surface-50: 15 23 42;
+  --surface-100: 18 26 42;
+  --surface-200: 31 41 55;
+  --surface-300: 51 65 85;
+  --surface-400: 71 85 105;
+  --surface-500: 100 116 139;
+  --surface-600: 148 163 184;
+  --surface-700: 203 213 225;
+  --surface-800: 226 232 240;
+  --surface-900: 248 250 252;
 }
 
 @layer base {
@@ -82,27 +118,47 @@
   ::selection {
     @apply bg-primary-500/20 text-surface-900;
   }
+
+  /* Focus visible styles for accessibility */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary-500 ring-offset-2 ring-offset-white;
+  }
 }
 
 @layer components {
+  /* Premium transitions */
+  .transition-premium {
+    @apply transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)];
+  }
+
   .container-marketing {
     @apply max-w-[1200px] mx-auto px-4 md:px-6 lg:px-8;
   }
 
   .honest-surface {
-    @apply bg-white border border-surface-200;
+    @apply bg-white border border-surface-200 rounded-lg transition-premium;
+  }
+
+  .premium-card {
+    @apply bg-white border border-surface-200 rounded-lg transition-premium;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 10px 20px rgba(16, 24, 40, 0.06);
+  }
+
+  .premium-card:hover {
+    @apply border-primary-500/30 bg-surface-50;
+    box-shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
   }
 
   .btn-primary {
-    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-medium rounded-md transition-all duration-200;
+    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-medium rounded-sm transition-premium;
   }
 
   .btn-secondary {
-    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-medium rounded-md transition-all duration-200;
+    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-medium rounded-sm transition-premium;
   }
 
   .btn-accent {
-    @apply px-6 py-3 bg-accent-500 hover:bg-accent-400 text-white font-medium rounded-md transition-all duration-200;
+    @apply px-6 py-3 bg-accent-500 hover:bg-accent-600 text-white font-medium rounded-sm transition-premium;
   }
 
   .section-title {
@@ -220,8 +276,8 @@ input[type='range']::-webkit-slider-track {
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  @apply w-5 h-5 rounded-full bg-primary-500 cursor-pointer;
-  margin-top: -6px;
+  @apply w-7 h-7 rounded-full bg-primary-500 cursor-pointer shadow-lg shadow-primary-500/20 border-2 border-white;
+  margin-top: -10px;
 }
 
 input[type='range']::-moz-range-track {
@@ -229,7 +285,7 @@ input[type='range']::-moz-range-track {
 }
 
 input[type='range']::-moz-range-thumb {
-  @apply w-5 h-5 rounded-full bg-primary-500 cursor-pointer border-0;
+  @apply w-7 h-7 rounded-full bg-primary-500 cursor-pointer border-2 border-white shadow-lg;
 }
 
 /* Terminal animation */
@@ -240,5 +296,14 @@ input[type='range']::-moz-range-thumb {
 
 .cursor-blink {
   animation: blink 1s infinite;
+}
+
+/* Safe area utilities */
+.safe-area-inset-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+.safe-area-inset-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
 }
 

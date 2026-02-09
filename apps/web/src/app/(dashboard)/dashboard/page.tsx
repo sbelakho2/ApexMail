@@ -37,6 +37,7 @@ import {
 import { ApexAreaChart, ApexBarChart } from '@/components/charts';
 import { cn, formatNumber, formatPercent, formatRelativeTime } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState } from '@/components/ui/empty-state';
 
 // ---------- Types matching GET /v1/analytics/dashboard response ----------
 
@@ -223,13 +224,13 @@ export default function DashboardPage() {
                 <ApexAreaChart
                     data={engagement.length > 0 ? engagement : [{ date: 'No data', opens: 0, clicks: 0 }]}
                     xKey="date"
-                    areas={[{ key: 'opens', name: 'Opens', color: '#2563EB' }, { key: 'clicks', name: 'Clicks', color: '#10B981' }]}
+                    areas={[{ key: 'opens', name: 'Opens', color: '#2563eb' }, { key: 'clicks', name: 'Clicks', color: '#16a34a' }]}
                     title="Engagement" description="Opens and clicks over the past 30 days" height={300}
                 />
                 <ApexBarChart
                     data={volume.length > 0 ? volume.map(v => ({ date: v.date, sent: v.sent })) : [{ date: 'No data', sent: 0 }]}
                     xKey="date"
-                    bars={[{ key: 'sent', name: 'Emails Sent', color: '#2563EB' }]}
+                    bars={[{ key: 'sent', name: 'Emails Sent', color: '#2563eb' }]}
                     title="Sending Volume" description="Emails sent over the past 30 days" height={300}
                 />
             </div>
@@ -243,9 +244,15 @@ export default function DashboardPage() {
                     </CardHeader>
                     <CardContent>
                         {campaigns.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                                <Mail className="h-8 w-8 mb-3" /><p className="text-sm">No messages sent yet</p>
-                            </div>
+                            <EmptyState
+                                icon={Mail}
+                                title="No messages sent yet"
+                                description="Start by creating your first campaign to see sending analytics and performance metrics here."
+                                action={{
+                                    label: 'Create Campaign',
+                                    onClick: () => window.location.href = '/campaigns/new'
+                                }}
+                            />
                         ) : (
                             <Table>
                                 <TableHeader>

@@ -114,7 +114,7 @@ export function SecuritySection() {
                   <div className="w-16 h-16 rounded-lg bg-white border border-surface-200 flex items-center justify-center mb-2 shadow-sm">
                     <span className="text-sm font-semibold text-surface-900 tracking-tight">{logo.name}</span>
                   </div>
-                  <div className="text-xs text-surface-500 font-medium whitespace-nowrap">{logo.description}</div>
+                  <div className="text-xs text-surface-600 font-bold uppercase tracking-wider">{logo.description}</div>
                 </div>
               ))}
             </div>
@@ -132,7 +132,7 @@ export function SecuritySection() {
  <FileCheck className="w-5 h-5 text-primary-600" />
  <div className="text-left">
  <div className="text-sm font-semibold text-surface-900">Security Audit Reports Available</div>
- <div className="text-xs text-surface-500">Enterprise customers receive full penetration test results</div>
+ <div className="text-xs text-surface-600 font-medium">Enterprise customers receive full penetration test results</div>
  </div>
  </div>
  </motion.div>

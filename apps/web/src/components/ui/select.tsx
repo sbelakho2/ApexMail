@@ -13,7 +13,7 @@ const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
 
 const selectTriggerVariants = cva(
-  'flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 shadow-sm transition-all duration-200',
+  'flex w-full items-center justify-between border border-input bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 shadow-sm transition-all duration-200',
   {
     variants: {
       variant: {
@@ -23,9 +23,9 @@ const selectTriggerVariants = cva(
         ghost: 'border-transparent bg-transparent shadow-none hover:bg-muted/50',
       },
       size: {
-        sm: 'h-8 px-2.5 text-xs',
-        default: 'h-10 px-3',
-        lg: 'h-12 px-4 text-[16px]',
+        sm: 'h-9 px-2.5 text-xs rounded-sm min-h-[44px]',
+        default: 'h-11 px-3 rounded-md',
+        lg: 'h-12 px-4 text-[17px] rounded-lg',
       },
     },
     defaultVariants: {
@@ -142,7 +142,7 @@ const SelectItem = React.forwardRef<
  <SelectPrimitive.Item
  ref={ref}
  className={cn(
- 'relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
+ 'relative flex w-full cursor-default select-none items-center rounded-sm py-2.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]',
  className
  )}
  {...props}

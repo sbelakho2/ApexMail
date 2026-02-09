@@ -96,7 +96,7 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <link rel="manifest" href="/manifest.json" />
       </head>
-      <body className="font-sans antialiased min-h-screen">
+      <body className="font-sans antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom">
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />

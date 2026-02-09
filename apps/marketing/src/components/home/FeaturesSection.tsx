@@ -129,7 +129,7 @@ export function FeaturesSection() {
  initial={{ opacity: 0, x: -20 }}
  animate={inView ? { opacity: 1, x: 0 } : {}}
  transition={{ delay: categoryIndex * 0.1 }}
- className="text-lg font-semibold text-surface-400 mb-8 flex items-center gap-3"
+ className="text-sm font-bold uppercase tracking-widest text-surface-600 mb-8 flex items-center gap-3"
  >
  <span className="w-8 h-px bg-surface-200" />
  {category.category}
@@ -149,7 +149,7 @@ export function FeaturesSection() {
                 <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                   <feature.icon className="w-5 h-5" strokeWidth={1.5} />
                 </div>
-                <span className="inline-flex items-center px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 text-xs font-medium">
+                <span className="inline-flex items-center px-2 py-1 rounded-sm bg-surface-50 text-surface-600 border border-surface-200 text-xs font-bold uppercase tracking-wider">
                   {feature.badge}
                 </span>
               </div>

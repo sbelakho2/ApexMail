@@ -1,9 +1,10 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
+const jetbrains = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains' });
 
 export const metadata: Metadata = {
     title: {
@@ -69,7 +70,7 @@ export default function RootLayout({
                     }}
                 />
             </head>
-            <body className={`${inter.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
+            <body className={`${inter.variable} ${jetbrains.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
                 <main className="min-h-screen bg-background">{children}</main>
                 <Toaster />
             </body>

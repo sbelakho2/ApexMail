@@ -1,10 +1,11 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import { ControlPlaneShell } from '../components/layout/control-plane-shell';
 import { Providers } from '../components/layout/providers';
 
-const inter = Inter({ subsets: ['latin'] });
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
+const jetbrains = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains' });
 
 export const metadata: Metadata = {
     title: 'ApexMail Control Plane',
@@ -34,7 +35,7 @@ export default function RootLayout({
 }) {
     return (
         <html lang="en">
-            <body className={inter.className}>
+            <body className={`${inter.variable} ${jetbrains.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
                 <Providers>
                     <ControlPlaneShell>{children}</ControlPlaneShell>
                 </Providers>

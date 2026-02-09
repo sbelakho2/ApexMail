@@ -39,9 +39,10 @@ function resolveTheme(theme: 'light' | 'dark' | 'system'): 'light' | 'dark' {
 interface HeaderProps {
  className?: string;
  onMenuClick?: () => void;
+ isMobileMenuOpen?: boolean;
 }
 
-export function Header({ className, onMenuClick }: HeaderProps) {
+export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps) {
  // FIX-095: Use zustand UIStore for persisted theme preference
  const storeTheme = useUIStore((s) => s.theme);
  const setStoreTheme = useUIStore((s) => s.setTheme);
@@ -84,7 +85,8 @@ export function Header({ className, onMenuClick }: HeaderProps) {
           size="icon"
           className="md:hidden"
           onClick={onMenuClick}
-          aria-label="Toggle menu"
+          aria-label={isMobileMenuOpen ? 'Close menu' : 'Open menu'}
+          aria-expanded={isMobileMenuOpen}
         >
           <Menu className="h-5 w-5" />
         </Button>
@@ -199,7 +201,7 @@ export function Header({ className, onMenuClick }: HeaderProps) {
  {/* User menu */}
  <DropdownMenu>
  <DropdownMenuTrigger asChild>
- <Button variant="ghost" className="relative h-9 w-9 rounded-full" aria-label="User menu">
+ <Button variant="ghost" className="relative h-11 w-11 rounded-full" aria-label="User menu">
  <Avatar size="sm">
  <AvatarImage src="/avatar.png" alt="User" />
  <AvatarFallback>JD</AvatarFallback>

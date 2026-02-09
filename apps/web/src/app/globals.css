@@ -10,20 +10,20 @@
         --card-foreground: 15 23 42;
         --popover: 255 255 255;
         --popover-foreground: 15 23 42;
-        --primary: 36 99 235;
-        --primary-foreground: 248 250 252;
+        --primary: 37 99 235;
+        --primary-foreground: 255 255 255;
         --secondary: 241 245 249;
         --secondary-foreground: 15 23 42;
         --muted: 241 245 249;
         --muted-foreground: 71 85 105;
         --accent: 241 245 249;
         --accent-foreground: 15 23 42;
-        --destructive: 239 68 68;
-        --destructive-foreground: 248 250 252;
-        --error: 239 68 68;
-        --border: 230 232 240;
-        --input: 230 232 240;
-        --ring: 36 99 235;
+        --destructive: 220 38 38;
+        --destructive-foreground: 255 255 255;
+        --error: 220 38 38;
+        --border: 226 232 240;
+        --input: 226 232 240;
+        --ring: 37 99 235;
         
         --radius-sm: 10px;
         --radius-md: 12px;
@@ -35,19 +35,31 @@
         --warning: 217 119 6;
         --danger: 220 38 38;
         --info: 8 145 178;
+        --error: 220 38 38;
 
-        /* ApexMail brand colors */
-        --apex: 59 130 246; /* Brand blue */
-        --apex-50: 239 246 255;
-        --apex-100: 219 234 254;
-        --apex-200: 191 219 254;
-        --apex-300: 147 197 253;
-        --apex-400: 96 165 250;
-        --apex-500: 59 130 246;
-        --apex-600: 37 99 235;
-        --apex-700: 29 78 216;
-        --apex-800: 30 64 175;
-        --apex-900: 30 58 138;
+        /* Surface Colors (Style Guide v1) */
+        --surface-50: 248 250 252;
+        --surface-100: 241 245 249;
+        --surface-200: 226 232 240;
+        --surface-300: 203 213 225;
+        --surface-400: 148 163 184;
+        --surface-500: 100 116 139;
+        --surface-600: 71 85 105;
+        --surface-700: 51 65 85;
+        --surface-800: 30 41 59;
+        --surface-900: 15 23 42;
+
+        /* Core Brand Colors (Style Guide v1) */
+        --brand-50: 239 246 255;
+        --brand-100: 219 234 254;
+        --brand-200: 191 219 254;
+        --brand-300: 147 197 253;
+        --brand-400: 96 165 250;
+        --brand-500: 37 99 235;
+        --brand-600: 29 78 216;
+        --brand-700: 23 66 180;
+        --brand-800: 30 64 175;
+        --brand-900: 30 58 138;
 
         --space-1: 4px;
         --space-2: 8px;
@@ -59,25 +71,36 @@
     }
     .dark {
         --background: 15 23 42;
-        --foreground: 229 231 235;
+        --foreground: 248 250 252;
         --card: 18 26 42;
         --card-foreground: 229 231 235;
         --popover: 15 23 42;
         --popover-foreground: 229 231 235;
-        --primary: 36 99 235;
-        --primary-foreground: 248 250 252;
+        --primary: 37 99 235;
+        --primary-foreground: 255 255 255;
         --secondary: 18 26 42;
         --secondary-foreground: 229 231 235;
         --muted: 18 26 42;
         --muted-foreground: 203 213 225;
         --accent: 18 26 42;
         --accent-foreground: 229 231 235;
-        --destructive: 127 29 29;
-        --destructive-foreground: 248 250 252;
+        --destructive: 185 28 28;
+        --destructive-foreground: 255 255 255;
         --error: 239 68 68;
         --border: 31 41 55;
         --input: 31 41 55;
-        --ring: 36 99 235;
+        --ring: 37 99 235;
+
+        --surface-50: 15 23 42;
+        --surface-100: 18 26 42;
+        --surface-200: 31 41 55;
+        --surface-300: 51 65 85;
+        --surface-400: 71 85 105;
+        --surface-500: 100 116 139;
+        --surface-600: 148 163 184;
+        --surface-700: 203 213 225;
+        --surface-800: 226 232 240;
+        --surface-900: 248 250 252;
     }
 }
 
@@ -157,14 +180,19 @@
 }
 
 @layer components {
+    /* Premium transitions */
+    .transition-premium {
+        @apply transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)];
+    }
+
     /* Honest surfaces - Rams-grade minimalism */
     .honest-surface {
-        @apply bg-card border border-border;
+        @apply bg-card border border-border rounded-md transition-premium;
     }
 
     /* Card with standard radius and honest border shift */
     .premium-card {
-        @apply bg-card border border-border rounded-lg transition-all duration-150 ease-out;
+        @apply bg-card border border-border rounded-lg transition-premium;
         box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06);
     }
 

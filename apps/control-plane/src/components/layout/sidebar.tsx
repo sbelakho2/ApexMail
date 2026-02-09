@@ -110,11 +110,12 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
                                             href={item.href}
                                             onClick={handleLinkClick}
                                             className={cn(
-                                                'flex items-center gap-3 px-3 py-2 md:py-2.5 rounded-lg text-sm transition-all',
+                                                'flex items-center gap-3 px-3 py-3 rounded-lg text-sm transition-all',
                                                 pathname === item.href
-                                                    ? 'bg-blue-50 text-blue-700 font-medium border border-blue-100'
+                                                    ? 'bg-brand-50 text-brand-700 font-medium border border-brand-100 shadow-[inset_0_0_0_1px_rgba(37,99,235,0.05)]'
                                                     : 'hover:bg-surface-50 text-surface-600 hover:text-surface-900'
                                             )}
+                                            aria-current={pathname === item.href ? 'page' : undefined}
                                         >
                                             <span className="text-base">{item.icon}</span>
                                             {item.label}

@@ -42,7 +42,7 @@ ONNX_DIR = os.path.join(os.path.dirname(__file__), "onnx_model")
 # QLoRA config — optimized for 6GB VRAM
 QLORA_CONFIG = {
     "r": 16,                    # Lower rank for faster training on small GPU
-    "lora_alpha": 32,           # Keep alpha/r scaling similar
+    "lora_alpha": 64,           # Stronger adapter scaling to improve downstream effect
     "lora_dropout": 0.05,       # Regularization
     "target_modules": [         # Which layers to adapt
         "q_proj", "k_proj", "v_proj", "o_proj",
@@ -62,15 +62,15 @@ BNB_CONFIG = BitsAndBytesConfig(
 
 # Training hyperparameters — tuned for small dataset + small model
 TRAINING_DEFAULTS = {
-    "num_train_epochs": 8,
+    "num_train_epochs": 6,
     "per_device_train_batch_size": 1,
     "per_device_eval_batch_size": 1,
-    "gradient_accumulation_steps": 16,  # Keep effective batch size ≈ 16
+    "gradient_accumulation_steps": 8,   # Effective batch size ≈ 8
     "learning_rate": 2e-4,
     "weight_decay": 0.01,
     "warmup_ratio": 0.1,
     "lr_scheduler_type": "cosine",
-    "max_seq_length": 768,
+    "max_seq_length": 2048, # TinyLlama's native context window (was 768 — the root cause bug!)
     "fp16": False,
     "bf16": True,                       # RTX 4050 supports bf16
     "logging_steps": 5,
@@ -220,12 +220,9 @@ def train(args) -> str:
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
 
-    # 4. Apply LoRA
-    print("🔧 Applying LoRA adapters...")
+    # 4. LoRA config (applied by SFTTrainer)
+    print("🔧 Preparing LoRA config...")
     lora_config = LoraConfig(**QLORA_CONFIG)
-    model = get_peft_model(model, lora_config)
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
 
     # 5. Training arguments
     epochs = args.epochs or TRAINING_DEFAULTS["num_train_epochs"]
@@ -272,7 +269,11 @@ def train(args) -> str:
         eval_dataset=val_ds,
         processing_class=tokenizer,
         callbacks=[ProgressCallback()],
+        peft_config=lora_config,
     )
+
+    trainable_params = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+    print(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
 
     # 7. Train!
     train_result = trainer.train()

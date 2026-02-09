@@ -13,9 +13,9 @@ const inputVariants = cva(
         ghost: 'border-transparent bg-transparent shadow-none hover:bg-muted/50',
       },
       inputSize: {
-        default: 'h-10 px-3 py-2',
-        sm: 'h-8 px-2.5 py-1 text-xs rounded-sm',
-        lg: 'h-11 px-4 py-3 text-[17px] rounded-lg',
+        default: 'h-11 px-3 py-2',
+        sm: 'h-9 px-2.5 py-1 text-xs rounded-sm min-h-[44px]',
+        lg: 'h-12 px-4 py-3 text-[17px] rounded-lg',
       },
     },
  defaultVariants: {
