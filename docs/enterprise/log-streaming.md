@@ -39,7 +39,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/log-streams \
     "destination": {
       "type": "s3",
       "bucket": "apexmail-logs",
-      "region": "us-east-1",
+      "region": "eu-central-1",
       "prefix": "email-events/",
       "credentials": {
         "accessKeyId": "AKIA...",
@@ -94,7 +94,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/log-streams \
   "destination": {
     "type": "s3",
     "bucket": "your-bucket",
-    "region": "us-east-1",
+    "region": "eu-central-1",
     "prefix": "apexmail/events/",
     "credentials": {
       "accessKeyId": "AKIA...",
@@ -132,19 +132,7 @@ s3://your-bucket/apexmail/events/2024/01/15/events_1705320000.json.gz
 }
 ```
 
-BigQuery schema is automatically created:
-```sql
-CREATE TABLE email_analytics.events (
-  event_id STRING,
-  event_type STRING,
-  email_id STRING,
-  recipient STRING,
-  timestamp TIMESTAMP,
-  metadata JSON,
-  tags ARRAY<STRING>
-)
-PARTITION BY DATE(timestamp);
-```
+BigQuery schema is automatically created with columns for event ID, event type, email ID, recipient, timestamp, metadata, and tags. The table is partitioned by date for efficient querying.
 
 ### Apache Kafka
 
@@ -152,7 +140,7 @@ PARTITION BY DATE(timestamp);
 {
   "destination": {
     "type": "kafka",
-    "brokers": ["kafka1:9092", "kafka2:9092"],
+    "brokers": ["kafka.yourcompany.com:9092", "kafka-2.yourcompany.com:9092"],
     "topic": "email-events",
     "authentication": {
       "mechanism": "SASL_SSL",
@@ -172,7 +160,7 @@ PARTITION BY DATE(timestamp);
   "destination": {
     "type": "kinesis",
     "streamName": "email-events",
-    "region": "us-east-1",
+    "region": "eu-central-1",
     "credentials": {
       "accessKeyId": "AKIA...",
       "secretAccessKey": "..."
@@ -188,15 +176,11 @@ PARTITION BY DATE(timestamp);
 {
   "destination": {
     "type": "elasticsearch",
-    "nodes": ["https://es-cluster:9200"],
+    "nodes": ["https://your-es-cluster.yourcompany.com:9200"],
     "index": "email-events",
     "authentication": {
       "username": "...",
       "password": "..."
-    },
-    "indexTemplate": {
-      "numberOfShards": 3,
-      "numberOfReplicas": 1
     }
   }
 }
@@ -228,12 +212,7 @@ PARTITION BY DATE(timestamp);
       "Authorization": "Bearer your-token",
       "Content-Type": "application/json"
     },
-    "batchSize": 100,
-    "retryPolicy": {
-      "maxRetries": 5,
-      "initialBackoffMs": 1000,
-      "maxBackoffMs": 60000
-    }
+    "batchSize": 100
   }
 }
 ```
@@ -454,31 +433,21 @@ Response:
 
 ## Error Handling
 
-### Retry Configuration
+### Retry Behavior
+
+Failed log deliveries are automatically retried with exponential backoff. You can configure retry behavior in your stream settings.
+
+### Failed Events
+
+Events that fail delivery after all retries:
 
 ```json
 {
-  "retryPolicy": {
-    "enabled": true,
-    "maxRetries": 5,
-    "initialBackoffMs": 1000,
-    "maxBackoffMs": 60000,
-    "backoffMultiplier": 2
-  }
-}
-```
-
-### Dead Letter Queue
-
-Failed events after all retries:
-
-```json
-{
-  "deadLetterQueue": {
+  "failedEvents": {
     "enabled": true,
     "destination": {
       "type": "s3",
-      "bucket": "apexmail-dlq",
+      "bucket": "your-company-failed-events",
       "prefix": "failed-events/"
     },
     "retentionDays": 30
@@ -523,6 +492,6 @@ Failed events after all retries:
 2. **Enable Compression** - Reduce bandwidth and storage costs
 3. **Filter at Source** - Only stream events you need
 4. **Monitor Error Rates** - Set up alerts for delivery failures
-5. **Use Dead Letter Queues** - Never lose events
+5. **Enable Failed Event Storage** - Never lose events
 6. **Partition by Date** - Easier querying and retention management
 7. **Hash PII** - Comply with privacy regulations

@@ -144,7 +144,7 @@ export function LiveAPIConsole() {
 
   return (
     <section ref={ref} id="api-console" className="py-20 lg:py-32 relative bg-surface-50">
-      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -153,7 +153,7 @@ export function LiveAPIConsole() {
         >
           <h2 className="section-title mb-4">
             <span className="text-surface-900">Try It</span>{' '}
-            <span className="text-primary-600">Right Now</span>
+            <span className="text-brand-500">Right Now</span>
           </h2>
           <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
             Send a real email in under 10 seconds. No signup, no credit card, no BS.
@@ -170,21 +170,21 @@ export function LiveAPIConsole() {
           {/* Left - Interactive Demo */}
           <div className="p-8 bg-white rounded-lg border border-surface-200 shadow-sm">
             <div className="flex items-center gap-3 mb-8">
-              <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
+              <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                 <Terminal className="w-5 h-5" strokeWidth={1.5} />
               </div>
               <div>
-                <h3 className="font-bold text-surface-900 text-sm">Live API Console</h3>
-                <p className="text-xs text-surface-500 font-medium">Test delivery speed in real-time</p>
+                <h3 className="font-bold text-surface-900 text-[14px]">Live API Console</h3>
+                <p className="text-[14px] text-surface-500 font-medium">Test delivery speed in real-time</p>
               </div>
-              <span className="ml-auto text-xs px-2 py-1 rounded bg-surface-50 text-surface-600 border border-surface-200 font-bold">
+              <span className="ml-auto text-[14px] px-2 py-1 rounded-sm bg-surface-50 text-surface-600 border border-surface-200 font-bold">
                 No Login
               </span>
             </div>
 
             {/* Email Input */}
             <div className="mb-6">
-              <label htmlFor="api-console-email" className="block text-xs font-semibold text-surface-700 mb-2">Your email address</label>
+              <label htmlFor="api-console-email" className="block text-[14px] font-semibold text-surface-700 mb-2">Your email address</label>
               <input
                 id="api-console-email"
                 type="email"
@@ -192,7 +192,7 @@ export function LiveAPIConsole() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
                 aria-describedby="email-hint"
-                className="w-full px-4 py-3 bg-white border border-surface-200 rounded-sm text-surface-900 placeholder-surface-400 focus:outline-none focus:border-primary-500 focus:ring-2 focus:ring-primary-500/10 transition-colors"
+                className="w-full px-4 py-3 bg-white border border-surface-200 rounded-sm text-surface-900 placeholder-surface-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/10 transition-colors"
               />
               <span id="email-hint" className="sr-only">Enter your email to receive a test email from the API</span>
             </div>
@@ -200,11 +200,11 @@ export function LiveAPIConsole() {
             {/* Curl Command Preview */}
             <div className="mb-8">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-semibold text-surface-700">cURL command</span>
+                <span className="text-[14px] font-semibold text-surface-700">cURL command</span>
                 <button
                   onClick={handleCopy}
                   aria-label={copied ? 'Copied to clipboard' : 'Copy cURL command'}
-                  className="flex items-center gap-1.5 text-xs font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-3 h-10 rounded border border-surface-200 hover:bg-surface-50"
+                  className="flex items-center gap-1.5 text-[14px] font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-3 h-10 rounded-sm border border-surface-200 hover:bg-surface-50"
                 >
                   {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   {copied ? 'Copied' : 'Copy'}
@@ -220,7 +220,7 @@ export function LiveAPIConsole() {
               onClick={handleSend}
               disabled={isSending}
               className={cn(
-                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm',
+                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-brand-500 rounded-md hover:bg-brand-600 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm',
               )}
             >
               {isSending ? (

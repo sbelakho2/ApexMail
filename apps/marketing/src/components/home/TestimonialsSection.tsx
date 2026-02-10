@@ -73,7 +73,7 @@ export function TestimonialsSection() {
 
  return (
  <section ref={ref} className="py-20 lg:py-32 relative overflow-hidden bg-surface-50">
- <div className="relative max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  {/* Header */}
  <motion.div
  initial={{ opacity: 0, y: 20 }}
@@ -81,9 +81,9 @@ export function TestimonialsSection() {
  className="text-center mb-12"
  >
  <h2 className="section-title mb-4">
- <span className="text-surface-900">Trusted by</span>{' '}
- <span className="text-primary-500">Developers Who Ship</span>
- </h2>
+            <span className="text-surface-900">Trusted by</span>{' '}
+            <span className="text-brand-500">Developers Who Ship</span>
+          </h2>
  <p className="text-surface-600 text-[17px] max-w-2xl mx-auto leading-relaxed">
  Don&apos;t take our word for it. Here&apos;s what our customers have to say.
  </p>
@@ -127,18 +127,18 @@ export function TestimonialsSection() {
  {/* Stats Card */}
  <div className="lg:w-64 flex-shrink-0">
  <div className="bg-surface-50 rounded-lg p-6 border border-surface-200">
- <div className="text-xs font-semibold text-surface-500 mb-4">{activeTestimonial.stats.metric}</div>
- <div className="space-y-4">
- <div>
- <div className="text-xs text-surface-400 mb-1 font-medium">Before</div>
- <div className="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">{activeTestimonial.stats.before}</div>
- </div>
- <div>
- <div className="text-xs text-surface-400 mb-1 font-medium">After</div>
- <div className="text-2xl font-mono text-primary-600 font-bold tabular-nums">{activeTestimonial.stats.after}</div>
- </div>
- </div>
- <div className="mt-6 pt-4 border-t border-surface-200 text-xs text-surface-500 font-medium">
+                <div className="text-[14px] font-semibold text-surface-500 mb-4">{activeTestimonial.stats.metric}</div>
+                <div className="space-y-4">
+                  <div>
+                    <div className="text-[14px] text-surface-400 mb-1 font-medium">Before</div>
+                    <div className="text-lg font-mono text-surface-700 font-semibold tabular-nums line-through decoration-surface-400/50">{activeTestimonial.stats.before}</div>
+                  </div>
+                  <div>
+                    <div className="text-[14px] text-surface-400 mb-1 font-medium">After</div>
+                    <div className="text-2xl font-mono text-brand-500 font-bold tabular-nums">{activeTestimonial.stats.after}</div>
+                  </div>
+                </div>
+                <div className="mt-6 pt-4 border-t border-surface-200 text-[14px] text-surface-500 font-medium">
  Industry: {activeTestimonial.industry}
  </div>
  </div>

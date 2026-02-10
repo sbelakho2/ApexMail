@@ -58,9 +58,9 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/schedule \
       }
     ],
     "focusAreas": [
-      "deliverability_improvement",
-      "scaling_for_growth",
-      "compliance_audit"
+      "deliverability",
+      "scaling",
+      "compliance"
     ],
     "additionalContext": "Preparing for Black Friday campaign, expecting 5x volume increase"
   }'
@@ -80,15 +80,12 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/schedule \
     "meetingLink": "https://meet.apexmail.ee/qbr/abc123",
     "apexMailTeam": [
       {
-        "name": "Sarah Chen",
         "role": "Customer Success Manager"
       },
       {
-        "name": "Mike Johnson",
         "role": "Technical Account Manager"
       },
       {
-        "name": "Lisa Park",
         "role": "Deliverability Specialist"
       }
     ],
@@ -373,12 +370,12 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/custom-analysis \
 
 | Analysis Type | Description |
 |--------------|-------------|
-| `competitor_benchmark` | Compare against industry competitors |
-| `campaign_deep_dive` | Detailed analysis of specific campaigns |
-| `list_health_audit` | Comprehensive list hygiene analysis |
-| `deliverability_forensics` | Root cause analysis for deliverability issues |
-| `roi_analysis` | Email marketing ROI calculation |
-| `predictive_analytics` | Forecasting for upcoming periods |
+| Competitor Benchmark | Compare against industry competitors |
+| Campaign Deep Dive | Detailed analysis of specific campaigns |
+| List Health Audit | Comprehensive list hygiene analysis |
+| Deliverability Forensics | Root cause analysis for deliverability issues |
+| ROI Analysis | Email marketing ROI calculation |
+| Predictive Analytics | Forecasting for upcoming periods |
 
 ## QBR Preparation Checklist
 

@@ -7,7 +7,7 @@ ApexMail is built as a modular monorepo with clear service boundaries:
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                              Load Balancer                              │
-│                         (nginx/HAProxy/Cloudflare)                      │
+│                         (nginx reverse proxy)                     │
 └────────────────────────────────┬───────────────────────────────────────┘
                                  │
          ┌───────────────────────┼───────────────────────┐

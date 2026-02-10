@@ -4,23 +4,7 @@ Comprehensive security documentation for ApexMail.
 
 ## Security Overview
 
-ApexMail implements defense-in-depth security with multiple layers:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Network Layer                             │
-│  • TLS 1.2+ encryption • DDoS protection • WAF rules            │
-├─────────────────────────────────────────────────────────────────┤
-│                      Application Layer                           │
-│  • Authentication • Authorization • Input validation            │
-├─────────────────────────────────────────────────────────────────┤
-│                         Data Layer                               │
-│  • Encryption at rest • Field-level encryption • Tokenization   │
-├─────────────────────────────────────────────────────────────────┤
-│                      Infrastructure Layer                        │
-│  • Container isolation • Network segmentation • Secret mgmt     │
-└─────────────────────────────────────────────────────────────────┘
-```
+ApexMail implements defense-in-depth security with multiple independent layers including network protection, application security, data encryption, and infrastructure hardening.
 
 ---
 
@@ -83,19 +67,14 @@ Content-Type: application/json
 
 #### Consent Management
 
-```typescript
-interface ConsentRecord {
-  id: string;
-  subjectEmail: string;
-  purpose: 'marketing' | 'transactional' | 'analytics';
-  granted: boolean;
-  grantedAt: Date | null;
-  revokedAt: Date | null;
-  ipAddress: string;
-  userAgent: string;
-  proofUrl: string;
-}
-```
+Every consent event is recorded with:
+
+- **Subject email** — the data subject's email address.
+- **Purpose** — the processing purpose (marketing, transactional, or analytics).
+- **Granted/revoked** — whether consent was given or withdrawn, and when.
+- **Proof** — IP address, user agent, and a link to the consent source (e.g., form URL) for audit purposes.
+
+Consent records are append-only and tamper-evident — revocations create new entries rather than modifying existing ones.
 
 ### CAN-SPAM Compliance
 
@@ -126,53 +105,23 @@ ApexMail security controls aligned with SOC 2 Trust Service Criteria:
 
 ### Authentication Methods
 
-| Method | Use Case | Security Level |
-|--------|----------|----------------|
-| JWT + Refresh Token | User sessions | High |
-| API Keys | Server-to-server | Medium-High |
-| OAuth 2.0 + PKCE | Third-party apps | High |
-| SAML 2.0 | Enterprise SSO | High |
+ApexMail supports multiple authentication methods:
+
+- **API Keys** — Server-to-server integration
+- **OAuth 2.0 + PKCE** — Third-party application integration
+- **SAML 2.0** — Enterprise single sign-on
+
+All authentication methods use industry-standard security.
 
 ### Role-Based Access Control (RBAC)
 
-```typescript
-interface Permission {
-  resource: string;
-  action: 'create' | 'read' | 'update' | 'delete' | 'admin';
-  conditions?: Record<string, unknown>;
-}
+| Role | Capabilities |
+|------|-------------|
+| **Viewer** | Read-only access to messages, campaigns, and analytics |
+| **Editor** | Everything in Viewer, plus create/edit messages and templates |
+| **Admin** | Full access to all resources and settings |
 
-interface Role {
-  name: string;
-  permissions: Permission[];
-  inherits?: string[];
-}
-
-// Built-in roles
-const roles = {
-  viewer: {
-    permissions: [
-      { resource: 'messages', action: 'read' },
-      { resource: 'campaigns', action: 'read' },
-      { resource: 'analytics', action: 'read' },
-    ],
-  },
-  editor: {
-    inherits: ['viewer'],
-    permissions: [
-      { resource: 'messages', action: 'create' },
-      { resource: 'templates', action: 'create' },
-      { resource: 'templates', action: 'update' },
-    ],
-  },
-  admin: {
-    inherits: ['editor'],
-    permissions: [
-      { resource: '*', action: 'admin' },
-    ],
-  },
-};
-```
+Roles are hierarchical — each role inherits the permissions of the role below it. Custom roles with fine-grained permissions are available on Enterprise plans.
 
 ### Multi-Factor Authentication (MFA)
 
@@ -196,93 +145,30 @@ MFA is enforced for:
 
 | Data Type | Encryption | Algorithm |
 |-----------|------------|-----------|
-| Database fields (PII) | Application-level | AES-256-GCM |
-| Database (full) | Transparent | AES-256 (PostgreSQL) |
+| Sensitive fields (PII) | Field-level | AES-256-GCM |
+| Storage (full) | Transparent | AES-256 |
 | File storage | Server-side | AES-256 |
 | Backups | Encrypted | AES-256-GCM |
 
 #### Field-Level Encryption
 
-```typescript
-// Encrypted fields in database
-interface EncryptedContact {
-  id: string;
-  email: string;                    // Searchable hash
-  emailEncrypted: string;           // Full encrypted value
-  customFields: string;             // Encrypted JSON
-  encryptionKeyId: string;          // Key version
-}
+Sensitive fields (email addresses, names, custom metadata) are individually encrypted using AES-256-GCM. This ensures that even if an attacker gains access to the underlying storage, individual fields remain protected.
 
-// Encryption implementation
-class FieldEncryption {
-  async encrypt(plaintext: string, context: string): Promise<EncryptedField> {
-    const key = await this.keyManager.getCurrentKey();
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key.material, iv);
-    cipher.setAAD(Buffer.from(context));
-    
-    const encrypted = Buffer.concat([
-      cipher.update(plaintext, 'utf8'),
-      cipher.final(),
-    ]);
-    const tag = cipher.getAuthTag();
-    
-    return {
-      ciphertext: Buffer.concat([iv, encrypted, tag]).toString('base64'),
-      keyId: key.id,
-    };
-  }
-}
-```
+- Key rotation happens seamlessly without downtime.
+- Encrypted fields remain searchable through your API and dashboard.
 
 ### Data in Transit
 
 - **TLS 1.2+** for all connections
 - **TLS 1.3** preferred where supported
-- **Certificate pinning** for mobile apps
-- **HSTS** enabled with preload
+- **HSTS** enabled
 
-TLS Configuration:
-```nginx
-ssl_protocols TLSv1.2 TLSv1.3;
-ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-ssl_prefer_server_ciphers off;
-ssl_session_timeout 1d;
-ssl_session_cache shared:SSL:50m;
-ssl_stapling on;
-ssl_stapling_verify on;
-```
+Only forward-secret key exchange with authenticated encryption modes is accepted. Legacy ciphers are disabled.
 
 ### Key Management
 
-```typescript
-interface KeyVersion {
-  id: string;
-  material: Buffer;
-  algorithm: 'aes-256-gcm';
-  createdAt: Date;
-  expiresAt: Date;
-  status: 'active' | 'rotating' | 'retired';
-}
-
-class KeyManager {
-  private keys: Map<string, KeyVersion> = new Map();
-  
-  async rotateKey(): Promise<void> {
-    const newKey = await this.generateKey();
-    const oldKey = await this.getCurrentKey();
-    
-    // Mark old key as rotating
-    oldKey.status = 'rotating';
-    
-    // Re-encrypt data in background
-    await this.reEncryptData(oldKey.id, newKey.id);
-    
-    // Retire old key
-    oldKey.status = 'retired';
-  }
-}
-```
+- Encryption keys are rotated periodically with zero downtime.
+- Distinct keys are used for different purposes (data encryption, token signing, backup encryption) to limit blast radius.
 
 ---
 
@@ -299,74 +185,26 @@ class KeyManager {
 | **Configuration** | Settings changes, webhook updates, integration changes |
 | **Security** | Failed logins, rate limiting, suspicious activity |
 
-### Audit Log Format
+### Audit Log Contents
 
-```typescript
-interface AuditEntry {
-  id: string;
-  timestamp: Date;
-  
-  // Actor
-  actor: {
-    type: 'user' | 'api_key' | 'system' | 'webhook';
-    id: string;
-    email?: string;
-    ip: string;
-    userAgent: string;
-  };
-  
-  // Action
-  action: string;
-  resource: {
-    type: string;
-    id: string;
-  };
-  
-  // Context
-  changes?: {
-    before: Record<string, unknown>;
-    after: Record<string, unknown>;
-  };
-  metadata?: Record<string, unknown>;
-  
-  // Integrity
-  previousHash: string;
-  hash: string;
-  signature: string;
-}
-```
+Each audit log entry records:
+
+| Field | Description |
+|-------|-------------|
+| **Timestamp** | When the event occurred (UTC) |
+| **Actor** | Who performed the action (user, API key, or system) |
+| **IP address** | Source IP of the request |
+| **Action** | What was done (e.g., `campaign.send`, `contact.delete`) |
+| **Resource** | The affected resource type and ID |
+| **Changes** | Before/after values for modifications |
 
 ### Tamper-Evident Chain
 
-```typescript
-function createAuditEntry(action: AuditAction, previousEntry: AuditEntry | null): AuditEntry {
-  const entry: Partial<AuditEntry> = {
-    id: generateId(),
-    timestamp: new Date(),
-    ...action,
-    previousHash: previousEntry?.hash ?? GENESIS_HASH,
-  };
-  
-  // Create hash chain
-  entry.hash = crypto
-    .createHash('sha256')
-    .update(JSON.stringify(entry))
-    .digest('hex');
-  
-  // Sign with HSM
-  entry.signature = hsm.sign(entry.hash);
-  
-  return entry as AuditEntry;
-}
-```
+Audit log entries are cryptographically chained — each entry includes a hash that depends on the previous entry. This means any modification to a historical record breaks the chain and is immediately detectable. Entries are additionally signed to prevent forgery.
 
 ### Audit Log Retention
 
-| Log Type | Retention | Storage |
-|----------|-----------|---------|
-| Security events | 7 years | Immutable storage |
-| Access logs | 2 years | Compressed archive |
-| Debug logs | 30 days | Hot storage |
+Security events are retained long-term in tamper-proof storage. Access logs and operational logs have retention periods appropriate to their sensitivity. Retention periods meet or exceed regulatory requirements.
 
 ---
 
@@ -374,22 +212,17 @@ function createAuditEntry(action: AuditAction, previousEntry: AuditEntry | null)
 
 ### Security Testing
 
-| Type | Frequency | Tools |
-|------|-----------|-------|
-| SAST | Every commit | CodeQL, Semgrep |
-| DAST | Weekly | OWASP ZAP |
-| Dependency scan | Daily | Snyk, npm audit |
-| Container scan | Every build | Trivy |
-| Penetration test | Quarterly | External vendor |
+| Type | Frequency |
+|------|-----------|
+| Static application security testing (SAST) | Every commit |
+| Dynamic application security testing (DAST) | Regularly |
+| Dependency vulnerability scanning | Continuously |
+| Infrastructure vulnerability scanning | Every build |
+| Penetration testing | Regularly (external vendor) |
 
 ### Vulnerability Response
 
-| Severity | Response Time | Action |
-|----------|---------------|--------|
-| Critical (CVSS 9.0+) | 24 hours | Emergency patch |
-| High (CVSS 7.0-8.9) | 7 days | Prioritized fix |
-| Medium (CVSS 4.0-6.9) | 30 days | Scheduled fix |
-| Low (CVSS < 4.0) | 90 days | Next release |
+Vulnerabilities are triaged by severity and addressed promptly. Critical issues receive emergency remediation priority.
 
 ### Responsible Disclosure
 
@@ -457,51 +290,15 @@ Data Protection Officer: dpo@apexmail.ee
 
 ## Security Configurations
 
-### Content Security Policy
-
-```http
-Content-Security-Policy: 
-  default-src 'self';
-  script-src 'self' 'unsafe-inline' https://cdn.example.com;
-  style-src 'self' 'unsafe-inline';
-  img-src 'self' data: https:;
-  font-src 'self' https://fonts.gstatic.com;
-  connect-src 'self' https://api.example.com;
-  frame-ancestors 'none';
-  base-uri 'self';
-  form-action 'self';
-```
-
 ### Security Headers
 
-```http
-Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-X-XSS-Protection: 1; mode=block
-Referrer-Policy: strict-origin-when-cross-origin
-Permissions-Policy: geolocation=(), microphone=(), camera=()
-```
+ApexMail enforces strict security headers on all responses, including HSTS, content type protection, frame denial, and a restrictive referrer policy.
 
 ### Rate Limiting
 
-```typescript
-const rateLimits = {
-  // API endpoints
-  'api:general': { window: 60, max: 1000 },
-  'api:auth': { window: 60, max: 10 },
-  'api:sensitive': { window: 60, max: 5 },
-  
-  // Per-user limits
-  'user:login': { window: 300, max: 5 },
-  'user:password-reset': { window: 3600, max: 3 },
-  'user:mfa': { window: 300, max: 5 },
-  
-  // Per-IP limits
-  'ip:general': { window: 60, max: 100 },
-  'ip:auth': { window: 300, max: 20 },
-};
-```
+ApexMail enforces rate limits on all API and authentication endpoints to protect against abuse and brute-force attacks. If you encounter rate limiting, check the `Retry-After` header for when to retry.
+
+Rate-limited responses include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `Retry-After` headers.
 
 ---
 

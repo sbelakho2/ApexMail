@@ -6,7 +6,7 @@
  *  2. Natural-language command execution (campaigns, lists, contacts)
  *  3. Semi-autonomous backend actions (billing, account, diagnostics)
  *
- * Uses the fine-tuned TinyLlama model (ONNX on VPS) or falls back to
+ * Uses the fine-tuned Qwen 7B model (ONNX on VPS) or falls back to
  * template-based responses when no model is loaded.
  */
 

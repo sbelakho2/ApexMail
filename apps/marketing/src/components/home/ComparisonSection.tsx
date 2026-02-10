@@ -65,7 +65,7 @@ export function ComparisonSection() {
 
   return (
     <section ref={ref} className="py-20 lg:py-32 relative bg-surface-50">
-      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -74,7 +74,7 @@ export function ComparisonSection() {
         >
           <h2 className="section-title mb-4">
             <span className="text-surface-900">See How We</span>{' '}
-            <span className="text-primary-600">Stack Up</span>
+            <span className="text-brand-500">Stack Up</span>
           </h2>
           <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
             We built ApexMail because we were tired of email providers that treat 
@@ -92,22 +92,22 @@ export function ComparisonSection() {
           {/* Table Header */}
           <div className="min-w-[900px]">
             <div className="grid grid-cols-5 gap-4 p-4 lg:p-6 border-b border-surface-200 bg-surface-50/50">
-              <div className="font-bold text-surface-900 text-xs flex items-center">Feature</div>
+              <div className="font-bold text-surface-900 text-sm flex items-center">Feature</div>
               <div className="text-center">
-                <div className="font-bold text-primary-700">ApexMail</div>
-                <div className="text-xs text-primary-600 font-medium">Our Platform</div>
+                <div className="font-bold text-brand-700">ApexMail</div>
+                <div className="text-sm text-brand-500 font-medium">Our Platform</div>
               </div>
               <div className="text-center text-surface-900">
                 <div className="font-semibold text-surface-700">SendGrid</div>
-                <div className="text-xs text-surface-500 font-medium">Twilio</div>
+                <div className="text-sm text-surface-500 font-medium">Twilio</div>
               </div>
               <div className="text-center text-surface-900">
                 <div className="font-semibold text-surface-700">Mailchimp</div>
-                <div className="text-xs text-surface-500 font-medium">Intuit</div>
+                <div className="text-sm text-surface-500 font-medium">Intuit</div>
               </div>
               <div className="text-center text-surface-900">
                 <div className="font-semibold text-surface-700">AWS SES</div>
-                <div className="text-xs text-surface-500 font-medium">Amazon</div>
+                <div className="text-sm text-surface-500 font-medium">Amazon</div>
               </div>
             </div>
 
@@ -116,7 +116,7 @@ export function ComparisonSection() {
               <div key={category.name}>
                 {/* Category Header */}
                 <div className="px-4 lg:px-6 py-2 bg-surface-50/30 border-b border-surface-100">
-                  <span className="text-xs font-bold uppercase tracking-widest text-surface-600">
+                  <span className="text-sm font-bold uppercase tracking-widest text-surface-600">
                     {category.name}
                   </span>
                 </div>
@@ -134,7 +134,7 @@ export function ComparisonSection() {
                     )}
                   >
                     <div className="text-sm font-semibold text-surface-700">{feature.name}</div>
-                    <div className="flex justify-center font-bold text-primary-700">
+                    <div className="flex justify-center font-bold text-brand-700">
                       {renderValue(feature.apexmail)}
                     </div>
                     <div className="flex justify-center text-surface-500">

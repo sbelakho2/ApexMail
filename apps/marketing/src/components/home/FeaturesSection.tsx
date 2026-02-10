@@ -103,7 +103,7 @@ export function FeaturesSection() {
 
  return (
  <section ref={ref} className="py-20 lg:py-32 relative bg-white" id="features">
- <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  {/* Section Header */}
  <motion.div
  initial={{ opacity: 0, y: 20 }}
@@ -112,9 +112,9 @@ export function FeaturesSection() {
  className="text-center mb-16"
  >
  <h2 className="section-title mb-4">
- <span className="text-surface-900">Features That</span>{' '}
- <span className="text-primary-600">Actually Matter</span>
- </h2>
+            <span className="text-surface-900">Features That</span>{' '}
+            <span className="text-brand-500">Actually Matter</span>
+          </h2>
  <p className="text-surface-600 text-[17px] max-w-2xl mx-auto leading-relaxed">
  Not another SendGrid clone. Every feature is built to solve real problems 
  that make developers and compliance officers lose sleep.
@@ -146,10 +146,10 @@ export function FeaturesSection() {
             >
               {/* Icon & Badge */}
               <div className="flex items-start justify-between mb-5">
-                <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
+                <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                   <feature.icon className="w-5 h-5" strokeWidth={1.5} />
                 </div>
-                <span className="inline-flex items-center px-2 py-1 rounded-sm bg-surface-50 text-surface-600 border border-surface-200 text-xs font-bold uppercase tracking-wider">
+                <span className="inline-flex items-center px-2 py-1 rounded-sm bg-surface-50 text-surface-600 border border-surface-200 text-[14px] font-bold uppercase tracking-wider">
                   {feature.badge}
                 </span>
               </div>
@@ -183,7 +183,7 @@ export function FeaturesSection() {
     ].map((stat) => (
       <div key={stat.label} className="text-center py-8 bg-white">
         <div className="text-3xl font-semibold text-surface-900 mb-1 tabular-nums tracking-tight">{stat.value}</div>
-        <div className="text-xs font-medium text-surface-500">{stat.label}</div>
+        <div className="text-[14px] font-medium text-surface-500">{stat.label}</div>
       </div>
     ))}
   </motion.div>

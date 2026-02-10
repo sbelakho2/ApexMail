@@ -84,7 +84,7 @@ export function AuditTrail() {
 
  return (
  <section ref={ref} className="py-24 relative bg-white">
- <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start">
  {/* Left - Copy */}
  <motion.div
@@ -92,7 +92,7 @@ export function AuditTrail() {
  animate={inView ? { opacity: 1, x: 0 } : {}}
  className="lg:sticky lg:top-32"
  >
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-100/50 border border-surface-200 text-xs font-medium text-surface-700 mb-6">
+ <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 border border-surface-200 text-[14px] font-medium text-surface-700 mb-6">
  <ScrollText className="w-4 h-4" />
  Audit Trail
  </div>
@@ -128,7 +128,7 @@ export function AuditTrail() {
  },
  ].map((feature) => (
  <div key={feature.title} className="flex items-start gap-4">
- <div className="w-10 h-10 rounded-lg bg-surface-50 flex items-center justify-center flex-shrink-0 border border-surface-200">
+ <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center flex-shrink-0 border border-surface-200">
  <feature.icon className="w-5 h-5 text-surface-900" strokeWidth={1.5} />
  </div>
  <div>
@@ -179,30 +179,30 @@ export function AuditTrail() {
  )}
  >
  <div className="flex items-start justify-between mb-3">
- <div className="flex items-center gap-2">
- <div
- className={`w-2 h-2 rounded-full ${
- event.outcome === 'success'
- ? 'bg-emerald-500'
- : event.outcome === 'warning'
- ? 'bg-amber-500'
- : 'bg-red-500'
- }`}
- />
- <span className="text-surface-900 font-medium font-mono text-xs">{event.action}</span>
- </div>
- <span className="text-xs text-surface-500 font-mono">
- {new Date(event.timestamp).toLocaleTimeString()}
- </span>
- </div>
- <div className="text-sm text-surface-900 mb-3 leading-relaxed">{event.details}</div>
- <div className="flex items-center gap-4">
- <div className="flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 border border-surface-200 rounded text-xs ">
- <User className="w-4 h-4 text-surface-400" />
- <span className="text-surface-700 font-mono">{event.actor}</span>
- </div>
- <div className="text-xs text-surface-400 font-mono">{event.ipAddress}</div>
- </div>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`w-2 h-2 rounded-full ${
+                            event.outcome === 'success'
+                              ? 'bg-emerald-500'
+                              : event.outcome === 'warning'
+                              ? 'bg-amber-500'
+                              : 'bg-red-500'
+                          }`}
+                        />
+                        <span className="text-surface-900 font-medium font-mono text-[13px]">{event.action}</span>
+                      </div>
+                      <span className="text-[13px] text-surface-500 font-mono">
+                        {new Date(event.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="text-[14px] text-surface-900 mb-3 leading-relaxed">{event.details}</div>
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-1.5 px-2 py-0.5 bg-surface-50 border border-surface-200 rounded-sm text-[13px] ">
+                        <User className="w-4 h-4 text-surface-400" />
+                        <span className="text-surface-700 font-mono">{event.actor}</span>
+                      </div>
+                      <div className="text-[13px] text-surface-400 font-mono">{event.ipAddress}</div>
+                    </div>
 
  {/* Expanded Details */}
  {selectedEvent?.id === event.id && (
@@ -245,10 +245,10 @@ export function AuditTrail() {
 
  {/* Footer */}
  <div className="p-3 bg-surface-50 border-t border-surface-200 text-center">
- <span className="text-xs text-surface-500 font-medium">
- Showing {filteredEvents.length} of 2,847,392 events
- </span>
- </div>
+                <span className="text-[14px] text-surface-500 font-medium">
+                  Showing {filteredEvents.length} of 2,847,392 events
+                </span>
+              </div>
  </div>
  </motion.div>
  </div>

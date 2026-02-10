@@ -148,7 +148,7 @@ export function PricingCalculator() {
 
   return (
     <section ref={ref} className="py-20 lg:py-32 relative bg-white" id="pricing">
-      <div className="relative max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -157,7 +157,7 @@ export function PricingCalculator() {
         >
           <h2 className="section-title mb-4">
             <span className="text-surface-900">Transparent</span>{' '}
-            <span className="text-primary-600">Pricing</span>
+            <span className="text-brand-500">Pricing</span>
           </h2>
           <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
             See exactly what you&apos;ll pay. No hidden fees, no surprise overages.
@@ -169,14 +169,14 @@ export function PricingCalculator() {
           initial={{ opacity: 0, y: 16 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.2 }}
-          className="rounded-2xl border border-surface-200 bg-white p-6 lg:p-10 shadow-sm"
+          className="rounded-lg border border-surface-200 bg-white p-6 lg:p-10 shadow-sm"
         >
           {/* Volume Slider */}
           <div className="mb-10">
             <div className="flex items-end justify-between mb-6">
               <label className="text-sm font-bold text-surface-900">Monthly Email Volume</label>
               <div className="text-right">
-                <span className="text-3xl font-bold text-primary-600 tabular-nums tracking-tight">{formatNumber(volume)}</span>
+                <span className="text-3xl font-bold text-brand-500 tabular-nums tracking-tight">{formatNumber(volume)}</span>
                 <span className="text-sm text-surface-500 font-medium ml-1">emails</span>
               </div>
             </div>
@@ -191,7 +191,7 @@ export function PricingCalculator() {
               aria-valuemin={1000}
               aria-valuemax={1000000}
               aria-valuenow={volume}
-              className="w-full h-2 bg-surface-100 rounded-full appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary-500/20 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-primary-600 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-sm [&::-webkit-slider-thumb]:active:scale-95 [&::-webkit-slider-thumb]:transition-transform"
+              className="w-full h-2 bg-surface-100 rounded-full appearance-none cursor-pointer focus:outline-none focus:ring-2 focus:ring-brand-500/20 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-brand-500 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-sm [&::-webkit-slider-thumb]:active:scale-95 [&::-webkit-slider-thumb]:transition-transform"
             />
             <div className="flex justify-between mt-3">
               {volumeMarks.map((mark) => (
@@ -199,7 +199,7 @@ export function PricingCalculator() {
                   key={mark.value}
                   className={cn(
                     'text-xs font-bold tracking-tight transition-colors focus:outline-none',
-                    Math.abs(volume - mark.value) < 50000 ? 'text-primary-600' : 'text-surface-400 hover:text-surface-600'
+                    Math.abs(volume - mark.value) < 50000 ? 'text-brand-500' : 'text-surface-400 hover:text-surface-600'
                   )}
                   onClick={() => setVolume(mark.value)}
                 >

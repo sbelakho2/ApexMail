@@ -337,28 +337,13 @@ AND last_opened > NOW() - INTERVAL '90 days';
 The inbox placement service uses these tables:
 
 ```sql
--- Seed accounts for testing
-CREATE TABLE seed_accounts (
-  id TEXT PRIMARY KEY,
-  email TEXT NOT NULL UNIQUE,
-  provider TEXT NOT NULL,
-  imap_host TEXT NOT NULL,
-  imap_port INTEGER DEFAULT 993,
-  status TEXT DEFAULT 'active'
-);
+Each inbox placement test tracks:
 
--- Test results
-CREATE TABLE inbox_placement_tests (
-  id TEXT PRIMARY KEY,
-  tenant_id TEXT REFERENCES tenants(id),
-  test_name TEXT NOT NULL,
-  status TEXT DEFAULT 'pending',
-  results JSONB DEFAULT '[]',
-  summary JSONB DEFAULT '{}',
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  completed_at TIMESTAMPTZ
-);
-```
+- **Test ID**: Unique identifier for the test run
+- **Test name**: Your label for the test
+- **Status**: pending, running, or completed
+- **Results**: Per-provider inbox vs. spam placement
+- **Summary**: Aggregate placement rates across all providers
 
 ## Related Documentation
 

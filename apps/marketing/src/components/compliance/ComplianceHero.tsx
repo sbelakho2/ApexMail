@@ -15,7 +15,7 @@ const badges = [
 export function ComplianceHero() {
  return (
  <section className="relative min-h-screen flex items-center pt-32 pb-20 overflow-hidden bg-surface-50">
- <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-20">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-20">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left Column */}
  <motion.div
@@ -24,8 +24,8 @@ export function ComplianceHero() {
  transition={{ duration: 0.5 }}
  >
  {/* Badge */}
- <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white border border-surface-200 text-xs font-medium text-surface-600 mb-8 p-1 pr-3">
-          <span className="w-6 h-6 rounded-full bg-surface-100 flex items-center justify-center">
+ <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-white border border-surface-200 text-[14px] font-medium text-surface-600 mb-8 p-1 pr-3">
+          <span className="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center">
             <Shield className="w-4 h-4" />
           </span>
           Compliance-as-Code
@@ -51,15 +51,15 @@ export function ComplianceHero() {
  { icon: Lock, text: 'One-click "Right-to-be-Forgotten" cascade deletion' },
  ].map((point) => (
  <li key={point.text} className="flex items-start gap-3">
- <Check className="w-5 h-5 text-primary-600 mt-0.5 flex-shrink-0" />
- <span className="text-surface-700 font-medium text-sm leading-relaxed">{point.text}</span>
+ <Check className="w-5 h-5 text-brand-500 mt-0.5 flex-shrink-0" />
+ <span className="text-surface-700 font-medium text-[14px] leading-relaxed">{point.text}</span>
  </li>
  ))}
  </ul>
 
  {/* CTA */}
  <div className="flex flex-wrap gap-4">
- <Link href="https://app.apexmail.ee/signup" className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors">
+ <Link href="https://app.apexmail.ee/signup" className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-brand-500 rounded-md hover:bg-brand-600 transition-colors">
  Start Free Trial
  <ArrowRight className="w-4 h-4 ml-2" />
  </Link>
@@ -77,7 +77,7 @@ export function ComplianceHero() {
  className="relative"
  >
  <div className="p-8 bg-white rounded-lg border border-surface-200">
- <h3 className="text-xs font-semibold text-surface-500 mb-8 text-center">
+ <h3 className="text-[14px] font-semibold text-surface-500 mb-8 text-center">
  Compliance Certifications
  </h3>
  <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
@@ -87,17 +87,17 @@ export function ComplianceHero() {
  initial={{ opacity: 0, scale: 0.8 }}
  animate={{ opacity: 1, scale: 1 }}
  transition={{ delay: 0.3 + index * 0.1 }}
- className="aspect-square rounded-lg bg-surface-50 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors"
+ className="aspect-square rounded-sm bg-surface-50 border border-surface-200 flex flex-col items-center justify-center p-4 hover:border-surface-300 transition-colors"
  >
- <div className="w-10 h-10 rounded-lg bg-white flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
+ <div className="w-10 h-10 rounded-sm bg-white flex items-center justify-center mb-3 border border-surface-200 text-surface-900">
  <Shield className="w-5 h-5" strokeWidth={1.5} />
  </div>
- <span className="text-xs font-semibold text-surface-900">{badge.name}</span>
+ <span className="text-[14px] font-semibold text-surface-900">{badge.name}</span>
  </motion.div>
  ))}
  </div>
- <div className="mt-10 p-4 rounded-lg bg-emerald-50 border border-emerald-100 ">
- <div className="flex items-center gap-3 text-emerald-700 text-xs font-bold">
+ <div className="mt-10 p-4 rounded-sm bg-emerald-50 border border-emerald-100 ">
+ <div className="flex items-center gap-3 text-emerald-700 text-[14px] font-bold">
  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
  Verified and Current
  </div>

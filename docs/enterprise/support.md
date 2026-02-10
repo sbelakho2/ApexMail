@@ -56,7 +56,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets \
     "priority": "high",
     "category": "deliverability",
     "assignedTo": {
-      "team": "deliverability_specialists",
+      "team": "deliverability",
       "agent": null
     },
     "sla": {
@@ -106,10 +106,9 @@ Response:
     "status": "in_progress",
     "priority": "high",
     "assignedTo": {
-      "team": "deliverability_specialists",
+      "team": "deliverability",
       "agent": {
-        "name": "Sarah Johnson",
-        "title": "Senior Deliverability Engineer"
+        "name": "Your assigned specialist"
       }
     },
     "timeline": [
@@ -122,7 +121,7 @@ Response:
         "timestamp": "2024-01-15T11:15:00Z",
         "action": "assigned",
         "actor": "system",
-        "details": "Assigned to Sarah Johnson"
+        "details": "Assigned to support agent"
       },
       {
         "timestamp": "2024-01-15T11:30:00Z",
@@ -191,27 +190,22 @@ Response:
   "escalation": {
     "ticketId": "ticket_abc123",
     "escalationLevel": 2,
-    "previousAssignee": "Sarah Johnson",
     "newAssignee": {
-      "team": "engineering_escalation",
-      "manager": "Mike Chen"
+      "team": "engineering"
     },
-    "escalatedAt": "2024-01-15T14:00:00Z",
-    "newSLA": {
-      "resolution": "2024-01-15T18:00:00Z"
-    }
+    "escalatedAt": "2024-01-15T14:00:00Z"
   }
 }
 ```
 
 ### Escalation Levels
 
-| Level | Team | Response Time | Criteria |
-|-------|------|---------------|----------|
-| 1 | Support Agent | Per SLA | Initial assignment |
-| 2 | Senior Specialist | 2 hours | Complex technical issues |
-| 3 | Engineering Team | 1 hour | Product bugs, infrastructure |
-| 4 | Leadership | 30 min | Critical business impact |
+| Level | Description | Criteria |
+|-------|-------------|----------|
+| 1 | Initial Support | Initial assignment |
+| 2 | Senior Specialist | Complex technical issues |
+| 3 | Engineering | Product bugs, infrastructure |
+| 4 | Leadership | Critical business impact |
 
 ## Customer Success Management
 

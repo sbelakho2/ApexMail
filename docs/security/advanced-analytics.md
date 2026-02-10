@@ -15,86 +15,74 @@ ApexMail includes cutting-edge analytics and engagement features that provide a 
 
 ## Bot Click Detection
 
-Security scanners and email gateways (Barracuda, Mimecast, Proofpoint, etc.) click every link in emails to check for malware. This distorts your engagement metrics.
+Security scanners and email gateways automatically click links in emails to check for malware. This distorts your engagement metrics.
 
 ### The Problem
 
-Research shows bot clicks can account for **20-60%** of total clicks in B2B email campaigns:
+Bot clicks can account for a significant portion of total clicks in B2B email campaigns:
 
-- Security scanners click all links instantly (< 1 second)
-- Multiple links clicked simultaneously from same IP
-- Known bot user-agents
+- Security scanners click links automatically
+- Multiple links clicked simultaneously from the same source
 - Corporate email gateways pre-fetch links
 
-### Detection Methods
+### How It Works
 
-```typescript
-import { BotDetectionService } from '@apexmail/analytics';
+ApexMail automatically filters bot clicks from your engagement metrics. When a click event is received, it is analyzed using multiple detection signals before being counted in your analytics.
 
-const botDetector = new BotDetectionService();
+### Example: Checking Bot Status via API
 
-// Analyze a click event
-const result = botDetector.analyzeClick({
-  messageId: 'msg_123',
-  recipientEmail: 'user@company.com',
-  linkUrl: 'https://example.com/promo',
-  timestamp: new Date(),
-  userAgent: 'Mozilla/5.0 (compatible; Barracuda)',
-  ipAddress: '64.235.100.50',
-  headers: { 'x-scanner': 'true' }
-}, messageOpenTime);
+```http
+GET /api/v1/analytics/clicks?campaignId=camp_123&includeBot=true
+Authorization: Bearer YOUR_API_KEY
+```
 
-if (result.isBot) {
-  console.log('Bot detected:', result.botType);
-  console.log('Confidence:', result.confidence);
-  console.log('Reasons:', result.reasons);
+Response includes a `botStatus` field for each click:
+
+```json
+{
+  "clicks": [
+    {
+      "messageId": "msg_123",
+      "recipientEmail": "user@company.com",
+      "url": "https://example.com/promo",
+      "timestamp": "2026-01-15T10:30:00Z",
+      "isBot": true,
+      "botType": "security_scanner",
+      "confidence": 0.98
+    }
+  ]
 }
 ```
 
-### Detection Signals
+### Detection
 
-| Signal | Weight | Description |
-|--------|--------|-------------|
-| User-Agent | 40% | Known bot patterns (Barracuda, Mimecast, etc.) |
-| Timing | 35% | Clicks within 1 second of open |
-| IP Reputation | 30% | Known security gateway IP ranges |
-| Click Velocity | 25% | Multiple clicks in < 5 seconds |
-| Headers | Variable | Missing browser headers, prefetch flags |
+ApexMail uses multi-signal bot detection to separate genuine human engagement from automated link scanning. Signals include user-agent analysis, click timing patterns, IP reputation, click velocity, and header analysis. Adjusted metrics are shown alongside raw numbers in your analytics dashboard.
 
 ### Honeypot Links
 
-Generate invisible links that only bots will click:
+ApexMail can automatically inject invisible honeypot links into your emails. Only bots click these links, providing a definitive signal for detection. Enable honeypot links in your sending domain settings or via the API:
 
-```typescript
-// Generate honeypot link
-const honeypotUrl = botDetector.generateHoneypotLink(
-  'msg_123',
-  'https://track.example.com'
-);
+```http
+PUT /api/v1/domains/:id/settings
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
 
-// Generate HTML to embed (invisible to humans)
-const honeypotHtml = botDetector.generateHoneypotHtml(honeypotUrl);
-
-// Check if a click is on honeypot
-if (botDetector.isHoneypotClick(clickedUrl)) {
-  // Definitely a bot
+{
+  "botDetection": {
+    "honeypotEnabled": true
+  }
 }
 ```
 
 ### Adjusted Metrics
 
-```typescript
-const metrics = botDetector.getAdjustedMetrics(
-  totalClicks: 1000,
-  botClicks: 350,
-  totalOpens: 5000,
-  botOpens: 200
-);
+The analytics dashboard and API automatically show bot-adjusted metrics alongside raw numbers:
 
-console.log('Raw click rate:', metrics.rawClickRate);       // 20%
-console.log('Adjusted click rate:', metrics.adjustedClickRate); // 13.5%
-console.log('Bot percentage:', metrics.botClickPercentage);  // 35%
-```
+| Metric | Description |
+|--------|-------------|
+| Raw click rate | Total clicks / total delivered |
+| Adjusted click rate | Human clicks only / total delivered |
+| Bot percentage | Percentage of clicks identified as bot activity |
 
 ---
 
@@ -109,29 +97,27 @@ Microsoft now "strongly recommends" allowing two-way communication. Reply rates 
 - **Deliverability boost**: Replies signal engagement to ISPs
 - **Valuable feedback**: Learn what subscribers actually think
 
-### Implementation
+### How It Works
 
-```typescript
-import { ReplyTrackingService } from '@apexmail/analytics';
+When reply tracking is enabled, ApexMail monitors incoming replies to your campaigns and provides structured analytics:
 
-const replyTracker = new ReplyTrackingService();
+```http
+GET /api/v1/analytics/replies?campaignId=camp_123
+Authorization: Bearer YOUR_API_KEY
+```
 
-// Process an incoming reply
-const reply = replyTracker.processReply({
-  messageId: '<reply123@example.com>',
-  inReplyTo: '<original456@yourcompany.com>',
-  references: ['<original456@yourcompany.com>'],
-  from: 'customer@example.com',
-  subject: 'Re: Your order has shipped',
-  body: 'Thanks for the quick delivery!',
-  headers: {},
-  receivedAt: new Date()
-}, originalMessage);
-
-if (reply) {
-  console.log('Is auto-reply:', reply.isAutoReply);
-  console.log('Sentiment:', reply.sentiment);
-  console.log('Thread depth:', reply.threadDepth);
+```json
+{
+  "replies": [
+    {
+      "messageId": "msg_456",
+      "from": "customer@example.com",
+      "subject": "Re: Your order has shipped",
+      "isAutoReply": false,
+      "sentiment": "positive",
+      "receivedAt": "2026-01-15T14:30:00Z"
+    }
+  ]
 }
 ```
 
@@ -154,23 +140,19 @@ The service automatically detects and filters auto-replies via:
 
 ### Recommended Reply-To Configuration
 
-```typescript
-const config = replyTracker.generateReplyToConfig({
-  brandName: 'Acme Corp',
-  domain: 'acme.com',
-  supportEmail: 'support@acme.com',
-  enableWebhook: true,
-  webhookUrl: 'https://api.acme.com/webhooks/replies'
-});
+Configure your reply-to settings via the dashboard or API:
 
-// Result:
-// {
-//   type: 'support-ticket',
-//   address: 'support@acme.com',
-//   autoResponderEnabled: true,
-//   autoResponderMessage: 'Thanks for your reply! The Acme Corp team will get back to you within 24 hours.',
-//   webhookUrl: 'https://api.acme.com/webhooks/replies'
-// }
+```http
+PUT /api/v1/domains/:id/reply-tracking
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+
+{
+  "replyToAddress": "support@acme.com",
+  "autoResponderEnabled": true,
+  "autoResponderMessage": "Thanks for your reply! The Acme Corp team will get back to you within 24 hours.",
+  "webhookUrl": "https://api.acme.com/webhooks/replies"
+}
 ```
 
 ### Reply Rate Benchmarks
@@ -200,56 +182,38 @@ Trust = (Credibility + Reliability + Intimacy) / Self-Orientation
 - **Intimacy**: Do they feel safe with you?
 - **Self-Orientation**: Are you focused on them or yourself? (lower is better)
 
-### Implementation
+### How It Works
 
-```typescript
-import { EngagementTrustService } from '@apexmail/analytics';
+ApexMail calculates a trust score (0–100) for each subscriber based on their engagement history. Access trust scores via the API or dashboard:
 
-const trustService = new EngagementTrustService();
-
-const trustScore = trustService.calculateTrustScore({
-  subscriberId: 'sub_123',
-  email: 'subscriber@example.com',
-  
-  // Engagement metrics
-  totalEmailsSent: 50,
-  totalOpens: 35,
-  totalClicks: 12,
-  totalReplies: 2,
-  totalConversions: 5,
-  
-  // Timing
-  firstEmailDate: new Date('2024-01-01'),
-  lastEngagementDate: new Date(),
-  
-  // Preferences
-  hasSetPreferences: true,
-  preferenceLastUpdated: new Date(),
-  
-  // Negative signals
-  totalComplaints: 0,
-  totalUnsubscribeClicks: 1,
-  markedAsSpam: false,
-  
-  // Feedback
-  surveyResponses: 1,
-  npsScore: 9,
-  feedbackSubmissions: 1
-});
-
-console.log('Trust Score:', trustScore.overall);  // 0-100
-console.log('Grade:', trustScore.grade);          // A-F
-console.log('Risk Level:', trustScore.riskLevel); // low/medium/high/critical
+```http
+GET /api/v1/contacts/:id/trust-score
+Authorization: Bearer YOUR_API_KEY
 ```
+
+```json
+{
+  "subscriberId": "sub_123",
+  "overall": 78,
+  "grade": "B",
+  "riskLevel": "low",
+  "components": {
+    "credibility": 82,
+    "reliability": 75,
+    "intimacy": 71,
+    "selfOrientation": 0.3
+  },
+  "trend": "improving"
+}
 
 ### Component Scoring
 
-| Component | Inputs | Impact |
-|-----------|--------|--------|
-| Credibility | Opens, clicks, spam marks | 30% of trust |
-| Reliability | Tenure, preferences, recency | 30% of trust |
-| Intimacy | Replies, surveys, NPS | 25% of trust |
-| Self-Orientation | Frequency vs engagement | 15% divisor |
+| Component | Inputs |
+|-----------|--------|
+| Credibility | Opens, clicks, spam marks |
+| Reliability | Tenure, preferences, recency |
+| Intimacy | Replies, surveys, NPS |
+| Self-Orientation | Frequency vs engagement (divisor — lower is better) |
 
 ### Trust Grades
 
@@ -263,18 +227,26 @@ console.log('Risk Level:', trustScore.riskLevel); // low/medium/high/critical
 
 ### Campaign-Level Trust Metrics
 
-```typescript
-const campaignMetrics = trustService.calculateCampaignTrustMetrics(
-  'campaign_123',
-  subscribers,
-  previousScoresMap
-);
+```http
+GET /api/v1/campaigns/:id/trust-metrics
+Authorization: Bearer YOUR_API_KEY
+```
 
-console.log('Average Trust:', campaignMetrics.averageTrustScore);
-console.log('Segments:', campaignMetrics.subscriberSegments);
-// { highTrust: 450, mediumTrust: 300, lowTrust: 180, atRisk: 70 }
-console.log('Trend:', campaignMetrics.trustTrend); // improving/stable/declining
-console.log('Top Recommendations:', campaignMetrics.topRecommendations);
+```json
+{
+  "averageTrustScore": 72,
+  "segments": {
+    "highTrust": 450,
+    "mediumTrust": 300,
+    "lowTrust": 180,
+    "atRisk": 70
+  },
+  "trend": "improving",
+  "recommendations": [
+    "Consider a re-engagement campaign for the 70 at-risk subscribers",
+    "Your sending frequency may be too high for the low-trust segment"
+  ]
+}
 ```
 
 ---
@@ -293,43 +265,44 @@ Gmail Annotations allow promotional emails to display:
 - **Expiration dates** for time-sensitive offers
 - **Brand logos**
 
-### Implementation
+### How to Use Gmail Annotations
 
-```typescript
-import { GmailAnnotationsService } from '@apexmail/mta';
+Add annotations to your campaigns via the API or dashboard:
 
-const annotationService = new GmailAnnotationsService();
+```http
+POST /api/v1/campaigns/:id/annotations
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
 
-const result = annotationService.generateAnnotations({
-  organization: {
-    name: 'Acme Store',
-    url: 'https://acme.com',
-    logoUrl: 'https://acme.com/logo.png'
+{
+  "organization": {
+    "name": "Acme Store",
+    "url": "https://acme.com",
+    "logoUrl": "https://acme.com/logo.png"
   },
-  featuredImageUrl: 'https://acme.com/promo-banner.png',
-  deal: {
-    discountDescription: '25% off everything',
-    discountCode: 'SAVE25',
-    availabilityEnds: new Date('2025-02-28')
+  "featuredImageUrl": "https://acme.com/promo-banner.png",
+  "deal": {
+    "discountDescription": "25% off everything",
+    "discountCode": "SAVE25",
+    "availabilityEnds": "2025-02-28T00:00:00Z"
   },
-  goToAction: {
-    name: 'Shop Now',
-    url: 'https://acme.com/sale'
+  "goToAction": {
+    "name": "Shop Now",
+    "url": "https://acme.com/sale"
   },
-  products: [
+  "products": [
     {
-      name: 'Premium Widget',
-      imageUrl: 'https://acme.com/widget.png',
-      price: 49.99,
-      currency: 'USD',
-      url: 'https://acme.com/widget'
+      "name": "Premium Widget",
+      "imageUrl": "https://acme.com/widget.png",
+      "price": 49.99,
+      "currency": "USD",
+      "url": "https://acme.com/widget"
     }
   ]
-});
-
-// Add to email <head>
-const emailHead = result.html;
+}
 ```
+
+ApexMail generates the required JSON-LD markup and injects it into the email `<head>` automatically.
 
 ### Generated Schema
 
@@ -356,16 +329,17 @@ The service generates JSON-LD markup conforming to schema.org:
 
 ### Validation
 
-```typescript
-const validation = annotationService.validateConfig(config);
+Validate your annotation configuration before sending:
 
-if (!validation.valid) {
-  console.error('Errors:', validation.errors);
-}
-if (validation.warnings.length > 0) {
-  console.warn('Warnings:', validation.warnings);
-}
+```http
+POST /api/v1/campaigns/:id/annotations/validate
+Authorization: Bearer YOUR_API_KEY
+Content-Type: application/json
+
+{ ... same payload as above ... }
 ```
+
+The response includes any errors or warnings about your annotation configuration.
 
 ---
 

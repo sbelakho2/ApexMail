@@ -54,21 +54,22 @@ ARC-Authentication-Results: i=1; apexmail.ee; spf=pass; dkim=pass; dmarc=pass
 
 ### Usage
 
-```typescript
-import { generateARCHeaders, validateARCChain, parseARCHeaders } from '@apexmail/mta/auth';
+ARC headers are generated automatically by ApexMail when forwarding messages. You can check ARC validation results via the API:
 
-// Generate ARC headers for outbound forwarded messages
-const arcHeaders = generateARCHeaders(
-  message,
-  { spf: 'pass', dkim: 'pass', dmarc: 'pass' },
-  { domain: 'apexmail.ee', selector: 'arc', privateKey: '...' }
-);
+```http
+GET /api/v1/messages/:id/authentication
+Authorization: Bearer YOUR_API_KEY
+```
 
-// Validate incoming ARC chain
-const validation = await validateARCChain(
-  parseARCHeaders(incomingHeaders),
-  lookupDKIMKey
-);
+```json
+{
+  "arc": {
+    "status": "pass",
+    "chain": [
+      { "instance": 1, "domain": "apexmail.ee", "result": "pass" }
+    ]
+  }
+}
 ```
 
 ---
@@ -310,7 +311,6 @@ GET /api/v1/domains/:id/auth-status
 
 - [Domain Management API](../api/endpoints/domains.md)
 - [Security & Compliance](../security/compliance.md)
-- [MTA Configuration](./mta-configuration.md)
 
 ## External Resources
 

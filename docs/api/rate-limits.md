@@ -2,15 +2,9 @@
 
 ApexMail implements rate limiting to ensure fair usage and protect service stability.
 
-## Rate Limit Tiers
+## Rate Limits
 
-| Plan | Requests/Second | Requests/Day | Burst |
-|------|-----------------|--------------|-------|
-| **Free** | 1 | 1,000 | 10 |
-| **Starter** | 10 | 10,000 | 50 |
-| **Growth** | 50 | 100,000 | 200 |
-| **Business** | 100 | 500,000 | 500 |
-| **Enterprise** | Custom | Custom | Custom |
+Rate limits vary by plan. Higher-tier plans receive higher rate limits. You can check your current limits via the `X-RateLimit-*` response headers on any API response, or in **Settings → API** in your dashboard.
 
 ## Rate Limit Headers
 
@@ -32,16 +26,7 @@ X-RateLimit-Retry-After: 60
 
 ## Endpoint-Specific Limits
 
-Some endpoints have additional limits:
-
-| Endpoint | Limit | Notes |
-|----------|-------|-------|
-| `POST /auth/login` | 5/min | Per IP |
-| `POST /auth/password-reset` | 3/hour | Per email |
-| `POST /messages` | Plan limit | Per API key |
-| `POST /messages/batch` | Plan limit / 10 | Per API key |
-| `GET /analytics/*` | 100/min | Heavy queries |
-| `POST /gdpr/*` | 10/hour | Resource intensive |
+Some endpoints (authentication, GDPR, analytics) have stricter rate limits to protect sensitive operations. If you encounter a `429` response on these endpoints, check the `Retry-After` header for when to retry.
 
 ## Rate Limit Response
 

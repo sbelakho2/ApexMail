@@ -39,7 +39,7 @@ Add these DNS records to your domain:
 
 ### 3. SSL Certificate
 
-ApexMail automatically provisions SSL certificates via Let's Encrypt. Alternatively, upload your own:
+ApexMail automatically provisions and renews SSL certificates for all white-label domains. Alternatively, upload your own:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel/ssl \

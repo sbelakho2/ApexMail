@@ -99,7 +99,7 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
             placeholder="Search campaigns, contacts..."
             className="w-64 pl-9 lg:w-80 bg-white border-surface-200 focus:ring-primary/10 shadow-sm"
           />
-          <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded border border-surface-200 bg-surface-50 px-1.5 font-mono text-[10px] font-bold text-surface-400 shadow-[0_1px_1px_0_rgba(0,0,0,0.05)]">
+          <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 bg-surface-50 px-1.5 font-mono text-[13px] font-bold text-surface-400 shadow-[0_1px_1px_0_rgba(0,0,0,0.05)]">
             ⌘K
           </kbd>
         </div>

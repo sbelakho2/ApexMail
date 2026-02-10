@@ -36,7 +36,7 @@ Webhooks allow you to receive HTTP POST requests when events happen in ApexMail,
 
 ### `message.sent`
 
-Triggered when a message is sent to the MTA.
+Triggered when a message is accepted for delivery.
 
 ```json
 {
@@ -236,16 +236,16 @@ function verifyWebhookSignature(
 }
 ```
 
-### Example: Express.js
+### Example: Node.js
 
-```typescript
+```javascript
 import express from 'express';
 
 const app = express();
 
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  const signature = req.headers['x-apexmail-signature'] as string;
-  const timestamp = req.headers['x-apexmail-timestamp'] as string;
+  const signature = req.headers['x-apexmail-signature'];
+  const timestamp = req.headers['x-apexmail-timestamp'];
   const payload = req.body.toString();
   
   if (!verifyWebhookSignature(payload, signature, timestamp, WEBHOOK_SECRET)) {
@@ -272,25 +272,13 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
 
 ## Retry Policy
 
-Failed webhooks are retried with exponential backoff:
-
-| Attempt | Delay |
-|---------|-------|
-| 1 | Immediate |
-| 2 | 1 minute |
-| 3 | 5 minutes |
-| 4 | 30 minutes |
-| 5 | 2 hours |
-| 6 | 8 hours |
-| 7 | 24 hours |
-
-After 7 failed attempts, the webhook is marked as failed.
+Failed webhook deliveries are retried automatically with increasing delays over approximately 24 hours. After multiple consecutive failures, the webhook event is marked as failed.
 
 ### Failure Handling
 
 Failures occur when:
 - Endpoint returns non-2xx status
-- Request times out (30 seconds)
+- Request times out
 - Connection fails
 - SSL/TLS error
 
@@ -327,7 +315,8 @@ Webhooks may be delivered multiple times. Use `messageId` for deduplication:
 async function handleWebhook(event: WebhookEvent) {
   const dedupeKey = `webhook:${event.event}:${event.data.messageId}`;
   
-  const isNew = await redis.set(dedupeKey, '1', { NX: true, EX: 86400 });
+  // Use any key-value store or database for deduplication
+  const isNew = await cache.setIfAbsent(dedupeKey, '1', { ttlSeconds: 86400 });
   if (!isNew) {
     return; // Already processed
   }

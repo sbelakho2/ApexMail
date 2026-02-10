@@ -80,19 +80,19 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
     return (
         <aside className={cn("w-64 border-r border-border bg-card min-h-screen overflow-y-auto print:hidden", className)}>
             {/* Control Plane Header - Uses semantic accent token */}
-            <div className="bg-control-plane text-control-plane-foreground text-xs font-medium py-1.5 px-4 text-center">
+            <div className="bg-control-plane text-control-plane-foreground text-[14px] font-medium py-1.5 px-4 text-center">
                 🔐 Control Plane
             </div>
             
             <div className="p-4 md:p-6">
                 {/* Logo */}
                 <Link href="/" className="flex items-center gap-3 mb-6 md:mb-8" onClick={handleLinkClick}>
-                    <div className="flex h-9 w-9 md:h-10 md:w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground font-bold text-base md:text-lg shadow-md">
+                    <div className="flex h-9 w-9 md:h-10 md:w-10 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold text-base md:text-lg shadow-md">
                         A
                     </div>
                     <div>
                         <span className="text-base md:text-lg font-bold text-foreground">ApexMail</span>
-                        <div className="text-xs text-muted-foreground">Platform Admin</div>
+                        <div className="text-[14px] text-muted-foreground">Platform Admin</div>
                     </div>
                 </Link>
 
@@ -100,7 +100,7 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
                 <nav className="space-y-4 md:space-y-6">
                     {navSections.map((section) => (
                         <div key={section.title}>
-                            <h3 className="text-xs font-semibold uppercase tracking-wider text-surface-600 mb-2 md:mb-3 px-3">
+                            <h3 className="text-[14px] font-semibold uppercase tracking-wider text-surface-600 mb-2 md:mb-3 px-3">
                                 {section.title}
                             </h3>
                             <ul className="space-y-1">
@@ -110,7 +110,7 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
                                             href={item.href}
                                             onClick={handleLinkClick}
                                             className={cn(
-                                                'flex items-center gap-3 px-3 py-3 rounded-lg text-sm transition-all',
+                                                'flex items-center gap-3 px-3 py-3 rounded-md text-sm transition-all',
                                                 pathname === item.href
                                                     ? 'bg-brand-50 text-brand-700 font-medium border border-brand-100 shadow-[inset_0_0_0_1px_rgba(37,99,235,0.05)]'
                                                     : 'hover:bg-surface-50 text-surface-600 hover:text-surface-900'
@@ -128,11 +128,11 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
                 </nav>
 
                 {/* Security Notice - Hidden on mobile for space */}
-                <div className="hidden md:block mt-8 p-4 bg-surface-50 rounded-xl border border-surface-200">
+                <div className="hidden md:block mt-8 p-4 bg-surface-50 rounded-lg border border-surface-200">
                     <div className="flex items-center gap-2 text-sm text-surface-700 font-medium mb-1">
                         🔒 Secure Environment
                     </div>
-                    <div className="text-xs text-surface-500">
+                    <div className="text-[14px] text-surface-500">
                         Control Plane is isolated from customer console.
                         IP-restricted access only.
                     </div>
@@ -140,7 +140,7 @@ export function Sidebar({ onNavigate, className }: SidebarProps) {
 
                 {/* Version */}
                 <div className="mt-6 text-center">
-                    <span className="text-xs text-surface-400">v1.0.0</span>
+                    <span className="text-[14px] text-surface-400">v1.0.0</span>
                 </div>
             </div>
         </aside>

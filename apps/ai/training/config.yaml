@@ -1,0 +1,112 @@
+# =============================================================================
+#  ApexMail AI — Training Configuration
+# =============================================================================
+#  Central config for Qwen 2.5-7B-Instruct QLoRA fine-tuning.
+#  Loaded by train.py, generate_dataset.py, eval.py, and export_onnx.py.
+# =============================================================================
+
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  base: "Qwen/Qwen2.5-7B-Instruct"
+  revision: "main"
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"
+  trust_remote_code: true
+
+# ── LoRA ─────────────────────────────────────────────────────────────────────
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# ── Quantisation (QLoRA) ────────────────────────────────────────────────────
+quantisation:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: true
+
+# ── Training hyper-parameters ────────────────────────────────────────────────
+training:
+  num_train_epochs: 4
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4          # effective batch = 16
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_seq_length: 4096
+  packing: true                           # pack short examples for efficiency
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  optim: "paged_adamw_8bit"
+  bf16: true
+  tf32: true
+  logging_steps: 5
+  eval_strategy: "steps"
+  eval_steps: 50
+  save_strategy: "steps"
+  save_steps: 100
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  report_to: "tensorboard"
+  seed: 42
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+paths:
+  data_dir: "data"
+  output_dir: "output"
+  merged_dir: "output-merged"
+  onnx_dir: "onnx_model"
+  gguf_dir: "gguf_model"
+  logs_dir: "logs"
+  eval_results: "eval_results"
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+dataset:
+  train_file: "data/train.jsonl"
+  val_file: "data/val.jsonl"
+  test_file: "data/test.jsonl"
+  val_split: 0.08
+  test_split: 0.04
+
+# ── Export ────────────────────────────────────────────────────────────────────
+# Primary: GGUF for llama.cpp CPU inference (much faster than ONNX for 7B)
+# Fallback: ONNX INT8 for onnxruntime
+export:
+  format: "gguf"                  # "gguf" or "onnx"
+  gguf:
+    quantisation: "Q4_K_M"       # excellent quality/speed for CPU (4.87 bpw)
+    # Also export Q5_K_M (5.69 bpw) and Q8_0 (8.50 bpw) for comparison
+    extra_quants:
+      - "Q5_K_M"
+      - "Q8_0"
+  onnx:
+    opset: 17
+    optimisation_level: 3
+    quantise_to: "int8"
+    provider: "CPUExecutionProvider"
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+evaluation:
+  temperature: 0.1
+  top_p: 0.9
+  max_new_tokens: 512
+  golden_set: "data/golden_qa.jsonl"
+  pass_threshold: 0.95            # 95 % A-grade on golden set to ship

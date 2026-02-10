@@ -46,9 +46,9 @@ export function HeroSection() {
  >
  {/* Badge */}
  <div
-   className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-surface-50 border border-surface-200 text-xs font-medium text-surface-600 mb-8"
+   className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-50 border border-surface-200 text-sm font-medium text-surface-600 mb-8"
  >
-   <span className="w-1.5 h-1.5 rounded-full bg-primary-500" />
+   <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />
    Now with Private Cloud deployments
  </div>
 
@@ -68,9 +68,9 @@ export function HeroSection() {
    {benefits.map((benefit) => (
      <li
        key={benefit}
-       className="flex items-center gap-2.5 text-surface-600 text-sm"
+       className="flex items-center gap-2.5 text-surface-600 text-[14px]"
      >
-       <Check className="w-4 h-4 text-primary-600" />
+       <Check className="w-4 h-4 text-brand-500" />
        {benefit}
      </li>
    ))}
@@ -80,7 +80,7 @@ export function HeroSection() {
         <div className="flex flex-wrap gap-4">
           <Link 
             href="https://app.apexmail.ee/signup" 
-            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors"
+            className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-brand-500 rounded-md hover:bg-brand-600 transition-colors"
             aria-label="Get API Keys - Sign up for free"
           >
             Get API Keys
@@ -98,7 +98,7 @@ export function HeroSection() {
 
         {/* Trust Signals */}
         <div className="mt-12 pt-8 border-t border-surface-200">
-          <p className="text-[13px] font-semibold text-surface-400 mb-6">Trusted by developers at</p>
+          <p className="text-[14px] font-semibold text-surface-400 mb-6 uppercase tracking-wider">Trusted by developers at</p>
           <div className="flex flex-wrap items-center gap-x-10 gap-y-6 opacity-40 grayscale contrast-125 hover:grayscale-0 hover:opacity-100 transition-all duration-500">
             {['TechCorp', 'StartupX', 'ScaleUp', 'DevHub', 'GlobalNet'].map((company) => (
               <span key={company} className="text-surface-900 font-bold text-lg tracking-tight">{company}</span>
@@ -110,7 +110,7 @@ export function HeroSection() {
  {/* Right Column - Code Block */}
  <div className="relative hidden lg:block">
  {/* Code block */}
- <div className="relative bg-surface-900 rounded-xl overflow-hidden border border-surface-800 shadow-2xl">
+ <div className="relative bg-surface-900 rounded-lg overflow-hidden border border-surface-800 shadow-2xl">
  {/* Window header */}
  <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-900">
  <div className="flex gap-1.5">
@@ -126,12 +126,12 @@ export function HeroSection() {
 
  {/* Floating stat card */}
  <div
- className="absolute -bottom-8 -left-8 bg-white border border-surface-200 rounded-xl px-5 py-4 shadow-xl"
+   className="absolute -bottom-8 -left-8 bg-white border border-surface-200 rounded-lg px-5 py-4 shadow-xl"
  >
- <div className="flex items-center gap-4">
- <div className="w-12 h-12 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100">
- <span className="text-primary-600 text-xl font-bold">✓</span>
- </div>
+   <div className="flex items-center gap-4">
+     <div className="w-12 h-12 rounded-full bg-brand-50 flex items-center justify-center border border-brand-100">
+       <span className="text-brand-500 text-xl font-bold">✓</span>
+     </div>
  <div>
  <div className="text-xs font-bold text-surface-500 mb-0.5">Average delivery</div>
  <div className="text-2xl font-bold text-surface-900 tabular-nums">1.2s</div>

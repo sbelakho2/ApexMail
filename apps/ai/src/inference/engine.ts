@@ -2,7 +2,7 @@
  * @apexmail/ai - ONNX Runtime Inference Engine
  * 
  * Local LLM inference using ONNX Runtime for privacy-preserving AI.
- * Supports Phi-3.5-mini and other ONNX-compatible models.
+ * Supports Qwen 2.5-7B-Instruct and other ONNX-compatible models.
  */
 
 import * as ort from 'onnxruntime-node';
@@ -19,20 +19,20 @@ import type {
 
 // Default inference configuration
 const DEFAULT_CONFIG: InferenceConfig = {
-    modelPath: './models/phi-3.5-mini-instruct-onnx',
-    modelName: 'phi-3.5-mini',
-    maxTokens: 2048,
+    modelPath: './models/qwen2.5-7b-instruct-onnx',
+    modelName: 'qwen2.5-7b-instruct',
+    maxTokens: 4096,
     temperature: 0.7,
     topP: 0.95,
     topK: 50,
     repetitionPenalty: 1.1,
-    stopSequences: ['<|end|>', '<|endoftext|>', '</s>'],
+    stopSequences: ['<|im_end|>', '<|endoftext|>'],
     useGPU: false,
     numThreads: 4,
-    contextLength: 4096,
+    contextLength: 8192,
 };
 
-// Simple tokenizer for Phi-3 (BPE-based)
+// Simple tokenizer for Qwen 2.5 (BPE-based, ChatML format)
 // In production, use the actual tokenizer from the model
 class SimpleTokenizer {
     private vocab: Map<string, number> = new Map();
@@ -42,15 +42,12 @@ class SimpleTokenizer {
     private sortedSpecialTokens: Array<[string, number]>;
 
     constructor() {
+        // Qwen 2.5 ChatML special tokens
         this.specialTokens = new Map([
-            ['<|system|>', 32006],
-            ['<|user|>', 32010],
-            ['<|assistant|>', 32001],
-            ['<|end|>', 32007],
-            ['<pad>', 32000],
-            ['<unk>', 0],
-            ['<s>', 1],
-            ['</s>', 2],
+            ['<|im_start|>', 151644],
+            ['<|im_end|>', 151645],
+            ['<|endoftext|>', 151643],
+            ['<|pad|>', 151646],
         ]);
 
         // FIX-500-447: Sort by token length descending — ensures '<|assistant|>' matches before '<|end|>'
@@ -404,7 +401,7 @@ export class InferenceEngine extends EventEmitter {
             name: this.config.modelName,
             version: '1.0.0',
             type: 'llm',
-            size: 2_100_000_000, // ~2.1GB for Phi-3.5-mini
+            size: 7_600_000_000, // ~7.6B params, Qwen 2.5-7B-Instruct (INT8 ONNX ~8GB)
             loadedAt: this.loadedAt ?? undefined,
             status: this.status,
             metrics: this.metrics,

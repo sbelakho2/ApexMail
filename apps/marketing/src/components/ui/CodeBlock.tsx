@@ -51,7 +51,7 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
 
  return (
  <div className="code-block overflow-x-auto">
- <pre className="p-4 text-sm leading-relaxed">
+ <pre className="p-4 text-[13px] leading-relaxed">
  <code
  className="font-mono"
  dangerouslySetInnerHTML={{

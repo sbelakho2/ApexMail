@@ -1,25 +1,25 @@
 # Private Cloud & Dedicated Infrastructure
 
-ApexMail's private cloud deployment options provide dedicated infrastructure for organizations requiring maximum control, security, and performance isolation.
+ApexMail offers private cloud deployment for organisations that require dedicated resources, strict data residency, and maximum performance isolation.
 
 ## Overview
 
 Private cloud deployment offers:
 
-- **Dedicated Infrastructure** - Your own isolated compute and network resources
-- **Geographic Control** - Deploy in specific regions for data residency
-- **Custom Configurations** - Tailored resource allocation and scaling
-- **Enhanced Security** - Network isolation, dedicated IPs, custom VPNs
-- **Performance Guarantees** - Dedicated capacity with SLA guarantees
+- **Dedicated Infrastructure** — Your own isolated compute and network resources
+- **Geographic Control** — Deploy in specific EU data centres for data residency compliance
+- **Custom Configurations** — Tailored resource allocation and scaling to match your workload
+- **Enhanced Security** — Network isolation, dedicated IPs, encrypted VPN tunnels
+- **Performance Guarantees** — Dedicated capacity with SLA guarantees
 
 ## Deployment Options
 
-| Option | Infrastructure | Use Case |
-|--------|---------------|----------|
-| **Dedicated Tenant** | Isolated containers on shared infrastructure | Mid-size enterprises |
-| **Private Cloud** | Dedicated VMs and networking | Large enterprises |
-| **On-Premises** | Your own data center | Regulated industries |
-| **Hybrid** | Mix of cloud and on-premises | Complex requirements |
+| Option | Description | Use Case |
+|--------|-------------|----------|
+| **Dedicated Tenant** | Isolated environment on managed infrastructure | Mid-size enterprises |
+| **Private Cloud** | Fully dedicated servers and networking | Large enterprises |
+| **On-Premises** | Deployed in your own data centre | Regulated industries |
+| **Hybrid** | Mix of ApexMail-managed and on-premises | Complex requirements |
 
 ## Dedicated Tenant Deployment
 
@@ -32,7 +32,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/request \
   -d '{
     "accountId": "acc_xxx",
     "deploymentType": "dedicated_tenant",
-    "region": "us-east-1",
+    "region": "eu-fi",
     "requirements": {
       "estimatedMonthlyVolume": 10000000,
       "peakSendRate": 5000,
@@ -42,16 +42,16 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/request \
     "networking": {
       "dedicatedIPs": true,
       "ipCount": 4,
-      "vpcPeering": false
+      "vpnTunnel": false
     },
     "security": {
       "encryption": "customer_managed_keys",
-      "keyArn": "arn:aws:kms:us-east-1:123456789:key/xxx"
+      "keyId": "cmk-your-key-id"
     },
     "contact": {
       "name": "John Smith",
       "email": "john@enterprise.com",
-      "phone": "+1-555-0123"
+      "phone": "+49-555-0123"
     }
   }'
 ```
@@ -64,7 +64,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/request \
     "id": "deploy_abc123",
     "status": "pending_review",
     "type": "dedicated_tenant",
-    "region": "us-east-1",
+    "region": "eu-fi",
     "estimatedProvisioningTime": "3-5 business days",
     "pricing": {
       "baseMonthly": 2500.00,
@@ -81,63 +81,21 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/request \
 }
 ```
 
-## Private Cloud Configuration
+## Available Regions
 
-### Infrastructure Sizing
+| Region Code | Location |
+|-------------|----------|
+| `eu-fi` | Helsinki, Finland |
+| `eu-de-south` | Southern Germany |
+| `eu-de-central` | Central Germany |
 
-```json
-{
-  "infrastructure": {
-    "compute": {
-      "apiServers": {
-        "instanceType": "c6i.2xlarge",
-        "count": 3,
-        "autoScaling": {
-          "min": 3,
-          "max": 10,
-          "targetCPU": 70
-        }
-      },
-      "workers": {
-        "instanceType": "c6i.xlarge",
-        "count": 5,
-        "autoScaling": {
-          "min": 5,
-          "max": 20,
-          "targetCPU": 80
-        }
-      },
-      "mtaServers": {
-        "instanceType": "m6i.xlarge",
-        "count": 4,
-        "autoScaling": {
-          "min": 4,
-          "max": 12,
-          "targetQueue": 10000
-        }
-      }
-    },
-    "database": {
-      "type": "PostgreSQL",
-      "instanceClass": "db.r6g.2xlarge",
-      "storage": "1000GB",
-      "multiAZ": true,
-      "readReplicas": 2
-    },
-    "cache": {
-      "type": "Redis",
-      "nodeType": "cache.r6g.xlarge",
-      "clusterMode": true,
-      "nodes": 6
-    },
-    "storage": {
-      "type": "S3",
-      "bucket": "dedicated",
-      "encryption": "AES-256"
-    }
-  }
-}
-```
+All regions are GDPR-compliant with data stored exclusively within the EU.
+
+## Infrastructure Sizing
+
+Private cloud deployments are sized to match your workload. During the provisioning process, our team will recommend a configuration based on your estimated monthly volume, peak send rate, and data retention requirements.
+
+All components include automatic health monitoring and alerting.
 
 ## Dedicated IP Pools
 
@@ -196,50 +154,47 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/dedicated-ips 
 
 ## Network Configuration
 
-### VPC Peering
+### VPN Tunnel
 
-Connect ApexMail private cloud to your AWS VPC:
+Connect your private network to your ApexMail deployment via an encrypted VPN tunnel:
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/vpc-peering \
+curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/vpn-tunnel \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
-    "peerVpcId": "vpc-0123456789abcdef0",
-    "peerOwnerId": "123456789012",
-    "peerRegion": "us-east-1",
-    "peerCidrBlock": "10.0.0.0/16"
+    "tunnelType": "wireguard",
+    "peerPublicKey": "your-wireguard-public-key",
+    "peerEndpoint": "vpn.yourcompany.com:51820",
+    "peerCidrBlock": "10.0.0.0/16",
+    "keepalive": 25
   }'
 ```
 
 Response:
 ```json
 {
-  "vpcPeering": {
-    "id": "pcx-abc123",
-    "status": "pending_acceptance",
-    "apexMailVpcId": "vpc-apexmail-xxx",
+  "vpnTunnel": {
+    "id": "vpn-abc123",
+    "status": "pending_peer_config",
+    "apexMailPublicKey": "apexmail-wireguard-public-key",
+    "apexMailEndpoint": "vpn-abc123.private.apexmail.ee:51820",
     "apexMailCidrBlock": "172.16.0.0/16",
     "instructions": [
-      "Accept the VPC peering request in your AWS console",
-      "Add route to ApexMail CIDR in your route tables",
-      "Update security groups to allow traffic from ApexMail"
+      "Add ApexMail's public key and endpoint to your WireGuard config",
+      "Configure allowed IPs for the ApexMail CIDR block",
+      "Verify the tunnel is established with a ping test"
     ]
   }
 }
 ```
 
-### Private Link / PrivateLink
+Supported tunnel types:
 
-```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/private-link \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -d '{
-    "deploymentId": "deploy_abc123",
-    "endpointType": "interface",
-    "services": ["api", "smtp"]
-  }'
-```
+| Type | Use Case |
+|------|----------|
+| **WireGuard** | Modern, high-performance VPN (recommended) |
+| **IPsec IKEv2** | Compatibility with corporate firewalls and legacy VPN gateways |
 
 ### Custom DNS
 
@@ -256,7 +211,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/private-link \
       {
         "type": "MX",
         "name": "smtp.internal.yourcompany.com",
-        "value": "10 smtp-1.apexmail-private.io"
+        "value": "10 smtp-1.apexmail-private.ee"
       }
     ]
   }
@@ -265,7 +220,9 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/private-link \
 
 ## Security Configuration
 
-### Customer-Managed Keys
+### Customer-Managed Encryption Keys
+
+ApexMail supports customer-managed encryption keys (CMEK). You provide the key endpoint, and ApexMail uses your key for data-at-rest encryption. Keys never leave your control.
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/private-deploy/encryption \
@@ -274,53 +231,26 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/private-deploy/encryption \
     "deploymentId": "deploy_abc123",
     "encryption": {
       "type": "customer_managed",
-      "kmsKeyArn": "arn:aws:kms:us-east-1:123456789:key/mrk-xxx",
+      "keyProvider": "external",
+      "keyEndpoint": "https://kms.yourcompany.com/keys/apexmail-dek",
+      "keyId": "cmk-your-key-id",
       "rotationEnabled": true,
       "rotationDays": 365
     }
   }'
 ```
 
+Supported key management providers:
+
+| Provider | Integration |
+|----------|-------------|
+| **HashiCorp Vault** | REST API / Transit engine |
+| **Custom KMS** | REST API endpoint |
+| **PKCS#11 HSM** | On-premises HSM |
+
 ### Network Security
 
-```json
-{
-  "security": {
-    "firewall": {
-      "inbound": [
-        {
-          "port": 443,
-          "protocol": "TCP",
-          "source": "0.0.0.0/0",
-          "description": "HTTPS API access"
-        },
-        {
-          "port": 587,
-          "protocol": "TCP",
-          "source": "10.0.0.0/8",
-          "description": "Internal SMTP submission"
-        }
-      ],
-      "outbound": [
-        {
-          "port": 25,
-          "protocol": "TCP",
-          "destination": "0.0.0.0/0",
-          "description": "SMTP delivery"
-        }
-      ]
-    },
-    "waf": {
-      "enabled": true,
-      "rules": ["OWASP", "IP_Rate_Limit", "Bot_Detection"]
-    },
-    "ddosProtection": {
-      "enabled": true,
-      "type": "advanced"
-    }
-  }
-}
-```
+Private Cloud deployments include a pre-configured firewall, web application firewall (WAF), and DDoS protection. You can customize firewall rules via the API or dashboard to restrict access to your deployment.
 
 ## Monitoring & Observability
 
@@ -335,29 +265,9 @@ curl https://api.apexmail.ee/enterprise/v1/private-deploy/metrics \
 Response:
 ```json
 {
-  "infrastructure": {
-    "apiServers": {
-      "healthy": 3,
-      "total": 3,
-      "avgCPU": 45,
-      "avgMemory": 62
-    },
-    "workers": {
-      "healthy": 5,
-      "total": 5,
-      "avgCPU": 72,
-      "queueDepth": 1250
-    },
-    "database": {
-      "connections": 85,
-      "maxConnections": 500,
-      "replicationLag": "0ms"
-    },
-    "cache": {
-      "hitRate": 98.5,
-      "memory": 4.2,
-      "maxMemory": 16
-    }
+  "health": {
+    "status": "healthy",
+    "lastCheck": "2024-01-15T10:30:00Z"
   },
   "email": {
     "sent24h": 1250000,
@@ -373,7 +283,7 @@ Response:
 
 ### Log Forwarding
 
-Forward infrastructure logs to your SIEM:
+Forward logs to your SIEM:
 
 ```json
 {
@@ -396,43 +306,11 @@ Forward infrastructure logs to your SIEM:
 
 ### Backup Configuration
 
-```json
-{
-  "backup": {
-    "database": {
-      "automated": true,
-      "retentionDays": 35,
-      "crossRegionCopy": "eu-west-1"
-    },
-    "configuration": {
-      "automated": true,
-      "retentionDays": 90
-    },
-    "pointInTimeRecovery": true
-  }
-}
-```
+Automated backups are configured with cross-region replication and point-in-time recovery. Backup retention periods are configurable.
 
 ### Multi-Region Setup
 
-```json
-{
-  "multiRegion": {
-    "primary": "us-east-1",
-    "secondary": "us-west-2",
-    "failover": {
-      "automatic": true,
-      "healthCheckInterval": 30,
-      "failoverThreshold": 3
-    },
-    "replication": {
-      "database": "async",
-      "configuration": "sync",
-      "maxLagSeconds": 60
-    }
-  }
-}
-```
+Private Cloud supports multi-region deployments with automatic failover and near-zero data loss. Contact your account manager for available region options and failover configuration.
 
 ## Deployment Status
 
@@ -450,7 +328,7 @@ Response:
     "id": "deploy_abc123",
     "status": "active",
     "type": "private_cloud",
-    "region": "us-east-1",
+    "region": "eu-fi",
     "provisionedAt": "2024-01-10T10:00:00Z",
     "endpoints": {
       "api": "https://api-abc123.private.apexmail.ee",
@@ -462,10 +340,8 @@ Response:
       "lastCheck": "2024-01-15T10:30:00Z",
       "components": {
         "api": "healthy",
-        "workers": "healthy",
-        "mta": "healthy",
-        "database": "healthy",
-        "cache": "healthy"
+        "email_delivery": "healthy",
+        "storage": "healthy"
       }
     },
     "maintenance": {
@@ -484,28 +360,21 @@ Response:
 | `/private-deploy/request` | POST | Request deployment |
 | `/private-deploy/status/{id}` | GET | Get deployment status |
 | `/private-deploy/dedicated-ips` | POST | Configure dedicated IPs |
-| `/private-deploy/vpc-peering` | POST | Setup VPC peering |
-| `/private-deploy/private-link` | POST | Setup PrivateLink |
+| `/private-deploy/vpn-tunnel` | POST | Setup VPN tunnel |
 | `/private-deploy/encryption` | PUT | Configure encryption |
 | `/private-deploy/metrics` | GET | Get infrastructure metrics |
 | `/private-deploy/scaling` | PUT | Update scaling config |
 
 ## SLA Guarantees
 
-| Metric | Standard | Private Cloud |
-|--------|----------|---------------|
-| Uptime | 99.9% | 99.99% |
-| API Latency (p99) | 500ms | 100ms |
-| Throughput | Shared | Dedicated |
-| Support Response | 4 hours | 15 minutes |
-| Incident RCA | 5 days | 24 hours |
+Private Cloud offers enhanced SLA guarantees including higher uptime, faster API response times, dedicated throughput, and priority support. See your service agreement for details.
 
 ## Best Practices
 
-1. **Start with Capacity Planning** - Accurately estimate volume and growth
-2. **Warm Up IPs Gradually** - Follow IP warmup schedule for new pools
-3. **Enable Multi-AZ** - Ensure high availability within region
-4. **Configure Monitoring** - Set up alerts before going live
-5. **Test Failover** - Regularly test disaster recovery procedures
-6. **Review Security** - Audit security configurations quarterly
-7. **Plan Maintenance Windows** - Coordinate with business requirements
+1. **Start with Capacity Planning** — Accurately estimate volume and growth
+2. **Warm Up IPs Gradually** — Follow IP warmup schedule for new pools
+3. **Enable Cross-Region Replication** — Set up a standby in a second region for HA
+4. **Configure Monitoring** — Set up alerts before going live
+5. **Test Failover** — Regularly test disaster recovery procedures
+6. **Review Security** — Audit security configurations quarterly
+7. **Plan Maintenance Windows** — Coordinate with business requirements

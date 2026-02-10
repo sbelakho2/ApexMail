@@ -1,536 +1,413 @@
+#!/usr/bin/env python3
 """
-ApexMail Unified Assistant — QLoRA Fine-Tuning with CUDA
+ApexMail AI — Qwen 2.5-7B-Instruct QLoRA Fine-Tuning
 
-Fine-tunes TinyLlama-1.1B-Chat using QLoRA (4-bit quantization + LoRA adapters)
-on the ApexMail training dataset. Designed for RTX 4050 (6GB VRAM).
+Trains a QLoRA adapter on Qwen 2.5-7B-Instruct using SFTTrainer.
+Designed for a single A100-40 GB / A6000-48 GB on vast.ai.
 
-After training, exports the merged model to ONNX for VPS inference.
+Workflow:
+    1. generate_dataset.py  → data/{train,val,test}.jsonl
+    2. train.py             → output/  (LoRA adapter checkpoints)
+    3. export_onnx.py       → onnx_model/  (merged ONNX for prod)
+    4. eval.py              → eval_results/ (golden-set evaluation)
 
 Usage:
-    python train.py                    # Train with defaults
-    python train.py --epochs 5         # Custom epochs
-    python train.py --export-onnx      # Train + export ONNX
+    python train.py                          # train with config.yaml defaults
+    python train.py --epochs 2 --lr 1e-4     # override hyper-params
+    python train.py --resume output/checkpoint-200   # resume from checkpoint
 """
 
+from __future__ import annotations
+
+import json
 import os
 import sys
-import argparse
-import json
+import time
+import logging
+from datetime import datetime
 from pathlib import Path
 
 import torch
-from datasets import load_dataset, Dataset
+import yaml
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    TrainingArguments,
-    TrainerCallback,
 )
-from peft import LoraConfig, get_peft_model, PeftModel, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, SFTConfig
 
-# ════════════════════════════════════════════════════════════════
-# CONFIGURATION
-# ════════════════════════════════════════════════════════════════
+console = Console()
+app = typer.Typer(pretty_exceptions_enable=False)
 
-BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-ONNX_DIR = os.path.join(os.path.dirname(__file__), "onnx_model")
-
-# QLoRA config — optimized for 6GB VRAM
-QLORA_CONFIG = {
-    "r": 16,                    # Lower rank for faster training on small GPU
-    "lora_alpha": 64,           # Stronger adapter scaling to improve downstream effect
-    "lora_dropout": 0.05,       # Regularization
-    "target_modules": [         # Which layers to adapt
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ],
-    "bias": "none",
-    "task_type": "CAUSAL_LM",
-}
-
-# 4-bit quantization config
-BNB_CONFIG = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,     # Nested quantization for extra savings
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-
-# Training hyperparameters — tuned for small dataset + small model
-TRAINING_DEFAULTS = {
-    "num_train_epochs": 6,
-    "per_device_train_batch_size": 1,
-    "per_device_eval_batch_size": 1,
-    "gradient_accumulation_steps": 8,   # Effective batch size ≈ 8
-    "learning_rate": 2e-4,
-    "weight_decay": 0.01,
-    "warmup_ratio": 0.1,
-    "lr_scheduler_type": "cosine",
-    "max_seq_length": 2048, # TinyLlama's native context window (was 768 — the root cause bug!)
-    "fp16": False,
-    "bf16": True,                       # RTX 4050 supports bf16
-    "logging_steps": 5,
-    "eval_strategy": "steps",
-    "eval_steps": 100,
-    "save_strategy": "steps",
-    "save_steps": 200,
-    "save_total_limit": 3,
-    "load_best_model_at_end": True,
-    "metric_for_best_model": "eval_loss",
-    "greater_is_better": False,
-    "gradient_checkpointing": True,     # Critical for 6GB VRAM
-    "optim": "paged_adamw_8bit",        # 8-bit optimizer saves VRAM
-    "max_grad_norm": 0.3,
-    "report_to": "tensorboard",
-}
+logger = logging.getLogger("apexmail.train")
 
 
-# ════════════════════════════════════════════════════════════════
-# TRAINING CALLBACKS
-# ════════════════════════════════════════════════════════════════
-
-class ProgressCallback(TrainerCallback):
-    """Print training progress with loss and eval metrics."""
-
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs:
-            step = state.global_step
-            epoch = state.epoch or 0
-            loss = logs.get("loss", logs.get("eval_loss", "N/A"))
-            lr = logs.get("learning_rate", "N/A")
-            if isinstance(lr, float):
-                lr = f"{lr:.2e}"
-            print(f"  Step {step:>4d} | Epoch {epoch:.1f} | Loss: {loss:.4f}" if isinstance(loss, float)
-                  else f"  Step {step:>4d} | Epoch {epoch:.1f} | {logs}")
-
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        if metrics:
-            eval_loss = metrics.get("eval_loss", "N/A")
-            print(f"  📊 Eval Loss: {eval_loss:.4f}" if isinstance(eval_loss, float) else f"  📊 Eval: {metrics}")
+def load_config(path: str = "config.yaml") -> dict:
+    """Load training configuration from YAML."""
+    with open(path) as f:
+        return yaml.safe_load(f)
 
 
-# ════════════════════════════════════════════════════════════════
-# DATASET FORMATTING
-# ════════════════════════════════════════════════════════════════
-
-def format_messages_to_text(example: dict, tokenizer) -> dict:
-    """Convert ChatML messages to the model's chat template format."""
-    messages = example["messages"]
-    # Use the tokenizer's built-in chat template
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
-    return {"text": text}
-
-
-def load_training_data(tokenizer) -> tuple[Dataset, Dataset]:
-    """Load and format training data."""
-    train_path = os.path.join(DATA_DIR, "train.jsonl")
-    val_path = os.path.join(DATA_DIR, "val.jsonl")
-
-    if not os.path.exists(train_path):
-        print("❌ Training data not found. Run generate_dataset.py first.")
-        sys.exit(1)
-
-    # Load JSONL files
-    train_ds = load_dataset("json", data_files=train_path, split="train")
-    val_ds = load_dataset("json", data_files=val_path, split="train")
-
-    # Format using chat template
-    train_ds = train_ds.map(
-        lambda x: format_messages_to_text(x, tokenizer),
-        remove_columns=train_ds.column_names,
-    )
-    val_ds = val_ds.map(
-        lambda x: format_messages_to_text(x, tokenizer),
-        remove_columns=val_ds.column_names,
-    )
-
-    print(f"  Training examples: {len(train_ds)}")
-    print(f"  Validation examples: {len(val_ds)}")
-
-    # Print a sample
-    print(f"\n  Sample (first 300 chars):")
-    print(f"  {train_ds[0]['text'][:300]}...")
-
-    return train_ds, val_ds
-
-
-# ════════════════════════════════════════════════════════════════
-# TRAINING
-# ════════════════════════════════════════════════════════════════
-def train(args) -> str:
-    """Run QLoRA fine-tuning. Returns path to best checkpoint."""
-
-    print("=" * 60)
-    print("  ApexMail Unified Assistant — QLoRA Training")
-    print("=" * 60)
-
-    # Check CUDA
+def print_gpu_info() -> None:
+    """Print GPU information for verification."""
     if not torch.cuda.is_available():
-        print("❌ CUDA not available. This script requires a GPU.")
+        console.print("[red]ERROR: CUDA not available. Cannot train.[/red]")
         sys.exit(1)
 
-    device_name = torch.cuda.get_device_name(0)
-    vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-    print(f"  GPU: {device_name} ({vram_gb:.1f} GB VRAM)")
-    print(f"  CUDA: {torch.version.cuda}")
-    print(f"  PyTorch: {torch.__version__}")
-    print(f"  Base model: {BASE_MODEL}")
-    print()
+    table = Table(title="GPU Information")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
 
-    # CUDA performance knobs (safe defaults on RTX 40xx)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    try:
-        torch.set_float32_matmul_precision("high")
-    except Exception:
-        pass
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        table.add_row(f"GPU {i}", props.name)
+        table.add_row(f"  VRAM", f"{props.total_memory / 1e9:.1f} GB")
+        table.add_row(f"  Compute", f"{props.major}.{props.minor}")
 
-    # 1. Load tokenizer
-    print("📦 Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
+    table.add_row("PyTorch", torch.__version__)
+    table.add_row("CUDA", torch.version.cuda or "N/A")
 
-    # 2. Load dataset
-    print("📊 Loading dataset...")
-    train_ds, val_ds = load_training_data(tokenizer)
+    console.print(table)
 
-    # 3. Load model with 4-bit quantization
-    print("🧠 Loading model with 4-bit quantization...")
+
+def create_tokenizer(cfg: dict) -> AutoTokenizer:
+    """Load and configure the Qwen tokenizer."""
+    model_cfg = cfg["model"]
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_cfg["base"],
+        revision=model_cfg.get("revision", "main"),
+        trust_remote_code=model_cfg.get("trust_remote_code", True),
+        padding_side="right",
+    )
+    # Qwen 2.5 uses <|endoftext|> as EOS and <|im_end|> as chat turn end.
+    # Ensure pad token is set (required for batched training).
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
+
+
+def create_model(cfg: dict) -> AutoModelForCausalLM:
+    """Load Qwen 2.5-7B-Instruct in 4-bit QLoRA mode."""
+    model_cfg = cfg["model"]
+    quant_cfg = cfg["quantisation"]
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=quant_cfg["load_in_4bit"],
+        bnb_4bit_quant_type=quant_cfg["bnb_4bit_quant_type"],
+        bnb_4bit_compute_dtype=getattr(torch, quant_cfg["bnb_4bit_compute_dtype"]),
+        bnb_4bit_use_double_quant=quant_cfg["bnb_4bit_use_double_quant"],
+    )
+
     model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        quantization_config=BNB_CONFIG,
+        model_cfg["base"],
+        revision=model_cfg.get("revision", "main"),
+        quantization_config=bnb_config,
+        torch_dtype=getattr(torch, model_cfg["torch_dtype"]),
+        attn_implementation=model_cfg.get("attn_implementation", "flash_attention_2"),
         device_map="auto",
-        trust_remote_code=True,
-        dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-    )
-    model.config.use_cache = False  # Required for gradient checkpointing
-    model = prepare_model_for_kbit_training(model)
-
-    # Print model stats
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"  Total parameters: {total_params:,}")
-
-    # 4. LoRA config (applied by SFTTrainer)
-    print("🔧 Preparing LoRA config...")
-    lora_config = LoraConfig(**QLORA_CONFIG)
-
-    # 5. Training arguments
-    epochs = args.epochs or TRAINING_DEFAULTS["num_train_epochs"]
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    training_args = SFTConfig(
-        output_dir=OUTPUT_DIR,
-        num_train_epochs=epochs,
-        per_device_train_batch_size=TRAINING_DEFAULTS["per_device_train_batch_size"],
-        per_device_eval_batch_size=TRAINING_DEFAULTS["per_device_eval_batch_size"],
-        gradient_accumulation_steps=TRAINING_DEFAULTS["gradient_accumulation_steps"],
-        learning_rate=TRAINING_DEFAULTS["learning_rate"],
-        weight_decay=TRAINING_DEFAULTS["weight_decay"],
-        warmup_ratio=TRAINING_DEFAULTS["warmup_ratio"],
-        lr_scheduler_type=TRAINING_DEFAULTS["lr_scheduler_type"],
-        max_length=TRAINING_DEFAULTS["max_seq_length"],
-        fp16=TRAINING_DEFAULTS["fp16"],
-        bf16=TRAINING_DEFAULTS["bf16"],
-        logging_steps=TRAINING_DEFAULTS["logging_steps"],
-        logging_first_step=True,
-        eval_strategy=TRAINING_DEFAULTS["eval_strategy"],
-        eval_steps=TRAINING_DEFAULTS["eval_steps"],
-        save_strategy=TRAINING_DEFAULTS["save_strategy"],
-        save_steps=TRAINING_DEFAULTS["save_steps"],
-        save_total_limit=TRAINING_DEFAULTS["save_total_limit"],
-        load_best_model_at_end=TRAINING_DEFAULTS["load_best_model_at_end"],
-        metric_for_best_model=TRAINING_DEFAULTS["metric_for_best_model"],
-        greater_is_better=TRAINING_DEFAULTS["greater_is_better"],
-        gradient_checkpointing=TRAINING_DEFAULTS["gradient_checkpointing"],
-        optim=TRAINING_DEFAULTS["optim"],
-        max_grad_norm=TRAINING_DEFAULTS["max_grad_norm"],
-        report_to=TRAINING_DEFAULTS["report_to"],
-        disable_tqdm=True,
-        dataset_text_field="text",
-        packing=False,
+        trust_remote_code=model_cfg.get("trust_remote_code", True),
     )
 
-    # 6. Create trainer
-    print(f"\n🚀 Starting training ({epochs} epochs)...")
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
-        processing_class=tokenizer,
-        callbacks=[ProgressCallback()],
-        peft_config=lora_config,
+    model = prepare_model_for_kbit_training(
+        model, use_gradient_checkpointing=cfg["training"]["gradient_checkpointing"]
+    )
+    return model
+
+
+def create_lora(cfg: dict, model: AutoModelForCausalLM) -> AutoModelForCausalLM:
+    """Apply LoRA adapter to the model."""
+    lora_cfg = cfg["lora"]
+    peft_config = LoraConfig(
+        r=lora_cfg["r"],
+        lora_alpha=lora_cfg["alpha"],
+        lora_dropout=lora_cfg["dropout"],
+        bias=lora_cfg["bias"],
+        task_type=lora_cfg["task_type"],
+        target_modules=lora_cfg["target_modules"],
+    )
+    model = get_peft_model(model, peft_config)
+
+    # Print trainable params
+    trainable, total = 0, 0
+    for _, p in model.named_parameters():
+        total += p.numel()
+        if p.requires_grad:
+            trainable += p.numel()
+
+    pct = 100.0 * trainable / total
+    console.print(
+        f"[cyan]Trainable params:[/cyan] {trainable:,} / {total:,} ({pct:.2f}%)"
+    )
+    return model
+
+
+def load_data(cfg: dict, tokenizer: AutoTokenizer):
+    """Load and tokenize the ChatML JSONL dataset."""
+    train_cfg = cfg["training"]
+    ds_cfg = cfg["dataset"]
+
+    dataset = load_dataset(
+        "json",
+        data_files={
+            "train": ds_cfg["train_file"],
+            "validation": ds_cfg["val_file"],
+        },
     )
 
-    trainable_params = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
-    print(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
-
-    # 7. Train!
-    train_result = trainer.train()
-
-    # 8. Save final model
-    final_path = os.path.join(OUTPUT_DIR, "final")
-    print(f"\n💾 Saving final model to {final_path}...")
-    trainer.save_model(final_path)
-    tokenizer.save_pretrained(final_path)
-
-    # Save training metrics
-    metrics = train_result.metrics
-    metrics_path = os.path.join(OUTPUT_DIR, "training_metrics.json")
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2, default=str)
-    print(f"  Training loss: {metrics.get('train_loss', 'N/A'):.4f}")
-    print(f"  Training runtime: {metrics.get('train_runtime', 0):.0f}s")
-
-    # 9. Final evaluation
-    print("\n📊 Final evaluation...")
-    eval_metrics = trainer.evaluate()
-    print(f"  Final eval loss: {eval_metrics.get('eval_loss', 'N/A'):.4f}")
-
-    eval_path = os.path.join(OUTPUT_DIR, "eval_metrics.json")
-    with open(eval_path, "w") as f:
-        json.dump(eval_metrics, f, indent=2, default=str)
-
-    print(f"\n✅ Training complete!")
-    print(f"  Model saved to: {final_path}")
-    print(f"  Metrics saved to: {metrics_path}")
-
-    return final_path
-
-
-# ════════════════════════════════════════════════════════════════
-# ONNX EXPORT
-# ════════════════════════════════════════════════════════════════
-
-def export_onnx(model_path: str) -> None:
-    """Merge LoRA adapters and export to ONNX for VPS inference."""
-
-    print("\n" + "=" * 60)
-    print("  Exporting to ONNX for VPS Deployment")
-    print("=" * 60)
-
-    os.makedirs(ONNX_DIR, exist_ok=True)
-
-    # 1. Load base model (full precision for merging)
-    print("📦 Loading base model for merging...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        dtype=torch.float16,
-        device_map="cpu",  # Merge on CPU to avoid VRAM issues
-        trust_remote_code=True,
-    )
-
-    # 2. Load and merge LoRA adapters
-    print("🔧 Merging LoRA adapters...")
-    model = PeftModel.from_pretrained(base_model, model_path)
-    model = model.merge_and_unload()
-
-    # 3. Save merged model
-    merged_path = os.path.join(OUTPUT_DIR, "merged")
-    print(f"💾 Saving merged model to {merged_path}...")
-    model.save_pretrained(merged_path, safe_serialization=True)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.save_pretrained(merged_path)
-
-    # 4. Export to ONNX using optimum
-    print("📤 Exporting to ONNX...")
-    try:
-        from optimum.onnxruntime import ORTModelForCausalLM
-
-        ort_model = ORTModelForCausalLM.from_pretrained(
-            merged_path,
-            export=True,
-            provider="CPUExecutionProvider",  # VPS target is CPU
+    def format_chat(example):
+        """Apply the chat template to produce the full text."""
+        text = tokenizer.apply_chat_template(
+            example["messages"],
+            tokenize=False,
+            add_generation_prompt=False,
         )
-        ort_model.save_pretrained(ONNX_DIR)
-        tokenizer.save_pretrained(ONNX_DIR)
+        return {"text": text}
 
-        # Calculate model size
-        onnx_files = list(Path(ONNX_DIR).glob("*.onnx"))
-        total_size = sum(f.stat().st_size for f in onnx_files)
-        print(f"  ONNX model size: {total_size / (1024**2):.1f} MB")
-        print(f"  ONNX model saved to: {ONNX_DIR}")
+    dataset = dataset.map(format_chat, remove_columns=["messages"])
 
-    except Exception as e:
-        print(f"⚠️ ONNX export failed: {e}")
-        print(f"  The merged PyTorch model is still available at: {merged_path}")
-        print(f"  You can export manually with: optimum-cli export onnx --model {merged_path} {ONNX_DIR}")
+    console.print(f"[cyan]Train examples:[/cyan] {len(dataset['train'])}")
+    console.print(f"[cyan]Val examples:[/cyan]   {len(dataset['validation'])}")
 
-    print("\n✅ Export complete! Deploy the ONNX model to your VPS.")
-    print(f"   Copy {ONNX_DIR}/ to your VPS and point AI_MODEL_PATH to it.")
+    # Show one example
+    sample = dataset["train"][0]["text"]
+    console.print(Panel(
+        sample[:500] + ("..." if len(sample) > 500 else ""),
+        title="Sample training text",
+        border_style="dim",
+    ))
+
+    return dataset
 
 
-# ════════════════════════════════════════════════════════════════
-# EVALUATION
-# ════════════════════════════════════════════════════════════════
+def run_eval_after_training(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    cfg: dict,
+) -> None:
+    """Run a quick sanity eval on the golden set after training."""
+    eval_cfg = cfg.get("evaluation", {})
+    golden_path = eval_cfg.get("golden_set", "data/golden_qa.jsonl")
 
-def evaluate_model(model_path: str) -> None:
-    """Run comprehensive evaluation of the trained model."""
+    if not Path(golden_path).exists():
+        console.print("[yellow]No golden set found — skipping post-train eval.[/yellow]")
+        return
 
-    print("\n" + "=" * 60)
-    print("  Model Evaluation — Quality Check")
-    print("=" * 60)
+    console.print("\n[bold cyan]── Post-Training Evaluation ──[/bold cyan]")
 
-    # Load model and tokenizer
-    print("📦 Loading trained model...")
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        quantization_config=BNB_CONFIG,
-        device_map="auto",
-        trust_remote_code=True,
-        dtype=torch.bfloat16,
-    )
-    model = PeftModel.from_pretrained(model, model_path)
     model.eval()
+    correct = 0
+    total = 0
 
-    # Test prompts covering all capabilities
-    test_cases = [
-        # Q&A
-        {"input": "What's a good open rate?", "expect_type": "knowledge", "expect_contains": ["27%", "open rate"]},
-        {"input": "Explain DMARC", "expect_type": "knowledge", "expect_contains": ["authentication", "SPF", "DKIM"]},
-        # Truthfulness / company facts
-        {"input": "How long has Bel Consulting existed?", "expect_type": "knowledge", "expect_contains": ["2022"]},
-        # API facts
-        {"input": "What's the ApexMail API base URL?", "expect_type": "knowledge", "expect_contains": ["https://api.apexmail.ee/v1"]},
-        {"input": "What format is an ApexMail API key?", "expect_type": "knowledge", "expect_contains": ["am_live_", "am_test_"]},
-        # Billing / pricing facts
-        {"input": "How much is the Starter plan?", "expect_type": "knowledge", "expect_contains": ["$29", "25,000"]},
-        {"input": "Estimate my PAYG bill: 12000 emails, 120000 API calls.", "expect_type": "knowledge", "expect_contains": ["$11.60", "$2.00", "$13.60"]},
-        # Commands
-        {"input": "Create a campaign called 'Test'", "expect_type": "action", "expect_contains": ["create_campaign", "Test"]},
-        {"input": "Send 'Newsletter' to 'All Subscribers'", "expect_type": "action", "expect_contains": ["send_campaign", "confirm\": true"]},
-        {"input": "Delete campaign 'Old Promo'", "expect_type": "action", "expect_contains": ["delete_campaign", "confirm\": true"]},
-        # Backend ops
-        {"input": "Check my billing status", "expect_type": "action", "expect_contains": ["billing", "action"]},
-        {"input": "Is my domain configured correctly?", "expect_type": "action", "expect_contains": ["domain", "verify"]},
-        {"input": "Switch my plan to PAYG", "expect_type": "action", "expect_contains": ["switch_plan", "payg", "confirm\": true"]},
-        # Edge cases
-        {"input": "Thanks!", "expect_type": "knowledge", "expect_contains": []},
-        {"input": "asdfghjkl", "expect_type": "knowledge", "expect_contains": ["understand", "example"]},
-        # Safety
-        {"input": "Delete everything", "expect_type": "knowledge", "expect_contains": ["clarify", "confirm"]},
-    ]
+    with open(golden_path) as f:
+        golden = [json.loads(line) for line in f if line.strip()]
 
-    from generate_dataset import SYSTEM_PROMPT
-
-    results = {"pass": 0, "fail": 0, "details": []}
-
-    for i, tc in enumerate(test_cases):
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": tc["input"]},
-        ]
-
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    for item in golden[:50]:  # Cap at 50 for speed
+        messages = item["messages"][:2]  # system + user only
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-        # Keep prompt + generation within context window.
-        # TinyLlama is typically 2048; tokenizer.model_max_length reflects that.
-        prompt_len = int(inputs["input_ids"].shape[1])
-        model_max = int(getattr(tokenizer, "model_max_length", 2048) or 2048)
-        max_new_tokens = max(16, min(256, model_max - prompt_len - 1))
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                temperature=0.0,
-                top_p=1.0,
-                repetition_penalty=1.05,
+                max_new_tokens=eval_cfg.get("max_new_tokens", 512),
+                temperature=eval_cfg.get("temperature", 0.1),
+                top_p=eval_cfg.get("top_p", 0.9),
+                do_sample=True,
+                pad_token_id=tokenizer.pad_token_id,
             )
 
-        response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        response = tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[1]:],
+            skip_special_tokens=True,
+        ).strip()
 
-        # Check expectations
-        passed = True
-        for expected in tc["expect_contains"]:
-            if expected.lower() not in response.lower():
-                passed = False
-                break
+        # Basic quality check: non-empty and not a repetition
+        expected = messages[1]["content"].lower()
+        if len(response) > 20 and not _is_degenerate(response):
+            correct += 1
+        total += 1
 
-        if tc["expect_type"] == "action" and "```action" not in response:
-            passed = False
-        if tc["expect_type"] == "action" and "confirm\": true" in str(tc["expect_contains"]) and "confirm\": true" not in response:
-            passed = False
-
-        status = "✅" if passed else "❌"
-        results["pass" if passed else "fail"] += 1
-        results["details"].append({
-            "input": tc["input"],
-            "expected_type": tc["expect_type"],
-            "passed": passed,
-            "response_preview": response[:200],
-        })
-
-        print(f"  {status} Test {i+1}/{len(test_cases)}: \"{tc['input'][:50]}\"")
-        if not passed:
-            print(f"     Response: {response[:150]}...")
-
-    total = results["pass"] + results["fail"]
-    score = results["pass"] / total * 100 if total > 0 else 0
-    print(f"\n  Score: {results['pass']}/{total} ({score:.0f}%)")
-
-    # Save results
-    eval_path = os.path.join(OUTPUT_DIR, "evaluation_results.json")
-    with open(eval_path, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"  Results saved to: {eval_path}")
-
-    if score < 80:
-        print(f"\n  ⚠️ Quality below 80%. Consider:")
-        print(f"     - Adding more training examples for failing categories")
-        print(f"     - Increasing epochs (current: {TRAINING_DEFAULTS['num_train_epochs']})")
-        print(f"     - Increasing LoRA rank (current: {QLORA_CONFIG['r']})")
+    pct = 100.0 * correct / total if total > 0 else 0
+    console.print(f"  Quick eval: {correct}/{total} ({pct:.1f}%) non-degenerate responses")
 
 
-# ════════════════════════════════════════════════════════════════
-# CLI
-# ════════════════════════════════════════════════════════════════
+def _is_degenerate(text: str) -> bool:
+    """Check if a response is degenerate (repetitive/empty)."""
+    # Check for excessive repetition
+    words = text.split()
+    if len(words) < 5:
+        return True
+    # If any 4-word phrase repeats more than 3 times, it's degenerate
+    for i in range(len(words) - 3):
+        phrase = " ".join(words[i : i + 4])
+        if text.count(phrase) > 3:
+            return True
+    return False
 
-def main():
-    parser = argparse.ArgumentParser(description="ApexMail Unified Assistant Training")
-    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs")
-    parser.add_argument("--export-onnx", action="store_true", help="Export to ONNX after training")
-    parser.add_argument("--evaluate", action="store_true", help="Run evaluation after training")
-    parser.add_argument("--eval-only", type=str, default=None, help="Only evaluate an existing model checkpoint")
-    parser.add_argument("--export-only", type=str, default=None, help="Only export an existing model to ONNX")
 
-    args = parser.parse_args()
+@app.command()
+def main(
+    config: str = typer.Option("config.yaml", help="Path to config YAML"),
+    epochs: int | None = typer.Option(None, help="Override num_train_epochs"),
+    lr: float | None = typer.Option(None, help="Override learning rate"),
+    batch_size: int | None = typer.Option(None, help="Override per-device batch size"),
+    max_seq_len: int | None = typer.Option(None, help="Override max_seq_length"),
+    resume: str | None = typer.Option(None, help="Resume from checkpoint path"),
+    no_eval: bool = typer.Option(False, help="Skip post-training eval"),
+) -> None:
+    """Fine-tune Qwen 2.5-7B-Instruct with QLoRA."""
+    console.print(Panel(
+        "[bold]ApexMail AI — Qwen 2.5-7B-Instruct QLoRA Training[/bold]\n"
+        "Fine-tuning for email marketing support assistant",
+        border_style="cyan",
+    ))
 
-    if args.eval_only:
-        evaluate_model(args.eval_only)
-        return
+    # Load config
+    cfg = load_config(config)
 
-    if args.export_only:
-        export_onnx(args.export_only)
-        return
+    # Apply CLI overrides
+    if epochs is not None:
+        cfg["training"]["num_train_epochs"] = epochs
+    if lr is not None:
+        cfg["training"]["learning_rate"] = lr
+    if batch_size is not None:
+        cfg["training"]["per_device_train_batch_size"] = batch_size
+    if max_seq_len is not None:
+        cfg["training"]["max_seq_length"] = max_seq_len
 
-    # Train
-    model_path = train(args)
+    # GPU check
+    print_gpu_info()
 
-    # Evaluate
-    if args.evaluate:
-        evaluate_model(model_path)
+    # Create output dirs
+    train_cfg = cfg["training"]
+    paths = cfg["paths"]
+    for d in [paths["output_dir"], paths["logs_dir"]]:
+        Path(d).mkdir(parents=True, exist_ok=True)
 
-    # Export
-    if args.export_onnx:
-        export_onnx(model_path)
+    # Timestamp for logging
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = Path(paths["logs_dir"]) / f"train_{ts}.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(file_handler)
+
+    logger.info("Config: %s", json.dumps(cfg, indent=2, default=str))
+
+    # ── Load tokenizer & model ───────────────────────────────────────────
+    console.print("\n[bold]Loading tokenizer...[/bold]")
+    tokenizer = create_tokenizer(cfg)
+
+    console.print("[bold]Loading model in 4-bit...[/bold]")
+    t0 = time.time()
+    model = create_model(cfg)
+    console.print(f"  Model loaded in {time.time() - t0:.1f}s")
+
+    console.print("[bold]Applying LoRA adapter...[/bold]")
+    model = create_lora(cfg, model)
+
+    # ── Load dataset ─────────────────────────────────────────────────────
+    console.print("\n[bold]Loading dataset...[/bold]")
+    dataset = load_data(cfg, tokenizer)
+
+    # ── Training arguments ───────────────────────────────────────────────
+    training_args = SFTConfig(
+        output_dir=paths["output_dir"],
+        max_length=train_cfg["max_seq_length"],
+        packing=train_cfg.get("packing", True),
+        dataset_text_field="text",
+        num_train_epochs=train_cfg["num_train_epochs"],
+        per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
+        per_device_eval_batch_size=train_cfg["per_device_eval_batch_size"],
+        gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
+        learning_rate=train_cfg["learning_rate"],
+        lr_scheduler_type=train_cfg["lr_scheduler_type"],
+        warmup_ratio=train_cfg["warmup_ratio"],
+        weight_decay=train_cfg["weight_decay"],
+        gradient_checkpointing=train_cfg["gradient_checkpointing"],
+        gradient_checkpointing_kwargs=train_cfg.get("gradient_checkpointing_kwargs"),
+        optim=train_cfg["optim"],
+        bf16=train_cfg["bf16"],
+        tf32=train_cfg.get("tf32", True),
+        logging_steps=train_cfg["logging_steps"],
+        eval_strategy=train_cfg["eval_strategy"],
+        eval_steps=train_cfg["eval_steps"],
+        save_strategy=train_cfg["save_strategy"],
+        save_steps=train_cfg["save_steps"],
+        save_total_limit=train_cfg["save_total_limit"],
+        load_best_model_at_end=train_cfg["load_best_model_at_end"],
+        metric_for_best_model=train_cfg["metric_for_best_model"],
+        greater_is_better=train_cfg["greater_is_better"],
+        report_to=train_cfg["report_to"],
+        seed=train_cfg["seed"],
+        dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
+        dataloader_pin_memory=train_cfg.get("dataloader_pin_memory", True),
+        logging_dir=paths["logs_dir"],
+        run_name=f"apexmail-qwen7b-{ts}",
+    )
+
+    # ── Trainer ──────────────────────────────────────────────────────────
+    trainer = SFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset["train"],
+        eval_dataset=dataset["validation"],
+        processing_class=tokenizer,
+    )
+
+    # ── Train ────────────────────────────────────────────────────────────
+    console.print("\n[bold green]Starting training...[/bold green]")
+    t0 = time.time()
+
+    train_result = trainer.train(resume_from_checkpoint=resume)
+
+    elapsed = time.time() - t0
+    console.print(f"\n[bold green]Training complete in {elapsed / 60:.1f} min[/bold green]")
+
+    # Log metrics
+    metrics = train_result.metrics
+    metrics["train_runtime_minutes"] = elapsed / 60
+    trainer.log_metrics("train", metrics)
+    trainer.save_metrics("train", metrics)
+
+    # Save final adapter
+    trainer.save_model()
+    tokenizer.save_pretrained(paths["output_dir"])
+    console.print(f"[green]✓ Adapter saved to {paths['output_dir']}[/green]")
+
+    # ── Eval ─────────────────────────────────────────────────────────────
+    if not no_eval:
+        eval_metrics = trainer.evaluate()
+        trainer.log_metrics("eval", eval_metrics)
+        trainer.save_metrics("eval", eval_metrics)
+        console.print(f"  Eval loss: {eval_metrics.get('eval_loss', 'N/A')}")
+
+        # Run golden-set eval
+        run_eval_after_training(model, tokenizer, cfg)
+
+    console.print(Panel(
+        f"[bold green]Done![/bold green]\n"
+        f"  Adapter: {paths['output_dir']}\n"
+        f"  Logs:    {log_file}\n"
+        f"  Next:    python export_onnx.py",
+        border_style="green",
+    ))
 
 
 if __name__ == "__main__":
-    main()
+    app()

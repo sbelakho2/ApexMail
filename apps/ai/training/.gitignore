@@ -1,12 +1,32 @@
-# Training artifacts
 .venv/
-data/
-output/
-output-onnx/
 __pycache__/
 *.pyc
 *.pth
 *.bin
+*.safetensors
 *.onnx
+*.onnx_data
+
+# Training artifacts
+output/
+output-merged/
+onnx_model/
+gguf_model/
+checkpoints/
 wandb/
 runs/
+logs/*.log
+eval_results/
+eval_results_full/
+artifacts_*/
+
+# Data (generated)
+data/train.jsonl
+data/val.jsonl
+data/test.jsonl
+data/eval_1000.jsonl
+data/golden_qa.jsonl
+
+# vast.ai secrets
+.vast_api_key
+vast_instance_id.txt

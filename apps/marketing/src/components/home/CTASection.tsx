@@ -17,7 +17,7 @@ export function CTASection() {
 
  return (
  <section ref={ref} className="py-20 lg:py-32 relative overflow-hidden bg-white">
- <div className="relative max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  <motion.div
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
@@ -25,10 +25,10 @@ export function CTASection() {
  >
  {/* Headline */}
  <h2 className="mb-6">
- <span className="text-surface-900">Ready to Ship</span>
- <br />
- <span className="text-primary-500">Better Email?</span>
- </h2>
+            <span className="text-surface-900">Ready to Ship</span>
+            <br />
+            <span className="text-brand-500">Better Email?</span>
+          </h2>
 
  {/* Subheadline */}
  <p className="text-xl text-surface-600 max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
@@ -46,10 +46,10 @@ export function CTASection() {
        transition={{ delay: 0.2 + index * 0.1 }}
        className="flex items-center gap-3 text-left"
      >
-       <div className="w-6 h-6 rounded bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
+       <div className="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
          <feature.icon className="w-4 h-4" />
        </div>
-       <span className="text-surface-600 text-sm font-bold uppercase tracking-wide">{feature.text}</span>
+       <span className="text-surface-600 text-[14px] font-bold uppercase tracking-wide">{feature.text}</span>
      </motion.div>
    ))}
  </div>
@@ -63,7 +63,7 @@ export function CTASection() {
  >
    <Link
      href="https://app.apexmail.ee/signup"
-     className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors w-full sm:w-auto shadow-lg shadow-primary-500/20"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-brand-500 rounded-md hover:bg-brand-600 transition-colors w-full sm:w-auto shadow-lg shadow-brand-500/20"
    >
      Deploy to Production
      <ArrowRight className="w-4 h-4 ml-2" />
@@ -78,28 +78,28 @@ export function CTASection() {
 
  {/* Trust Badges */}
  <motion.div
- initial={{ opacity: 0 }}
- animate={inView ? { opacity: 1 } : {}}
- transition={{ delay: 0.6 }}
- className="flex flex-wrap items-center justify-center gap-6 text-surface-600 text-xs font-bold uppercase tracking-widest"
- >
- <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
- 99.99% Uptime SLA
- </span>
- <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-primary-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
- SOC 2 Certified
- </span>
- <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-primary-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
- GDPR Compliant
- </span>
- <span className="flex items-center gap-2">
- <span className="w-1.5 h-1.5 rounded-full bg-surface-400"></span>
- 24/7 Support
- </span>
- </motion.div>
+      initial={{ opacity: 0 }}
+      animate={inView ? { opacity: 1 } : {}}
+      transition={{ delay: 0.6 }}
+      className="flex flex-wrap items-center justify-center gap-6 text-[14px] font-bold uppercase tracking-widest text-surface-600"
+    >
+      <span className="flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
+        99.99% Uptime SLA
+      </span>
+      <span className="flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-brand-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
+        SOC 2 Certified
+      </span>
+      <span className="flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-brand-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
+        GDPR Compliant
+      </span>
+      <span className="flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-surface-400"></span>
+        24/7 Support
+      </span>
+    </motion.div>
  </motion.div>
  </div>
  </section>

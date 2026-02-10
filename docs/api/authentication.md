@@ -125,28 +125,19 @@ Response:
 }
 ```
 
-### Token Structure
-```typescript
-interface AccessTokenPayload {
-  sub: string;           // User ID
-  email: string;         // User email
-  accountId: string;     // Account ID
-  role: string;          // User role
-  permissions: string[]; // Granted permissions
-  iat: number;           // Issued at
-  exp: number;           // Expiration (1 hour)
-  jti: string;           // Token ID (for revocation)
-}
+### Token Contents
 
-interface RefreshTokenPayload {
-  sub: string;           // User ID
-  accountId: string;     // Account ID
-  iat: number;           // Issued at
-  exp: number;           // Expiration (30 days)
-  jti: string;           // Token ID
-  family: string;        // Token family (rotation)
-}
-```
+Access tokens contain the following claims:
+
+| Claim | Description |
+|-------|-------------|
+| User ID | Identifies the authenticated user |
+| Account ID | The account the token is scoped to |
+| Role | The user's role (owner, admin, editor, viewer) |
+| Permissions | Granted permission scopes |
+| Expiration | Access tokens expire after 1 hour |
+
+Refresh tokens are long-lived (30 days) and support automatic rotation. When a refresh token is used, a new refresh token is issued and the old one is invalidated.
 
 ### Using Access Tokens
 ```http
@@ -185,11 +176,8 @@ Content-Type: application/json
 ```
 
 ### Security Features
-- **Algorithm**: ES256 (ECDSA with P-256 curve)
-- **Access Token TTL**: 1 hour
-- **Refresh Token TTL**: 30 days
-- **Token Rotation**: Refresh tokens rotated on use
-- **Family Tracking**: Detects refresh token reuse attacks
+- Access tokens are short-lived and refresh tokens are rotated on each use.
+- Refresh token reuse is detected and results in immediate session revocation.
 
 ---
 

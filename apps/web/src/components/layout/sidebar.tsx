@@ -110,7 +110,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
       <div className="flex h-16 items-center justify-between px-4">
         {!collapsed && (
           <Link href="/dashboard" className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold shadow-sm">
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold shadow-sm">
               A
             </div>
             <span className="text-xl font-bold tracking-tight text-foreground">ApexMail</span>
@@ -128,7 +128,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
           </Button>
         )}
         {collapsed && (
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold mx-auto shadow-sm">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold mx-auto shadow-sm">
             A
           </div>
         )}
@@ -142,7 +142,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
           {mainNav.map((section, sectionIndex) => (
             <div key={sectionIndex} className="flex flex-col gap-1">
               {section.title && !collapsed && (
-                <h4 className="px-3 mb-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/60">
+                <h4 className="px-3 mb-2 text-[14px] font-semibold uppercase tracking-widest text-muted-foreground/60">
                   {section.title}
                 </h4>
               )}
@@ -158,7 +158,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
                     <Link
                       href={item.disabled ? '#' : item.href}
                       className={cn(
-                        'flex items-center gap-3 rounded-lg px-3 py-3 text-[14px] font-medium transition-all duration-200',
+                        'flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium transition-all duration-200',
                         isActive
                           ? 'bg-primary/5 text-primary shadow-[inset_0_0_0_1px_rgba(37,99,235,0.1)]'
                           : 'text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -172,7 +172,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
                         <>
                           <span className="flex-1 truncate">{item.title}</span>
                           {item.badge && (
-                            <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-bold text-primary">
+                            <span className="rounded-sm bg-primary/10 px-1.5 py-0.5 text-[12px] font-bold text-primary">
                               {item.badge}
                             </span>
                           )}
@@ -201,7 +201,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
  <div className="mb-4">
  <Link
                 href="/help"
-                className="flex items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                className="flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
               >
  <HelpCircle className="h-5 w-5" />
  <span>Help & Support</span>
