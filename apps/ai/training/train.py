@@ -175,7 +175,14 @@ def load_data(cfg: dict, tokenizer: AutoTokenizer):
         )
         return {"text": text}
 
-    dataset = dataset.map(format_chat, remove_columns=["messages"])
+    # Only apply format_chat if data has "messages" column (not pre-formatted "text")
+    if "messages" in dataset["train"].column_names:
+        dataset = dataset.map(format_chat, remove_columns=["messages"])
+    elif "text" not in dataset["train"].column_names:
+        console.print("[red]ERROR: Dataset must have 'messages' or 'text' column[/red]")
+        sys.exit(1)
+    else:
+        console.print("[cyan]Dataset already has 'text' column — skipping format_chat[/cyan]")
 
     console.print(f"[cyan]Train examples:[/cyan] {len(dataset['train'])}")
     console.print(f"[cyan]Val examples:[/cyan]   {len(dataset['validation'])}")

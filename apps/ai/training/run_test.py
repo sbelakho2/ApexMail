@@ -8,12 +8,11 @@ BASE_DIR = Path("/workspace/ApexMail/apps/ai/training")
 ADAPTER_PATH = BASE_DIR / "output"
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 
-SYSTEM_PROMPT = (
-    "You are the official AI assistant for ApexMail, an email platform for developers. "
-    "You answer questions about ApexMail features, pricing, API, deliverability, and more. "
-    "Be helpful, accurate, and concise. If you do not know something, say so honestly. "
-    "Never make up features, pricing, or capabilities that do not exist."
-)
+# Use the SAME system prompt from prompts.py that the training data uses.
+# This is critical — if the test uses a different prompt, the model can't
+# ground its answers in the factual data it learned to reference.
+sys.path.insert(0, str(BASE_DIR))
+from prompts import SYSTEM_PROMPT
 
 SEP = "=" * 60
 
@@ -60,7 +59,6 @@ def generate(model, tokenizer, question, max_new=512):
     return tokenizer.decode(out[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True).strip()
 
 
-sys.path.insert(0, str(BASE_DIR))
 from stress_test import STRESS_TESTS, grade_response
 
 
