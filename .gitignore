@@ -48,5 +48,14 @@ lerna-debug.log*
 .idea/
 .vscode/
 
+# AI model artifacts (large binaries — use external storage)
+apps/ai/training/onnx_model/
+apps/ai/training/output/
+*.onnx
+*.onnx_data
+
+# Test reports (generated artifacts)
+apps/testing/reports/
+
 # Misc
 .vercel/
