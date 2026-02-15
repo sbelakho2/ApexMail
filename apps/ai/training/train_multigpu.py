@@ -139,15 +139,13 @@ def main():
     })
     log(f"  Train: {len(ds['train'])}  Val: {len(ds['validation'])}")
 
-    # ── Training config — MAXIMISE VRAM usage ────────────────────────────
-    # 2xB200 = 366 GB total.  Model in 4-bit = ~4 GB per GPU.
-    # With packing + seq=4096, each sample is a FULL 4096-token sequence.
-    # SDPA attention backward needs O(n²) memory: batch × 28 heads × 4096².
-    # flash-attn doesn't support B200 (sm_100) yet, so we keep batch small
-    # and use gradient_accumulation to maintain large effective batch.
-    # batch=4 per GPU × 2 GPUs × 6 accum = 48 effective
-    PER_DEVICE_BATCH = 4
-    GRAD_ACCUM = 6
+    # ── Training config — KEEP effective batch = 28 ────────────────────────
+    # 4xB200 = 733 GB total.  Model in 4-bit = ~4 GB per GPU.
+    # CRITICAL: R17m proved large effective batch (112) causes regression.
+    # R17l used single-GPU batch=14, accum=2 → effective=28 → 93.5%.
+    # To preserve fine-grained knowledge: 7/GPU × 4 GPUs × 1 accum = 28.
+    PER_DEVICE_BATCH = 7
+    GRAD_ACCUM = 1
     effective = PER_DEVICE_BATCH * WORLD_SIZE * GRAD_ACCUM
     log(f"  Batch: {PER_DEVICE_BATCH}/GPU × {WORLD_SIZE} GPUs × {GRAD_ACCUM} accum = {effective} effective")
 

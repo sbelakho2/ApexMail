@@ -9,7 +9,7 @@ from peft import PeftModel
 
 BASE_DIR = Path("/workspace/ApexMail/apps/ai/training")
 ADAPTER_PATH = BASE_DIR / "output"
-MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_NAME = "/workspace/models/Qwen3-8B"
 
 sys.path.insert(0, str(BASE_DIR))
 from prompts import SYSTEM_PROMPT
