@@ -10,85 +10,129 @@ import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// Demo fallback
-const DEMO_STATS = {
-    mrr: 45890, mrrGrowth: 0.08, arr: 550680, arrGrowth: 0.12,
-    ltv: 2450, cac: 180, churnRate: 0.028, expansionRevenue: 4200,
-    newCustomers: 24, upgrades: 12, downgrades: 3, churned: 4,
-};
-
-const DEMO_MONTHLY = [
-    { month: 'Jul', mrr: 38500, newMrr: 2800, expansionMrr: 1200, churnedMrr: 850 },
-    { month: 'Aug', mrr: 40200, newMrr: 2400, expansionMrr: 1500, churnedMrr: 1200 },
-    { month: 'Sep', mrr: 41800, newMrr: 2900, expansionMrr: 800, churnedMrr: 1100 },
-    { month: 'Oct', mrr: 43100, newMrr: 2600, expansionMrr: 1400, churnedMrr: 1700 },
-    { month: 'Nov', mrr: 44500, newMrr: 3100, expansionMrr: 1200, churnedMrr: 1900 },
-    { month: 'Dec', mrr: 45890, newMrr: 2800, expansionMrr: 1500, churnedMrr: 1910 },
-];
-
-const DEMO_BY_PLAN = [
-    { plan: 'Enterprise', customers: 15, mrr: 14985, percentage: 0.327 },
-    { plan: 'Professional', customers: 89, mrr: 17711, percentage: 0.386 },
-    { plan: 'Starter', customers: 156, mrr: 7644, percentage: 0.167 },
-    { plan: 'Free', customers: 432, mrr: 0, percentage: 0 },
-    { plan: 'Add-ons', customers: 45, mrr: 5550, percentage: 0.121 },
-];
-
 export async function GET() {
     try {
-        // TODO: Replace with real billing/subscription queries
-        const mrrRows = await query<{ mrr: string }>(`
+        const [currentMrrRows, previousMrrRows, planRows, monthlyRows, customerRows, movementRows] = await Promise.all([
+            query<{ mrr: string }>(`
             SELECT COALESCE(SUM(
                 CASE 
-                    WHEN billing_period = 'monthly' THEN price_cents
-                    WHEN billing_period = 'yearly' THEN price_cents / 12
+                    WHEN billing_interval = 'year' THEN amount / 12.0
                     ELSE 0 
                 END
             ) / 100.0, 0) as mrr
-            FROM subscriptions 
-            WHERE status = 'active'
-        `);
-
-        const currentMrr = parseFloat(mrrRows[0]?.mrr || '0');
-
-        if (currentMrr > 0) {
-            // We have real subscription data
-            const planRows = await query<{ plan: string; customers: string; mrr: string }>(`
+            FROM stripe_subscriptions
+            WHERE status IN ('active', 'trialing', 'past_due')
+              AND canceled_at IS NULL
+        `),
+            query<{ mrr: string }>(`
+            SELECT COALESCE(SUM(
+                CASE 
+                    WHEN billing_interval = 'year' THEN amount / 12.0
+                    ELSE amount
+                END
+            ) / 100.0, 0) as mrr
+            FROM stripe_subscriptions
+            WHERE status IN ('active', 'trialing', 'past_due')
+              AND created_at < NOW() - INTERVAL '30 days'
+              AND (canceled_at IS NULL OR canceled_at >= NOW() - INTERVAL '30 days')
+        `),
+            query<{ plan: string; customers: string; mrr: string }>(`
                 SELECT 
                     t.plan,
                     COUNT(DISTINCT t.id) as customers,
                     COALESCE(SUM(
                         CASE 
-                            WHEN s.billing_period = 'monthly' THEN s.price_cents
-                            WHEN s.billing_period = 'yearly' THEN s.price_cents / 12
+                            WHEN s.billing_interval = 'year' THEN s.amount / 12.0
+                            WHEN s.billing_interval = 'month' THEN s.amount
                             ELSE 0 
                         END
                     ) / 100.0, 0) as mrr
                 FROM tenants t
-                LEFT JOIN subscriptions s ON s.tenant_id = t.id AND s.status = 'active'
+                LEFT JOIN stripe_subscriptions s
+                  ON s.tenant_id = t.id
+                 AND s.status IN ('active', 'trialing', 'past_due')
+                 AND s.canceled_at IS NULL
                 GROUP BY t.plan
                 ORDER BY mrr DESC
-            `);
+        `),
+            query<{ month: string; mrr: string }>(`
+            WITH months AS (
+                SELECT generate_series(
+                    date_trunc('month', NOW()) - INTERVAL '5 months',
+                    date_trunc('month', NOW()),
+                    INTERVAL '1 month'
+                ) AS month_start
+            )
+            SELECT
+                to_char(month_start, 'Mon') as month,
+                COALESCE(SUM(i.total) / 100.0, 0) as mrr
+            FROM months m
+            LEFT JOIN invoices i
+              ON date_trunc('month', COALESCE(i.issued_at, i.created_at)) = m.month_start
+             AND i.status IN ('paid', 'open')
+            GROUP BY month_start
+            ORDER BY month_start
+        `),
+            query<{ new_customers: string }>(`
+            SELECT COUNT(*)::text as new_customers
+            FROM tenants
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+        `),
+            query<{ churned: string; active: string }>(`
+            SELECT
+                COUNT(*) FILTER (WHERE canceled_at >= NOW() - INTERVAL '30 days')::text as churned,
+                COUNT(*) FILTER (WHERE status IN ('active', 'trialing', 'past_due') AND canceled_at IS NULL)::text as active
+            FROM stripe_subscriptions
+        `),
+        ]);
 
-            const totalMrr = planRows.reduce((sum, r) => sum + parseFloat(r.mrr), 0);
-            const revenueByPlan = planRows.map(r => ({
-                plan: r.plan || 'Free',
-                customers: parseInt(r.customers, 10),
-                mrr: parseFloat(r.mrr),
-                percentage: totalMrr > 0 ? parseFloat(r.mrr) / totalMrr : 0,
-            }));
+        const currentMrr = parseFloat(currentMrrRows[0]?.mrr || '0');
+        const previousMrr = parseFloat(previousMrrRows[0]?.mrr || '0');
+        const mrrGrowth = previousMrr > 0 ? (currentMrr - previousMrr) / previousMrr : 0;
+        const arr = currentMrr * 12;
+        const previousArr = previousMrr * 12;
+        const arrGrowth = previousArr > 0 ? (arr - previousArr) / previousArr : 0;
 
-            return NextResponse.json({
-                stats: { ...DEMO_STATS, mrr: currentMrr, arr: currentMrr * 12 },
-                monthlyData: DEMO_MONTHLY, // TODO: Build from historical data
-                revenueByPlan,
-            });
-        }
+        const totalMrrByPlan = planRows.reduce((sum, row) => sum + parseFloat(row.mrr || '0'), 0);
+        const revenueByPlan = planRows.map((row) => {
+            const planMrr = parseFloat(row.mrr || '0');
+            return {
+                plan: row.plan || 'free',
+                customers: parseInt(row.customers || '0', 10),
+                mrr: planMrr,
+                percentage: totalMrrByPlan > 0 ? planMrr / totalMrrByPlan : 0,
+            };
+        });
+
+        const monthlyData = monthlyRows.map((row) => ({
+            month: row.month,
+            mrr: parseFloat(row.mrr || '0'),
+            newMrr: 0,
+            expansionMrr: 0,
+            churnedMrr: 0,
+        }));
+
+        const churned = parseInt(movementRows[0]?.churned || '0', 10);
+        const active = parseInt(movementRows[0]?.active || '0', 10);
+        const newCustomers = parseInt(customerRows[0]?.new_customers || '0', 10);
 
         return NextResponse.json({
-            stats: DEMO_STATS,
-            monthlyData: DEMO_MONTHLY,
-            revenueByPlan: DEMO_BY_PLAN,
+            stats: {
+                mrr: currentMrr,
+                mrrGrowth,
+                arr,
+                arrGrowth,
+                ltv: 0,
+                cac: 0,
+                churnRate: active > 0 ? churned / active : 0,
+                expansionRevenue: 0,
+                newCustomers,
+                upgrades: 0,
+                downgrades: 0,
+                churned,
+            },
+            monthlyData,
+            revenueByPlan,
         });
     } catch (error) {
         console.error('Revenue API error:', error);

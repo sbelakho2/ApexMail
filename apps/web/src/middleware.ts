@@ -20,11 +20,17 @@ const PUBLIC_PATHS = [
     '/favicon.ico',
 ];
 
+const PUBLIC_PREFIXES = ['/_next'];
+
 const IMPERSONATION_SESSION_COOKIE = 'impersonation_session';
 const USER_SESSION_COOKIE = 'am_session';
 
 function isPublicPath(pathname: string): boolean {
-    return PUBLIC_PATHS.some((path) => pathname === path || pathname.startsWith(path));
+    if (PUBLIC_PATHS.includes(pathname)) {
+        return true;
+    }
+
+    return PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 function validateImpersonationSession(sessionToken: string, secret: string): boolean {

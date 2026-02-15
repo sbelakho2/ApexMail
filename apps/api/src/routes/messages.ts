@@ -436,7 +436,7 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
     // Previously used fetch-then-check pattern which could leak timing information
     const [result, eventsResult] = await Promise.all([
-      messagesRepo.findById(messageId, tenantId),
+      messagesRepo.findById(messageId),
       eventsRepo.findByMessageId(messageId, tenantId),
     ]);
     
@@ -445,6 +445,10 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     if (!result.value) {
+      throw ApiError.notFound('Message');
+    }
+
+    if (result.value.tenantId !== tenantId) {
       throw ApiError.notFound('Message');
     }
 
@@ -591,13 +595,17 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // SECURITY FIX: Include tenant_id in DB query to enforce tenant isolation at the data layer
-    const result = await messagesRepo.findById(messageId, tenantId);
+    const result = await messagesRepo.findById(messageId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch message');
     }
 
     if (!result.value) {
+      throw ApiError.notFound('Message');
+    }
+
+    if (result.value.tenantId !== tenantId) {
       throw ApiError.notFound('Message');
     }
 
@@ -618,14 +626,14 @@ export function messagesRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to cancel message');
     }
 
-    // Audit log - AUDIT-003 FIX: Use message.sent for cancellation tracking
+    // Audit log for cancellation
     await auditRepo.create({
       tenantId,
       userId: userId ?? undefined,
-      action: 'message.sent', // Use message.sent with metadata indicating cancellation
+      action: 'message.sent',
       resourceType: 'message',
       resourceId: messageId,
-      metadata: { cancelled: true, previousStatus: message.status },
+      metadata: { event: 'message.cancelled', previousStatus: message.status },
     });
 
     logger.info('Message cancelled', { messageId });

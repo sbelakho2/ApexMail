@@ -31,13 +31,13 @@ const configSchema = z.object({
 export type Config = z.infer<typeof configSchema>;
 
 function loadConfig(): Config {
-  return configSchema.parse({
+  const parsed = configSchema.parse({
     port: parseInt(process.env.PORT ?? '4200', 10),
     host: process.env.HOST ?? '0.0.0.0',
     databaseUrl: process.env.DATABASE_URL,
     redisUrl: process.env.REDIS_URL,
     webhookSigningSecret: process.env.WEBHOOK_SIGNING_SECRET,
-    corsOrigins: process.env.CORS_ORIGINS?.split(',') ?? ['*'],
+    corsOrigins: process.env.CORS_ORIGINS?.split(',').map((origin) => origin.trim()).filter(Boolean) ?? ['*'],
     apiBaseUrl: process.env.API_BASE_URL ?? 'https://api.apexmail.ee',
     docsBaseUrl: process.env.DOCS_BASE_URL ?? 'https://docs.apexmail.ee',
     currentApiVersion: process.env.CURRENT_API_VERSION ?? '2024-01',
@@ -51,6 +51,12 @@ function loadConfig(): Config {
     dbPassword: process.env.DB_PASSWORD ?? '',
     nodeEnv: process.env.NODE_ENV ?? 'development',
   });
+
+  if (parsed.nodeEnv !== 'development' && parsed.corsOrigins.includes('*')) {
+    throw new Error('SECURITY: Wildcard CORS origins are not allowed outside development');
+  }
+
+  return parsed;
 }
 
 export const config = loadConfig();

@@ -12,6 +12,7 @@
 import { Hono } from 'hono';
 import type { AppEnv, AppContext } from '../app.js';
 import { isReady } from '../index.js';
+import { verifyJwt } from '../middleware/auth.js';
 
 export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
@@ -135,8 +136,16 @@ export function healthRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // In production, require either a valid bearer token or health check key
     if (ctx.config.env === 'production') {
-      const authorized = (expectedKey && healthKey === expectedKey) ||
-        (authHeader && authHeader.startsWith('Bearer ') && authHeader.length > 10);
+      const keyAuthorized = Boolean(expectedKey && healthKey === expectedKey);
+      let bearerAuthorized = false;
+
+      if (authHeader?.startsWith('Bearer ')) {
+        const token = authHeader.slice(7);
+        const jwtResult = await verifyJwt(token, ctx.config.auth.jwtSecret);
+        bearerAuthorized = jwtResult.valid;
+      }
+
+      const authorized = keyAuthorized || bearerAuthorized;
       if (!authorized) {
         return c.json({ error: 'Authentication required for deep health check' }, 401);
       }

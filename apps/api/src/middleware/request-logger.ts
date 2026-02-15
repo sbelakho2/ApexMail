@@ -65,6 +65,11 @@ export function requestLogger(baseLogger: Logger): MiddlewareHandler<AppEnv> {
 }
 
 function getClientIp(c: Context): string {
+  const validatedIp = c.req.header('X-Validated-Client-IP');
+  if (validatedIp) {
+    return validatedIp;
+  }
+
   return (
     c.req.header('CF-Connecting-IP') ??
     c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() ??

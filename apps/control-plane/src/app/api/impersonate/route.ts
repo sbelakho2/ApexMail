@@ -18,6 +18,56 @@ import { query } from '@/lib/db';
 
 const IMPERSONATION_TOKEN_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
+interface ControlPlaneSessionPayload {
+    sub: string;
+    name?: string;
+    type: string;
+    iat: number;
+    exp: number;
+}
+
+function verifyControlPlaneSession(sessionToken: string): ControlPlaneSessionPayload | null {
+    try {
+        const [payloadB64, signatureB64] = sessionToken.split('.');
+        if (!payloadB64 || !signatureB64) {
+            return null;
+        }
+
+        const secret = process.env.CONTROL_PLANE_JWT_SECRET;
+        if (!secret) {
+            return null;
+        }
+
+        const expectedSignature = crypto
+            .createHmac('sha256', secret)
+            .update(payloadB64)
+            .digest('base64url');
+
+        const providedBuffer = Buffer.from(signatureB64, 'utf8');
+        const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+        if (providedBuffer.length !== expectedBuffer.length) {
+            return null;
+        }
+
+        if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) {
+            return null;
+        }
+
+        const decoded = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as ControlPlaneSessionPayload;
+        if (!decoded.sub || decoded.type !== 'control_plane') {
+            return null;
+        }
+
+        if (decoded.exp && Date.now() > decoded.exp) {
+            return null;
+        }
+
+        return decoded;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Generates an impersonation token for accessing the customer console
  */
@@ -84,38 +134,54 @@ export async function POST(request: NextRequest) {
             );
         }
         
-        // FIX-500-010: Reject impersonation if session cannot be decoded.
-        // Previously this silently fell through with operatorId='unknown',
-        // issuing a valid impersonation token with no audit trail of who
-        // performed the impersonation — a security risk.
-        let operatorId: string;
-        let operatorName: string;
-        
-        try {
-            const [payload] = cpSession.split('.');
-            if (!payload) throw new Error('Empty session payload');
-            const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
-            if (!decoded.sub) throw new Error('Session missing operator ID (sub)');
-            operatorId = decoded.sub;
-            operatorName = decoded.name || 'Control Plane Operator';
-        } catch (sessionErr) {
-            console.error('[IMPERSONATION] Failed to decode operator session:', sessionErr);
+        const session = verifyControlPlaneSession(cpSession);
+        if (!session) {
             return NextResponse.json(
                 { error: 'Invalid or expired control plane session' },
                 { status: 401 }
             );
         }
+        const operatorId = session.sub;
+        const operatorName = session.name || 'Control Plane Operator';
+        const forwardedFor = request.headers.get('x-forwarded-for');
+        const realIp = request.headers.get('x-real-ip');
+        const ipAddress = forwardedFor?.split(',')[0]?.trim() || realIp || null;
+        const userAgent = request.headers.get('user-agent');
         
         // Generate the impersonation token
         const token = generateImpersonationToken(tenantId, operatorId, operatorName);
-        
-        // Log the impersonation event (in production, this goes to audit log)
-        console.log(`[AUDIT] Impersonation token generated`, {
-            operatorId,
-            operatorName,
-            tenantId,
-            tenantName,
-            timestamp: new Date().toISOString(),
+
+        await query(
+            `INSERT INTO audit_logs (
+                timestamp,
+                action,
+                resource_type,
+                resource_id,
+                user_id,
+                tenant_id,
+                ip_address,
+                user_agent,
+                metadata
+            ) VALUES (
+                NOW(),
+                'control_plane.impersonation.token_created',
+                'tenant',
+                $1,
+                $2,
+                $1,
+                $3,
+                $4,
+                $5::jsonb
+            )`,
+            [
+                tenantId,
+                operatorId,
+                ipAddress,
+                userAgent,
+                JSON.stringify({ operatorName, tenantName: tenantName ?? null }),
+            ]
+        ).catch((auditError) => {
+            console.error('[IMPERSONATION] Failed to persist audit record', auditError);
         });
         
         // Return the token and console URL

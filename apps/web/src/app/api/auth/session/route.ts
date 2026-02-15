@@ -9,6 +9,7 @@ import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
 
 const IMPERSONATION_SESSION_COOKIE = 'impersonation_session';
+const USER_SESSION_COOKIE = 'am_session';
 
 function validateSession(sessionToken: string, secret: string): { valid: boolean; payload?: Record<string, unknown> } {
     try {
@@ -47,6 +48,7 @@ function validateSession(sessionToken: string, secret: string): { valid: boolean
 
 export async function GET(request: NextRequest) {
     const impersonationToken = request.cookies.get(IMPERSONATION_SESSION_COOKIE)?.value;
+    const userSessionToken = request.cookies.get(USER_SESSION_COOKIE)?.value;
     
     const response: Record<string, unknown> = {
         authenticated: false,
@@ -76,9 +78,28 @@ export async function GET(request: NextRequest) {
         }
     }
     
-    // TODO: Also check for regular user session
-    // const userSession = request.cookies.get('session')?.value;
-    // ...
+    // Check regular user session when impersonation is not active
+    if (!response.authenticated && userSessionToken) {
+        const apiBaseUrl = process.env.API_URL || 'http://localhost:3001';
+
+        try {
+            const authResponse = await fetch(`${apiBaseUrl}/v1/auth/me`, {
+                headers: {
+                    Authorization: `Bearer ${userSessionToken}`,
+                    'Content-Type': 'application/json',
+                },
+                cache: 'no-store',
+            });
+
+            if (authResponse.ok) {
+                const data = await authResponse.json().catch(() => ({}));
+                response.authenticated = true;
+                response.user = data.user ?? null;
+            }
+        } catch {
+            // Keep unauthenticated response on upstream connectivity errors
+        }
+    }
     
     return NextResponse.json(response);
 }

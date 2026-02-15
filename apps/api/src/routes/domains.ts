@@ -827,6 +827,9 @@ function generateDnsRecordInstructions(domain: DomainData): Array<{
 const dnsCache = new Map<string, { result: unknown; expiresAt: number }>();
 const DNS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+const META_TAG_VERIFICATION_TIMEOUT_MS = 8_000;
+const META_TAG_VERIFICATION_PATHS = ['/', '/index.html'];
+
 function getCachedDns<T>(key: string): T | undefined {
   const entry = dnsCache.get(key);
   if (!entry) return undefined;
@@ -846,10 +849,90 @@ function setCachedDns(key: string, result: unknown): void {
   dnsCache.set(key, { result, expiresAt: Date.now() + DNS_CACHE_TTL_MS });
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasVerificationMetaTag(html: string, verificationToken: string): boolean {
+  const escapedToken = escapeRegex(verificationToken);
+  const strictMetaPattern = new RegExp(
+    `<meta\\s+[^>]*name=["']apexmail-verification["'][^>]*content=["']${escapedToken}["'][^>]*>`,
+    'i',
+  );
+
+  if (strictMetaPattern.test(html)) {
+    return true;
+  }
+
+  const genericMetaPattern = /<meta\s+[^>]*>/gi;
+  const metaTags = html.match(genericMetaPattern) ?? [];
+  return metaTags.some((tag) => {
+    const normalized = tag.toLowerCase();
+    return normalized.includes('apexmail-verification') && tag.includes(verificationToken);
+  });
+}
+
+async function verifyMetaTag(domain: string, verificationToken: string): Promise<{ verified: boolean; details?: string }> {
+  const candidates: string[] = [];
+  for (const protocol of ['https', 'http']) {
+    for (const host of [domain, `www.${domain}`]) {
+      for (const path of META_TAG_VERIFICATION_PATHS) {
+        candidates.push(`${protocol}://${host}${path}`);
+      }
+    }
+  }
+
+  const details: string[] = [];
+
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(META_TAG_VERIFICATION_TIMEOUT_MS),
+        headers: {
+          Accept: 'text/html,application/xhtml+xml',
+          'User-Agent': 'ApexMail-Domain-Verification/1.0',
+        },
+      });
+
+      if (response.status >= 300 && response.status < 400) {
+        details.push(`${url}: redirect response ${response.status}`);
+        continue;
+      }
+
+      if (!response.ok) {
+        details.push(`${url}: HTTP ${response.status}`);
+        continue;
+      }
+
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!contentType.toLowerCase().includes('text/html')) {
+        details.push(`${url}: non-HTML content`);
+        continue;
+      }
+
+      const html = await response.text();
+      if (hasVerificationMetaTag(html, verificationToken)) {
+        return { verified: true };
+      }
+
+      details.push(`${url}: verification meta tag not found`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'request failed';
+      details.push(`${url}: ${message}`);
+    }
+  }
+
+  return {
+    verified: false,
+    details: details.length > 0
+      ? `Meta tag not found. Attempts: ${details.slice(0, 4).join('; ')}`
+      : 'Meta tag verification failed',
+  };
+}
+
 async function verifyDomain(domain: DomainData): Promise<{ verified: boolean; details?: string }> {
-  // In production, this would perform actual DNS lookups
-  // For now, we'll simulate the verification process
-  
   // C-071: DNS lookup timeout helper — prevents hanging on unresponsive nameservers
   const DNS_TIMEOUT_MS = 10_000;
   function withDnsTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
@@ -917,12 +1000,7 @@ async function verifyDomain(domain: DomainData): Promise<{ verified: boolean; de
       }
       
       case 'meta_tag': {
-        // Meta tag verification would require HTTP request to the domain
-        // This is a placeholder
-        return {
-          verified: false,
-          details: 'Meta tag verification not yet implemented',
-        };
+        return verifyMetaTag(domain.domain, domain.verificationToken);
       }
     }
   } catch (error) {

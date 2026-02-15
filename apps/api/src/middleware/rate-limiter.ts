@@ -41,9 +41,7 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
       ? `ratelimit:apikey:${apiKeyId}`
       : `ratelimit:tenant:${tenantId}`;
 
-    const clientIp = c.req.header('x-forwarded-for')?.split(',')[0]?.trim()
-      || c.req.header('x-real-ip')
-      || 'unknown';
+    const clientIp = c.req.header('X-Validated-Client-IP') || 'unknown';
     const ipLimitKey = `ratelimit:ip:${clientIp}`;
 
     const windowMs = ctx.config.rateLimit.windowMs;
@@ -112,7 +110,7 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
       
       // In production, fail closed to prevent abuse
       // In development, allow requests for easier debugging
-      if (process.env.NODE_ENV === 'production') {
+      if (ctx.config.env === 'production') {
         throw ApiError.serviceUnavailable(
           'Service temporarily unavailable. Please try again later.',
           'RATE_LIMITER_UNAVAILABLE'
@@ -226,7 +224,7 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
       // SECURITY FIX: On Redis errors, fail CLOSED to prevent DDoS during outages
       logger.error('Sliding window rate limiter error - failing closed for security', { error });
       
-      if (process.env.NODE_ENV === 'production') {
+      if (ctx.config.env === 'production') {
         throw ApiError.serviceUnavailable(
           'Service temporarily unavailable. Please try again later.',
           'RATE_LIMITER_UNAVAILABLE'

@@ -1078,19 +1078,27 @@ interface ReportData {
   generatedAt: string;
 }
 
+function toSafeCsvCell(value: unknown): string {
+  const str = String(value ?? '');
+  const escaped = str.replace(/"/g, '""');
+  const formulaRisk = /^[=+\-@]/.test(escaped);
+  const safe = formulaRisk ? `'${escaped}` : escaped;
+  return `"${safe}"`;
+}
+
 function convertReportToCSV(data: ReportData): string {
   const lines: string[] = [];
 
-  lines.push(`Report Type,${data.reportType}`);
-  lines.push(`Period Start,${data.period.since}`);
-  lines.push(`Period End,${data.period.until}`);
-  lines.push(`Generated At,${data.generatedAt}`);
+  lines.push(`Report Type,${toSafeCsvCell(data.reportType)}`);
+  lines.push(`Period Start,${toSafeCsvCell(data.period.since)}`);
+  lines.push(`Period End,${toSafeCsvCell(data.period.until)}`);
+  lines.push(`Generated At,${toSafeCsvCell(data.generatedAt)}`);
   lines.push('');
 
   if (data.events) {
     lines.push('Event Type,Count');
     for (const [key, value] of Object.entries(data.events)) {
-      lines.push(`${key},${value}`);
+      lines.push(`${toSafeCsvCell(key)},${toSafeCsvCell(value)}`);
     }
     lines.push('');
   }
@@ -1098,7 +1106,7 @@ function convertReportToCSV(data: ReportData): string {
   if (data.messages) {
     lines.push('Message Status,Count');
     for (const [key, value] of Object.entries(data.messages)) {
-      lines.push(`${key},${value}`);
+      lines.push(`${toSafeCsvCell(key)},${toSafeCsvCell(value)}`);
     }
     lines.push('');
   }
@@ -1107,9 +1115,9 @@ function convertReportToCSV(data: ReportData): string {
     const firstCampaign = data.campaigns[0];
     if (firstCampaign) {
       const headers = Object.keys(firstCampaign);
-      lines.push(headers.map(h => `"${String(h).replace(/"/g, '""')}"`).join(','));
+      lines.push(headers.map(toSafeCsvCell).join(','));
       for (const campaign of data.campaigns) {
-        lines.push(headers.map(h => `"${String(campaign[h] ?? '').replace(/"/g, '""')}"`).join(','));
+        lines.push(headers.map(h => toSafeCsvCell(campaign[h] ?? '')).join(','));
       }
     }
   }
@@ -1118,9 +1126,9 @@ function convertReportToCSV(data: ReportData): string {
     const firstDomain = data.domains[0];
     if (firstDomain) {
       const headers = Object.keys(firstDomain);
-      lines.push(headers.map(h => `"${String(h).replace(/"/g, '""')}"`).join(','));
+      lines.push(headers.map(toSafeCsvCell).join(','));
       for (const domain of data.domains) {
-        lines.push(headers.map(h => `"${String(domain[h] ?? '').replace(/"/g, '""')}"`).join(','));
+        lines.push(headers.map(h => toSafeCsvCell(domain[h] ?? '')).join(','));
       }
     }
   }

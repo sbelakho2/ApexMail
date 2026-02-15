@@ -10,17 +10,21 @@ import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// Demo fallback
-const DEMO_REQUESTS = [
-    { id: 'gdpr-001', type: 'deletion', status: 'pending', email: 'user1@example.com', tenantId: 'tenant-saas', tenantName: 'SaaS Notifications', createdAt: new Date(Date.now() - 172800000).toISOString(), verifiedAt: null, completedAt: null, slaDeadline: new Date(Date.now() + 2419200000).toISOString(), notes: null },
-    { id: 'gdpr-002', type: 'access', status: 'verified', email: 'user2@corp.com', tenantId: 'tenant-newsletter', tenantName: 'Newsletter Pro', createdAt: new Date(Date.now() - 259200000).toISOString(), verifiedAt: new Date(Date.now() - 86400000).toISOString(), completedAt: null, slaDeadline: new Date(Date.now() + 2160000000).toISOString(), notes: 'User verified via double opt-in' },
-    { id: 'gdpr-003', type: 'deletion', status: 'processing', email: 'john.doe@test.com', tenantId: 'tenant-ecommerce', tenantName: 'E-Commerce Store', createdAt: new Date(Date.now() - 604800000).toISOString(), verifiedAt: new Date(Date.now() - 518400000).toISOString(), completedAt: null, slaDeadline: new Date(Date.now() + 1814400000).toISOString(), notes: 'Deleting from all systems' },
-    { id: 'gdpr-004', type: 'portability', status: 'completed', email: 'jane@startup.io', tenantId: 'tenant-growth', tenantName: 'GrowthHack Inc', createdAt: new Date(Date.now() - 1209600000).toISOString(), verifiedAt: new Date(Date.now() - 1123200000).toISOString(), completedAt: new Date(Date.now() - 864000000).toISOString(), slaDeadline: new Date(Date.now() + 1209600000).toISOString(), notes: 'Data export sent to user' },
-    { id: 'gdpr-005', type: 'rectification', status: 'completed', email: 'mike@company.com', tenantId: 'tenant-saas', tenantName: 'SaaS Notifications', createdAt: new Date(Date.now() - 2592000000).toISOString(), verifiedAt: new Date(Date.now() - 2505600000).toISOString(), completedAt: new Date(Date.now() - 2419200000).toISOString(), slaDeadline: new Date(Date.now() - 172800000).toISOString(), notes: 'Updated email address per request' },
-];
+async function tableExists(tableName: string): Promise<boolean> {
+    const rows = await query<{ exists: boolean }>(
+        `SELECT to_regclass($1) IS NOT NULL as exists`,
+        [`public.${tableName}`]
+    );
+    return rows[0]?.exists ?? false;
+}
 
 export async function GET(request: Request) {
     try {
+        const hasGdprRequests = await tableExists('gdpr_requests');
+        if (!hasGdprRequests) {
+            return NextResponse.json([]);
+        }
+
         // FIX-500-302: Add pagination support
         const url = new URL(request.url);
         const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
@@ -48,10 +52,6 @@ export async function GET(request: Request) {
             ORDER BY g.created_at DESC
             LIMIT $1 OFFSET $2
         `, [limit, offset]);
-
-        if (rows.length === 0) {
-            return NextResponse.json(DEMO_REQUESTS);
-        }
 
         return NextResponse.json(rows.map(r => ({
             id: r.id,

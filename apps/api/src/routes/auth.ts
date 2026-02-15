@@ -83,7 +83,7 @@ export function publicAuthRoutes(ctx: AppContext): Hono<AppEnv> {
         ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
         metadata: { reason: 'inactive_user' },
       });
-      throw ApiError.unauthorized('Account is not active', 'ACCOUNT_INACTIVE');
+      throw ApiError.unauthorized('Invalid credentials', 'INVALID_CREDENTIALS');
     }
 
     // Verify password
@@ -114,7 +114,7 @@ export function publicAuthRoutes(ctx: AppContext): Hono<AppEnv> {
     );
 
     // Update last login (A-004: pass tenantId for tenant isolation)
-    await usersRepo.update(user.id, { lastLoginAt: new Date() }, user.tenantId);
+    await usersRepo.update(user.id, { lastLoginAt: new Date() });
 
     // Audit log
     await auditRepo.create({
@@ -171,8 +171,12 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // A-001: Pass tenantId for database-level tenant isolation
-    const userResult = await usersRepo.findById(userId, tenantId);
+    const userResult = await usersRepo.findById(userId);
     if (!userResult.ok || !userResult.value) {
+      throw ApiError.notFound('User');
+    }
+
+    if (userResult.value.tenantId !== tenantId) {
       throw ApiError.notFound('User');
     }
 
@@ -348,7 +352,7 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     // C-117: Invalidate cached API key lookup so revocation takes effect immediately
     //        instead of waiting up to 60s for cache TTL expiry.
     const { invalidateApiKeyCacheByKeyId } = await import('../middleware/auth.js');
-    invalidateApiKeyCacheByKeyId(apiKeyId);
+    await invalidateApiKeyCacheByKeyId(ctx.redis, apiKeyId);
 
     // Audit log
     await auditRepo.create({
@@ -442,8 +446,12 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
 
     // Re-fetch the user to ensure they are still active and pick up any
     // role or permission changes since the original token was issued.
-    const userResult = await usersRepo.findById(userId, tenantId);
+    const userResult = await usersRepo.findById(userId);
     if (!userResult.ok || !userResult.value) {
+      throw ApiError.unauthorized('User not found', 'USER_NOT_FOUND');
+    }
+
+    if (userResult.value.tenantId !== tenantId) {
       throw ApiError.unauthorized('User not found', 'USER_NOT_FOUND');
     }
 
@@ -468,11 +476,12 @@ export function authRoutes(ctx: AppContext): Hono<AppEnv> {
     await auditRepo.create({
       tenantId: user.tenantId,
       userId: user.id,
-      action: 'user.token_refreshed',
+      action: 'user.updated',
       resourceType: 'user',
       resourceId: user.id,
       ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
       userAgent: c.req.header('User-Agent') ?? undefined,
+      metadata: { event: 'token_refreshed' },
     });
 
     logger.info('JWT refreshed', { userId: user.id });

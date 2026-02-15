@@ -169,10 +169,11 @@ async function startHealthServer(port: number): Promise<void> {
           res.writeHead(allReady ? 200 : 503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: allReady ? 'ready' : 'not_ready', checks }));
         } catch (error) {
+          logger.warn('Readiness check failed', { error: error instanceof Error ? error.message : String(error) });
           res.writeHead(503, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ 
             status: 'error', 
-            error: error instanceof Error ? error.message : 'Unknown error' 
+            error: 'Readiness check failed' 
           }));
         }
       } else {

@@ -11,12 +11,12 @@ function verifyUnused() {
   console.log('🔍 Checking for unused code...\n');
 
   try {
-    // Check if eslint-plugin-unused-imports is configured
+    // Check if eslint config exists
     const eslintConfig = join(process.cwd(), '.eslintrc.json');
     if (!existsSync(eslintConfig)) {
-      console.log('⚠️  .eslintrc.json not found');
-      console.log('   Creating basic config...\n');
-      createEslintConfig();
+      console.log('❌ .eslintrc.json not found');
+      console.log('   Add ESLint configuration before running unused-code verification.');
+      process.exit(1);
     }
 
     // Run eslint with unused-imports plugin
@@ -55,32 +55,7 @@ function verifyUnused() {
   }
 }
 
-function createEslintConfig() {
-  const fs = require('fs');
-  const config = {
-    root: true,
-    parser: '@typescript-eslint/parser',
-    plugins: ['@typescript-eslint', 'unused-imports'],
-    extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended'],
-    rules: {
-      'unused-imports/no-unused-imports': 'error',
-      'unused-imports/no-unused-vars': [
-        'warn',
-        {
-          vars: 'all',
-          varsIgnorePattern: '^_',
-          args: 'after-used',
-          argsIgnorePattern: '^_',
-        },
-      ],
-    },
-  };
-
-  fs.writeFileSync('.eslintrc.json', JSON.stringify(config, null, 2));
-  console.log('✓ Created .eslintrc.json');
-}
-
-if (require.main === module) {
+if (import.meta.url === new URL(process.argv[1], 'file:').href) {
   verifyUnused();
 }
 

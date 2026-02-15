@@ -5,8 +5,13 @@
 
 import { Pool } from 'pg';
 
+const databaseUrl = process.env.DATABASE_URL;
+if (!databaseUrl) {
+  throw new Error('DATABASE_URL must be set to run reconciliation');
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/apexmail',
+  connectionString: databaseUrl,
 });
 
 interface ReconciliationIssue {
@@ -132,7 +137,7 @@ async function reconcile() {
   }
 }
 
-if (require.main === module) {
+if (import.meta.url === new URL(process.argv[1], 'file:').href) {
   reconcile().catch(error => {
     console.error(error);
     process.exit(1);

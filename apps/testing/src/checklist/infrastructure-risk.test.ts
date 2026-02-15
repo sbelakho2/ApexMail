@@ -182,7 +182,7 @@ describe('Infrastructure & Deployment Risk Analysis', () => {
         }
       }
       
-      expect(devInProd).toBeLessThan(70); // Increased from 50 to account for operational logging
+      expect(devInProd).toBeLessThan(50);
     });
   });
 
@@ -462,7 +462,7 @@ describe('Infrastructure & Deployment Risk Analysis', () => {
 
     it('detects missing security headers', () => {
       const apiFiles = getAllTsFiles(path.join(APPS_ROOT, 'apps/api/src'));
-      const securityHeaders = {
+      let securityHeaders = {
         csp: false,
         xframe: false,
         xcontent: false,

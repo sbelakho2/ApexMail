@@ -136,7 +136,11 @@ async function main(): Promise<void> {
 
     // Clean up resources
     await disconnectTokenBlacklist();
-    await redis.quit().catch(() => {});
+    await redis.quit().catch((error) => {
+      logger.warn('Redis shutdown returned error', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     await db.disconnect();
 
     logger.info('Shutdown complete');

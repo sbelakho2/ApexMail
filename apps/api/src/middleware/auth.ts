@@ -9,6 +9,8 @@ import { ApiKeysRepository } from '@apexmail/db';
 import { ApiError } from './error-handler.js';
 import { createHmacSignature, timingSafeCompare } from '@apexmail/lib/crypto';
 import { isTokenBlacklisted } from './token-blacklist.js';
+import { createHash } from 'node:crypto';
+import type { Redis } from 'ioredis';
 
 interface JwtPayload {
   sub: string;       // User ID
@@ -25,35 +27,44 @@ interface JwtPayload {
  */
 interface CachedApiKeyResult {
   result: ApiKeyVerifyResult;
-  expiresAt: number;
 }
 
-const API_KEY_CACHE = new Map<string, CachedApiKeyResult>();
-const API_KEY_CACHE_TTL_MS = 60_000; // 60 seconds
-const API_KEY_CACHE_MAX_SIZE = 10_000; // Prevent unbounded growth
+const API_KEY_CACHE_TTL_SECONDS = 60;
+const API_KEY_CACHE_PREFIX = 'apexmail:auth:apikey-cache:v1:';
+const API_KEY_CACHE_INDEX_PREFIX = 'apexmail:auth:apikey-cache:index:';
 
-function getCachedApiKeyResult(cacheKey: string): ApiKeyVerifyResult | null {
-  const entry = API_KEY_CACHE.get(cacheKey);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    API_KEY_CACHE.delete(cacheKey);
+function getApiKeyCacheKey(apiKey: string, clientIp: string): string {
+  const digest = createHash('sha256').update(`${apiKey}:${clientIp}`).digest('hex');
+  return `${API_KEY_CACHE_PREFIX}${digest}`;
+}
+
+function getApiKeyCacheIndexKey(apiKeyId: string): string {
+  return `${API_KEY_CACHE_INDEX_PREFIX}${apiKeyId}`;
+}
+
+async function getCachedApiKeyResult(redis: Redis, cacheKey: string): Promise<ApiKeyVerifyResult | null> {
+  const raw = await redis.get(cacheKey);
+  if (!raw) return null;
+  try {
+    const entry = JSON.parse(raw) as CachedApiKeyResult;
+    return entry.result;
+  } catch {
+    await redis.del(cacheKey);
     return null;
   }
-  return entry.result;
 }
 
-function setCachedApiKeyResult(cacheKey: string, result: ApiKeyVerifyResult): void {
-  // Evict oldest entries if cache is too large
-  if (API_KEY_CACHE.size >= API_KEY_CACHE_MAX_SIZE) {
-    const firstKey = API_KEY_CACHE.keys().next().value;
-    if (firstKey) API_KEY_CACHE.delete(firstKey);
-  }
+async function setCachedApiKeyResult(redis: Redis, cacheKey: string, result: ApiKeyVerifyResult): Promise<void> {
   // Only cache valid results (don't cache failures — they should re-check)
   if (result.valid) {
-    API_KEY_CACHE.set(cacheKey, {
-      result,
-      expiresAt: Date.now() + API_KEY_CACHE_TTL_MS,
-    });
+    const payload: CachedApiKeyResult = { result };
+    await redis.set(cacheKey, JSON.stringify(payload), 'EX', API_KEY_CACHE_TTL_SECONDS);
+
+    if (result.apiKeyId) {
+      const indexKey = getApiKeyCacheIndexKey(result.apiKeyId);
+      await redis.sadd(indexKey, cacheKey);
+      await redis.expire(indexKey, API_KEY_CACHE_TTL_SECONDS + 5);
+    }
   }
 }
 
@@ -62,12 +73,13 @@ function setCachedApiKeyResult(cacheKey: string, result: ApiKeyVerifyResult): vo
  * Must be called when a key is revoked, rotated, or updated to prevent
  * stale cache entries from allowing access for up to API_KEY_CACHE_TTL_MS.
  */
-export function invalidateApiKeyCacheByKeyId(apiKeyId: string): void {
-  for (const [cacheKey, entry] of API_KEY_CACHE.entries()) {
-    if (entry.result.apiKeyId === apiKeyId) {
-      API_KEY_CACHE.delete(cacheKey);
-    }
+export async function invalidateApiKeyCacheByKeyId(redis: Redis, apiKeyId: string): Promise<void> {
+  const indexKey = getApiKeyCacheIndexKey(apiKeyId);
+  const cacheKeys = await redis.smembers(indexKey);
+  if (cacheKeys.length > 0) {
+    await redis.del(...cacheKeys);
   }
+  await redis.del(indexKey);
 }
 
 export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
@@ -82,11 +94,22 @@ export function authMiddleware(ctx: AppContext): MiddlewareHandler<AppEnv> {
     if (apiKey) {
       // C-101: Check TTL cache before hitting the database
       const clientIp = getClientIp(c);
-      const cacheKey = `${apiKey}:${clientIp}`;
-      let result = getCachedApiKeyResult(cacheKey);
+      const cacheKey = getApiKeyCacheKey(apiKey, clientIp);
+      let result: ApiKeyVerifyResult | null = null;
+
+      try {
+        result = await getCachedApiKeyResult(ctx.redis, cacheKey);
+      } catch {
+        result = null;
+      }
+
       if (!result) {
         result = await verifyApiKey(apiKey, apiKeysRepo, clientIp);
-        setCachedApiKeyResult(cacheKey, result);
+        try {
+          await setCachedApiKeyResult(ctx.redis, cacheKey, result);
+        } catch {
+          // Cache write failures must not block authentication
+        }
       }
       
       if (!result.valid) {
@@ -187,7 +210,7 @@ interface JwtVerifyResult {
   payload?: JwtPayload;
 }
 
-async function verifyJwt(token: string, secret: string): Promise<JwtVerifyResult> {
+export async function verifyJwt(token: string, secret: string): Promise<JwtVerifyResult> {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) {
@@ -335,6 +358,7 @@ const VALID_SCOPES = new Set([
   'suppressions:read',
   'suppressions:write',
   'events:read',
+  'events:write',
   'templates:read',
   'templates:write',
   'analytics:read',

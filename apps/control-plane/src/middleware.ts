@@ -20,9 +20,10 @@ const PUBLIC_PATHS = [
     '/api/auth/login',
     '/api/auth/logout',
     '/api/csrf',
-    '/_next',
     '/favicon.ico',
 ];
+
+const PUBLIC_PREFIXES = ['/_next'];
 
 // Production IP whitelist - Control plane only accessible from these IPs
 // In production, this would be loaded from environment variables
@@ -226,7 +227,7 @@ export async function middleware(request: NextRequest) {
     console.log(`[CONTROL_PLANE_ACCESS] IP=${clientIp} Path=${path} Method=${request.method}`);
     
     // Allow public paths
-    if (PUBLIC_PATHS.some(p => path.startsWith(p))) {
+    if (PUBLIC_PATHS.includes(path) || PUBLIC_PREFIXES.some(prefix => path.startsWith(prefix))) {
         return NextResponse.next();
     }
     

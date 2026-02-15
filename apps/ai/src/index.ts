@@ -136,19 +136,17 @@ export function getBootstrap(): ServiceBootstrap | null {
 }
 
 // Start server if running directly
-// FIX-500-190: Robust entry point detection — works for both CJS and ESM
 const isMainModule = (() => {
-    // CJS: require.main check
-    try {
-        if (typeof require !== 'undefined' && require.main === module) return true;
-    } catch {
-        // ESM environment — require not available
+    const argvPath = process.argv[1];
+    if (!argvPath) {
+        return false;
     }
-    // Suffix match as fallback (handles ts-node, compiled output, etc.)
-    const arg = process.argv[1] ?? '';
-    return arg.endsWith('/ai/src/index.js') ||
-        arg.endsWith('/ai/src/index.ts') ||
-        arg.endsWith('/ai/dist/index.js');
+
+    try {
+        return import.meta.url === new URL(argvPath, 'file:').href;
+    } catch {
+        return false;
+    }
 })();
 
 if (isMainModule) {

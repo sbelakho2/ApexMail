@@ -210,6 +210,10 @@ const testWebhookSchema = z.object({
  */
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function matchesWebhookEvent(events: string[], event: string): boolean {
+  return events.includes('*') || events.includes(event);
+}
+
 export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
   const webhooksRepo = new WebhooksRepository(ctx.db.getPool());
@@ -244,10 +248,6 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       secret,
       events: input.events,
       headers: input.headers,
-      description: input.description,
-      enabled: input.enabled,
-      retryPolicy: input.retryPolicy,
-      metadata: input.metadata,
     };
 
     const result = await webhooksRepo.create(webhookInsert);
@@ -326,6 +326,8 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const enabled = c.req.query('enabled');
     const event = c.req.query('event');
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '50', 10) || 50, 200));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
     const filters: { enabled?: boolean; event?: string } = {};
     if (enabled !== undefined) {
@@ -335,7 +337,19 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       filters.event = event;
     }
 
-    const webhooks = await webhooksRepo.findByTenantFiltered(tenantId, filters);
+    const allWebhooks = await webhooksRepo.findByTenant(tenantId);
+    const filtered = allWebhooks.filter((webhook) => {
+      if (filters.enabled !== undefined && webhook.enabled !== filters.enabled) {
+        return false;
+      }
+      if (filters.event && !matchesWebhookEvent(webhook.events, filters.event)) {
+        return false;
+      }
+      return true;
+    });
+
+    const total = filtered.length;
+    const webhooks = filtered.slice(offset, offset + limit);
 
     return c.json({
       webhooks: webhooks.map(w => ({
@@ -351,7 +365,12 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
         createdAt: w.createdAt,
         updatedAt: w.updatedAt,
       })),
-      total: webhooks.length,
+      total,
+      pagination: {
+        limit,
+        offset,
+        hasMore: offset + webhooks.length < total,
+      },
     });
   });
 
@@ -516,7 +535,7 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
           ...webhook.headers,
         },
         body: JSON.stringify(testPayload),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(ctx.config.webhooks.timeoutMs),
       });
 
       const duration = Date.now() - startTime;
@@ -575,8 +594,13 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/:id/deliveries', requireScopes('webhooks:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const webhookId = c.req.param('id');
-    const status = c.req.query('status');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10) || 50;
+    const status = c.req.query('status') as 'pending' | 'delivered' | 'failed' | undefined;
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '50', 10) || 50, 200));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
+
+    if (status && !['pending', 'delivered', 'failed'].includes(status)) {
+      throw ApiError.badRequest('Status must be one of: pending, delivered, failed');
+    }
 
     // F-227: Validate ID format before passing to DB query
     if (!uuidRegex.test(webhookId)) {
@@ -588,11 +612,59 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.notFound('Webhook');
     }
 
+    const deliveryConditions: string[] = ['tenant_id = $1', 'webhook_id = $2'];
+    const deliveryParams: unknown[] = [tenantId, webhookId];
+    let paramIndex = 3;
+
+    if (status) {
+      deliveryConditions.push(`status = $${paramIndex++}`);
+      deliveryParams.push(status);
+    }
+
+    const countResult = await ctx.db.getPool().query<{ count: string }>(
+      `SELECT COUNT(*)::text as count
+       FROM webhook_queue
+       WHERE ${deliveryConditions.join(' AND ')}`,
+      deliveryParams,
+    );
+
+    const deliveryResult = await ctx.db.getPool().query<{
+      id: string;
+      event_type: string;
+      status: 'pending' | 'delivered' | 'failed';
+      attempt: number;
+      max_attempts: number;
+      response_status: number | null;
+      error_message: string | null;
+      created_at: Date;
+      completed_at: Date | null;
+    }>(
+      `SELECT id, event_type, status, attempt, max_attempts, response_status, error_message, created_at, completed_at
+       FROM webhook_queue
+       WHERE ${deliveryConditions.join(' AND ')}
+       ORDER BY created_at DESC
+       LIMIT $${paramIndex++} OFFSET $${paramIndex}`,
+      [...deliveryParams, limit, offset],
+    );
+
+    const deliveryTotal = parseInt(countResult.rows[0]?.count ?? '0', 10);
+    const deliveryRows = deliveryResult.rows;
+
     // Get delivery stats from queue
     const stats = await webhooksRepo.getQueueStats(tenantId);
 
     return c.json({
-      deliveries: [], // Would be populated from webhook_queue table
+      deliveries: deliveryRows.map((item) => ({
+        id: item.id,
+        eventType: item.event_type,
+        status: item.status,
+        attempt: item.attempt,
+        maxAttempts: item.max_attempts,
+        responseStatus: item.response_status,
+        errorMessage: item.error_message,
+        createdAt: item.created_at,
+        completedAt: item.completed_at,
+      })),
       summary: {
         pending: stats.pending,
         delivered: stats.delivered,
@@ -604,7 +676,10 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
         disabledReason: webhook.disabledReason,
       },
       limit,
+      offset,
+      total: deliveryTotal,
       status,
+      hasMore: offset + deliveryRows.length < deliveryTotal,
     });
   });
 
@@ -873,6 +948,7 @@ export async function deliverWebhook(
   webhook: Webhook,
   payload: Record<string, unknown>
 ): Promise<{ success: boolean; statusCode?: number; error?: string }> {
+  const timeoutMs = Math.max(1000, parseInt(process.env.WEBHOOK_TIMEOUT_MS ?? '30000', 10) || 30000);
   const timestamp = Date.now();
   const signature = signPayload(webhook.secret, timestamp, payload);
   const deliveryId = generateId('dlv');
@@ -891,7 +967,7 @@ export async function deliverWebhook(
         ...webhook.headers,
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     // Record trigger result in database

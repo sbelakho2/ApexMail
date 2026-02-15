@@ -10,49 +10,21 @@ import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// Demo fallback
-const DEMO_TENANTS = [
-    {
-        tenantId: 'tenant-spammy', tenantName: 'Spammy Marketing Co', domain: 'spammy.io', riskScore: 92, riskLevel: 'critical',
-        flags: [
-            { id: '1', type: 'high_bounce', severity: 'critical', message: 'Bounce rate exceeds 15%', createdAt: new Date(Date.now() - 86400000).toISOString(), resolved: false },
-            { id: '2', type: 'spam_complaints', severity: 'critical', message: 'Spam complaints above 0.5%', createdAt: new Date(Date.now() - 172800000).toISOString(), resolved: false },
-        ],
-        metrics: { bounceRate: 0.18, complaintRate: 0.008, dailyVolume: 45000, monthlyVolume: 890000 },
-        limits: { daily: 10000, hourly: 1000 }, lastAssessed: new Date(Date.now() - 3600000).toISOString(),
-    },
-    {
-        tenantId: 'tenant-growth', tenantName: 'GrowthHack Inc', domain: 'growthhack.co', riskScore: 68, riskLevel: 'high',
-        flags: [
-            { id: '3', type: 'volume_spike', severity: 'warning', message: 'Unusual volume increase (3x normal)', createdAt: new Date(Date.now() - 43200000).toISOString(), resolved: false },
-        ],
-        metrics: { bounceRate: 0.06, complaintRate: 0.002, dailyVolume: 78000, monthlyVolume: 1200000 },
-        limits: { daily: null, hourly: null }, lastAssessed: new Date(Date.now() - 7200000).toISOString(),
-    },
-    {
-        tenantId: 'tenant-newsletter', tenantName: 'Newsletter Pro', domain: 'newsletter.pro', riskScore: 42, riskLevel: 'medium',
-        flags: [
-            { id: '4', type: 'missing_dmarc', severity: 'warning', message: 'DMARC policy not configured', createdAt: new Date(Date.now() - 604800000).toISOString(), resolved: false },
-        ],
-        metrics: { bounceRate: 0.025, complaintRate: 0.0005, dailyVolume: 12000, monthlyVolume: 320000 },
-        limits: { daily: null, hourly: null }, lastAssessed: new Date(Date.now() - 14400000).toISOString(),
-    },
-    {
-        tenantId: 'tenant-saas', tenantName: 'SaaS Notifications', domain: 'saasnotify.io', riskScore: 15, riskLevel: 'low',
-        flags: [],
-        metrics: { bounceRate: 0.008, complaintRate: 0.0001, dailyVolume: 85000, monthlyVolume: 2100000 },
-        limits: { daily: null, hourly: null }, lastAssessed: new Date(Date.now() - 1800000).toISOString(),
-    },
-    {
-        tenantId: 'tenant-ecommerce', tenantName: 'E-Commerce Store', domain: 'shop.example.com', riskScore: 12, riskLevel: 'low',
-        flags: [],
-        metrics: { bounceRate: 0.012, complaintRate: 0.0002, dailyVolume: 25000, monthlyVolume: 650000 },
-        limits: { daily: null, hourly: null }, lastAssessed: new Date(Date.now() - 900000).toISOString(),
-    },
-];
+async function tableExists(tableName: string): Promise<boolean> {
+    const rows = await query<{ exists: boolean }>(
+        `SELECT to_regclass($1) IS NOT NULL as exists`,
+        [`public.${tableName}`]
+    );
+    return rows[0]?.exists ?? false;
+}
 
 export async function GET(request: Request) {
     try {
+        const [hasReputationStats, hasReputationAlerts] = await Promise.all([
+            tableExists('reputation_stats'),
+            tableExists('reputation_alerts'),
+        ]);
+
         // FIX-500-302: Add pagination support
         const url = new URL(request.url);
         const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
@@ -61,22 +33,57 @@ export async function GET(request: Request) {
         const rows = await query<{
             id: string;
             name: string;
-            domain: string;
-            risk_score: number;
+            slug: string;
+            critical_alerts: string;
+            high_alerts: string;
+            recent_bounces: string;
+            recent_complaints: string;
+            recent_sent: string;
         }>(`
-            SELECT id, name, domain, COALESCE(risk_score, 0) as risk_score
-            FROM tenants
-            WHERE risk_score > 0
-            ORDER BY risk_score DESC
+            SELECT
+                t.id,
+                t.name,
+                t.slug,
+                ${hasReputationAlerts ? `
+                COALESCE(SUM(CASE WHEN ra.alert_type = 'critical' THEN 1 ELSE 0 END), 0)::text as critical_alerts,
+                COALESCE(SUM(CASE WHEN ra.alert_type <> 'critical' THEN 1 ELSE 0 END), 0)::text as high_alerts,
+                ` : `
+                '0'::text as critical_alerts,
+                '0'::text as high_alerts,
+                `}
+                ${hasReputationStats ? `
+                COALESCE(SUM(rs.bounces), 0)::text as recent_bounces,
+                COALESCE(SUM(rs.complaints), 0)::text as recent_complaints,
+                COALESCE(SUM(rs.sent), 0)::text as recent_sent
+                ` : `
+                '0'::text as recent_bounces,
+                '0'::text as recent_complaints,
+                '0'::text as recent_sent
+                `}
+            FROM tenants t
+            ${hasReputationAlerts ? `LEFT JOIN reputation_alerts ra ON ra.tenant_id = t.id AND ra.acknowledged = false` : ''}
+            ${hasReputationStats ? `LEFT JOIN reputation_stats rs ON rs.tenant_id = t.id AND rs.date >= CURRENT_DATE - INTERVAL '30 days'` : ''}
+            GROUP BY t.id, t.name, t.slug
+            ORDER BY t.created_at DESC
             LIMIT $1 OFFSET $2
         `, [limit, offset]);
 
-        if (rows.length === 0) {
-            return NextResponse.json(DEMO_TENANTS);
-        }
-
         const tenants = rows.map(row => {
-            const riskScore = Number(row.risk_score);
+            const criticalAlerts = parseInt(row.critical_alerts || '0', 10);
+            const highAlerts = parseInt(row.high_alerts || '0', 10);
+            const bounces = parseInt(row.recent_bounces || '0', 10);
+            const complaints = parseInt(row.recent_complaints || '0', 10);
+            const sent = parseInt(row.recent_sent || '0', 10);
+
+            const bounceRate = sent > 0 ? bounces / sent : 0;
+            const complaintRate = sent > 0 ? complaints / sent : 0;
+            const riskScore = Math.min(100,
+                (criticalAlerts * 35) +
+                (highAlerts * 12) +
+                Math.round(bounceRate * 200) +
+                Math.round(complaintRate * 2000)
+            );
+
             let riskLevel: 'low' | 'medium' | 'high' | 'critical' = 'low';
             if (riskScore >= 90) riskLevel = 'critical';
             else if (riskScore >= 70) riskLevel = 'high';
@@ -85,11 +92,16 @@ export async function GET(request: Request) {
             return {
                 tenantId: row.id,
                 tenantName: row.name,
-                domain: row.domain,
+                domain: row.slug,
                 riskScore,
                 riskLevel,
-                flags: [], // TODO: join with risk_flags table
-                metrics: { bounceRate: 0, complaintRate: 0, dailyVolume: 0, monthlyVolume: 0 },
+                flags: [],
+                metrics: {
+                    bounceRate,
+                    complaintRate,
+                    dailyVolume: 0,
+                    monthlyVolume: sent,
+                },
                 limits: { daily: null, hourly: null },
                 lastAssessed: new Date().toISOString(),
             };

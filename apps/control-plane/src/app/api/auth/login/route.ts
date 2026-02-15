@@ -15,22 +15,30 @@ import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { validateCsrf } from '@/lib/csrf';
+import { query } from '@/lib/db';
 
-// Rate limiting store
-// FIX-500-029: In-memory rate limiter — only effective for single-instance deployments.
-// TODO: Migrate to Redis-backed sliding window (INCR + EXPIRE) for multi-instance.
-// Periodic cleanup prevents unbounded memory growth.
-const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
+// Rate limiting storage (database-backed for multi-instance consistency)
+let rateLimitTableReady: Promise<void> | null = null;
 
-// Cleanup stale rate limit entries every 30 minutes
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of loginAttempts) {
-        if (now - entry.lastAttempt > 30 * 60 * 1000) {
-            loginAttempts.delete(key);
-        }
+async function ensureRateLimitTable(): Promise<void> {
+    if (!rateLimitTableReady) {
+        rateLimitTableReady = (async () => {
+            await query(
+                `CREATE TABLE IF NOT EXISTS control_plane_login_attempts (
+                    ip_address TEXT PRIMARY KEY,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    first_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )`
+            );
+        })().catch((error) => {
+            rateLimitTableReady = null;
+            throw error;
+        });
     }
-}, 30 * 60 * 1000).unref();
+
+    await rateLimitTableReady;
+}
 
 // Maximum login attempts before lockout
 const MAX_ATTEMPTS = 5;
@@ -50,7 +58,10 @@ function getClientIp(request: NextRequest): string {
     if (forwarded) {
         // FIX-500-304: Use rightmost entry — the one added by our trusted reverse proxy.
         const parts = forwarded.split(',').map(s => s.trim()).filter(Boolean);
-        return parts[parts.length - 1];
+        const proxiedIp = parts[parts.length - 1];
+        if (proxiedIp) {
+            return proxiedIp;
+        }
     }
     return request.headers.get('x-real-ip') || '127.0.0.1';
 }
@@ -58,41 +69,57 @@ function getClientIp(request: NextRequest): string {
 /**
  * Checks if the IP is rate limited
  */
-function isRateLimited(ip: string): { limited: boolean; remainingTime?: number } {
-    const attempts = loginAttempts.get(ip);
+async function isRateLimited(ip: string): Promise<{ limited: boolean; remainingTime?: number }> {
+    await ensureRateLimitTable();
+
+    const rows = await query<{ attempt_count: number; last_attempt_at: Date }>(
+        `SELECT attempt_count, last_attempt_at
+         FROM control_plane_login_attempts
+         WHERE ip_address = $1`,
+        [ip]
+    );
+
+    const attempts = rows[0];
     if (!attempts) return { limited: false };
-    
-    const timeSinceLastAttempt = Date.now() - attempts.lastAttempt;
-    
-    // Reset if lockout has expired
+
+    const lastAttemptAt = new Date(attempts.last_attempt_at).getTime();
+    const timeSinceLastAttempt = Date.now() - lastAttemptAt;
+
     if (timeSinceLastAttempt > LOCKOUT_DURATION_MS) {
-        loginAttempts.delete(ip);
+        await query('DELETE FROM control_plane_login_attempts WHERE ip_address = $1', [ip]);
         return { limited: false };
     }
-    
-    if (attempts.count >= MAX_ATTEMPTS) {
-        return { 
-            limited: true, 
-            remainingTime: Math.ceil((LOCKOUT_DURATION_MS - timeSinceLastAttempt) / 1000)
+
+    if (attempts.attempt_count >= MAX_ATTEMPTS) {
+        return {
+            limited: true,
+            remainingTime: Math.ceil((LOCKOUT_DURATION_MS - timeSinceLastAttempt) / 1000),
         };
     }
-    
+
     return { limited: false };
 }
 
 /**
  * Records a login attempt
  */
-function recordAttempt(ip: string, success: boolean): void {
+async function recordAttempt(ip: string, success: boolean): Promise<void> {
+    await ensureRateLimitTable();
+
     if (success) {
-        loginAttempts.delete(ip);
+        await query('DELETE FROM control_plane_login_attempts WHERE ip_address = $1', [ip]);
         return;
     }
-    
-    const attempts = loginAttempts.get(ip) || { count: 0, lastAttempt: 0 };
-    attempts.count += 1;
-    attempts.lastAttempt = Date.now();
-    loginAttempts.set(ip, attempts);
+
+    await query(
+        `INSERT INTO control_plane_login_attempts (ip_address, attempt_count, first_attempt_at, last_attempt_at)
+         VALUES ($1, 1, NOW(), NOW())
+         ON CONFLICT (ip_address)
+         DO UPDATE SET
+            attempt_count = control_plane_login_attempts.attempt_count + 1,
+            last_attempt_at = NOW()`,
+        [ip]
+    );
 }
 
 /**
@@ -305,13 +332,13 @@ function createSessionToken(userId: string, name?: string, role?: string): strin
 export async function POST(request: NextRequest) {
     const csrf = validateCsrf(request);
     if (!csrf.ok) {
-        return csrf.response!;
+        return csrf.response ?? NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
     }
 
     const clientIp = getClientIp(request);
     
     // Check rate limiting
-    const rateLimitCheck = isRateLimited(clientIp);
+    const rateLimitCheck = await isRateLimited(clientIp);
     if (rateLimitCheck.limited) {
         console.warn(`[SECURITY] Rate limited login attempt from ${clientIp}`);
         return NextResponse.json(
@@ -329,6 +356,7 @@ export async function POST(request: NextRequest) {
         
         // Validate required fields
         if (!email || !password) {
+            await recordAttempt(clientIp, false);
             return NextResponse.json(
                 { error: 'Email and password are required' },
                 { status: 400 }
@@ -339,11 +367,20 @@ export async function POST(request: NextRequest) {
         const credentialCheck = await verifyCredentials(email, password);
         
         if (!credentialCheck.valid) {
-            recordAttempt(clientIp, false);
+            await recordAttempt(clientIp, false);
             console.warn(`[SECURITY] Failed login attempt for ${email} from ${clientIp}`);
             return NextResponse.json(
                 { error: 'Invalid credentials' },
                 { status: 401 }
+            );
+        }
+
+        if (!credentialCheck.userId) {
+            await recordAttempt(clientIp, false);
+            console.error('[SECURITY] Credential check succeeded without userId');
+            return NextResponse.json(
+                { error: 'Authentication failed' },
+                { status: 500 }
             );
         }
         
@@ -371,8 +408,8 @@ export async function POST(request: NextRequest) {
                 );
             }
             
-            if (!verifyMfaCode(credentialCheck.userId!, mfaCode)) {
-                recordAttempt(clientIp, false);
+            if (!verifyMfaCode(credentialCheck.userId, mfaCode)) {
+                await recordAttempt(clientIp, false);
                 console.warn(`[SECURITY] Failed MFA attempt for ${email} from ${clientIp}`);
                 return NextResponse.json(
                     { error: 'Invalid MFA code' },
@@ -385,14 +422,12 @@ export async function POST(request: NextRequest) {
         }
         
         // Success - create session
-        recordAttempt(clientIp, true);
+        await recordAttempt(clientIp, true);
         const sessionToken = createSessionToken(
-            credentialCheck.userId!,
+            credentialCheck.userId,
             credentialCheck.name,
             credentialCheck.role
         );
-        
-        console.log(`[CONTROL_PLANE] Successful login for ${email} from ${clientIp}`);
         
         // Set session cookie
         const response = NextResponse.json({ 
@@ -415,6 +450,9 @@ export async function POST(request: NextRequest) {
         return response;
         
     } catch (error) {
+        await recordAttempt(clientIp, false).catch((recordError) => {
+            console.error('[CONTROL_PLANE] Failed to record failed login attempt', recordError);
+        });
         console.error('[CONTROL_PLANE] Login error:', error);
         return NextResponse.json(
             { error: 'Internal server error' },

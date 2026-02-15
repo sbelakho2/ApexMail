@@ -261,8 +261,9 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     const typeParam = c.req.query('reason');
     const scopeParam = c.req.query('scope');
     const includeExpired = c.req.query('includeExpired') === 'true';
-    const limit = parseInt(c.req.query('limit') ?? '50', 10) || 50;
-    const offset = parseInt(c.req.query('offset') ?? '0', 10) || 0;
+    const rawLimit = parseInt(c.req.query('limit') ?? '50', 10) || 50;
+    const limit = Math.max(1, Math.min(rawLimit, 1000));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
     // F-200: Validate type/scope enums at runtime
     const validTypes = ['bounce', 'complaint', 'unsubscribe', 'manual', 'list_unsubscribe'] as const;
@@ -286,7 +287,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       type,
       scope,
       includeExpired,
-      limit: Math.min(limit, 1000),
+      limit,
       offset,
     });
 
@@ -347,7 +348,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid suppression ID format', 'INVALID_ID');
     }
 
-    const result = await suppressionsRepo.findById(suppressionId, tenantId);
+    const result = await suppressionsRepo.findById(suppressionId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch suppression');
@@ -393,12 +394,12 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await suppressionsRepo.findById(suppressionId, tenantId);
+    const existing = await suppressionsRepo.findById(suppressionId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Suppression');
     }
 
-    const result = await suppressionsRepo.remove(suppressionId, tenantId);
+    const result = await suppressionsRepo.remove(suppressionId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to remove suppression');
@@ -446,7 +447,7 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
     let removedCount = 0;
     const removedIds: string[] = [];
     for (const suppression of existing.value) {
-      const result = await suppressionsRepo.remove(suppression.id, tenantId);
+      const result = await suppressionsRepo.remove(suppression.id);
       if (result.ok) {
         removedCount++;
         removedIds.push(suppression.id);
@@ -538,11 +539,10 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
   });
 
   // Export suppressions
-  // F-199: TODO — add dedicated export rate limiting (e.g., max 5 exports per hour per tenant)
-  // to prevent abuse. Bulk exports are expensive queries and should be throttled
-  // independently from the normal API rate limiter.
+  // F-199: Dedicated export throttling protects expensive bulk export queries.
   router.get('/export', requireScopes('suppressions:read'), async (c) => {
     const tenantId = c.get('tenantId');
+    const logger = c.get('logger');
     const format = c.req.query('format') ?? 'json';
     const type = c.req.query('type') as SuppressionType | undefined;
 
@@ -550,10 +550,24 @@ export function suppressionsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Format must be json or csv');
     }
 
+    // F-199: Dedicated export throttling (5 exports/hour/tenant)
+    const exportWindowSeconds = 60 * 60;
+    const maxExportsPerHour = 5;
+    const exportRateKey = `ratelimit:suppressions:export:${tenantId}:${Math.floor(Date.now() / (exportWindowSeconds * 1000))}`;
+    const exportCount = await ctx.redis.incr(exportRateKey);
+    if (exportCount === 1) {
+      await ctx.redis.expire(exportRateKey, exportWindowSeconds + 5);
+    }
+    if (exportCount > maxExportsPerHour) {
+      c.header('Retry-After', String(exportWindowSeconds));
+      logger.warn('Suppressions export rate limit exceeded', { tenantId, exportCount, maxExportsPerHour });
+      throw ApiError.tooManyRequests('Export limit exceeded. Max 5 exports per hour.', 'EXPORT_RATE_LIMIT_EXCEEDED');
+    }
+
     // F-199: Enforce pagination on exports to prevent unbounded queries.
     // Clients should paginate through the list endpoint for large datasets.
-    const limit = Math.min(parseInt(c.req.query('limit') ?? '10000', 10), 10000);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = Math.max(1, Math.min(parseInt(c.req.query('limit') ?? '10000', 10) || 10000, 10000));
+    const offset = Math.max(0, parseInt(c.req.query('offset') ?? '0', 10) || 0);
 
     const result = await suppressionsRepo.listByTenant(tenantId, {
       type,
@@ -722,6 +736,14 @@ function hashEmail(email: string): string {
 
 import type { Suppression } from '@apexmail/db';
 
+function toSafeCsvCell(value: unknown): string {
+  const str = String(value ?? '');
+  const escaped = str.replace(/"/g, '""');
+  const formulaRisk = /^[=+\-@]/.test(escaped);
+  const safe = formulaRisk ? `'${escaped}` : escaped;
+  return `"${safe}"`;
+}
+
 function convertToCSV(data: Suppression[]): string {
   const headers = ['emailHash', 'type', 'reason', 'bounceType', 'source', 'createdAt'];
   const rows = data.map(row => [
@@ -731,7 +753,7 @@ function convertToCSV(data: Suppression[]): string {
     row.bounceType ?? '',
     row.source,
     row.createdAt.toISOString(),
-  ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+  ].map(toSafeCsvCell).join(','));
 
   return [headers.join(','), ...rows].join('\n');
 }

@@ -189,9 +189,6 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
   // Health check (no auth)
   app.route('/health', healthRoutes(ctx));
 
-  // Webhook endpoints (separate auth - signature verification)
-  app.route('/webhooks', webhooksRoutes(ctx));
-
   // Auth login route MUST be outside auth middleware (users need to obtain JWT)
   // Rate limit login separately to prevent brute-force
   // FIX-500-162: Only /login is public; /me, /api-keys, /logout, /refresh are authenticated
@@ -227,6 +224,7 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
   api.route('/suppressions', suppressionsRoutes(ctx));
   api.route('/events', eventsRoutes(ctx));
   api.route('/analytics', analyticsRoutes(ctx));
+  api.route('/webhooks', webhooksRoutes(ctx));
 
   // Mount API under /v1
   app.route('/v1', api);

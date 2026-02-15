@@ -14,7 +14,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 
 interface MigrationFile {
     version: string;
@@ -70,9 +70,9 @@ class MigrationEngine {
         return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
     }
 
-    private async acquireLock(): Promise<boolean> {
+    private async acquireLock(client: PoolClient): Promise<boolean> {
         this.log('Acquiring advisory lock...');
-        const result = await this.pool.query(
+        const result = await client.query(
             'SELECT pg_try_advisory_lock($1) as acquired',
             [MIGRATION_LOCK_ID]
         );
@@ -85,8 +85,8 @@ class MigrationEngine {
         return acquired;
     }
 
-    private async releaseLock(): Promise<void> {
-        await this.pool.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID]);
+    private async releaseLock(client: PoolClient): Promise<void> {
+        await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID]);
         this.log('Advisory lock released');
     }
 
@@ -148,14 +148,16 @@ class MigrationEngine {
         const client = await this.pool.connect();
         let applied = 0;
         let skipped = 0;
+        let lockAcquired = false;
 
         try {
             // Acquire lock
             if (!this.dryRun) {
-                const locked = await this.acquireLock();
+                const locked = await this.acquireLock(client);
                 if (!locked) {
                     throw new Error('Could not acquire migration lock');
                 }
+                lockAcquired = true;
             }
 
             await this.ensureAuditTable();
@@ -220,8 +222,8 @@ class MigrationEngine {
             return { applied, skipped };
 
         } finally {
-            if (!this.dryRun) {
-                await this.releaseLock();
+            if (!this.dryRun && lockAcquired) {
+                await this.releaseLock(client);
             }
             client.release();
         }
@@ -249,13 +251,15 @@ class MigrationEngine {
     async rollback(targetVersion?: string): Promise<{ rolledBack: number }> {
         const client = await this.pool.connect();
         let rolledBack = 0;
+        let lockAcquired = false;
 
         try {
             if (!this.dryRun) {
-                const locked = await this.acquireLock();
+                const locked = await this.acquireLock(client);
                 if (!locked) {
                     throw new Error('Could not acquire migration lock');
                 }
+                lockAcquired = true;
             }
 
             await this.ensureAuditTable();
@@ -341,8 +345,8 @@ class MigrationEngine {
             return { rolledBack };
 
         } finally {
-            if (!this.dryRun) {
-                await this.releaseLock();
+            if (!this.dryRun && lockAcquired) {
+                await this.releaseLock(client);
             }
             client.release();
         }
@@ -434,7 +438,7 @@ async function main(): Promise<void> {
 export { MigrationEngine };
 
 // Run CLI if executed directly
-if (require.main === module) {
+if (import.meta.url === new URL(process.argv[1], 'file:').href) {
     main().catch(error => {
         console.error('Migration failed:', error.message);
         process.exit(1);

@@ -6,31 +6,76 @@
  */
 
 import { NextResponse } from 'next/server';
+import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// TODO: Replace with real lead discovery service queries
-const DEMO_SOURCES = [
-    { id: 'product_hunt', name: 'Product Hunt', icon: '🚀', enabled: true, lastRun: new Date(Date.now() - 3600000).toISOString(), leadsFound: 47, status: 'idle' },
-    { id: 'g2', name: 'G2 Crowd', icon: '⭐', enabled: true, lastRun: new Date(Date.now() - 7200000).toISOString(), leadsFound: 89, status: 'idle' },
-    { id: 'capterra', name: 'Capterra', icon: '📊', enabled: true, lastRun: new Date(Date.now() - 14400000).toISOString(), leadsFound: 63, status: 'idle' },
-    { id: 'crunchbase', name: 'Crunchbase', icon: '💼', enabled: false, lastRun: null, leadsFound: 0, status: 'idle' },
-];
-
-const DEMO_LEADS = [
-    { id: '1', companyName: 'EmailNinja Pro', domain: 'emailninja.io', source: 'product_hunt', category: 'Email Marketing', description: 'AI-powered email scheduling for busy professionals', foundAt: new Date(Date.now() - 1800000).toISOString(), imported: false },
-    { id: '2', companyName: 'NewsletterOS', domain: 'newsletteros.com', source: 'g2', category: 'Newsletter Platforms', description: 'Complete newsletter management platform', foundAt: new Date(Date.now() - 3600000).toISOString(), imported: false },
-    { id: '3', companyName: 'SendMetrics', domain: 'sendmetrics.co', source: 'capterra', category: 'Email Marketing', description: 'Email analytics and reporting dashboard', foundAt: new Date(Date.now() - 7200000).toISOString(), imported: true },
-    { id: '4', companyName: 'AutoMailer Hub', domain: 'automailerhub.com', source: 'product_hunt', category: 'Marketing Automation', description: 'Automated email sequences for SaaS', foundAt: new Date(Date.now() - 14400000).toISOString(), imported: false },
-    { id: '5', companyName: 'ColdReach AI', domain: 'coldreach.ai', source: 'g2', category: 'Sales Enablement', description: 'AI cold email personalization', foundAt: new Date(Date.now() - 21600000).toISOString(), imported: false },
-];
+async function tableExists(tableName: string): Promise<boolean> {
+    const rows = await query<{ exists: boolean }>(
+        `SELECT to_regclass($1) IS NOT NULL as exists`,
+        [`public.${tableName}`]
+    );
+    return rows[0]?.exists ?? false;
+}
 
 export async function GET() {
     try {
-        // TODO: Replace with real lead discovery service query
+        const hasSalesLeads = await tableExists('sales_leads');
+        if (!hasSalesLeads) {
+            return NextResponse.json({ sources: [], leads: [] });
+        }
+
+        const [sourceRows, leadRows] = await Promise.all([
+            query<{ source: string; leads_found: string; last_run: Date | null }>(`
+                SELECT
+                    COALESCE(source, 'unknown') as source,
+                    COUNT(*)::text as leads_found,
+                    MAX(created_at) as last_run
+                FROM sales_leads
+                GROUP BY COALESCE(source, 'unknown')
+                ORDER BY leads_found::int DESC
+            `),
+            query<{
+                id: string;
+                company_name: string;
+                domain: string;
+                source: string | null;
+                industry: string | null;
+                notes: string | null;
+                status: string;
+                created_at: Date;
+            }>(`
+                SELECT id, company_name, domain, source, industry, notes, status, created_at
+                FROM sales_leads
+                ORDER BY created_at DESC
+                LIMIT 100
+            `),
+        ]);
+
+        const sources = sourceRows.map((row) => ({
+            id: row.source,
+            name: row.source,
+            icon: '📡',
+            enabled: true,
+            lastRun: row.last_run ? new Date(row.last_run).toISOString() : null,
+            leadsFound: parseInt(row.leads_found, 10),
+            status: 'idle',
+        }));
+
+        const leads = leadRows.map((row) => ({
+            id: row.id,
+            companyName: row.company_name,
+            domain: row.domain,
+            source: row.source ?? 'unknown',
+            category: row.industry ?? 'General',
+            description: row.notes ?? '',
+            foundAt: new Date(row.created_at).toISOString(),
+            imported: row.status !== 'new',
+        }));
+
         return NextResponse.json({
-            sources: DEMO_SOURCES,
-            leads: DEMO_LEADS,
+            sources,
+            leads,
         });
     } catch (error) {
         console.error('Leads discovery API error:', error);

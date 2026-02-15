@@ -150,7 +150,8 @@ export class WebhooksRepository {
     async findByTenantFiltered(
         tenantId: string,
         filters?: { enabled?: boolean; event?: string },
-    ): Promise<Webhook[]> {
+        options?: { limit?: number; offset?: number },
+    ): Promise<{ webhooks: Webhook[]; total: number }> {
         const conditions: string[] = ['tenant_id = $1'];
         const params: unknown[] = [tenantId];
         let idx = 2;
@@ -166,12 +167,59 @@ export class WebhooksRepository {
             idx++;
         }
 
-        const result = await this.pool.query<Record<string, unknown>>(
-            `SELECT * FROM webhooks WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT 100`,
+        const countResult = await this.pool.query<{ count: string }>(
+            `SELECT COUNT(*)::text as count FROM webhooks WHERE ${conditions.join(' AND ')}`,
             params,
         );
 
-        return result.rows.map(row => this.mapRow(row));
+        const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+        const offset = Math.max(0, options?.offset ?? 0);
+
+        const result = await this.pool.query<Record<string, unknown>>(
+            `SELECT * FROM webhooks WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx}`,
+            [...params, limit, offset],
+        );
+
+        return {
+            webhooks: result.rows.map(row => this.mapRow(row)),
+            total: parseInt(countResult.rows[0]?.count ?? '0', 10),
+        };
+    }
+
+    async listDeliveries(
+        tenantId: string,
+        webhookId: string,
+        options?: { status?: 'pending' | 'delivered' | 'failed'; limit?: number; offset?: number },
+    ): Promise<{ deliveries: WebhookQueueItem[]; total: number }> {
+        const conditions: string[] = ['tenant_id = $1', 'webhook_id = $2'];
+        const params: unknown[] = [tenantId, webhookId];
+        let idx = 3;
+
+        if (options?.status) {
+            conditions.push(`status = $${idx++}`);
+            params.push(options.status);
+        }
+
+        const countResult = await this.pool.query<{ count: string }>(
+            `SELECT COUNT(*)::text as count FROM webhook_queue WHERE ${conditions.join(' AND ')}`,
+            params,
+        );
+
+        const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
+        const offset = Math.max(0, options?.offset ?? 0);
+
+        const result = await this.pool.query<Record<string, unknown>>(
+            `SELECT * FROM webhook_queue
+             WHERE ${conditions.join(' AND ')}
+             ORDER BY created_at DESC
+             LIMIT $${idx++} OFFSET $${idx}`,
+            [...params, limit, offset],
+        );
+
+        return {
+            deliveries: result.rows.map((row) => this.mapQueueRow(row)),
+            total: parseInt(countResult.rows[0]?.count ?? '0', 10),
+        };
     }
 
     async findEnabledByEvent(tenantId: string, eventType: string): Promise<Webhook[]> {

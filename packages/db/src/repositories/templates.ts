@@ -586,7 +586,7 @@ export class TemplatesRepository {
     );
   }
 
-  async getVersion(templateId: string, version: number): Promise<Result<TemplateVersion | null, Error>> {
+  async getVersion(templateId: string, version: number, tenantId?: string): Promise<Result<TemplateVersion | null, Error>> {
     const result = await this.db.query<{
       version: number;
       html_content: string | null;
@@ -597,10 +597,12 @@ export class TemplatesRepository {
       created_by: string | null;
       changelog: string | null;
     }>(
-      `SELECT version, html_content, text_content, subject, variables, created_at, created_by, changelog
-       FROM template_versions
-       WHERE template_id = $1 AND version = $2`,
-      [templateId, version]
+      `SELECT tv.version, tv.html_content, tv.text_content, tv.subject, tv.variables, tv.created_at, tv.created_by, tv.changelog
+       FROM template_versions tv
+       ${tenantId ? 'JOIN templates t ON tv.template_id = t.id' : ''}
+       WHERE tv.template_id = $1 AND tv.version = $2
+       ${tenantId ? 'AND t.tenant_id = $3' : ''}`,
+      tenantId ? [templateId, version, tenantId] : [templateId, version]
     );
 
     if (!result.ok) return result;
@@ -692,7 +694,7 @@ export class TemplatesRepository {
       }
     }
 
-    const versionData = await this.getVersion(templateId, version);
+    const versionData = await this.getVersion(templateId, version, tenantId);
     if (!versionData.ok) return versionData;
     if (!versionData.value) {
       return Result.err(new Error(`Version ${version} not found`));
@@ -831,8 +833,8 @@ export class TemplatesRepository {
     });
   }
 
-  async duplicate(id: string, newName: string): Promise<Result<Template, Error>> {
-    const original = await this.findById(id);
+  async duplicate(id: string, newName: string, tenantId?: string): Promise<Result<Template, Error>> {
+    const original = await this.findById(id, tenantId);
     if (!original.ok) return original;
     if (!original.value) return Result.err(new Error('Template not found'));
 

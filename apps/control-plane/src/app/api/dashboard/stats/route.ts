@@ -1,37 +1,15 @@
 /**
  * Control Plane Dashboard Stats API
- * 
- * Provides real-time business metrics by querying the database directly.
+ *
+ * Provides dashboard metrics by querying canonical database tables.
  * This endpoint is only accessible to authenticated control plane users.
  */
 
 import { NextResponse } from 'next/server';
-// FIX-500-060: Import shared pool instead of creating a duplicate
-import { getPool as getSharedPool } from '../../../../lib/db';
+import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
-// Use dynamic import for pg to avoid build issues
-type Pool = import('pg').Pool;
-type PoolClient = import('pg').PoolClient;
-
-async function getPool(): Promise<Pool> {
-    return getSharedPool();
-}
-
-// Database configuration types
-interface DbConfig {
-    host: string;
-    port: number;
-    database: string;
-    user: string;
-    password: string;
-    max: number;
-    idleTimeoutMillis: number;
-    connectionTimeoutMillis: number;
-}
-
-// Activity row interface
 interface ActivityRow {
     id: string;
     type: string;
@@ -74,248 +52,312 @@ export interface DashboardStats {
     };
 }
 
+async function tableExists(tableName: string): Promise<boolean> {
+    const rows = await query<{ exists: boolean }>(
+        `SELECT to_regclass($1) IS NOT NULL as exists`,
+        [`public.${tableName}`]
+    );
+    return rows[0]?.exists ?? false;
+}
+
+function parseCount(value: string | undefined): number {
+    return parseInt(value || '0', 10);
+}
+
+function toIsoTimestamp(value: Date | string): string {
+    return new Date(value).toISOString();
+}
+
 export async function GET(): Promise<NextResponse<DashboardStats | { error: string }>> {
     try {
-        const dbPool = await getPool();
-        const client = await dbPool.connect();
-        
-        try {
-            // Sales metrics
-            const [
-                activeLeadsResult,
-                leadsThisWeekResult,
-                campaignsRunningResult,
-                demosScheduledResult,
-                pipelineResult,
-                conversionResult,
-            ] = await Promise.all([
-                // Active leads count
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM leads 
-                     WHERE status NOT IN ('converted', 'lost', 'unqualified')`
-                ),
-                // Leads this week
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM leads 
-                     WHERE created_at >= NOW() - INTERVAL '7 days'`
-                ),
-                // Running campaigns
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM campaigns WHERE status = 'active'`
-                ),
-                // Demos scheduled
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM leads WHERE stage = 'demo_scheduled'`
-                ),
-                // Pipeline stages
-                client.query<{ stage: string; count: string }>(
-                    `SELECT stage, COUNT(*) as count FROM leads 
-                     WHERE status NOT IN ('converted', 'lost')
-                     GROUP BY stage`
-                ),
-                // Conversion rate (converted / total contacted)
-                client.query<{ conversion_rate: string }>(
-                    `SELECT 
-                        CASE 
-                            WHEN COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted')) = 0 
-                            THEN 0
-                            ELSE COUNT(*) FILTER (WHERE status = 'converted')::float / 
-                                 COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted'))
-                        END as conversion_rate
-                     FROM leads`
-                ),
-            ]);
+        const [
+            hasSalesLeads,
+            hasDripCampaigns,
+            hasGdprRequests,
+            hasSystemAlerts,
+            hasStripeSubscriptions,
+        ] = await Promise.all([
+            tableExists('sales_leads'),
+            tableExists('drip_campaigns'),
+            tableExists('gdpr_requests'),
+            tableExists('system_alerts'),
+            tableExists('stripe_subscriptions'),
+        ]);
 
-            // Compliance metrics
-            const [
-                riskAlertsResult,
-                criticalTenantsResult,
-                gdprPendingResult,
-                auditEventsTodayResult,
-            ] = await Promise.all([
-                // Risk alerts (high/critical tenants)
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM tenants 
-                     WHERE risk_score >= 70`
-                ),
-                // Critical tenants
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM tenants 
-                     WHERE risk_score >= 90 OR suspended = true`
-                ),
-                // Pending GDPR requests
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM gdpr_requests 
-                     WHERE status = 'pending'`
-                ),
-                // Audit events today
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM audit_logs 
-                     WHERE created_at >= CURRENT_DATE`
-                ),
-            ]);
-
-            // Platform metrics
-            const [
-                activeTenantsResult,
-                totalEmailsResult,
-                mrrResult,
-                healthResult,
-            ] = await Promise.all([
-                // Active tenants
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM tenants 
-                     WHERE status = 'active'`
-                ),
-                // Total emails sent
-                client.query<{ count: string }>(
-                    `SELECT COUNT(*) as count FROM messages 
-                     WHERE status IN ('sent', 'delivered')`
-                ),
-                // MRR (Monthly Recurring Revenue)
-                client.query<{ mrr: string }>(
-                    `SELECT COALESCE(SUM(
-                        CASE 
-                            WHEN billing_period = 'monthly' THEN price_cents
-                            WHEN billing_period = 'yearly' THEN price_cents / 12
-                            ELSE 0 
-                        END
-                    ) / 100.0, 0) as mrr
-                     FROM subscriptions 
-                     WHERE status = 'active'`
-                ),
-                // System health
-                client.query<{ status: string; last_check: Date }>(
-                    `SELECT status, last_check FROM system_health 
-                     ORDER BY last_check DESC LIMIT 1`
-                ),
-            ]);
-
-            // Recent activity (combine from multiple sources)
-            const recentActivityResult = await client.query<{
-                id: string;
-                type: string;
-                message: string;
-                timestamp: Date;
-            }>(`
-                (
-                    SELECT 
-                        id::text,
-                        'lead' as type,
-                        'New lead: ' || company_name as message,
-                        created_at as timestamp
-                    FROM leads 
-                    WHERE score >= 70
-                    ORDER BY created_at DESC 
-                    LIMIT 3
-                )
-                UNION ALL
-                (
-                    SELECT 
-                        id::text,
-                        'risk' as type,
-                        'Tenant "' || name || '" flagged: risk score ' || risk_score as message,
-                        updated_at as timestamp
-                    FROM tenants 
-                    WHERE risk_score >= 70
-                    ORDER BY updated_at DESC 
-                    LIMIT 2
-                )
-                UNION ALL
-                (
-                    SELECT 
-                        id::text,
-                        'campaign' as type,
-                        'Campaign "' || name || '" - ' || 
-                            COALESCE((stats->>'emailsSent')::int, 0)::text || ' emails sent' as message,
-                        updated_at as timestamp
-                    FROM campaigns 
+        const [
+            activeLeadsRows,
+            leadsThisWeekRows,
+            campaignsRunningRows,
+            demosScheduledRows,
+            pipelineRows,
+            conversionRows,
+            auditEventsTodayRows,
+            activeTenantsRows,
+            totalEmailsRows,
+            mrrRows,
+            alertsRows,
+        ] = await Promise.all([
+            hasSalesLeads
+                ? query<{ count: string }>(`
+                    SELECT COUNT(*)::text as count
+                    FROM sales_leads
+                    WHERE status NOT IN ('converted', 'lost', 'unqualified')
+                `)
+                : Promise.resolve([]),
+            hasSalesLeads
+                ? query<{ count: string }>(`
+                    SELECT COUNT(*)::text as count
+                    FROM sales_leads
+                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                `)
+                : Promise.resolve([]),
+            hasDripCampaigns
+                ? query<{ count: string }>(`
+                    SELECT COUNT(*)::text as count
+                    FROM drip_campaigns
                     WHERE status = 'active'
-                    ORDER BY updated_at DESC 
-                    LIMIT 2
-                )
-                UNION ALL
-                (
-                    SELECT 
-                        id::text,
-                        'gdpr' as type,
-                        'GDPR request from ' || email as message,
-                        created_at as timestamp
-                    FROM gdpr_requests 
+                `)
+                : Promise.resolve([]),
+            hasSalesLeads
+                ? query<{ count: string }>(`
+                    SELECT COUNT(*)::text as count
+                    FROM sales_leads
+                    WHERE status IN ('demo_scheduled', 'demo_booked', 'demo')
+                `)
+                : Promise.resolve([]),
+            hasSalesLeads
+                ? query<{ status: string; count: string }>(`
+                    SELECT status, COUNT(*)::text as count
+                    FROM sales_leads
+                    GROUP BY status
+                `)
+                : Promise.resolve([]),
+            hasSalesLeads
+                ? query<{ conversion_rate: string }>(`
+                    SELECT CASE
+                        WHEN COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted')) = 0 THEN 0
+                        ELSE (
+                            COUNT(*) FILTER (WHERE status = 'converted')::float /
+                            COUNT(*) FILTER (WHERE status IN ('contacted', 'qualified', 'converted'))
+                        )
+                    END::text as conversion_rate
+                    FROM sales_leads
+                `)
+                : Promise.resolve([]),
+            query<{ count: string }>(`
+                SELECT COUNT(*)::text as count
+                FROM audit_logs
+                WHERE timestamp >= CURRENT_DATE
+            `),
+            query<{ count: string }>(`
+                SELECT COUNT(*)::text as count
+                FROM tenants
+                WHERE status = 'active'
+            `),
+            query<{ count: string }>(`
+                SELECT COUNT(*)::text as count
+                FROM messages
+                WHERE status IN ('sent', 'delivered')
+            `),
+            hasStripeSubscriptions
+                ? query<{ mrr: string }>(`
+                    SELECT COALESCE(SUM(
+                        CASE
+                            WHEN billing_interval = 'year' THEN amount / 12.0
+                            WHEN billing_interval = 'month' THEN amount
+                            ELSE 0
+                        END
+                    ) / 100.0, 0)::text as mrr
+                    FROM stripe_subscriptions
+                    WHERE status IN ('active', 'trialing', 'past_due')
+                      AND canceled_at IS NULL
+                `)
+                : Promise.resolve([]),
+            hasSystemAlerts
+                ? query<{ severity: string; total: string; tenant_count: string }>(`
+                    SELECT
+                        severity,
+                        COUNT(*)::text as total,
+                        COUNT(DISTINCT tenant_id)::text as tenant_count
+                    FROM system_alerts
+                    WHERE acknowledged = false
+                      AND severity IN ('high', 'critical')
+                    GROUP BY severity
+                `)
+                : Promise.resolve([]),
+        ]);
+
+        const [leadActivityRows, alertActivityRows, campaignActivityRows, gdprActivityRows, gdprPendingRows] = await Promise.all([
+            hasSalesLeads
+                ? query<{
+                    id: string;
+                    company_name: string;
+                    created_at: Date;
+                }>(`
+                    SELECT id, company_name, created_at
+                    FROM sales_leads
+                    ORDER BY created_at DESC
+                    LIMIT 4
+                `)
+                : Promise.resolve([]),
+            hasSystemAlerts
+                ? query<{
+                    id: string;
+                    alert_type: string;
+                    message: string | null;
+                    created_at: Date;
+                }>(`
+                    SELECT id, alert_type, message, created_at
+                    FROM system_alerts
+                    ORDER BY created_at DESC
+                    LIMIT 3
+                `)
+                : Promise.resolve([]),
+            hasDripCampaigns
+                ? query<{
+                    id: string;
+                    name: string;
+                    status: string;
+                    created_at: Date;
+                }>(`
+                    SELECT id, name, status, created_at
+                    FROM drip_campaigns
+                    ORDER BY created_at DESC
+                    LIMIT 3
+                `)
+                : Promise.resolve([]),
+            hasGdprRequests
+                ? query<{
+                    id: string;
+                    email: string;
+                    status: string;
+                    created_at: Date;
+                }>(`
+                    SELECT id, email, status, created_at
+                    FROM gdpr_requests
+                    ORDER BY created_at DESC
+                    LIMIT 3
+                `)
+                : Promise.resolve([]),
+            hasGdprRequests
+                ? query<{ count: string }>(`
+                    SELECT COUNT(*)::text as count
+                    FROM gdpr_requests
                     WHERE status = 'pending'
-                    ORDER BY created_at DESC 
-                    LIMIT 2
-                )
-                ORDER BY timestamp DESC
-                LIMIT 10
-            `);
+                `)
+                : Promise.resolve([]),
+        ]);
 
-            // Build pipeline object
-            const pipelineMap: Record<string, number> = {
-                prospect: 0,
-                outreach: 0,
-                engaged: 0,
-                demo_scheduled: 0,
-                closed_won: 0,
-            };
-            for (const row of pipelineResult.rows) {
-                pipelineMap[row.stage] = parseInt(row.count, 10);
+        const pipeline = {
+            prospect: 0,
+            outreach: 0,
+            engaged: 0,
+            demo: 0,
+            closed: 0,
+        };
+
+        for (const row of pipelineRows) {
+            const status = row.status;
+            const count = parseCount(row.count);
+
+            if (['new', 'prospect', 'identified'].includes(status)) {
+                pipeline.prospect += count;
+            } else if (['contacted', 'outreach', 'attempted'].includes(status)) {
+                pipeline.outreach += count;
+            } else if (['engaged', 'qualified', 'responded'].includes(status)) {
+                pipeline.engaged += count;
+            } else if (['demo_scheduled', 'demo_booked', 'demo'].includes(status)) {
+                pipeline.demo += count;
+            } else if (['converted', 'closed_won'].includes(status)) {
+                pipeline.closed += count;
             }
-
-            // Determine health status
-            let healthStatus: 'healthy' | 'degraded' | 'down' = 'healthy';
-            if (healthResult.rows[0]) {
-                const { status, last_check } = healthResult.rows[0];
-                const checkAge = Date.now() - new Date(last_check).getTime();
-                if (status === 'down' || checkAge > 5 * 60 * 1000) {
-                    healthStatus = 'down';
-                } else if (status === 'degraded') {
-                    healthStatus = 'degraded';
-                }
-            }
-
-            const stats: DashboardStats = {
-                sales: {
-                    activeLeads: parseInt(activeLeadsResult.rows[0]?.count || '0', 10),
-                    leadsThisWeek: parseInt(leadsThisWeekResult.rows[0]?.count || '0', 10),
-                    campaignsRunning: parseInt(campaignsRunningResult.rows[0]?.count || '0', 10),
-                    demosScheduled: parseInt(demosScheduledResult.rows[0]?.count || '0', 10),
-                    conversionRate: parseFloat(conversionResult.rows[0]?.conversion_rate || '0'),
-                },
-                compliance: {
-                    riskAlerts: parseInt(riskAlertsResult.rows[0]?.count || '0', 10),
-                    criticalTenants: parseInt(criticalTenantsResult.rows[0]?.count || '0', 10),
-                    gdprPending: parseInt(gdprPendingResult.rows[0]?.count || '0', 10),
-                    auditEventsToday: parseInt(auditEventsTodayResult.rows[0]?.count || '0', 10),
-                },
-                platform: {
-                    activeTenants: parseInt(activeTenantsResult.rows[0]?.count || '0', 10),
-                    totalEmails: parseInt(totalEmailsResult.rows[0]?.count || '0', 10),
-                    mrr: parseFloat(mrrResult.rows[0]?.mrr || '0'),
-                    healthStatus,
-                },
-                recentActivity: recentActivityResult.rows.map((row: ActivityRow) => ({
-                    id: row.id,
-                    type: row.type,
-                    message: row.message,
-                    timestamp: row.timestamp.toISOString(),
-                })),
-                pipeline: {
-                    prospect: pipelineMap.prospect || 0,
-                    outreach: pipelineMap.outreach || 0,
-                    engaged: pipelineMap.engaged || 0,
-                    demo: pipelineMap.demo_scheduled || 0,
-                    closed: pipelineMap.closed_won || 0,
-                },
-            };
-
-            return NextResponse.json(stats);
-        } finally {
-            client.release();
         }
+
+        let riskAlerts = 0;
+        let criticalTenants = 0;
+        let criticalAlertCount = 0;
+        let highAlertCount = 0;
+
+        for (const row of alertsRows) {
+            const alertCount = parseCount(row.total);
+            riskAlerts += alertCount;
+
+            if (row.severity === 'critical') {
+                criticalAlertCount += alertCount;
+                criticalTenants += parseCount(row.tenant_count);
+            }
+            if (row.severity === 'high') {
+                highAlertCount += alertCount;
+            }
+        }
+
+        const healthStatus: 'healthy' | 'degraded' | 'down' = criticalAlertCount > 0
+            ? 'down'
+            : highAlertCount > 0
+                ? 'degraded'
+                : 'healthy';
+
+        const recentActivity: ActivityRow[] = [
+            ...leadActivityRows.map((row) => ({
+                id: row.id,
+                type: 'lead',
+                message: `New lead: ${row.company_name}`,
+                timestamp: row.created_at,
+            })),
+            ...alertActivityRows.map((row) => ({
+                id: row.id,
+                type: 'risk',
+                message: row.message || `System alert: ${row.alert_type}`,
+                timestamp: row.created_at,
+            })),
+            ...campaignActivityRows.map((row) => ({
+                id: row.id,
+                type: 'campaign',
+                message: `Campaign ${row.name} is ${row.status}`,
+                timestamp: row.created_at,
+            })),
+            ...gdprActivityRows.map((row) => ({
+                id: row.id,
+                type: 'gdpr',
+                message: `GDPR request from ${row.email} (${row.status})`,
+                timestamp: row.created_at,
+            })),
+        ]
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 10);
+
+        const stats: DashboardStats = {
+            sales: {
+                activeLeads: parseCount(activeLeadsRows[0]?.count),
+                leadsThisWeek: parseCount(leadsThisWeekRows[0]?.count),
+                campaignsRunning: parseCount(campaignsRunningRows[0]?.count),
+                demosScheduled: parseCount(demosScheduledRows[0]?.count),
+                conversionRate: parseFloat(conversionRows[0]?.conversion_rate || '0'),
+            },
+            compliance: {
+                riskAlerts,
+                criticalTenants,
+                gdprPending: parseCount(gdprPendingRows[0]?.count),
+                auditEventsToday: parseCount(auditEventsTodayRows[0]?.count),
+            },
+            platform: {
+                activeTenants: parseCount(activeTenantsRows[0]?.count),
+                totalEmails: parseCount(totalEmailsRows[0]?.count),
+                mrr: parseFloat(mrrRows[0]?.mrr || '0'),
+                healthStatus,
+            },
+            recentActivity: recentActivity.map((row) => ({
+                id: row.id,
+                type: row.type,
+                message: row.message,
+                timestamp: toIsoTimestamp(row.timestamp),
+            })),
+            pipeline,
+        };
+
+        return NextResponse.json(stats);
     } catch (error) {
         console.error('Dashboard stats error:', error);
-        // FIX-500-303: Return 500 instead of masking DB failure as success
         return NextResponse.json(
             { error: 'Failed to fetch dashboard stats' },
             { status: 500 }

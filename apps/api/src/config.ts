@@ -137,10 +137,10 @@ export function loadConfig(): Config {
   
   // SECURITY: Additional validation for production secrets
   if (!isDev) {
-    // SECURITY FIX: Reject wildcard CORS origin in production
+    // SECURITY FIX: Reject wildcard CORS origin in all non-development environments
     if (validated.CORS_ORIGINS === '*') {
       throw new Error(
-        'SECURITY: CORS_ORIGINS cannot be "*" in production. ' +
+        'SECURITY: CORS_ORIGINS cannot be "*" outside development. ' +
         'Set CORS_ORIGINS to a comma-separated list of allowed origins (e.g., "https://app.apexmail.com,https://admin.apexmail.com").'
       );
     }

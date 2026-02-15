@@ -13,6 +13,8 @@ import { secureHeaders } from 'hono/secure-headers';
 import { bodyLimit } from 'hono/body-limit'; // FIX-500-394
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
+import Redis from 'ioredis';
+import { randomUUID } from 'crypto';
 
 // G-199: Structured logger for AI service (local — no @apexmail/lib dependency)
 const aiLogger = {
@@ -49,27 +51,32 @@ const app = new Hono();
 // RATE LIMITING (AI-007: Per-tenant rate limiting)
 // ========================================
 
-// Simple in-memory rate limiter for AI endpoints
-// In production, use Redis-backed rate limiting
-interface RateLimitEntry {
-    count: number;
-    resetAt: number;
-}
-
-const rateLimitStore: Map<string, RateLimitEntry> = new Map();
 const RATE_LIMIT_WINDOW_MS = 60000; // 1 minute window
 const RATE_LIMIT_MAX_REQUESTS = 60; // 60 requests per minute per tenant
 
-// Periodically clean up expired rate limit entries to prevent memory leak
-// FIX-500-232: .unref() so this interval doesn't block graceful process exit
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of rateLimitStore) {
-        if (entry.resetAt < now) {
-            rateLimitStore.delete(key);
+let redisClient: Redis | null = null;
+
+function getRedisClient(): Redis {
+    if (!redisClient) {
+        const redisUrl = process.env.REDIS_URL;
+        if (redisUrl) {
+            redisClient = new Redis(redisUrl, {
+                maxRetriesPerRequest: 2,
+                enableReadyCheck: true,
+            });
+        } else {
+            redisClient = new Redis({
+                host: process.env.REDIS_HOST ?? '127.0.0.1',
+                port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+                password: process.env.REDIS_PASSWORD,
+                db: parseInt(process.env.REDIS_DB ?? '0', 10),
+                maxRetriesPerRequest: 2,
+                enableReadyCheck: true,
+            });
         }
     }
-}, RATE_LIMIT_WINDOW_MS).unref();
+    return redisClient;
+}
 
 // ========================================
 // MIDDLEWARE
@@ -90,7 +97,7 @@ app.use('*', prettyJSON());
 app.use('*', async (c, next) => {
     // Get existing request ID from header or generate a new one
     const incomingRequestId = c.req.header('X-Request-ID');
-    const requestId = incomingRequestId ?? `ai-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+    const requestId = incomingRequestId ?? `ai-${randomUUID()}`;
     
     // Store in header for downstream use (Hono's preferred pattern)
     c.req.raw.headers.set('X-Request-ID', requestId);
@@ -106,36 +113,44 @@ app.use('/api/*', async (c, next) => {
     // Extract tenant ID from header or request body
     const tenantId = c.req.header('X-Tenant-ID') ?? 'default';
     const now = Date.now();
-    const key = `ai:ratelimit:${tenantId}`;
-    
-    let entry = rateLimitStore.get(key);
-    
-    if (!entry || entry.resetAt < now) {
-        // Create new entry
-        entry = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
-        rateLimitStore.set(key, entry);
-    } else {
-        entry.count++;
+    const windowStart = Math.floor(now / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_WINDOW_MS;
+    const windowEnd = windowStart + RATE_LIMIT_WINDOW_MS;
+    const key = `ai:ratelimit:${tenantId}:${windowStart}`;
+
+    try {
+        const redis = getRedisClient();
+        const count = await redis.incr(key);
+        if (count === 1) {
+            await redis.expire(key, Math.ceil(RATE_LIMIT_WINDOW_MS / 1000) + 1);
+        }
+
+        const remaining = Math.max(0, RATE_LIMIT_MAX_REQUESTS - count);
+        c.header('X-RateLimit-Limit', String(RATE_LIMIT_MAX_REQUESTS));
+        c.header('X-RateLimit-Remaining', String(remaining));
+        c.header('X-RateLimit-Reset', String(Math.floor(windowEnd / 1000)));
+
+        if (count > RATE_LIMIT_MAX_REQUESTS) {
+            const retryAfter = Math.ceil((windowEnd - now) / 1000);
+            c.header('Retry-After', String(retryAfter));
+            return c.json({
+                success: false,
+                error: `Rate limit exceeded. Retry after ${retryAfter} seconds.`,
+                code: 'RATE_LIMIT_EXCEEDED',
+            }, 429);
+        }
+
+        return next();
+    } catch (error) {
+        aiLogger.error('Rate limiter unavailable', { error: error instanceof Error ? error.message : String(error) });
+        if (process.env.NODE_ENV === 'production') {
+            return c.json({
+                success: false,
+                error: 'Service temporarily unavailable.',
+                code: 'RATE_LIMITER_UNAVAILABLE',
+            }, 503);
+        }
+        return next();
     }
-    
-    // Set rate limit headers
-    const remaining = Math.max(0, RATE_LIMIT_MAX_REQUESTS - entry.count);
-    c.header('X-RateLimit-Limit', String(RATE_LIMIT_MAX_REQUESTS));
-    c.header('X-RateLimit-Remaining', String(remaining));
-    c.header('X-RateLimit-Reset', String(Math.floor(entry.resetAt / 1000)));
-    
-    // Check if over limit
-    if (entry.count > RATE_LIMIT_MAX_REQUESTS) {
-        const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
-        c.header('Retry-After', String(retryAfter));
-        return c.json({
-            success: false,
-            error: `Rate limit exceeded. Retry after ${retryAfter} seconds.`,
-            code: 'RATE_LIMIT_EXCEEDED',
-        }, 429);
-    }
-    
-    return next();
 });
 
 // Error handling

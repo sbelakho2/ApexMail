@@ -12,6 +12,8 @@ import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
 import { compress } from 'hono/compress';
 import { Pool } from 'pg';
+import { parseApiKey } from '@apexmail/lib/id';
+import { verifyPassword } from '@apexmail/lib/crypto';
 import { createDevExRoutes } from './routes/devex.js';
 import { ApiVersioningService } from './services/api-versioning.js';
 import { OpenApiGenerator } from './services/openapi-generator.js'; // FIX-500-415: Static import
@@ -45,7 +47,7 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
     allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-API-Version', 'X-Request-ID', 'Idempotency-Key'],
     exposeHeaders: ['X-Request-ID', 'X-API-Version', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
     maxAge: 86400,
-    credentials: true,
+    credentials: !config.corsOrigins.includes('*'),
   }));
 
   // Request ID middleware
@@ -59,7 +61,7 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
   // API versioning middleware
   app.use('/api/*', versioningMiddleware);
 
-  // Auth middleware - extract tenant from API key
+  // Auth middleware - validate API key and bind tenant from database
   app.use('/api/*', async (c, next) => {
     const authHeader = c.req.header('Authorization');
     const apiKeyHeader = c.req.header('X-API-Key');
@@ -76,13 +78,7 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
       return c.json({ error: { code: 'unauthorized', message: 'API key required' } }, 401);
     }
 
-    // Validate API key and get tenant
-    // For sandbox keys (am_test_*), validate with sandbox service
-    // For production keys (am_live_*), validate with main auth service
-    
-    // In a real implementation, this would validate the key
-    // For now, we'll extract a tenant ID from the key format
-    const tenantId = extractTenantFromKey(apiKey);
+    const tenantId = await verifyApiKeyTenant(db, apiKey);
     if (!tenantId) {
       return c.json({ error: { code: 'unauthorized', message: 'Invalid API key' } }, 401);
     }
@@ -120,12 +116,16 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
         },
       });
     } catch (error) {
+      console.error('[DevEx Readiness Check Failed]', {
+        requestId: c.get('requestId'),
+        error: error instanceof Error ? error.message : String(error),
+      });
+
       return c.json({
         status: 'not_ready',
         checks: {
           database: 'failed',
         },
-        error: (error as Error).message,
       }, 503);
     }
   });
@@ -246,27 +246,38 @@ export function createApp(db: Pool): Hono<{ Variables: Variables }> {
 }
 
 /**
- * Extract tenant ID from API key
+ * Validate API key against persisted records and return tenant ID.
  */
-function extractTenantFromKey(apiKey: string): string | null {
-  // API key format: am_{env}_{tenantPrefix}_{secret}
-  // env: live or test
-  // tenantPrefix: first 8 chars of tenant ID
-  
-  if (!apiKey.startsWith('am_live_') && !apiKey.startsWith('am_test_')) {
+async function verifyApiKeyTenant(db: Pool, apiKey: string): Promise<string | null> {
+  const parsed = parseApiKey(apiKey);
+  if (!parsed) {
     return null;
   }
 
-  // In production, this would validate against the database
-  // For now, extract what looks like a tenant ID
-  const parts = apiKey.split('_');
-  if (parts.length < 3 || !parts[2]) {
+  const result = await db.query<{
+    tenant_id: string;
+    key_hash: string;
+  }>(
+    `SELECT tenant_id, key_hash
+     FROM api_keys
+     WHERE prefix = $1
+       AND is_active = true
+       AND (expires_at IS NULL OR expires_at > NOW())`,
+    [parsed.prefix]
+  );
+
+  if (result.rows.length === 0) {
     return null;
   }
 
-  // Return a placeholder tenant ID based on key prefix
-  // In production, this would be looked up from the database
-  return `tenant_${parts[2].slice(0, 8)}`;
+  for (const row of result.rows) {
+    const isValid = await verifyPassword(apiKey, row.key_hash);
+    if (isValid) {
+      return row.tenant_id;
+    }
+  }
+
+  return null;
 }
 
 /**

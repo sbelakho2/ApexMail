@@ -264,6 +264,30 @@ async function safeFetch(url: string, options: RequestInit = {}): Promise<Respon
     }
 }
 
+function sanitizeProxyHeaders(input: Record<string, unknown>): Record<string, string> {
+    const allowed = new Set([
+        'accept',
+        'accept-language',
+        'content-type',
+        'if-none-match',
+        'if-modified-since',
+        'cache-control',
+    ]);
+
+    const sanitized: Record<string, string> = {};
+    for (const [rawKey, rawValue] of Object.entries(input)) {
+        const key = rawKey.toLowerCase();
+        if (!allowed.has(key)) {
+            continue;
+        }
+        if (typeof rawValue !== 'string') {
+            continue;
+        }
+        sanitized[rawKey] = rawValue;
+    }
+    return sanitized;
+}
+
 /**
  * POST /api/proxy
  * 
@@ -291,12 +315,14 @@ export async function POST(request: NextRequest) {
             );
         }
         
+        const safeHeaders = sanitizeProxyHeaders(headers as Record<string, unknown>);
+
         // Make safe request
         const response = await safeFetch(url, {
             method: method.toUpperCase(),
             headers: {
                 'Content-Type': 'application/json',
-                ...headers,
+                ...safeHeaders,
             },
             body: data ? JSON.stringify(data) : undefined,
         });
@@ -349,53 +375,8 @@ export async function POST(request: NextRequest) {
  * Simple GET proxy with URL in query parameter
  */
 export async function GET(request: NextRequest) {
-    try {
-        const url = request.nextUrl.searchParams.get('url');
-        
-        if (!url) {
-            return NextResponse.json(
-                { error: 'URL query parameter is required' },
-                { status: 400 }
-            );
-        }
-        
-        const response = await safeFetch(url, { method: 'GET' });
-        
-        // Handle redirect responses
-        if (response.status >= 300 && response.status < 400) {
-            const location = response.headers.get('location');
-            return NextResponse.json({
-                status: response.status,
-                redirect: true,
-                location,
-                message: 'Redirect detected. Validate and follow manually if needed.',
-            });
-        }
-        
-        const contentType = response.headers.get('content-type') || '';
-        let responseData;
-        
-        if (contentType.includes('application/json')) {
-            responseData = await response.json();
-        } else {
-            responseData = await response.text();
-        }
-        
-        return NextResponse.json({
-            status: response.status,
-            data: responseData,
-        });
-        
-    } catch (error) {
-        const message = error instanceof Error ? error.message : 'Proxy request failed';
-        
-        const safeMessage = process.env.NODE_ENV === 'production' 
-            ? 'Request failed. URL may be invalid or blocked.'
-            : message;
-        
-        return NextResponse.json(
-            { error: safeMessage },
-            { status: 400 }
-        );
-    }
+    return NextResponse.json(
+        { error: 'GET proxy is disabled. Use POST /api/proxy with a validated payload.' },
+        { status: 405 }
+    );
 }

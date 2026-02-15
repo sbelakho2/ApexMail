@@ -4,7 +4,7 @@
  */
 
 import { Pool } from 'pg';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash, scryptSync } from 'crypto';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/apexmail',
@@ -82,16 +82,17 @@ function generateId(prefix: string): string {
 }
 
 function hashPassword(password: string): string {
-  // In production, use bcrypt or scrypt
-  return require('crypto').createHash('sha256').update(password).digest('hex');
+  const salt = randomBytes(16).toString('hex');
+  const derived = scryptSync(password, salt, 64).toString('hex');
+  return `scrypt:${salt}:${derived}`;
 }
 
 function hashApiKey(key: string): string {
-  return require('crypto').createHash('sha256').update(key).digest('hex');
+  return createHash('sha256').update(key).digest('hex');
 }
 
 // Run if executed directly
-if (require.main === module) {
+if (import.meta.url === new URL(process.argv[1], 'file:').href) {
   seed().catch((error) => {
     console.error(error);
     process.exit(1);

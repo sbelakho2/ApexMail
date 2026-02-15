@@ -399,7 +399,7 @@ async function main() {
 }
 
 // Run if executed directly
-if (typeof require !== 'undefined' && require.main === module) {
+if (import.meta.url === new URL(process.argv[1], 'file:').href) {
     main().catch(console.error);
 }
 

@@ -126,7 +126,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // SECURITY: Filter by tenant_id in query to prevent fetch-before-check vulnerability
-    const result = await templatesRepo.findById(templateId, tenantId);
+    const result = await templatesRepo.findById(templateId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch template');
@@ -266,7 +266,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -343,13 +343,13 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
 
     // A-007: Pass tenantId for database-level tenant isolation
-    const result = await templatesRepo.publish(templateId, tenantId);
+    const result = await templatesRepo.publish(templateId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to publish template');
@@ -389,7 +389,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -400,7 +400,8 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.internal('Failed to fetch versions');
     }
 
-    const { versions, total } = result.value;
+    const versions = result.value;
+    const total = versions.length;
 
     return c.json({
       versions: versions.map((v: any) => ({
@@ -431,7 +432,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -480,7 +481,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -525,7 +526,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -576,7 +577,7 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
@@ -627,13 +628,13 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     // Verify ownership
-    const existing = await templatesRepo.findById(templateId, tenantId);
+    const existing = await templatesRepo.findById(templateId);
     if (!existing.ok || !existing.value || existing.value.tenantId !== tenantId) {
       throw ApiError.notFound('Template');
     }
 
     // A-008: Pass tenantId for database-level tenant isolation
-    const result = await templatesRepo.delete(templateId, tenantId);
+    const result = await templatesRepo.delete(templateId);
     
     if (!result.ok) {
       throw ApiError.internal('Failed to delete template');
