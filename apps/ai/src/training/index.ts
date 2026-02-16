@@ -399,7 +399,7 @@ async function main() {
 }
 
 // Run if executed directly
-if (import.meta.url === new URL(process.argv[1], 'file:').href) {
+if (require.main?.filename === process.argv[1] || __filename === process.argv[1]) {
     main().catch(console.error);
 }
 

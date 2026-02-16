@@ -165,7 +165,7 @@ export default function RevenuePage() {
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 <span className="w-8 h-8 bg-success/10 rounded-full flex items-center justify-center text-success">
-                                    ➕
+                                    New
                                 </span>
                                 <span className="text-muted-foreground font-medium">New Customers</span>
                             </div>
@@ -174,7 +174,7 @@ export default function RevenuePage() {
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 <span className="w-8 h-8 bg-info/10 rounded-full flex items-center justify-center text-info">
-                                    ⬆️
+                                    Up
                                 </span>
                                 <span className="text-muted-foreground font-medium">Upgrades</span>
                             </div>
@@ -183,7 +183,7 @@ export default function RevenuePage() {
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 <span className="w-8 h-8 bg-warning/10 rounded-full flex items-center justify-center text-warning">
-                                    ⬇️
+                                    Down
                                 </span>
                                 <span className="text-muted-foreground font-medium">Downgrades</span>
                             </div>
@@ -192,7 +192,7 @@ export default function RevenuePage() {
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
                                 <span className="w-8 h-8 bg-destructive/10 rounded-full flex items-center justify-center text-destructive">
-                                    🚪
+                                    Exit
                                 </span>
                                 <span className="text-muted-foreground font-medium">Churned</span>
                             </div>

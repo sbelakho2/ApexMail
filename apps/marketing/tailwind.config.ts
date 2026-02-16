@@ -113,6 +113,10 @@ const config: Config = {
       backgroundImage: {
         'hero-pattern': 'url("/patterns/hero-grid.svg")',
       },
+      boxShadow: {
+        'premium': '0 1px 2px rgba(16, 24, 40, 0.06), 0 10px 20px rgba(16, 24, 40, 0.06)',
+        'premium-hover': '0 14px 40px rgba(15, 23, 42, 0.08)',
+      },
       borderRadius: {
         sm: 'var(--radius-sm)',
         md: 'var(--radius-md)',

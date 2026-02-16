@@ -267,7 +267,7 @@ export default function AutopilotConsolePage() {
             {/* Header */}
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                 <div>
-                    <h1 className="text-2xl font-bold tracking-tight">🤖 Autopilot Console</h1>
+                    <h1 className="text-2xl font-bold tracking-tight">Autopilot Console</h1>
                     <p className="text-muted-foreground mt-1">
                         Hourly optimization loop — Thompson sampling · copy gates · safety rails
                     </p>
@@ -292,7 +292,7 @@ export default function AutopilotConsolePage() {
                                 : 'bg-green-600 text-white hover:bg-green-700',
                         )}
                     >
-                        {overview?.status === 'running' ? '⏹ Stop Loop' : '▶ Start Loop'}
+                        {overview?.status === 'running' ? 'Stop Loop' : 'Start Loop'}
                     </button>
                     <button
                         onClick={loadAll}
@@ -369,7 +369,7 @@ function OverviewTab({ overview, metrics, baseline }: { overview: Overview; metr
             {!overview.safetyOk && (
                 <div className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-800 p-4">
                     <p className="text-sm font-medium text-red-800 dark:text-red-400">
-                        ⚠ Safety issue: {overview.safetyMessage}
+                        Safety issue: {overview.safetyMessage}
                     </p>
                 </div>
             )}
@@ -515,7 +515,6 @@ function ApprovalsTab({ pending, approveEmail, rejectEmail, approveAll, acting }
     if (pending.length === 0) {
         return (
             <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-                <span className="text-4xl mb-3">✅</span>
                 <p className="text-lg font-medium">No pending approvals</p>
                 <p className="text-sm mt-1">All emails have been reviewed.</p>
             </div>
@@ -531,7 +530,7 @@ function ApprovalsTab({ pending, approveEmail, rejectEmail, approveAll, acting }
                     disabled={acting}
                     className="px-3 py-1.5 rounded-md text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition-colors disabled:opacity-50"
                 >
-                    ✓ Approve All
+                    Approve All
                 </button>
             </div>
 
@@ -555,14 +554,14 @@ function ApprovalsTab({ pending, approveEmail, rejectEmail, approveAll, acting }
                                     disabled={acting}
                                     className="px-3 py-1.5 rounded-md text-xs font-medium bg-green-100 text-green-800 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50 transition-colors disabled:opacity-50"
                                 >
-                                    ✓ Approve
+                                    Approve
                                 </button>
                                 <button
                                     onClick={() => rejectEmail(email.id)}
                                     disabled={acting}
                                     className="px-3 py-1.5 rounded-md text-xs font-medium bg-red-100 text-red-800 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 transition-colors disabled:opacity-50"
                                 >
-                                    ✗ Reject
+                                    Reject
                                 </button>
                             </div>
                         </div>
@@ -614,7 +613,7 @@ function OutcomesTab({ outcomes }: { outcomes: HourlyOutcome[] }) {
                                 <td className="px-3 py-2 text-right tabular-nums">{o.candidatesKilled.length}</td>
                                 <td className="px-3 py-2 text-right tabular-nums">{o.newVariantsSeeded}</td>
                                 <td className="px-3 py-2 text-center">
-                                    {o.safeModeTriggered ? <span className="text-red-600 dark:text-red-400">⚠</span> : <span className="text-green-600 dark:text-green-400">✓</span>}
+                                    {o.safeModeTriggered ? <span className="text-red-600 dark:text-red-400">Warn</span> : <span className="text-green-600 dark:text-green-400">OK</span>}
                                 </td>
                             </tr>
                         ))}
@@ -641,7 +640,7 @@ function SafetyTab({ safety }: { safety: SafetyReport }) {
                         : 'border-green-300 bg-green-50 dark:bg-green-900/20 dark:border-green-800',
             )}>
                 <p className="font-medium">
-                    {ts.halt ? '🛑 HALT' : ts.throttle ? '⚠ Throttled' : '✅ All Clear'}
+                    {ts.halt ? 'HALT' : ts.throttle ? 'Throttled' : 'All Clear'}
                 </p>
                 <p className="text-sm text-muted-foreground mt-1">{ts.reason}</p>
             </div>

@@ -55,7 +55,7 @@ export async function GET() {
         const sources = sourceRows.map((row) => ({
             id: row.source,
             name: row.source,
-            icon: '📡',
+            icon: 'Source',
             enabled: true,
             lastRun: row.last_run ? new Date(row.last_run).toISOString() : null,
             leadsFound: parseInt(row.leads_found, 10),

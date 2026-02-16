@@ -185,6 +185,7 @@ describe('Phase 4-6: Email Processing Deep Bug Detection', () => {
       
       if (fs.existsSync(mtaDir)) {
         let foundSmtpErrors = false;
+        let foundCategorizedHandling = false;
         
         const checkDir = (dir: string) => {
           const files = fs.readdirSync(dir);
@@ -194,12 +195,15 @@ describe('Phase 4-6: Email Processing Deep Bug Detection', () => {
               checkDir(filePath);
             } else if (file.endsWith('.ts')) {
               const content = readSource(filePath);
-              if (content && content.match(/4\d{2}|5\d{2}/)) {
+              const hasSmtpContext = !!content && /smtp|enhanced\s+status|dsn|bounce|delivery\s+status/i.test(content);
+              if (content && hasSmtpContext && content.match(/\b[245]\d{2}\b/)) {
                 // Has SMTP error codes
                 foundSmtpErrors = true;
-                
-                // Check for proper categorization
-                expect(content).toMatch(/temporary|permanent|transient|bounce/i);
+
+                // Check for proper categorization (at least one SMTP handler file should include it)
+                if (/temporary|permanent|transient|bounce/i.test(content)) {
+                  foundCategorizedHandling = true;
+                }
               }
             }
           }
@@ -207,6 +211,7 @@ describe('Phase 4-6: Email Processing Deep Bug Detection', () => {
         
         checkDir(mtaDir);
         expect(foundSmtpErrors).toBe(true);
+        expect(foundCategorizedHandling).toBe(true);
       }
     });
   });

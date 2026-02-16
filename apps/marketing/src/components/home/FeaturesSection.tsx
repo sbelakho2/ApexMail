@@ -142,23 +142,23 @@ export function FeaturesSection() {
  initial={{ opacity: 0, y: 20 }}
  animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: categoryIndex * 0.1 + index * 0.1 }}
-              className="p-6 bg-white rounded-lg border border-surface-200 hover:border-surface-300 transition-colors"
-            >
-              {/* Icon & Badge */}
+ className="p-8 bg-white rounded-xl border border-surface-200 hover:border-brand-200 hover:shadow-xl hover:shadow-brand-500/5 transition-all duration-300 group"
+>
+ {/* Icon & Badge */}
               <div className="flex items-start justify-between mb-5">
-                <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
-                  <feature.icon className="w-5 h-5" strokeWidth={1.5} />
+                <div className="w-12 h-12 rounded-xl bg-brand-50 flex items-center justify-center border border-brand-100 text-brand-600 shadow-sm">
+                  <feature.icon className="w-6 h-6" strokeWidth={1.5} />
                 </div>
-                <span className="inline-flex items-center px-2 py-1 rounded-sm bg-surface-50 text-surface-600 border border-surface-200 text-[14px] font-bold uppercase tracking-wider">
+                <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-surface-100 text-surface-600 border border-surface-200 text-[11px] font-bold uppercase tracking-widest">
                   {feature.badge}
                 </span>
               </div>
 
               {/* Content */}
-              <h4 className="text-base font-semibold text-surface-900 mb-2">
+              <h4 className="text-lg font-bold text-surface-900 mb-2">
                 {feature.title}
               </h4>
-              <p className="text-surface-600 text-sm leading-relaxed">
+              <p className="text-surface-600 text-[15px] leading-relaxed">
                 {feature.description}
               </p>
             </motion.div>

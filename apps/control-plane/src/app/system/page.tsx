@@ -178,7 +178,7 @@ export default function SystemHealthPage() {
                         onClick={loadData}
                         className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors"
                     >
-                        🔄 Refresh Now
+                        Refresh Now
                     </button>
                 </div>
             </div>
@@ -187,7 +187,7 @@ export default function SystemHealthPage() {
             {criticalAlerts.length > 0 && (
                 <div className="bg-destructive/10 border border-destructive/20 rounded-xl p-4 mb-6">
                     <div className="flex items-center gap-2 text-destructive font-medium mb-2">
-                        🚨 {criticalAlerts.length} Critical Alert{criticalAlerts.length > 1 ? 's' : ''}
+                        {criticalAlerts.length} Critical Alert{criticalAlerts.length > 1 ? 's' : ''}
                     </div>
                     <div className="space-y-2">
                         {criticalAlerts.map(alert => (
@@ -246,10 +246,10 @@ export default function SystemHealthPage() {
             <div className="border-b border-border mb-6 overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
-                        { key: 'overview', label: 'Overview', icon: '📊' },
-                        { key: 'queues', label: 'Queues', icon: '📥' },
-                        { key: 'workers', label: 'Workers', icon: '⚙️' },
-                        { key: 'mta', label: 'MTA Nodes', icon: '📤' },
+                        { key: 'overview', label: 'Overview', icon: 'OV' },
+                        { key: 'queues', label: 'Queues', icon: 'Q' },
+                        { key: 'workers', label: 'Workers', icon: 'WK' },
+                        { key: 'mta', label: 'MTA Nodes', icon: 'MTA' },
                     ].map(tab => (
                         <button
                             key={tab.key}

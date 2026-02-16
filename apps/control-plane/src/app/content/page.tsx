@@ -40,10 +40,10 @@ interface ContentItem {
 
 
 const TYPE_CONFIG: Record<string, { label: string; bg: string; text: string; icon: string }> = {
-    blog: { label: 'Blog Post', bg: 'bg-blue-500/10', text: 'text-blue-500', icon: '📝' },
-    changelog: { label: 'Changelog', bg: 'bg-violet-500/10', text: 'text-violet-500', icon: '📋' },
-    docs: { label: 'Documentation', bg: 'bg-emerald-500/10', text: 'text-emerald-500', icon: '📚' },
-    announcement: { label: 'Announcement', bg: 'bg-amber-500/10', text: 'text-amber-500', icon: '📢' },
+    blog: { label: 'Blog Post', bg: 'bg-blue-500/10', text: 'text-blue-500', icon: 'Blog' },
+    changelog: { label: 'Changelog', bg: 'bg-violet-500/10', text: 'text-violet-500', icon: 'Log' },
+    docs: { label: 'Documentation', bg: 'bg-emerald-500/10', text: 'text-emerald-500', icon: 'Docs' },
+    announcement: { label: 'Announcement', bg: 'bg-amber-500/10', text: 'text-amber-500', icon: 'News' },
 };
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {

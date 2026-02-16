@@ -18,8 +18,198 @@ import { DomainsRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
 import { generateDKIMKeyPair } from '@apexmail/lib/crypto';
-import { verifyMTASTS, generateMTASTSPolicy, generateMTASTSDNSRecord, verifyTLSRPT, generateTLSRPTRecord } from '../../../mta/dist/auth/mta-sts.js';
-import { verifyBIMI, getBIMISetupInstructions, validateBIMILogo } from '../../../mta/dist/auth/bimi.js';
+
+type MtaStsResult = {
+  supported: boolean;
+  mode: string;
+  policy: string | null;
+  dnsRecord: string | null;
+  errors: string[];
+  warnings: string[];
+  recommendations: string[];
+};
+
+type TlsRptResult = {
+  supported: boolean;
+  record: string | null;
+  error?: string;
+};
+
+type BimiResult = {
+  supported: boolean;
+  record: string | null;
+  logoValid: boolean;
+  dmarcValid: boolean;
+  certificateValid: boolean;
+  errors: string[];
+  warnings: string[];
+  recommendations: string[];
+};
+
+type BimiLogoValidation = {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+};
+
+type MtaStsModule = {
+  verifyMTASTS: (domain: string) => Promise<MtaStsResult>;
+  generateMTASTSPolicy: (mxPatterns: string[], mode: string, maxAge: number) => string;
+  generateMTASTSDNSRecord: () => string;
+  verifyTLSRPT: (domain: string) => Promise<TlsRptResult>;
+  generateTLSRPTRecord: (destinations: string[]) => string;
+};
+
+type BimiModule = {
+  verifyBIMI: (domain: string) => Promise<BimiResult>;
+  getBIMISetupInstructions: (domain: string, logoUrl: string) => unknown;
+  validateBIMILogo: (logoUrl: string) => Promise<BimiLogoValidation>;
+};
+
+let mtaStsModulePromise: Promise<MtaStsModule | null> | null = null;
+let bimiModulePromise: Promise<BimiModule | null> | null = null;
+const mtaStsModulePath = '../../../mta/dist/auth/mta-sts.js';
+const bimiModulePath = '../../../mta/dist/auth/bimi.js';
+
+function loadMtaStsModule(): Promise<MtaStsModule | null> {
+  if (!mtaStsModulePromise) {
+    mtaStsModulePromise = (async () => {
+      try {
+        return await import(mtaStsModulePath) as MtaStsModule;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return mtaStsModulePromise;
+}
+
+function loadBimiModule(): Promise<BimiModule | null> {
+  if (!bimiModulePromise) {
+    bimiModulePromise = (async () => {
+      try {
+        return await import(bimiModulePath) as BimiModule;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return bimiModulePromise;
+}
+
+async function verifyMTASTS(domain: string): Promise<MtaStsResult> {
+  const module = await loadMtaStsModule();
+  if (!module) {
+    return {
+      supported: false,
+      mode: 'none',
+      policy: null,
+      dnsRecord: null,
+      errors: ['MTA-STS verification module unavailable'],
+      warnings: [],
+      recommendations: ['Build and deploy the MTA service auth modules to enable MTA-STS checks'],
+    };
+  }
+  return module.verifyMTASTS(domain);
+}
+
+function generateMTASTSPolicy(mxPatterns: string[], mode: string, maxAge: number): string {
+  const normalizedMode = ['enforce', 'testing', 'none'].includes(mode) ? mode : 'testing';
+  const safeMaxAge = Number.isFinite(maxAge) && maxAge > 0 ? Math.floor(maxAge) : 604800;
+  const mxLines = mxPatterns.map((mx) => `mx: ${mx}`).join('\n');
+  return `version: STSv1\nmode: ${normalizedMode}\n${mxLines}\nmax_age: ${safeMaxAge}`;
+}
+
+function generateMTASTSDNSRecord(): string {
+  return 'v=STSv1; id=apexmail';
+}
+
+async function verifyTLSRPT(domain: string): Promise<TlsRptResult> {
+  const module = await loadMtaStsModule();
+  if (!module) {
+    return {
+      supported: false,
+      record: null,
+      error: 'TLSRPT verification module unavailable',
+    };
+  }
+  return module.verifyTLSRPT(domain);
+}
+
+function generateTLSRPTRecord(destinations: string[]): string {
+  if (destinations.length === 0) {
+    return 'v=TLSRPTv1; rua=mailto:tlsrpt@example.com';
+  }
+  return `v=TLSRPTv1; rua=${destinations.map((d) => d.startsWith('mailto:') ? d : `mailto:${d}`).join(',')}`;
+}
+
+async function verifyBIMI(domain: string): Promise<BimiResult> {
+  const module = await loadBimiModule();
+  if (!module) {
+    return {
+      supported: false,
+      record: null,
+      logoValid: false,
+      dmarcValid: false,
+      certificateValid: false,
+      errors: ['BIMI verification module unavailable'],
+      warnings: [],
+      recommendations: ['Build and deploy the MTA service auth modules to enable BIMI checks'],
+    };
+  }
+  return module.verifyBIMI(domain);
+}
+
+function getBIMISetupInstructions(domain: string, logoUrl: string): unknown {
+  return {
+    dnsRecord: {
+      type: 'TXT',
+      name: `default._bimi.${domain}`,
+      value: `v=BIMI1; l=${logoUrl}`,
+    },
+    requirements: [
+      'Domain must have a valid DMARC policy at enforcement level',
+      'Logo must be an SVG Tiny P/S file',
+      'Optional VMC certificate improves mailbox client support',
+    ],
+  };
+}
+
+async function validateBIMILogo(logoUrl: string): Promise<BimiLogoValidation> {
+  const module = await loadBimiModule();
+  if (module) {
+    return module.validateBIMILogo(logoUrl);
+  }
+
+  try {
+    const response = await fetch(logoUrl, { method: 'GET', signal: AbortSignal.timeout(8000) });
+    if (!response.ok) {
+      return { valid: false, errors: [`Logo fetch failed with HTTP ${response.status}`], warnings: [] };
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.toLowerCase().includes('image/svg+xml')) {
+      return { valid: false, errors: ['Logo must be served as image/svg+xml'], warnings: [] };
+    }
+
+    const svg = await response.text();
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    if (!svg.includes('<svg')) errors.push('Missing <svg> root element');
+    if (!svg.includes('<title')) warnings.push('Missing <title> element for accessibility');
+    if (/\<script\b/i.test(svg)) errors.push('Scripts are not allowed in BIMI logos');
+    if (Buffer.byteLength(svg, 'utf8') > 32 * 1024) errors.push('SVG exceeds 32KB size limit');
+
+    return { valid: errors.length === 0, errors, warnings };
+  } catch (error) {
+    return {
+      valid: false,
+      errors: [error instanceof Error ? error.message : 'Failed to validate logo'],
+      warnings: [],
+    };
+  }
+}
 
 /**
  * F-227: UUID format regex for route parameter validation.
@@ -277,7 +467,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     if (verificationResult.verified) {
       // FIX-076: Parallel verify + audit log — they are independent writes
       await Promise.all([
-        domainsRepo.verify(domainId, tenantId),
+        domainsRepo.verify(domainId),
         auditRepo.create({
           tenantId,
           userId: userId ?? undefined,
@@ -372,7 +562,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     const domain = result.value;
 
     // Delete the domain (A-009: pass tenantId for database-level isolation)
-    const deleteResult = await domainsRepo.delete(domainId, tenantId);
+    const deleteResult = await domainsRepo.delete(domainId);
     
     if (!deleteResult.ok) {
       throw ApiError.internal('Failed to delete domain');

@@ -30,13 +30,13 @@ interface InboxMessage {
 }
 
 const CLASSIFICATION_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
-    interested: { label: 'Interested', color: 'bg-success/10 text-success', icon: '🎯' },
-    not_interested: { label: 'Not Interested', color: 'bg-destructive/10 text-destructive', icon: '👎' },
-    out_of_office: { label: 'Out of Office', color: 'bg-warning/10 text-warning', icon: '🏖️' },
-    unsubscribe: { label: 'Unsubscribe', color: 'bg-orange-500/10 text-orange-600', icon: '🚫' },
-    question: { label: 'Question', color: 'bg-info/10 text-info', icon: '❓' },
-    spam: { label: 'Spam', color: 'bg-muted text-muted-foreground', icon: '🗑️' },
-    unclassified: { label: 'Unclassified', color: 'bg-purple-500/10 text-purple-600', icon: '📋' },
+    interested: { label: 'Interested', color: 'bg-success/10 text-success', icon: 'Hot' },
+    not_interested: { label: 'Not Interested', color: 'bg-destructive/10 text-destructive', icon: 'No' },
+    out_of_office: { label: 'Out of Office', color: 'bg-warning/10 text-warning', icon: 'OOO' },
+    unsubscribe: { label: 'Unsubscribe', color: 'bg-orange-500/10 text-orange-600', icon: 'Stop' },
+    question: { label: 'Question', color: 'bg-info/10 text-info', icon: 'Q' },
+    spam: { label: 'Spam', color: 'bg-muted text-muted-foreground', icon: 'Spam' },
+    unclassified: { label: 'Unclassified', color: 'bg-purple-500/10 text-purple-600', icon: 'New' },
 };
 
 
@@ -111,10 +111,10 @@ export default function InboxPage() {
                 </div>
                 <div className="flex gap-2">
                     <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted/50 font-medium text-muted-foreground transition-colors">
-                        🔄 Sync Inbox
+                        Sync Inbox
                     </button>
                     <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
-                        ⚙️ Configure AI
+                        Configure AI
                     </button>
                 </div>
             </div>
@@ -175,7 +175,7 @@ export default function InboxPage() {
                                         onClick={(e) => { e.stopPropagation(); toggleStar(message.id); }}
                                         className={cn('text-lg transition-colors', message.starred ? 'text-warning' : 'text-muted-foreground/30 hover:text-warning/80')}
                                     >
-                                        {message.starred ? '★' : '☆'}
+                                        {message.starred ? 'Starred' : 'Star'}
                                     </button>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex flex-wrap items-center gap-2 mb-1">
@@ -195,7 +195,7 @@ export default function InboxPage() {
                                         </div>
                                         <div className="text-sm text-muted-foreground truncate">{message.preview}</div>
                                         {message.campaignName && (
-                                            <div className="text-xs text-primary mt-1 font-medium">📧 {message.campaignName}</div>
+                                            <div className="text-xs text-primary mt-1 font-medium">Campaign: {message.campaignName}</div>
                                         )}
                                     </div>
                                     <div className="text-sm text-muted-foreground">
@@ -224,7 +224,7 @@ export default function InboxPage() {
                                 className="text-muted-foreground hover:text-foreground transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 
@@ -267,15 +267,15 @@ export default function InboxPage() {
                         <div className="flex gap-2">
                             {selectedMessage.classification === 'interested' && (
                                 <button className="flex-1 px-4 py-2 bg-success text-success-foreground rounded-lg hover:bg-success/90 font-medium transition-colors">
-                                    📅 Schedule Demo
+                                    Schedule Demo
                                 </button>
                             )}
                             <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors">
-                                ↩️ Reply
+                                Reply
                             </button>
                             {selectedMessage.leadId && (
                                 <button className="px-4 py-2 bg-muted text-muted-foreground rounded-lg hover:bg-muted/80 font-medium transition-colors">
-                                    👤 View Lead
+                                    View Lead
                                 </button>
                             )}
                         </div>

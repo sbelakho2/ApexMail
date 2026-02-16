@@ -73,16 +73,16 @@ export default function AuditLogsPage() {
     }
 
     function getActionIcon(action: string): string {
-        if (action.startsWith('auth')) return '🔐';
-        if (action.startsWith('email')) return '📧';
-        if (action.startsWith('api')) return '🔑';
-        if (action.startsWith('domain')) return '🌐';
-        if (action.startsWith('gdpr')) return '🇪🇺';
-        if (action.startsWith('webhook')) return '🔗';
-        if (action.startsWith('template')) return '📄';
-        if (action.startsWith('subscription') || action.startsWith('billing')) return '💳';
-        if (action.startsWith('rate_limit')) return '⚡';
-        return '📋';
+        if (action.startsWith('auth')) return 'Auth';
+        if (action.startsWith('email')) return 'Email';
+        if (action.startsWith('api')) return 'API';
+        if (action.startsWith('domain')) return 'Domain';
+        if (action.startsWith('gdpr')) return 'GDPR';
+        if (action.startsWith('webhook')) return 'Webhook';
+        if (action.startsWith('template')) return 'Template';
+        if (action.startsWith('subscription') || action.startsWith('billing')) return 'Billing';
+        if (action.startsWith('rate_limit')) return 'Rate';
+        return 'Log';
     }
 
     async function exportLogs() {
@@ -119,13 +119,13 @@ export default function AuditLogsPage() {
                 </div>
                 <div className="flex gap-3">
                     <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
-                        ⚙️ Configure Alerts
+                            Configure Alerts
                     </button>
                     <button
                         onClick={exportLogs}
                         className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md"
                     >
-                        📥 Export Logs
+                        Export Logs
                     </button>
                 </div>
             </div>
@@ -261,13 +261,13 @@ export default function AuditLogsPage() {
                                     </div>
                                 </div>
                             </div>
-                            <button 
-                                onClick={() => setSelectedLog(null)} 
-                                className="text-muted-foreground hover:text-foreground p-2 rounded-lg hover:bg-muted transition-colors"
-                                aria-label="Close modal"
-                            >
-                                ✕
-                            </button>
+                                <button 
+                                    onClick={() => setSelectedLog(null)} 
+                                    className="text-muted-foreground hover:text-foreground p-2 rounded-lg hover:bg-muted transition-colors"
+                                    aria-label="Close modal"
+                                >
+                                    Close
+                                </button>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6 mb-8">

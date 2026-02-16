@@ -65,12 +65,12 @@ def main():
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": q},
         ]
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
             out = model.generate(
-                **inputs, max_new_tokens=512, temperature=0.3, top_p=0.9,
-                do_sample=True, repetition_penalty=1.15, pad_token_id=tokenizer.eos_token_id,
+                **inputs, max_new_tokens=768, do_sample=False,
+                repetition_penalty=1.15, pad_token_id=tokenizer.eos_token_id,
             )
         resp = tokenizer.decode(out[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True).strip()
 

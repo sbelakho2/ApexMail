@@ -451,8 +451,11 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
     const uniqueMessageIds = [...new Set(events.map(e => e.messageId))];
     const recipientMap = new Map<string, string>();
     for (const mid of uniqueMessageIds) {
-      const msgResult = await messagesRepo.findById(mid, tenantId);
+      const msgResult = await messagesRepo.findById(mid);
       if (msgResult.ok && msgResult.value) {
+        if (msgResult.value.tenantId !== tenantId) {
+          continue;
+        }
         const firstRecipient = msgResult.value.recipients?.[0];
         if (firstRecipient) {
           recipientMap.set(mid, typeof firstRecipient === 'string' ? firstRecipient : firstRecipient.email);
@@ -558,8 +561,12 @@ export function eventsRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.badRequest('Invalid message ID format', 'INVALID_ID');
     }
 
-    // SECURITY: Use tenant-scoped query to prevent cross-tenant data leak
-    const result = await eventsRepo.getLinkStats(messageId, tenantId);
+    const messageResult = await messagesRepo.findById(messageId);
+    if (!messageResult.ok || !messageResult.value || messageResult.value.tenantId !== tenantId) {
+      throw ApiError.notFound('Message');
+    }
+
+    const result = await eventsRepo.getLinkStats(messageId);
 
     if (!result.ok) {
       throw ApiError.internal('Failed to fetch click stats');

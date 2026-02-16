@@ -249,7 +249,7 @@ export default function RiskMonitoringPage() {
                                 className="text-muted-foreground hover:text-foreground p-2 rounded-lg hover:bg-muted transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 

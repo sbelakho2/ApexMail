@@ -136,6 +136,10 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
       throw ApiError.notFound('Template');
     }
 
+    if (result.value.tenantId !== tenantId) {
+      throw ApiError.notFound('Template');
+    }
+
     const template = result.value;
 
     return c.json({

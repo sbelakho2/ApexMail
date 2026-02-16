@@ -2,7 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { formatNumber, timeAgo } from '../lib/utils';
+import { 
+    Target, 
+    Mail, 
+    Euro, 
+    Activity, 
+    AlertTriangle, 
+    ShieldCheck, 
+    Lock,
+    ArrowRight,
+} from 'lucide-react';
+import { cn, formatNumber, timeAgo } from '../lib/utils';
 
 /**
  * Control Plane Dashboard
@@ -128,17 +138,17 @@ export default function ControlPlaneDashboard() {
 
     return (
         <div className="max-w-7xl mx-auto">
-            <div className="mb-8">
+            <div className="mb-10">
                 <div className="flex items-center justify-between">
                     <div>
-                        <h1 className="text-2xl font-bold text-foreground">Control Plane Dashboard</h1>
-                        <p className="text-muted-foreground mt-1">
-                            Business operations overview • Last updated: {currentTime}
+                        <h1 className="text-3xl font-bold text-foreground tracking-tight">Control Plane</h1>
+                        <p className="text-surface-500 mt-1 font-medium">
+                            Platform operations & infrastructure governance • Last updated: {currentTime}
                         </p>
                     </div>
                     {error && (
                         <div className="px-3 py-1.5 bg-warning/10 border border-warning/20 rounded-lg text-warning text-sm">
-                            ⚠️ Using cached data - {error}
+                            Warning: Using cached data - {error}
                         </div>
                     )}
                 </div>
@@ -146,24 +156,25 @@ export default function ControlPlaneDashboard() {
 
             {/* Critical Alerts */}
             {(stats.compliance.riskAlerts > 0 || stats.compliance.criticalTenants > 0) && (
-                <div className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-[18px]">
+                <div className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
                     <div className="flex items-center gap-2 text-destructive font-semibold mb-2">
-                        ⚠️ Requires Attention
+                        <AlertTriangle className="w-5 h-5" />
+                        Requires Attention
                     </div>
                     <div className="flex gap-4 text-sm text-destructive">
                         {stats.compliance.riskAlerts > 0 && (
-                            <Link href="/risk" className="hover:underline flex items-center gap-1">
-                                <span className="font-medium">{stats.compliance.riskAlerts}</span> risk alert{stats.compliance.riskAlerts > 1 ? 's' : ''}
+                            <Link href="/risk" className="hover:underline flex items-center gap-1.5 px-3 py-1 rounded-full bg-destructive/10 border border-destructive/20 transition-colors hover:bg-destructive/20">
+                                <span className="font-bold">{stats.compliance.riskAlerts}</span> risk alert{stats.compliance.riskAlerts > 1 ? 's' : ''}
                             </Link>
                         )}
                         {stats.compliance.criticalTenants > 0 && (
-                            <Link href="/risk" className="hover:underline flex items-center gap-1">
-                                <span className="font-medium">{stats.compliance.criticalTenants}</span> critical tenant{stats.compliance.criticalTenants > 1 ? 's' : ''}
+                            <Link href="/risk" className="hover:underline flex items-center gap-1.5 px-3 py-1 rounded-full bg-destructive/10 border border-destructive/20 transition-colors hover:bg-destructive/20">
+                                <span className="font-bold">{stats.compliance.criticalTenants}</span> critical tenant{stats.compliance.criticalTenants > 1 ? 's' : ''}
                             </Link>
                         )}
                         {stats.compliance.gdprPending > 0 && (
-                            <Link href="/gdpr" className="hover:underline flex items-center gap-1">
-                                <span className="font-medium">{stats.compliance.gdprPending}</span> pending GDPR request{stats.compliance.gdprPending > 1 ? 's' : ''}
+                            <Link href="/gdpr" className="hover:underline flex items-center gap-1.5 px-3 py-1 rounded-full bg-destructive/10 border border-destructive/20 transition-colors hover:bg-destructive/20">
+                                <span className="font-bold">{stats.compliance.gdprPending}</span> pending GDPR request{stats.compliance.gdprPending > 1 ? 's' : ''}
                             </Link>
                         )}
                     </div>
@@ -171,67 +182,78 @@ export default function ControlPlaneDashboard() {
             )}
 
             {/* Quick Stats Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
                 <StatCard
                     title="Active Leads"
                     value={formatNumber(stats.sales.activeLeads)}
                     change={`+${stats.sales.leadsThisWeek} this week`}
-                    icon="🎯"
+                    icon={<Target className="w-5 h-5" />}
                     href="/crm"
+                    color="text-brand-600"
+                    bgColor="bg-brand-50"
                 />
                 <StatCard
                     title="Campaigns Running"
                     value={stats.sales.campaignsRunning.toString()}
                     change={`${stats.sales.demosScheduled} demos scheduled`}
-                    icon="📧"
+                    icon={<Mail className="w-5 h-5" />}
                     href="/campaigns"
+                    color="text-brand-600"
+                    bgColor="bg-brand-50"
                 />
                 <StatCard
                     title="Monthly Revenue"
                     value={`€${formatNumber(stats.platform.mrr)}`}
                     change={`${stats.platform.activeTenants} active tenants`}
-                    icon="💰"
+                    icon={<Euro className="w-5 h-5" />}
                     href="/revenue"
+                    color="text-brand-600"
+                    bgColor="bg-brand-50"
                 />
                 <StatCard
                     title="Platform Health"
                     value={stats.platform.healthStatus === 'healthy' ? 'All Systems Go' : 'Issues Detected'}
                     change={`${formatNumber(stats.platform.totalEmails)} emails sent`}
-                    icon={stats.platform.healthStatus === 'healthy' ? '✅' : '⚠️'}
+                    icon={stats.platform.healthStatus === 'healthy' ? <Activity className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
                     variant={stats.platform.healthStatus === 'healthy' ? 'success' : 'warning'}
+                    color={stats.platform.healthStatus === 'healthy' ? 'text-success-600' : 'text-warning-600'}
+                    bgColor={stats.platform.healthStatus === 'healthy' ? 'bg-success-50' : 'bg-warning-50'}
                 />
             </div>
 
             {/* Main Content Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Sales Overview */}
-                <div className="lg:col-span-2 bg-card rounded-[18px] border border-border p-6 shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)]">
-                    <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-lg font-semibold text-foreground">Sales Pipeline</h2>
-                        <Link href="/crm" className="text-sm text-primary hover:text-primary/90 font-medium">
+                <div className="lg:col-span-2 bg-white rounded-2xl border-none p-6 shadow-premium">
+                    <div className="flex items-center justify-between mb-6">
+                        <h2 className="text-lg font-bold text-foreground">Sales Pipeline</h2>
+                        <Link href="/crm" className="text-sm text-brand-600 hover:text-brand-700 font-bold">
                             View CRM →
                         </Link>
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                        <PipelineStage label="Prospects" count={stats.pipeline?.prospect ?? 0} color="bg-muted" />
-                        <PipelineStage label="Outreach" count={stats.pipeline?.outreach ?? 0} color="bg-primary/10" />
-                        <PipelineStage label="Engaged" count={stats.pipeline?.engaged ?? 0} color="bg-warning/10" />
-                        <PipelineStage label="Demo" count={stats.pipeline?.demo ?? 0} color="bg-blue-500/10" />
-                        <PipelineStage label="Closed" count={stats.pipeline?.closed ?? 0} color="bg-success/10" />
+                        <PipelineStage label="Prospects" count={stats.pipeline?.prospect ?? 0} color="bg-surface-50" />
+                        <PipelineStage label="Outreach" count={stats.pipeline?.outreach ?? 0} color="bg-brand-50" />
+                        <PipelineStage label="Engaged" count={stats.pipeline?.engaged ?? 0} color="bg-warning-50" />
+                        <PipelineStage label="Demo" count={stats.pipeline?.demo ?? 0} color="bg-info-50" />
+                        <PipelineStage label="Closed" count={stats.pipeline?.closed ?? 0} color="bg-success-50" />
                     </div>
-                    <div className="mt-6 pt-4 border-t border-border">
+                    <div className="mt-8 pt-6 border-t border-surface-50">
                         <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">Conversion Rate</span>
-                            <span className="font-semibold text-foreground tabular-nums">{(stats.sales.conversionRate * 100).toFixed(1)}%</span>
+                            <span className="font-bold text-surface-500 uppercase tracking-widest text-[11px]">Conversion Rate</span>
+                            <span className="font-bold text-surface-900 tabular-nums flex items-center gap-1">
+                                {(stats.sales.conversionRate * 100).toFixed(1)}%
+                                <ArrowRight className="w-3.5 h-3.5 text-surface-400" />
+                            </span>
                         </div>
                     </div>
                 </div>
 
                 {/* Compliance Status */}
-                <div className="bg-card rounded-[18px] border border-border p-6 shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)]">
-                    <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-lg font-semibold text-foreground">Compliance Status</h2>
-                        <Link href="/compliance" className="text-sm text-primary hover:text-primary/90 font-medium">
+                <div className="bg-white rounded-2xl border-none p-6 shadow-premium">
+                    <div className="flex items-center justify-between mb-6">
+                        <h2 className="text-lg font-bold text-foreground">Compliance</h2>
+                        <Link href="/compliance" className="text-sm text-brand-600 hover:text-brand-700 font-bold">
                             View All →
                         </Link>
                     </div>
@@ -261,32 +283,36 @@ export default function ControlPlaneDashboard() {
             </div>
 
             {/* Recent Activity */}
-            <div className="mt-6 bg-card rounded-[18px] border border-border p-6 shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)]">
-                <h2 className="text-lg font-semibold text-foreground mb-4">Recent Activity</h2>
-                <div className="space-y-3">
+            <div className="mt-8 bg-white rounded-2xl border-none p-6 shadow-premium">
+                <h2 className="text-lg font-bold text-foreground mb-6">Recent Activity</h2>
+                <div className="space-y-1">
                     {stats.recentActivity.map((activity) => (
-                        <div key={activity.id} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                            {/* TODO: Replace emoji icons with Lucide icons (Target, AlertTriangle, Mail, Globe, DollarSign) */}
-                            <span className="text-lg">
-                                {activity.type === 'lead' && '🎯'}
-                                {activity.type === 'risk' && '⚠️'}
-                                {activity.type === 'campaign' && '📧'}
-                                {activity.type === 'gdpr' && '🇪🇺'}
-                                {activity.type === 'revenue' && '💰'}
+                        <div key={activity.id} className="flex items-center gap-4 py-3 border-b border-surface-50 last:border-0 group hover:bg-surface-50/50 transition-colors -mx-2 px-2 rounded-lg">
+                            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-surface-50 text-surface-400 group-hover:bg-brand-50 group-hover:text-brand-600 transition-colors">
+                                {activity.type === 'lead' && <Target className="w-4 h-4" />}
+                                {activity.type === 'risk' && <AlertTriangle className="w-4 h-4" />}
+                                {activity.type === 'campaign' && <Mail className="w-4 h-4" />}
+                                {activity.type === 'gdpr' && <ShieldCheck className="w-4 h-4" />}
+                                {activity.type === 'revenue' && <Euro className="w-4 h-4" />}
                             </span>
-                            <span className="flex-1 text-sm text-foreground">{activity.message}</span>
-                            <span className="text-xs text-muted-foreground font-medium">{timeAgo(activity.timestamp)}</span>
+                            <span className="flex-1 text-sm font-medium text-surface-700">{activity.message}</span>
+                            <span className="text-xs text-surface-400 font-bold tabular-nums uppercase">{timeAgo(activity.timestamp)}</span>
                         </div>
                     ))}
                 </div>
             </div>
 
             {/* Process Isolation Status */}
-            <div className="mt-6 bg-gradient-to-br from-background to-primary/5 rounded-[18px] border border-border p-6">
-                {/* TODO: Replace 🔒 emoji with Lucide Lock icon */}
-                <h2 className="text-lg font-semibold text-foreground mb-4">🔒 Process Isolation Status</h2>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <ProcessCard name="Control Plane UI" port="3020" status="isolated" />
+            <div className="mt-8 bg-gradient-to-br from-brand-600 to-brand-800 rounded-2xl p-8 text-white shadow-xl shadow-brand-500/20 relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-4 opacity-10">
+                    <Lock className="w-32 h-32 rotate-12" />
+                </div>
+                <h2 className="text-xl font-bold mb-6 flex items-center gap-3 relative z-10">
+                    <Lock className="w-5 h-5" />
+                    Infrastructure Isolation
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 relative z-10">
+                    <ProcessCard name="Control Plane" port="3020" status="isolated" />
                     <ProcessCard name="Sales Autopilot" port="3010" status="isolated" />
                     <ProcessCard name="Compliance API" port="3011" status="isolated" />
                     <ProcessCard name="Customer API" port="3001" status="disconnected" />
@@ -303,32 +329,39 @@ function StatCard({
     icon,
     href,
     variant = 'default',
+    color = 'text-primary',
+    bgColor = 'bg-primary/5',
 }: {
     title: string;
     value: string;
     change: string;
-    icon: string;
+    icon: React.ReactNode;
     href?: string;
     variant?: 'default' | 'success' | 'warning';
+    color?: string;
+    bgColor?: string;
 }) {
     const content = (
-        <div className={`rounded-[18px] border p-6 shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)] transition-all hover:shadow-md ${
-            variant === 'success' ? 'bg-success/10 border-success/20' :
-            variant === 'warning' ? 'bg-warning/10 border-warning/20' :
-            'bg-card border-border'
-        }`}>
-            <div className="flex items-center justify-between mb-3">
-                {/* TODO: Replace emoji icon with Lucide icon */}
-                <span className="text-2xl">{icon}</span>
+        <div className={cn(
+            "rounded-2xl border-none p-6 shadow-premium transition-all duration-300 hover:shadow-premium-hover",
+            variant === 'success' ? 'bg-white' :
+            variant === 'warning' ? 'bg-white' :
+            'bg-white'
+        )}>
+            <div className="flex items-center justify-between mb-4">
+                <div className={cn('p-2.5 rounded-xl transition-colors', bgColor)}>
+                    <span className={color}>{icon}</span>
+                </div>
+                {href && <ArrowRight className="w-4 h-4 text-surface-400 group-hover:text-brand-600 transition-colors" />}
             </div>
-            <div className="text-2xl font-bold text-foreground tabular-nums">{value}</div>
-            <div className="text-sm font-medium text-muted-foreground mt-1">{title}</div>
-            <div className="text-xs text-muted-foreground mt-1">{change}</div>
+            <div className="text-3xl font-bold text-foreground tabular-nums tracking-tight">{value}</div>
+            <div className="text-xs font-bold uppercase tracking-widest text-surface-500 mt-2">{title}</div>
+            <div className="text-sm font-medium text-surface-400 mt-1">{change}</div>
         </div>
     );
 
     return href ? (
-        <Link href={href} className="block" aria-label={`View ${title} details`}>
+        <Link href={href} className="block group" aria-label={`View ${title} details`}>
             {content}
         </Link>
     ) : content;
@@ -336,11 +369,11 @@ function StatCard({
 
 function PipelineStage({ label, count, color }: { label: string; count: number; color: string }) {
     return (
-        <div className="text-center">
-            <div className={`${color} rounded-[18px] py-6 mb-2 transition-transform hover:scale-105`}>
-                <div className="text-2xl font-bold text-foreground tabular-nums">{count}</div>
+        <div className="text-center group">
+            <div className={cn(color, "rounded-2xl py-8 mb-3 transition-all duration-300 group-hover:scale-105 group-hover:shadow-md border border-transparent group-hover:border-surface-100")}>
+                <div className="text-3xl font-bold text-foreground tabular-nums tracking-tight">{count}</div>
             </div>
-            <div className="text-xs font-medium text-muted-foreground">{label}</div>
+            <div className="text-[11px] font-bold uppercase tracking-widest text-surface-400 group-hover:text-surface-600 transition-colors">{label}</div>
         </div>
     );
 }
@@ -355,16 +388,16 @@ function ComplianceItem({
     status: 'good' | 'warning' | 'critical' | 'info';
 }) {
     const statusColors = {
-        good: 'text-success bg-success/10 border border-success/20',
-        warning: 'text-warning bg-warning/10 border border-warning/20',
-        critical: 'text-destructive bg-destructive/10 border border-destructive/20',
-        info: 'text-primary bg-primary/10 border border-primary/20',
+        good: 'text-success-700 bg-success-50 border-success-100',
+        warning: 'text-warning-700 bg-warning-50 border-warning-100',
+        critical: 'text-danger-700 bg-danger-50 border-danger-100',
+        info: 'text-brand-700 bg-brand-50 border-brand-100',
     };
 
     return (
-        <div className="flex items-center justify-between py-1">
-            <span className="text-sm text-muted-foreground">{label}</span>
-            <span className={`px-2.5 py-0.5 rounded-full text-sm font-semibold tabular-nums ${statusColors[status]}`}>
+        <div className="flex items-center justify-between py-2 border-b border-surface-50 last:border-0">
+            <span className="text-[13px] font-bold text-surface-500 uppercase tracking-widest">{label}</span>
+            <span className={cn("px-3 py-1 rounded-full text-xs font-bold tabular-nums border shadow-sm", statusColors[status])}>
                 {formatNumber(value)}
             </span>
         </div>
@@ -381,12 +414,12 @@ function ProcessCard({
     status: 'isolated' | 'disconnected';
 }) {
     return (
-        <div className="bg-card rounded-[18px] p-4 border border-border shadow-[0_1px_2px_rgba(16,24,40,0.06),0_10px_20px_rgba(16,24,40,0.06)]">
-            <div className="text-sm font-medium text-muted-foreground">{name}</div>
-            <div className="text-lg font-bold text-foreground tabular-nums">Port {port}</div>
-            <div className={`text-xs font-medium flex items-center gap-1 mt-1 ${status === 'isolated' ? 'text-success' : 'text-muted-foreground'}`}>
-                <span className={`w-2 h-2 rounded-full ${status === 'isolated' ? 'bg-success' : 'bg-muted'}`}></span>
-                {status === 'isolated' ? 'Isolated' : 'Not Connected'}
+        <div className="bg-white/10 backdrop-blur-md rounded-xl p-5 border border-white/10 hover:bg-white/15 transition-colors">
+            <div className="text-[11px] font-bold uppercase tracking-widest text-white/60 mb-1">{name}</div>
+            <div className="text-xl font-bold tabular-nums">Port {port}</div>
+            <div className={`text-xs font-bold flex items-center gap-2 mt-3 ${status === 'isolated' ? 'text-success-400' : 'text-white/40'}`}>
+                <span className={`w-2 h-2 rounded-full ${status === 'isolated' ? 'bg-success-400 shadow-[0_0_8px_rgba(74,222,128,0.5)]' : 'bg-white/20'}`}></span>
+                {status === 'isolated' ? 'Isolated' : 'Disconnected'}
             </div>
         </div>
     );

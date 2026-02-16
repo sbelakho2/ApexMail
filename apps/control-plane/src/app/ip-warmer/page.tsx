@@ -309,7 +309,7 @@ export default function IPWarmerPage() {
                     toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
                 )}>
                     <div className="flex items-center gap-2">
-                        <span>{toast.type === 'success' ? '✓' : '✕'}</span>
+                        <span>{toast.type === 'success' ? 'OK' : 'Error'}</span>
                         <span className="text-sm font-medium">{toast.message}</span>
                     </div>
                 </div>
@@ -339,7 +339,7 @@ export default function IPWarmerPage() {
                         </>
                     ) : (
                         <>
-                            ⚡ Run Daily Advancement
+                            Run Daily Advancement
                         </>
                     )}
                 </button>
@@ -387,8 +387,8 @@ export default function IPWarmerPage() {
             <div className="border-b border-border mb-6 overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
-                        { key: 'pools', label: 'IP Pools', icon: '🖥️' },
-                        { key: 'schedules', label: 'Warmup Schedules', icon: '📅' },
+                        { key: 'pools', label: 'IP Pools', icon: 'Pools' },
+                        { key: 'schedules', label: 'Warmup Schedules', icon: 'Schedules' },
                     ].map(tab => (
                         <button
                             key={tab.key}
@@ -497,7 +497,7 @@ export default function IPWarmerPage() {
                                                                 statusConfig.color,
                                                                 statusConfig.borderColor
                                                             )}>
-                                                                {ip.isFullyWarmed ? '✓ Fully Warmed' : statusConfig.label}
+                                                                {ip.isFullyWarmed ? 'Fully Warmed' : statusConfig.label}
                                                             </span>
                                                         </td>
                                                         <td className="px-4 py-3">
@@ -594,7 +594,6 @@ export default function IPWarmerPage() {
                             </div>
                         ) : (
                             <div className="bg-card rounded-xl border border-border p-12 text-center">
-                                <div className="text-4xl mb-4">🖥️</div>
                                 <h3 className="text-lg font-medium text-foreground mb-2">Select an IP Pool</h3>
                                 <p className="text-muted-foreground text-sm">
                                     Choose a pool from the list to view and manage its IPs
@@ -620,10 +619,10 @@ export default function IPWarmerPage() {
                                     <div className="px-4 py-3 bg-muted/30 border-b border-border flex items-center justify-between">
                                         <div className="flex items-center gap-3">
                                             <span className="text-lg">
-                                                {isp === 'gmail' ? '📧' : 
-                                                 isp === 'microsoft' ? '📪' : 
-                                                 isp === 'yahoo' ? '📬' : 
-                                                 isp === 'apple' ? '🍎' : '📨'}
+                                                {isp === 'gmail' ? 'Gmail' : 
+                                                 isp === 'microsoft' ? 'Microsoft' : 
+                                                 isp === 'yahoo' ? 'Yahoo' : 
+                                                 isp === 'apple' ? 'Apple' : 'Other'}
                                             </span>
                                             <div>
                                                 <span className="font-medium text-foreground capitalize">{isp}</span>
@@ -658,7 +657,7 @@ export default function IPWarmerPage() {
 
                     {/* Warmup Guidelines */}
                     <div className="bg-primary/5 border border-primary/20 rounded-xl p-6">
-                        <h4 className="font-semibold text-primary mb-3">📘 Warmup Best Practices</h4>
+                        <h4 className="font-semibold text-primary mb-3">Warmup Best Practices</h4>
                         <ul className="space-y-2 text-sm text-primary/80">
                             <li className="flex items-start gap-2">
                                 <span className="text-primary mt-0.5">•</span>
@@ -692,7 +691,7 @@ export default function IPWarmerPage() {
                                     onClick={() => setShowSetDayModal(false)}
                                     className="text-muted-foreground hover:text-foreground transition-colors"
                                 >
-                                    ✕
+                                    Close
                                 </button>
                             </div>
                             <p className="text-sm text-muted-foreground mt-1">
@@ -720,7 +719,7 @@ export default function IPWarmerPage() {
                                 </div>
                             </div>
                             <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 text-xs text-warning">
-                                ⚠️ Use this for recovery scenarios only. Artificially advancing warmup without actual sending may harm deliverability.
+                                Warning: Use this for recovery scenarios only. Artificially advancing warmup without actual sending may harm deliverability.
                             </div>
                         </div>
                         <div className="p-4 border-t border-border flex justify-end gap-3">

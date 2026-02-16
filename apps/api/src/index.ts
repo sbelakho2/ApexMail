@@ -30,6 +30,7 @@ async function main(): Promise<void> {
 
   // Initialize database pool (uses service-specific config for 'api' = 20 connections)
   const db = getDatabase('api');
+  await db.connect();
 
   // G-214: Verify database connectivity before accepting traffic.
   // Unlike Redis (which degrades gracefully), the API cannot function
@@ -63,8 +64,10 @@ async function main(): Promise<void> {
   });
 
   // C-078: Handle Redis connection errors to prevent uncaught exceptions
-  redis.on('error', (err: Error) => {
-    logger.error('Redis connection error', { error: err.message });
+  redis.on('error', (err: unknown) => {
+    logger.error('Redis connection error', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   });
 
   try {
@@ -136,7 +139,7 @@ async function main(): Promise<void> {
 
     // Clean up resources
     await disconnectTokenBlacklist();
-    await redis.quit().catch((error) => {
+    await redis.quit().catch((error: unknown) => {
       logger.warn('Redis shutdown returned error', {
         error: error instanceof Error ? error.message : String(error),
       });

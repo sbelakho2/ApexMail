@@ -27,8 +27,10 @@ const config: Config = {
                 },
                 destructive: {
                     DEFAULT: 'rgb(var(--destructive) / <alpha-value>)',
-                    foreground: 'rgb(var(--destructive-foreground) / <alpha-value>)',
+                    foreground: 'rgb(var(--primary-foreground) / <alpha-value>)',
                 },
+                danger: 'rgb(var(--danger) / <alpha-value>)',
+                error: 'rgb(var(--error) / <alpha-value>)',
                 muted: {
                     DEFAULT: 'rgb(var(--muted) / <alpha-value>)',
                     foreground: 'rgb(var(--muted-foreground) / <alpha-value>)',
@@ -45,18 +47,9 @@ const config: Config = {
                     DEFAULT: 'rgb(var(--card) / <alpha-value>)',
                     foreground: 'rgb(var(--card-foreground) / <alpha-value>)',
                 },
-                success: {
-                    DEFAULT: 'rgb(var(--success-500) / <alpha-value>)',
-                    foreground: 'rgb(var(--success-100) / <alpha-value>)',
-                },
-                warning: {
-                    DEFAULT: 'rgb(var(--warning-500) / <alpha-value>)',
-                    foreground: 'rgb(var(--warning-100) / <alpha-value>)',
-                },
-                info: {
-                    DEFAULT: 'rgb(var(--info-500) / <alpha-value>)',
-                    foreground: 'rgb(var(--info-100) / <alpha-value>)',
-                },
+                success: 'rgb(var(--success) / <alpha-value>)',
+                warning: 'rgb(var(--warning) / <alpha-value>)',
+                info: 'rgb(var(--info) / <alpha-value>)',
                 surface: {
                     0: 'rgb(var(--surface-0) / <alpha-value>)',
                     50: 'rgb(var(--surface-50) / <alpha-value>)',
@@ -88,6 +81,10 @@ const config: Config = {
                     800: 'rgb(var(--brand-800) / <alpha-value>)',
                     900: 'rgb(var(--brand-900) / <alpha-value>)',
                 },
+            },
+            boxShadow: {
+                'premium': '0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06)',
+                'premium-hover': '0 14px 40px rgba(15,23,42,0.08)',
             },
             borderRadius: {
                 xl: 'var(--radius-xl)',

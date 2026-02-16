@@ -29,22 +29,19 @@ export default function ControlPlaneLogin() {
     const [csrfToken, setCsrfToken] = useState<string | null>(null);
 
     useEffect(() => {
-        let isMounted = true;
-        fetch('/api/csrf')
+        const controller = new AbortController();
+        fetch('/api/csrf', { signal: controller.signal })
             .then((res) => res.json())
             .then((data) => {
-                if (isMounted) {
-                    setCsrfToken(data.token || null);
-                }
+                setCsrfToken(data.token || null);
             })
-            .catch(() => {
-                if (isMounted) {
-                    setError('Unable to initialize security token. Please refresh.');
-                }
+            .catch((err) => {
+                if (err instanceof DOMException && err.name === 'AbortError') return;
+                setError('Unable to initialize security token. Please refresh.');
             });
 
         return () => {
-            isMounted = false;
+            controller.abort();
         };
     }, []);
 
@@ -97,9 +94,9 @@ export default function ControlPlaneLogin() {
     return (
         <div className="min-h-screen flex flex-col bg-background">
             {/* Control Plane Banner - Uses semantic control-plane-accent token */}
-            <div className="bg-control-plane text-control-plane-foreground text-sm font-semibold py-2 px-4 text-center shadow-sm">
+            <div className="bg-control-plane text-control-plane-foreground text-xs font-semibold py-1.5 px-4 text-center shadow-sm">
                 <div className="flex items-center justify-center gap-2">
-                    <Lock className="w-4 h-4" />
+                    <Lock className="w-3.5 h-3.5" />
                     <span>ApexMail Control Plane — Restricted access</span>
                 </div>
             </div>
@@ -137,12 +134,12 @@ export default function ControlPlaneLogin() {
                     </div>
 
                     {/* Login Card - Uses semantic design tokens */}
-                    <div className="bg-card rounded-[18px] shadow-xl border border-border overflow-hidden">
+                    <div className="bg-card rounded-lg shadow-xl border border-border overflow-hidden">
                         {/* Form */}
                         <form onSubmit={handleLogin} className="p-8 space-y-5">
                             {error && (
                                 <div className="bg-destructive/10 border border-destructive/20 text-destructive text-sm rounded-lg p-3 flex items-center gap-2">
-                                    <span>❌</span>
+                                    <AlertTriangle className="w-4 h-4" />
                                     {error}
                                 </div>
                             )}
@@ -243,8 +240,7 @@ export default function ControlPlaneLogin() {
                         <div className="flex justify-center">
                             <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-card border border-border text-muted-foreground shadow-sm">
                                 <span className="relative flex h-2 w-2">
-                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75"></span>
-                                  <span className="relative inline-flex rounded-full h-2 w-2 bg-success"></span>
+                                  <span className="relative inline-flex rounded-full h-2 w-2 bg-success-500"></span>
                                 </span>
                                 System Operational
                             </span>

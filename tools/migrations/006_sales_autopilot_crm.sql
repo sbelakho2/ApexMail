@@ -4,7 +4,7 @@
 -- Pipelines stored per tenant
 CREATE TABLE IF NOT EXISTS sales_pipelines (
   id VARCHAR(64) PRIMARY KEY,
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   name VARCHAR(255) NOT NULL,
   stages JSONB NOT NULL DEFAULT '[]',
   default_stage VARCHAR(64) NOT NULL,
@@ -39,7 +39,7 @@ ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS next_follow_up_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS sales_lead_activities (
   id VARCHAR(64) PRIMARY KEY,
   lead_id VARCHAR(64) NOT NULL REFERENCES sales_leads(id) ON DELETE CASCADE,
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   type VARCHAR(64) NOT NULL,
   description TEXT NOT NULL,
   data JSONB NOT NULL DEFAULT '{}',
@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_sales_lead_activities_lead ON sales_lead_activiti
 CREATE TABLE IF NOT EXISTS sales_lead_tasks (
   id VARCHAR(64) PRIMARY KEY,
   lead_id VARCHAR(64) NOT NULL REFERENCES sales_leads(id) ON DELETE CASCADE,
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   type VARCHAR(64) NOT NULL,
   priority VARCHAR(32) NOT NULL,
   status VARCHAR(32) NOT NULL,

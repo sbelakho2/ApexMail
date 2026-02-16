@@ -7,7 +7,13 @@
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
-import { decryptAES256CBC, encryptAES256GCM, decryptAES256GCM, hmacSign } from '@apexmail/lib/crypto';
+import {
+  decryptAES256CBC,
+  decryptBufferAES256GCM as decryptAES256GCM,
+  deriveKeySync,
+  encryptBufferAES256GCM as encryptAES256GCM,
+  hmacSign,
+} from '@apexmail/lib/crypto';
 import { createLogger } from '@apexmail/lib';
 import { config } from '../config.js';
 
@@ -1041,14 +1047,20 @@ export class LogStreamingService {
   // FIX-500-034: Use AES-256-GCM (authenticated encryption) instead of AES-256-CBC
   // which is vulnerable to padding oracle attacks.
   private encrypt(text: string): string {
-    return encryptAES256GCM(text, config.logStreaming.encryptionKey);
+    const key = deriveKeySync(config.logStreaming.encryptionKey, 'log-streaming', 32);
+    const payload = encryptAES256GCM(Buffer.from(text, 'utf8'), key).toString('base64');
+    return `gcm:${payload}`;
   }
 
   private decrypt(text: string): string {
-    // Try GCM first (new format: salt:iv:authTag:ciphertext)
-    const gcmResult = decryptAES256GCM(text, config.logStreaming.encryptionKey);
-    if (gcmResult.ok) {
-      return gcmResult.value;
+    // Try GCM first (new format: gcm:<base64(iv|tag|ciphertext)>)
+    if (text.startsWith('gcm:')) {
+      const key = deriveKeySync(config.logStreaming.encryptionKey, 'log-streaming', 32);
+      const raw = Buffer.from(text.slice(4), 'base64');
+      const gcmResult = decryptAES256GCM(raw, key);
+      if (gcmResult.ok) {
+        return gcmResult.value.toString('utf8');
+      }
     }
     // Fallback to legacy CBC for existing encrypted data
     const cbcResult = decryptAES256CBC(text, config.logStreaming.encryptionKey, 'salt');

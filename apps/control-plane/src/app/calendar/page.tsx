@@ -37,9 +37,9 @@ interface AvailabilitySlot {
 }
 
 const EVENT_TYPE_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
-    discovery: { label: 'Discovery Call', color: 'bg-info/10 text-info', icon: '🔍' },
-    demo: { label: 'Product Demo', color: 'bg-primary/10 text-primary', icon: '🎬' },
-    follow_up: { label: 'Follow-up', color: 'bg-success/10 text-success', icon: '📞' },
+    discovery: { label: 'Discovery Call', color: 'bg-info/10 text-info', icon: 'Discovery' },
+    demo: { label: 'Product Demo', color: 'bg-primary/10 text-primary', icon: 'Demo' },
+    follow_up: { label: 'Follow-up', color: 'bg-success/10 text-success', icon: 'Follow-up' },
 };
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
@@ -125,10 +125,10 @@ export default function CalendarPage() {
                 </div>
                 <div className="flex gap-2">
                     <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted font-medium text-foreground transition-colors">
-                        🔗 Connect Calendar
+                        Connect Calendar
                     </button>
                     <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
-                        📋 Copy Booking Link
+                        Copy Booking Link
                     </button>
                 </div>
             </div>
@@ -365,7 +365,7 @@ export default function CalendarPage() {
                                 className="text-muted-foreground hover:text-foreground transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 
@@ -405,19 +405,19 @@ export default function CalendarPage() {
                                         rel="noopener noreferrer"
                                         className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-center hover:bg-primary/90 font-medium transition-colors"
                                     >
-                                        🔗 Join Meeting
+                                        Join Meeting
                                     </a>
                                     <button
                                         onClick={() => updateEventStatus(selectedEvent.id, 'completed')}
                                         className="px-4 py-2 bg-success/10 text-success rounded-lg hover:bg-success/20 font-medium transition-colors"
                                     >
-                                        ✓ Mark Complete
+                                        Mark Complete
                                     </button>
                                     <button
                                         onClick={() => updateEventStatus(selectedEvent.id, 'no_show')}
                                         className="px-4 py-2 bg-destructive/10 text-destructive rounded-lg hover:bg-destructive/20 font-medium transition-colors"
                                     >
-                                        ✗ No Show
+                                        No Show
                                     </button>
                                 </>
                             )}

@@ -20,7 +20,7 @@ export const metadata: Metadata = {
  * 
  * Process Isolation:
  * - Runs on port 3020 (customer console: 3000)
- * - Connects to Sales Autopilot API (port 3010), NOT customer API (port 3001)
+ * - Connects to API (port 3010), NOT customer API (port 3001)
  * - Has its own authentication (owner auth, not tenant auth)
  * 
  * Data Isolation:

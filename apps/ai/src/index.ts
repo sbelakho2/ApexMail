@@ -143,7 +143,7 @@ const isMainModule = (() => {
     }
 
     try {
-        return import.meta.url === new URL(argvPath, 'file:').href;
+        return require.main?.filename === argvPath || __filename === argvPath;
     } catch {
         return false;
     }

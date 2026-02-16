@@ -33,9 +33,10 @@ ApexMail is a monorepo containing multiple services that work together to provid
 
 | App | Description | Port |
 |-----|-------------|------|
-| `@apexmail/api` | REST API for message sending, domain management, templates | 3000 |
+| `@apexmail/api` | REST API for message sending, domain management, templates | 3010 |
 | `@apexmail/tracking` | Open pixel, click tracking, unsubscribe handling | 3001 |
 | `@apexmail/analytics` | Parquet compaction, reconciliation, DuckDB queries | 3002 |
+| `@apexmail/control-plane` | Internal administration dashboard for platform owners | 3020 |
 | `@apexmail/worker` | Background job processing (email delivery, webhooks) | N/A |
 | `@apexmail/mta` | Inbound email, bounce, and feedback loop processing | 25, 2525, 2526 |
 

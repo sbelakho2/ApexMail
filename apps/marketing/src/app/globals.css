@@ -32,6 +32,8 @@
   --warning: 217 119 6;
   --danger: 220 38 38;
   --info: 8 145 178;
+  --destructive: 220 38 38;
+  --error: 220 38 38;
 
   /* Spacing */
   --space-1: 4px;
@@ -104,15 +106,24 @@
   }
 
   h1 {
-    @apply text-[40px] md:text-[56px] font-bold leading-[1.1] tracking-[-0.02em];
+    @apply text-[44px] md:text-[64px] font-bold leading-[1.05] tracking-[-0.03em];
   }
 
   h2 {
-    @apply text-[28px] md:text-[36px] font-bold leading-[1.2] tracking-[-0.015em];
+    @apply text-[32px] md:text-[42px] font-bold leading-[1.1] tracking-[-0.02em];
   }
 
   h3 {
-    @apply text-[20px] md:text-[24px] font-bold leading-[1.2] tracking-[-0.01em];
+    @apply text-[22px] md:text-[28px] font-bold leading-[1.2] tracking-[-0.01em];
+  }
+
+  /* Core UI elements from Style Guide */
+  .apex-card {
+    @apply bg-white border border-surface-200 rounded-lg transition-premium shadow-premium;
+  }
+
+  .apex-card:hover {
+    @apply border-primary-500/30 bg-surface-50 shadow-premium-hover;
   }
 
   ::selection {
@@ -128,7 +139,9 @@
 @layer components {
   /* Premium transitions */
   .transition-premium {
-    @apply transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)];
+    transition-property: all;
+    transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+    transition-duration: 300ms;
   }
 
   .container-marketing {
@@ -140,25 +153,23 @@
   }
 
   .premium-card {
-    @apply bg-white border border-surface-200 rounded-lg transition-premium;
-    box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 10px 20px rgba(16, 24, 40, 0.06);
+    @apply bg-white border border-surface-200 rounded-lg transition-premium shadow-premium;
   }
 
   .premium-card:hover {
-    @apply border-primary-500/30 bg-surface-50;
-    box-shadow: 0 14px 40px rgba(15, 23, 42, 0.08);
+    @apply border-primary-500/30 bg-surface-50 shadow-premium-hover;
   }
 
   .btn-primary {
-    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-medium rounded-sm transition-premium;
+    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-lg transition-premium shadow-lg shadow-primary-500/20 active:scale-[0.98];
   }
 
   .btn-secondary {
-    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-medium rounded-sm transition-premium;
+    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-semibold rounded-lg transition-premium active:scale-[0.98];
   }
 
   .btn-accent {
-    @apply px-6 py-3 bg-accent-500 hover:bg-accent-600 text-white font-medium rounded-sm transition-premium;
+    @apply px-6 py-3 bg-accent-500 hover:bg-accent-600 text-white font-semibold rounded-lg transition-premium shadow-lg shadow-accent-500/20 active:scale-[0.98];
   }
 
   .section-title {

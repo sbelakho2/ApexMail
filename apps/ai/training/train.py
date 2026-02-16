@@ -110,13 +110,17 @@ def create_model(cfg: dict) -> AutoModelForCausalLM:
         bnb_4bit_use_double_quant=quant_cfg["bnb_4bit_use_double_quant"],
     )
 
+    # For DDP multi-GPU: each process loads onto its own GPU via LOCAL_RANK
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device_map = {"": local_rank}
+
     model = AutoModelForCausalLM.from_pretrained(
         model_cfg["base"],
         revision=model_cfg.get("revision", "main"),
         quantization_config=bnb_config,
         torch_dtype=getattr(torch, model_cfg["torch_dtype"]),
-        attn_implementation=model_cfg.get("attn_implementation", "flash_attention_2"),
-        device_map="auto",
+        attn_implementation=model_cfg.get("attn_implementation", "sdpa"),
+        device_map=device_map,
         trust_remote_code=model_cfg.get("trust_remote_code", True),
     )
 

@@ -14,6 +14,41 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+// ---------- Edge-compatible crypto helpers ----------
+// The Edge Runtime does NOT support Node.js 'crypto' module.
+// All HMAC / comparison operations use the Web Crypto API instead.
+
+const _enc = new TextEncoder();
+
+function _b64url(buf: Uint8Array): string {
+    let bin = '';
+    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function _b64urlDecode(s: string): string {
+    // base64url → base64 → decoded string
+    const base64 = s.replace(/-/g, '+').replace(/_/g, '/');
+    return atob(base64);
+}
+
+async function _hmacSign(secret: string, data: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+        'raw', _enc.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+    );
+    const sig = await crypto.subtle.sign('HMAC', key, _enc.encode(data));
+    return _b64url(new Uint8Array(sig));
+}
+
+function _constTimeEq(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let r = 0;
+    for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return r === 0;
+}
+// ---------- end crypto helpers ----------
+
 // Allowed paths without authentication (login page, assets)
 const PUBLIC_PATHS = [
     '/login',
@@ -54,28 +89,17 @@ async function validateSession(sessionToken: string): Promise<boolean> {
             return false; // Fail-secure: no secret = no valid sessions
         }
         
-        // Compute expected signature using HMAC-SHA256
-        const crypto = await import('crypto');
-        const expectedSignature = crypto
-            .createHmac('sha256', secret)
-            .update(payload)
-            .digest('base64url');
+        // Compute expected signature using HMAC-SHA256 (Web Crypto API)
+        const expectedSignature = await _hmacSign(secret, payload);
         
         // Constant-time comparison to prevent timing attacks
-        const signatureBuffer = Buffer.from(signature);
-        const expectedBuffer = Buffer.from(expectedSignature);
-        
-        if (signatureBuffer.length !== expectedBuffer.length) {
-            return false;
-        }
-        
-        if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
+        if (!_constTimeEq(signature, expectedSignature)) {
             console.warn('[SECURITY] Invalid session signature detected');
             return false;
         }
         
         // Signature verified, now decode and validate payload
-        const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
+        const decoded = JSON.parse(_b64urlDecode(payload));
         
         // Check expiration
         if (decoded.exp && Date.now() > decoded.exp) {
@@ -117,18 +141,11 @@ async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid
         const secret = process.env.CONTROL_PLANE_JWT_SECRET;
         if (!secret) return { valid: false };
 
-        const crypto = await import('crypto');
-        const expectedSignature = crypto
-            .createHmac('sha256', secret)
-            .update(payload)
-            .digest('base64url');
+        // Web Crypto API — Edge Runtime compatible
+        const expectedSignature = await _hmacSign(secret, payload);
+        if (!_constTimeEq(signature, expectedSignature)) return { valid: false };
 
-        const signatureBuffer = Buffer.from(signature);
-        const expectedBuffer = Buffer.from(expectedSignature);
-        if (signatureBuffer.length !== expectedBuffer.length) return { valid: false };
-        if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) return { valid: false };
-
-        const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
+        const decoded = JSON.parse(_b64urlDecode(payload));
 
         if (decoded.exp && Date.now() > decoded.exp) return { valid: false };
         if (decoded.type !== 'control_plane') return { valid: false };
@@ -148,16 +165,14 @@ async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid
                 iat: Date.now(),
                 exp: Date.now() + SESSION_DURATION_MS,
             };
-            const refreshedB64 = Buffer.from(JSON.stringify(refreshedPayload)).toString('base64url');
-            const refreshedSig = crypto
-                .createHmac('sha256', secret)
-                .update(refreshedB64)
-                .digest('base64url');
+            const refreshedB64 = _b64url(_enc.encode(JSON.stringify(refreshedPayload)));
+            const refreshedSig = await _hmacSign(secret, refreshedB64);
             refreshedToken = `${refreshedB64}.${refreshedSig}`;
         }
 
         return { valid: true, refreshedToken };
-    } catch {
+    } catch (err) {
+        console.error('[MIDDLEWARE] validateSessionWithRefresh error:', err);
         return { valid: false };
     }
 }
@@ -303,16 +318,10 @@ export async function middleware(request: NextRequest) {
                 );
             }
 
-            const crypto = await import('crypto');
-            const expectedSig = crypto
-                .createHmac('sha256', secret)
-                .update(csrfCookie)
-                .digest('base64url');
+            // Web Crypto API — Edge Runtime compatible
+            const expectedSig = await _hmacSign(secret, csrfCookie);
 
-            if (
-                expectedSig.length !== csrfSig.length ||
-                !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(csrfSig))
-            ) {
+            if (!_constTimeEq(expectedSig, csrfSig)) {
                 return new NextResponse(
                     JSON.stringify({ error: 'CSRF token invalid' }),
                     { status: 403, headers: { 'Content-Type': 'application/json' } }

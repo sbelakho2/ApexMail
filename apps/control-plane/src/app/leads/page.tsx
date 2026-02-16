@@ -168,7 +168,7 @@ export default function LeadDiscoveryPage() {
                             <span className="animate-spin">⟳</span> Running Discovery...
                         </span>
                     ) : (
-                        '🔍 Run Discovery'
+                        'Run Discovery'
                     )}
                 </button>
             </div>
@@ -244,7 +244,7 @@ export default function LeadDiscoveryPage() {
                     </div>
                     <div className="mt-6 p-4 bg-warning/10 rounded-xl border border-warning/20">
                         <div className="flex gap-3">
-                            <span className="text-warning">💡</span>
+                            <span className="text-warning">Tip</span>
                             <div className="text-sm text-warning/90">
                                 <strong>Tip:</strong> Select categories related to email marketing to find prospects who may benefit from ApexMail.
                             </div>
@@ -283,15 +283,15 @@ export default function LeadDiscoveryPage() {
                                         <span className="text-xs px-2.5 py-0.5 bg-muted text-muted-foreground border border-border rounded-md font-medium">{lead.source.replace('_', ' ')}</span>
                                         {lead.imported && (
                                             <span className="text-xs px-2.5 py-0.5 bg-success/10 text-success border border-success/20 rounded-md font-medium flex items-center gap-1">
-                                                <span>✓</span> Imported
+                                                <span>OK</span> Imported
                                             </span>
                                         )}
                                     </div>
                                     <div className="text-sm text-muted-foreground mb-2">{lead.description}</div>
                                     <div className="flex items-center gap-4 text-xs text-muted-foreground/70">
-                                        <span className="flex items-center gap-1"><span className="opacity-70">🌐</span> {lead.domain}</span>
-                                        <span className="flex items-center gap-1"><span className="opacity-70">📁</span> {lead.category}</span>
-                                        <span className="flex items-center gap-1"><span className="opacity-70">⏰</span> {new Date(lead.foundAt).toLocaleString()}</span>
+                                        <span className="flex items-center gap-1"><span className="opacity-70">Domain</span> {lead.domain}</span>
+                                        <span className="flex items-center gap-1"><span className="opacity-70">Category</span> {lead.category}</span>
+                                        <span className="flex items-center gap-1"><span className="opacity-70">Found</span> {new Date(lead.foundAt).toLocaleString()}</span>
                                     </div>
                                 </div>
                                 {!lead.imported && (

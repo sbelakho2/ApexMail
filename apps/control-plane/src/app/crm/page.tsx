@@ -171,11 +171,11 @@ export default function CRMPipelinePage() {
                                                 </span>
                                             </div>
                                             <div className="text-xs text-muted-foreground mb-3 flex items-center gap-1">
-                                                <span>🌐</span> {lead.domain}
+                                                <span>Domain</span> {lead.domain}
                                             </div>
                                             {lead.contactName && (
                                                 <div className="text-xs text-muted-foreground mb-3 flex items-center gap-1">
-                                                    <span className="w-5 h-5 rounded-full bg-muted flex items-center justify-center text-[10px]">👤</span>
+                                                    <span className="w-5 h-5 rounded-full bg-muted flex items-center justify-center text-[10px]">U</span>
                                                     {lead.contactName}
                                                 </div>
                                             )}
@@ -187,7 +187,7 @@ export default function CRMPipelinePage() {
                                                 ))}
                                             </div>
                                             <div className="text-[10px] text-muted-foreground flex items-center gap-1 border-t border-border pt-2 mt-2">
-                                                <span>🕒</span> {formatDate(lead.lastActivity)}
+                                                <span>Time</span> {formatDate(lead.lastActivity)}
                                             </div>
                                         </div>
                                     ))}
@@ -206,7 +206,7 @@ export default function CRMPipelinePage() {
                             <div>
                                 <h2 id="lead-modal-title" className="text-xl font-bold text-foreground">{selectedLead.companyName}</h2>
                                 <a href={`https://${selectedLead.domain}`} target="_blank" rel="noopener noreferrer" className="text-primary text-sm hover:underline font-medium inline-flex items-center gap-1">
-                                    {selectedLead.domain} <span>↗</span>
+                                    {selectedLead.domain} <span>Open</span>
                                 </a>
                             </div>
                             <button 
@@ -214,7 +214,7 @@ export default function CRMPipelinePage() {
                                 className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 

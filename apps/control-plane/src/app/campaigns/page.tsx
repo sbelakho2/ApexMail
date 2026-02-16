@@ -195,7 +195,7 @@ export default function CampaignsPage() {
                                         </button>
                                     )}
                                     <button className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
-                                        ⚙️
+                                        Settings
                                     </button>
                                 </div>
                             </div>
@@ -207,11 +207,11 @@ export default function CampaignsPage() {
                                         {index > 0 && <div className="w-6 h-px bg-border mx-2" />}
                                         {step.type === 'email' ? (
                                             <div className="flex-shrink-0 px-3 py-1.5 bg-card border border-primary/20 rounded-lg text-xs font-medium text-foreground shadow-sm flex items-center gap-1.5">
-                                                <span className="text-primary">📧</span> {step.subject?.substring(0, 25)}...
+                                                <span className="text-primary">Email</span> {step.subject?.substring(0, 25)}...
                                             </div>
                                         ) : step.type === 'delay' ? (
                                             <div className="flex-shrink-0 px-3 py-1.5 bg-muted/50 border border-border rounded-lg text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-                                                <span>⏱️</span> {step.delayDays}d
+                                                <span>Delay</span> {step.delayDays}d
                                             </div>
                                         ) : null}
                                     </div>
@@ -236,7 +236,7 @@ export default function CampaignsPage() {
                                 className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 
@@ -288,7 +288,7 @@ export default function CampaignsPage() {
                                         </div>
                                     ) : (
                                         <div className="bg-muted/30 rounded-xl border border-border p-3 flex items-center gap-3 text-muted-foreground">
-                                            <span className="text-lg">⏱️</span>
+                                            <span className="text-lg">Delay</span>
                                             <span className="font-medium">Wait {step.delayDays} days</span>
                                         </div>
                                     )}

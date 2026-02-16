@@ -46,16 +46,19 @@ export function HeroSection() {
  >
  {/* Badge */}
  <div
-   className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-50 border border-surface-200 text-sm font-medium text-surface-600 mb-8"
+   className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-50 border border-brand-100 text-sm font-semibold text-brand-700 mb-8 shadow-sm"
  >
-   <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />
+   <span className="relative flex h-2 w-2">
+     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75"></span>
+     <span className="relative inline-flex rounded-full h-2 w-2 bg-brand-500"></span>
+   </span>
    Now with Private Cloud deployments
  </div>
 
  {/* Headline */}
- <h1 className="mb-6 text-surface-900">
+ <h1 className="mb-6 text-surface-900 leading-[1.05]">
                 The Email API That <br />
-                <span className="text-surface-500">Values Your Sleep.</span>
+                <span className="text-brand-500">Values Your Sleep.</span>
               </h1>
 
  {/* subheadline */}
@@ -110,7 +113,7 @@ export function HeroSection() {
  {/* Right Column - Code Block */}
  <div className="relative hidden lg:block">
  {/* Code block */}
- <div className="relative bg-surface-900 rounded-lg overflow-hidden border border-surface-800 shadow-2xl">
+ <div className="relative bg-surface-900 rounded-xl overflow-hidden border border-surface-800 shadow-2xl">
  {/* Window header */}
  <div className="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-900">
  <div className="flex gap-1.5">
@@ -126,8 +129,8 @@ export function HeroSection() {
 
  {/* Floating stat card */}
  <div
-   className="absolute -bottom-8 -left-8 bg-white border border-surface-200 rounded-lg px-5 py-4 shadow-xl"
- >
+                            className="absolute -bottom-8 -left-8 bg-white border border-surface-200 rounded-xl px-5 py-4 shadow-xl"
+                        >
    <div className="flex items-center gap-4">
      <div className="w-12 h-12 rounded-full bg-brand-50 flex items-center justify-center border border-brand-100">
        <span className="text-brand-500 text-xl font-bold">✓</span>

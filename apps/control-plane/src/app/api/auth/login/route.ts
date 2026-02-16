@@ -19,6 +19,7 @@ import { query } from '@/lib/db';
 
 // Rate limiting storage (database-backed for multi-instance consistency)
 let rateLimitTableReady: Promise<void> | null = null;
+let rateLimitCleanupStarted = false;
 
 async function ensureRateLimitTable(): Promise<void> {
     if (!rateLimitTableReady) {
@@ -38,6 +39,22 @@ async function ensureRateLimitTable(): Promise<void> {
     }
 
     await rateLimitTableReady;
+
+    // FIX-500-029: Periodic cleanup prevents unbounded growth in attempts table.
+    if (!rateLimitCleanupStarted) {
+        rateLimitCleanupStarted = true;
+        const cleanupInterval = setInterval(async () => {
+            try {
+                await query(
+                    `DELETE FROM control_plane_login_attempts
+                     WHERE last_attempt_at < NOW() - INTERVAL '24 hours'`
+                );
+            } catch (error) {
+                console.warn('[AUTH] Failed to cleanup login attempts table:', error);
+            }
+        }, 10 * 60 * 1000);
+        cleanupInterval.unref();
+    }
 }
 
 // Maximum login attempts before lockout

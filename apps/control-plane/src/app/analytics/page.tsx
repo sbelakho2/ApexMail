@@ -142,10 +142,10 @@ export default function AnalyticsPage() {
                         ))}
                     </div>
                     <button onClick={handleExport} className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted shadow-sm transition-colors">
-                        📊 Export
+                        Export
                     </button>
                     <button onClick={handlePrint} className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
-                        🖨️ Print Report
+                        Print Report
                     </button>
                 </div>
             </div>
@@ -154,11 +154,11 @@ export default function AnalyticsPage() {
             <div className="border-b border-border mb-6 no-print overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
-                        { key: 'overview', label: 'Overview', icon: '📈' },
-                        { key: 'email', label: 'Email Performance', icon: '✉️' },
-                        { key: 'tenants', label: 'Tenant Analytics', icon: '👥' },
-                        { key: 'revenue', label: 'Revenue Intelligence', icon: '💰' },
-                        { key: 'sales', label: 'Sales Pipeline', icon: '🎯' },
+                        { key: 'overview', label: 'Overview', icon: 'OV' },
+                        { key: 'email', label: 'Email Performance', icon: 'EM' },
+                        { key: 'tenants', label: 'Tenant Analytics', icon: 'TN' },
+                        { key: 'revenue', label: 'Revenue Intelligence', icon: 'RV' },
+                        { key: 'sales', label: 'Sales Pipeline', icon: 'SL' },
                     ].map(tab => (
                         <button
                             key={tab.key}
@@ -182,10 +182,10 @@ export default function AnalyticsPage() {
                 <div className="space-y-6">
                     {/* Key Metrics Grid */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 print-avoid-break">
-                        <StatCard label="Monthly Recurring Revenue" value="$847,320" change={12.5} trend="up" changeLabel="vs last month" icon="💰" />
-                        <StatCard label="Total Emails Sent" value="12.4M" change={8.2} trend="up" changeLabel="vs last month" icon="📧" />
-                        <StatCard label="Active Tenants" value="2,847" change={5.3} trend="up" changeLabel="vs last month" icon="👥" />
-                        <StatCard label="Delivery Rate" value="98.7%" change={0.3} trend="up" changeLabel="vs last month" icon="✅" />
+                        <StatCard label="Monthly Recurring Revenue" value="$847,320" change={12.5} trend="up" changeLabel="vs last month" icon="MRR" />
+                        <StatCard label="Total Emails Sent" value="12.4M" change={8.2} trend="up" changeLabel="vs last month" icon="Mail" />
+                        <StatCard label="Active Tenants" value="2,847" change={5.3} trend="up" changeLabel="vs last month" icon="Users" />
+                        <StatCard label="Delivery Rate" value="98.7%" change={0.3} trend="up" changeLabel="vs last month" icon="OK" />
                     </div>
 
                     {/* Email Volume Trend */}
@@ -280,11 +280,11 @@ export default function AnalyticsPage() {
             {activeSection === 'email' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                        <StatCard label="Total Sent" value="12.4M" change={8.2} trend="up" icon="📤" />
-                        <StatCard label="Delivered" value="12.2M" change={8.1} trend="up" icon="✅" />
-                        <StatCard label="Opened" value="4.8M" change={12.3} trend="up" icon="👁️" />
-                        <StatCard label="Clicked" value="892K" change={15.7} trend="up" icon="🖱️" />
-                        <StatCard label="Bounced" value="0.8%" change={-0.2} trend="up" icon="🚫" />
+                        <StatCard label="Total Sent" value="12.4M" change={8.2} trend="up" icon="Sent" />
+                        <StatCard label="Delivered" value="12.2M" change={8.1} trend="up" icon="OK" />
+                        <StatCard label="Opened" value="4.8M" change={12.3} trend="up" icon="Open" />
+                        <StatCard label="Clicked" value="892K" change={15.7} trend="up" icon="Click" />
+                        <StatCard label="Bounced" value="0.8%" change={-0.2} trend="up" icon="Block" />
                     </div>
 
                     {/* Deliverability Health */}
@@ -362,10 +362,10 @@ export default function AnalyticsPage() {
             {activeSection === 'tenants' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <StatCard label="Total Tenants" value="2,847" change={5.3} trend="up" icon="👥" />
-                        <StatCard label="Active (30d)" value="2,412" change={3.1} trend="up" icon="✅" />
-                        <StatCard label="New This Month" value="143" change={12.5} trend="up" icon="🆕" />
-                        <StatCard label="Churned" value="28" change={-15.2} trend="up" icon="⚠️" />
+                        <StatCard label="Total Tenants" value="2,847" change={5.3} trend="up" icon="Users" />
+                        <StatCard label="Active (30d)" value="2,412" change={3.1} trend="up" icon="OK" />
+                        <StatCard label="New This Month" value="143" change={12.5} trend="up" icon="New" />
+                        <StatCard label="Churned" value="28" change={-15.2} trend="up" icon="Warn" />
                     </div>
 
                     {/* Tenant Health Distribution */}
@@ -453,10 +453,10 @@ export default function AnalyticsPage() {
             {activeSection === 'revenue' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <StatCard label="MRR" value="$847,320" change={12.5} trend="up" icon="💰" />
-                        <StatCard label="ARR" value="$10.2M" change={12.5} trend="up" icon="📊" />
-                        <StatCard label="ARPU" value="$298" change={6.8} trend="up" icon="👤" />
-                        <StatCard label="LTV" value="$8,940" change={4.2} trend="up" icon="⏳" />
+                        <StatCard label="MRR" value="$847,320" change={12.5} trend="up" icon="MRR" />
+                        <StatCard label="ARR" value="$10.2M" change={12.5} trend="up" icon="ARR" />
+                        <StatCard label="ARPU" value="$298" change={6.8} trend="up" icon="ARPU" />
+                        <StatCard label="LTV" value="$8,940" change={4.2} trend="up" icon="LTV" />
                     </div>
 
                     {/* Revenue Trend */}
@@ -521,10 +521,10 @@ export default function AnalyticsPage() {
             {activeSection === 'sales' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <StatCard label="Pipeline Value" value="$1.2M" change={18.5} trend="up" icon="💎" />
-                        <StatCard label="Active Deals" value="234" change={12.3} trend="up" icon="🤝" />
-                        <StatCard label="Win Rate" value="34.2%" change={2.5} trend="up" icon="🏆" />
-                        <StatCard label="Avg Deal Size" value="$4,230" change={8.1} trend="up" icon="📈" />
+                        <StatCard label="Pipeline Value" value="$1.2M" change={18.5} trend="up" icon="Value" />
+                        <StatCard label="Active Deals" value="234" change={12.3} trend="up" icon="Deals" />
+                        <StatCard label="Win Rate" value="34.2%" change={2.5} trend="up" icon="Win" />
+                        <StatCard label="Avg Deal Size" value="$4,230" change={8.1} trend="up" icon="Avg" />
                     </div>
 
                     {/* Sales Funnel */}
@@ -573,9 +573,9 @@ export default function AnalyticsPage() {
                                             <span className="text-sm text-success font-medium">{c.conversion}% conv.</span>
                                         </div>
                                         <div className="flex gap-4 text-xs text-muted-foreground">
-                                            <span>📧 {c.sent.toLocaleString()} sent</span>
-                                            <span>💬 {c.replies} replies</span>
-                                            <span>📅 {c.meetings} meetings</span>
+                                            <span>{c.sent.toLocaleString()} sent</span>
+                                            <span>{c.replies} replies</span>
+                                            <span>{c.meetings} meetings</span>
                                         </div>
                                     </div>
                                 ))}

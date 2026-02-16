@@ -92,7 +92,7 @@ export default function CompliancePage() {
             {(overview.riskSummary.critical > 0 || overview.gdprRequests.overdue > 0) && (
                 <div className="mb-8 p-4 bg-destructive/10 border border-destructive/20 rounded-xl shadow-sm">
                     <div className="flex items-center gap-2 text-destructive font-medium mb-2">
-                        🚨 Critical Issues Requiring Immediate Attention
+                        Critical Issues Requiring Immediate Attention
                     </div>
                     <div className="flex gap-4 text-sm text-destructive/90">
                         {overview.riskSummary.critical > 0 && (
@@ -113,7 +113,7 @@ export default function CompliancePage() {
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                 <Link href="/risk" className="block bg-card rounded-xl border border-border p-5 shadow-sm hover:shadow-md transition-all hover:border-muted-foreground/20 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl group-hover:scale-110 transition-transform">⚠️</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">Risk</span>
                         <span className="font-semibold text-foreground">Risk Monitoring</span>
                     </div>
                     <div className="text-2xl font-bold text-warning">
@@ -123,7 +123,7 @@ export default function CompliancePage() {
                 </Link>
                 <Link href="/audit" className="block bg-card rounded-xl border border-border p-5 shadow-sm hover:shadow-md transition-all hover:border-muted-foreground/20 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl group-hover:scale-110 transition-transform">📜</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">Audit</span>
                         <span className="font-semibold text-foreground">Audit Logs</span>
                     </div>
                     <div className="text-2xl font-bold text-primary">
@@ -133,7 +133,7 @@ export default function CompliancePage() {
                 </Link>
                 <Link href="/gdpr" className="block bg-card rounded-xl border border-border p-5 shadow-sm hover:shadow-md transition-all hover:border-muted-foreground/20 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl group-hover:scale-110 transition-transform">🇪🇺</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">GDPR</span>
                         <span className="font-semibold text-foreground">GDPR Requests</span>
                     </div>
                     <div className="text-2xl font-bold text-primary">
@@ -143,7 +143,7 @@ export default function CompliancePage() {
                 </Link>
                 <Link href="/secrets" className="block bg-card rounded-xl border border-border p-5 shadow-sm hover:shadow-md transition-all hover:border-muted-foreground/20 group">
                     <div className="flex items-center gap-3 mb-2">
-                        <span className="text-2xl group-hover:scale-110 transition-transform">🔐</span>
+                        <span className="text-2xl group-hover:scale-110 transition-transform">Vault</span>
                         <span className="font-semibold text-foreground">Secrets Vault</span>
                     </div>
                     <div className="text-2xl font-bold text-success">

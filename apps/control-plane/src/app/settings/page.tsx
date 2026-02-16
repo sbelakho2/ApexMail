@@ -22,13 +22,13 @@ interface SettingsSection {
 }
 
 const SETTINGS_SECTIONS: SettingsSection[] = [
-    { id: 'access', title: 'Access Control', description: 'IP whitelist, MFA, session settings', icon: '🔐' },
-    { id: 'integrations', title: 'Integrations', description: 'Calendar, CRM, payment providers', icon: '🔗' },
-    { id: 'email', title: 'Email Configuration', description: 'Sending limits, domains, defaults', icon: '📧' },
-    { id: 'tenants', title: 'Tenant Defaults', description: 'Default plans, limits, features', icon: '👥' },
-    { id: 'ai', title: 'AI Assistant', description: 'Autonomous mode, escalation, proactive', icon: '🤖' },
-    { id: 'compliance', title: 'Compliance Settings', description: 'Data retention, privacy, audit', icon: '⚖️' },
-    { id: 'backup', title: 'Backup & Recovery', description: 'Backup schedule, disaster recovery', icon: '💾' },
+    { id: 'access', title: 'Access Control', description: 'IP whitelist, MFA, session settings', icon: 'AC' },
+    { id: 'integrations', title: 'Integrations', description: 'Calendar, CRM, payment providers', icon: 'IN' },
+    { id: 'email', title: 'Email Configuration', description: 'Sending limits, domains, defaults', icon: 'EM' },
+    { id: 'tenants', title: 'Tenant Defaults', description: 'Default plans, limits, features', icon: 'TN' },
+    { id: 'ai', title: 'AI Assistant', description: 'Autonomous mode, escalation, proactive', icon: 'AI' },
+    { id: 'compliance', title: 'Compliance Settings', description: 'Data retention, privacy, audit', icon: 'CP' },
+    { id: 'backup', title: 'Backup & Recovery', description: 'Backup schedule, disaster recovery', icon: 'BK' },
 ];
 
 export default function SettingsPage() {
@@ -43,10 +43,10 @@ export default function SettingsPage() {
 
     // Integrations State
     const [integrations] = useState([
-        { id: 'google-calendar', name: 'Google Calendar', status: 'connected', icon: '📅' },
-        { id: 'hubspot', name: 'HubSpot CRM', status: 'not_connected', icon: '🏢' },
-        { id: 'stripe', name: 'Stripe Payments', status: 'connected', icon: '💳' },
-        { id: 'slack', name: 'Slack Notifications', status: 'connected', icon: '💬' },
+        { id: 'google-calendar', name: 'Google Calendar', status: 'connected', icon: 'GC' },
+        { id: 'hubspot', name: 'HubSpot CRM', status: 'not_connected', icon: 'HB' },
+        { id: 'stripe', name: 'Stripe Payments', status: 'connected', icon: 'ST' },
+        { id: 'slack', name: 'Slack Notifications', status: 'connected', icon: 'SL' },
     ]);
 
     // Email Config State
@@ -203,9 +203,9 @@ export default function SettingsPage() {
                         saveStatus === 'saved' && 'bg-success text-success-foreground'
                     )}
                 >
-                    {saveStatus === 'idle' && '💾 Save Changes'}
+                    {saveStatus === 'idle' && 'Save Changes'}
                     {saveStatus === 'saving' && 'Saving...'}
-                    {saveStatus === 'saved' && '✓ Saved!'}
+                    {saveStatus === 'saved' && 'Saved'}
                 </button>
             </div>
 
@@ -336,7 +336,7 @@ export default function SettingsPage() {
                                                     'text-sm',
                                                     integration.status === 'connected' ? 'text-success' : 'text-muted-foreground'
                                                 )}>
-                                                    {integration.status === 'connected' ? '✓ Connected' : 'Not connected'}
+                                                    {integration.status === 'connected' ? 'Connected' : 'Not connected'}
                                                 </div>
                                             </div>
                                         </div>
@@ -656,7 +656,7 @@ export default function SettingsPage() {
                                         <div className="flex flex-wrap gap-2">
                                             {aiConfig.autoApproveActions.map(action => (
                                                 <span key={action} className="px-2 py-1 bg-success/10 text-success text-xs rounded-full font-mono">
-                                                    ✓ {action}
+                                                    {action}
                                                 </span>
                                             ))}
                                         </div>
@@ -671,7 +671,7 @@ export default function SettingsPage() {
                                         <div className="flex flex-wrap gap-2">
                                             {aiConfig.alwaysEscalateActions.map(action => (
                                                 <span key={action} className="px-2 py-1 bg-destructive/10 text-destructive text-xs rounded-full font-mono">
-                                                    ⚠️ {action}
+                                                    Escalate: {action}
                                                 </span>
                                             ))}
                                         </div>
@@ -750,7 +750,7 @@ export default function SettingsPage() {
                             
                             <div className="bg-success/10 border border-success/20 rounded-lg p-4 mb-6">
                                 <div className="flex items-center gap-2 text-success">
-                                    <span>✓</span>
+                                    <span>OK</span>
                                     <span className="font-medium">Last backup: {formatDate(backupConfig.lastBackup)}</span>
                                 </div>
                             </div>
@@ -824,13 +824,13 @@ export default function SettingsPage() {
 
                             <div className="flex gap-2 pt-4 border-t border-border">
                                 <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
-                                    🔄 Run Backup Now
+                                    Run Backup Now
                                 </button>
                                 <button className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">
-                                    📋 View Backup History
+                                    View Backup History
                                 </button>
                                 <button className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
-                                    ⚠️ Test DR Failover
+                                    Test DR Failover
                                 </button>
                             </div>
                         </div>

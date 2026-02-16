@@ -44,10 +44,10 @@ interface TenantOverride {
 
 
 const CATEGORY_CONFIG: Record<string, { label: string; bg: string; text: string; icon: string }> = {
-    core: { label: 'Core', bg: 'bg-info/10', text: 'text-info', icon: '🔵' },
-    beta: { label: 'Beta', bg: 'bg-purple-500/10', text: 'text-purple-600', icon: '🟣' },
-    experimental: { label: 'Experimental', bg: 'bg-warning/10', text: 'text-warning', icon: '🟡' },
-    killswitch: { label: 'Killswitch', bg: 'bg-destructive/10', text: 'text-destructive', icon: '🔴' },
+    core: { label: 'Core', bg: 'bg-info/10', text: 'text-info', icon: 'Core' },
+    beta: { label: 'Beta', bg: 'bg-purple-500/10', text: 'text-purple-600', icon: 'Beta' },
+    experimental: { label: 'Experimental', bg: 'bg-warning/10', text: 'text-warning', icon: 'Exp' },
+    killswitch: { label: 'Killswitch', bg: 'bg-destructive/10', text: 'text-destructive', icon: 'Kill' },
 };
 
 function FeatureFlagsPageContent() {
@@ -142,7 +142,7 @@ function FeatureFlagsPageContent() {
             {flags.some(f => f.category === 'killswitch' && f.enabled) && (
                 <div className="bg-destructive/10 border border-destructive/20 rounded-xl p-4 mb-6">
                     <div className="flex items-center gap-2 text-destructive font-medium">
-                        🚨 Active Killswitches Detected
+                        Active Killswitches Detected
                     </div>
                     <div className="mt-2 space-y-1">
                         {flags.filter(f => f.category === 'killswitch' && f.enabled).map(f => (
@@ -323,7 +323,7 @@ function FeatureFlagsPageContent() {
                                                     onClick={() => setEditingFlag(flag)}
                                                     className="p-2 text-muted-foreground hover:text-foreground transition-colors"
                                                 >
-                                                    ✏️
+                                                    Edit
                                                 </button>
                                             )}
                                         </div>

@@ -337,19 +337,35 @@ export function webhooksRoutes(ctx: AppContext): Hono<AppEnv> {
       filters.event = event;
     }
 
-    const allWebhooks = await webhooksRepo.findByTenant(tenantId);
-    const filtered = allWebhooks.filter((webhook) => {
-      if (filters.enabled !== undefined && webhook.enabled !== filters.enabled) {
-        return false;
-      }
-      if (filters.event && !matchesWebhookEvent(webhook.events, filters.event)) {
-        return false;
-      }
-      return true;
-    });
+    const compatibleRepo = webhooksRepo as unknown as {
+      findByTenantFiltered?: (
+        tenant: string,
+        f?: { enabled?: boolean; event?: string },
+        options?: { limit?: number; offset?: number },
+      ) => Promise<{ webhooks: Webhook[]; total: number }>;
+    };
 
-    const total = filtered.length;
-    const webhooks = filtered.slice(offset, offset + limit);
+    let webhooks: Webhook[];
+    let total: number;
+
+    if (typeof compatibleRepo.findByTenantFiltered === 'function') {
+      const result = await compatibleRepo.findByTenantFiltered(tenantId, filters, { limit, offset });
+      webhooks = result.webhooks;
+      total = result.total;
+    } else {
+      const allWebhooks = await webhooksRepo.findByTenant(tenantId);
+      const filtered = allWebhooks.filter((webhook) => {
+        if (filters.enabled !== undefined && webhook.enabled !== filters.enabled) {
+          return false;
+        }
+        if (filters.event && !matchesWebhookEvent(webhook.events, filters.event)) {
+          return false;
+        }
+        return true;
+      });
+      total = filtered.length;
+      webhooks = filtered.slice(offset, offset + limit);
+    }
 
     return c.json({
       webhooks: webhooks.map(w => ({

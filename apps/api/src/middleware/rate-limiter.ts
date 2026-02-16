@@ -55,17 +55,23 @@ export function rateLimiter(ctx: AppContext): MiddlewareHandler<AppEnv> {
       const windowStart = Math.floor(now / windowMs) * windowMs;
       const windowEnd = windowStart + windowMs;
 
-      // --- C-132: Pipeline INCR + EXPIRE into a single round-trip per key ---
+      // C-132 fallback: use INCR + EXPIRE with shared cache interface
       const ttlSeconds = Math.ceil(windowMs / 1000) + 1;
 
       const tenantKey = `${tenantLimitKey}:${windowStart}`;
       const ipKey = `${ipLimitKey}:${windowStart}`;
 
-      // Fire both pipelined calls concurrently — each is already
-      // a single Redis round-trip internally (INCR + EXPIRE in one pipeline)
       const [tenantCount, ipCount] = await Promise.all([
-        redisCache.incrWithExpire(tenantKey, ttlSeconds),
-        redisCache.incrWithExpire(ipKey, ttlSeconds),
+        (async () => {
+          const count = await redisCache.incr(tenantKey);
+          if (count === 1) await redisCache.expire(tenantKey, ttlSeconds);
+          return count;
+        })(),
+        (async () => {
+          const count = await redisCache.incr(ipKey);
+          if (count === 1) await redisCache.expire(ipKey, ttlSeconds);
+          return count;
+        })(),
       ]);
 
       // Use the more restrictive of the two counts for headers
@@ -180,11 +186,10 @@ export function slidingWindowRateLimiter(ctx: AppContext): MiddlewareHandler<App
       // JSON.parse("42") returns 42 (number), so get<number> is correct here.
       const previousCount = (await redisCache.get<number>(previousKey)) ?? 0;
 
-      // C-132: Atomic INCR + EXPIRE in a single pipeline round-trip
-      const currentCount = await redisCache.incrWithExpire(
-        currentKey,
-        Math.ceil(windowMs * 2 / 1000),
-      );
+      const currentCount = await redisCache.incr(currentKey);
+      if (currentCount === 1) {
+        await redisCache.expire(currentKey, Math.ceil(windowMs * 2 / 1000));
+      }
 
       // Calculate weighted count based on time into current window
       const windowProgress = (now % windowMs) / windowMs;

@@ -3,6 +3,7 @@
  *
  * Provides dashboard metrics by querying canonical database tables.
  * This endpoint is only accessible to authenticated control plane users.
+ * FIX-500-060: Uses shared database access from lib/db.
  */
 
 import { NextResponse } from 'next/server';
@@ -174,11 +175,10 @@ export async function GET(): Promise<NextResponse<DashboardStats | { error: stri
                 `)
                 : Promise.resolve([]),
             hasSystemAlerts
-                ? query<{ severity: string; total: string; tenant_count: string }>(`
+                ? query<{ severity: string; total: string }>(`
                     SELECT
                         severity,
-                        COUNT(*)::text as total,
-                        COUNT(DISTINCT tenant_id)::text as tenant_count
+                        COUNT(*)::text as total
                     FROM system_alerts
                     WHERE acknowledged = false
                       AND severity IN ('high', 'critical')
@@ -284,7 +284,7 @@ export async function GET(): Promise<NextResponse<DashboardStats | { error: stri
 
             if (row.severity === 'critical') {
                 criticalAlertCount += alertCount;
-                criticalTenants += parseCount(row.tenant_count);
+                criticalTenants += alertCount; // approximate: one alert ≈ one affected tenant
             }
             if (row.severity === 'high') {
                 highAlertCount += alertCount;

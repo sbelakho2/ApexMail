@@ -47,7 +47,7 @@ training:
   warmup_ratio: 0.05
   weight_decay: 0.01
   max_seq_length: 4096
-  packing: true                           # pack short examples for efficiency
+  packing: false                          # disabled — SDPA lacks document masking for packing
   gradient_checkpointing: true
   gradient_checkpointing_kwargs:
     use_reentrant: false
@@ -65,7 +65,7 @@ training:
   greater_is_better: false
   report_to: "tensorboard"
   seed: 42
-  dataloader_num_workers: 4
+  dataloader_num_workers: 8
   dataloader_pin_memory: true
 
 # ── Paths ────────────────────────────────────────────────────────────────────

@@ -28,11 +28,11 @@ interface GDPRRequest {
 }
 
 const REQUEST_TYPE_LABELS: Record<string, { label: string; icon: string; description: string }> = {
-    access: { label: 'Data Access', icon: '👁️', description: 'Subject wants to know what data is stored' },
-    deletion: { label: 'Data Deletion', icon: '🗑️', description: 'Subject wants all data deleted' },
-    portability: { label: 'Data Portability', icon: '📦', description: 'Subject wants data exported' },
-    rectification: { label: 'Rectification', icon: '✏️', description: 'Subject wants data corrected' },
-    restriction: { label: 'Processing Restriction', icon: '🚫', description: 'Subject wants processing limited' },
+    access: { label: 'Data Access', icon: 'Access', description: 'Subject wants to know what data is stored' },
+    deletion: { label: 'Data Deletion', icon: 'Delete', description: 'Subject wants all data deleted' },
+    portability: { label: 'Data Portability', icon: 'Export', description: 'Subject wants data exported' },
+    rectification: { label: 'Rectification', icon: 'Fix', description: 'Subject wants data corrected' },
+    restriction: { label: 'Processing Restriction', icon: 'Restrict', description: 'Subject wants processing limited' },
 };
 
 
@@ -149,7 +149,7 @@ export default function GDPRPage() {
             {requests.some(r => isOverdue(r)) && (
                 <div className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
                     <div className="flex items-center gap-2 text-destructive font-medium">
-                        ⚠️ {requests.filter(r => isOverdue(r)).length} request(s) have exceeded the 30-day SLA deadline
+                        Warning: {requests.filter(r => isOverdue(r)).length} request(s) have exceeded the 30-day SLA deadline
                     </div>
                 </div>
             )}
@@ -250,7 +250,7 @@ export default function GDPRPage() {
                                 className="text-muted-foreground hover:text-foreground transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 
@@ -300,7 +300,7 @@ export default function GDPRPage() {
                                         onClick={() => updateRequestStatus(selectedRequest.id, 'verified')}
                                         className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors"
                                     >
-                                        ✓ Mark as Verified
+                                        Mark as Verified
                                     </button>
                                     <button
                                         onClick={() => updateRequestStatus(selectedRequest.id, 'rejected')}
@@ -315,7 +315,7 @@ export default function GDPRPage() {
                                     onClick={() => updateRequestStatus(selectedRequest.id, 'processing')}
                                     className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors"
                                 >
-                                    🚀 Start Processing
+                                    Start Processing
                                 </button>
                             )}
                             {selectedRequest.status === 'processing' && (
@@ -323,7 +323,7 @@ export default function GDPRPage() {
                                     onClick={() => updateRequestStatus(selectedRequest.id, 'completed')}
                                     className="flex-1 px-4 py-2 bg-success text-success-foreground rounded-lg hover:bg-success/90 font-medium transition-colors"
                                 >
-                                    ✓ Mark as Completed
+                                    Mark as Completed
                                 </button>
                             )}
                             {(selectedRequest.status === 'completed' || selectedRequest.status === 'rejected') && (

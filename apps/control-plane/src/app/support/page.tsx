@@ -58,11 +58,11 @@ const PRIORITY_CONFIG: Record<string, { label: string; color: string; bgColor: s
 };
 
 const CATEGORY_CONFIG: Record<string, { label: string; icon: string }> = {
-    billing: { label: 'Billing', icon: '💳' },
-    technical: { label: 'Technical', icon: '🔧' },
-    feature_request: { label: 'Feature Request', icon: '💡' },
-    bug: { label: 'Bug Report', icon: '🐛' },
-    general: { label: 'General', icon: '💬' },
+    billing: { label: 'Billing', icon: 'BIL' },
+    technical: { label: 'Technical', icon: 'TEC' },
+    feature_request: { label: 'Feature Request', icon: 'REQ' },
+    bug: { label: 'Bug Report', icon: 'BUG' },
+    general: { label: 'General', icon: 'GEN' },
 };
 
 
@@ -182,7 +182,7 @@ function SupportPageContent() {
             {urgentCount > 0 && (
                 <div className="bg-destructive/10 border border-destructive/20 rounded-xl p-4 mb-6">
                     <div className="flex items-center gap-2 text-destructive font-medium">
-                        <span>🚨</span>
+                        <span>Alert</span>
                         <span>{urgentCount} urgent ticket(s) require immediate attention</span>
                     </div>
                 </div>
@@ -304,7 +304,7 @@ function SupportPageContent() {
                                         onClick={() => setSelectedTicket(null)}
                                         className="text-muted-foreground hover:text-foreground lg:hidden"
                                     >
-                                        ✕
+                                        Close
                                     </button>
                                 </div>
                                 <div className="flex flex-wrap gap-2 mt-3">
@@ -356,7 +356,7 @@ function SupportPageContent() {
                                     }}
                                     className="px-3 py-1.5 bg-warning/10 text-warning rounded-lg text-sm font-medium hover:bg-warning/20 transition-colors"
                                 >
-                                    👁️ Impersonate
+                                    Impersonate
                                 </button>
                             </div>
 
@@ -386,7 +386,7 @@ function SupportPageContent() {
                                             <div className="mt-2 flex flex-wrap gap-2">
                                                 {message.attachments.map(attachment => (
                                                     <span key={attachment} className="px-2.5 py-1 bg-muted rounded text-xs text-muted-foreground">
-                                                        📎 {attachment}
+                                                        Attachment: {attachment}
                                                     </span>
                                                 ))}
                                             </div>
@@ -427,7 +427,6 @@ function SupportPageContent() {
                         </div>
                     ) : (
                         <div className="bg-card rounded-xl border border-border p-12 text-center">
-                            <div className="text-4xl mb-4">🎫</div>
                             <h3 className="text-lg font-medium text-foreground mb-2">Select a Ticket</h3>
                             <p className="text-muted-foreground text-sm">
                                 Choose a ticket from the list to view details and respond

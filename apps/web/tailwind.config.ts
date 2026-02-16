@@ -68,6 +68,10 @@ const config: Config = {
                     800: 'rgb(var(--brand-800) / <alpha-value>)',
                     900: 'rgb(var(--brand-900) / <alpha-value>)',
                 },
+                apex: {
+                    DEFAULT: 'rgb(var(--brand-500) / <alpha-value>)',
+                    foreground: 'rgb(var(--primary-foreground) / <alpha-value>)',
+                },
                 surface: {
                     50: 'rgb(var(--surface-50) / <alpha-value>)',
                     100: 'rgb(var(--surface-100) / <alpha-value>)',
@@ -89,6 +93,10 @@ const config: Config = {
                 '6': 'var(--space-6)',
                 '8': 'var(--space-8)',
                 '12': 'var(--space-12)',
+            },
+            boxShadow: {
+                'premium': '0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06)',
+                'premium-hover': '0 14px 40px rgba(15,23,42,0.08)',
             },
             borderRadius: {
                 xl: 'var(--radius-xl)',

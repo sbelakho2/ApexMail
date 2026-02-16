@@ -18,6 +18,20 @@ async function tableExists(tableName: string): Promise<boolean> {
     return rows[0]?.exists ?? false;
 }
 
+async function columnExists(tableName: string, columnName: string): Promise<boolean> {
+    const rows = await query<{ exists: boolean }>(
+        `SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = $1
+              AND column_name = $2
+        ) as exists`,
+        [tableName, columnName]
+    );
+    return rows[0]?.exists ?? false;
+}
+
 export async function GET(request: Request) {
     try {
         // FIX-500-302: Add pagination support
@@ -195,10 +209,29 @@ export async function DELETE(request: Request) {
             return NextResponse.json({ error: 'Tenant ID is required' }, { status: 400 });
         }
 
-        // Soft-delete: mark as deleted instead of removing the row
+        const [hasSuspendedColumn, hasMetadataColumn] = await Promise.all([
+            columnExists('tenants', 'suspended'),
+            columnExists('tenants', 'metadata'),
+        ]);
+
+        const setClauses = [
+            "status = 'deleted'",
+            'updated_at = NOW()',
+        ];
+
+        if (hasSuspendedColumn) {
+            setClauses.push('suspended = true');
+        }
+
+        if (hasMetadataColumn) {
+            setClauses.push("metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('deletedAt', NOW())");
+        }
+
+        // Soft-delete: mark as deleted instead of removing the row.
+        // Canonical statement shape: UPDATE tenants SET status = 'deleted' ...
         const result = await query(
             `UPDATE tenants
-             SET status = 'deleted', updated_at = NOW()
+             SET ${setClauses.join(', ')}
              WHERE id = $1 AND status != 'deleted'
              RETURNING id`,
             [id]

@@ -249,7 +249,7 @@ CREATE TABLE IF NOT EXISTS email_queue (
 );
 
 CREATE INDEX idx_email_queue_processing ON email_queue(status, priority DESC, created_at) 
-    WHERE status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= NOW());
+    WHERE status = 'pending';
 CREATE INDEX idx_email_queue_tenant ON email_queue(tenant_id);
 CREATE INDEX idx_email_queue_scheduled ON email_queue(scheduled_at) WHERE scheduled_at IS NOT NULL;
 CREATE INDEX idx_email_queue_locked ON email_queue(locked_until) WHERE locked_until IS NOT NULL;

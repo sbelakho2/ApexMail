@@ -38,6 +38,7 @@ ALTER TABLE domains ADD COLUMN IF NOT EXISTS dns_records JSONB NOT NULL DEFAULT 
 ALTER TABLE domains ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
 
 -- Recreate the unique index with the new column name
+ALTER TABLE domains DROP CONSTRAINT IF EXISTS domains_tenant_id_name_key;
 DROP INDEX IF EXISTS domains_tenant_id_name_key;
 CREATE UNIQUE INDEX IF NOT EXISTS domains_tenant_id_domain_key ON domains(tenant_id, domain);
 

@@ -32,6 +32,12 @@ const DEFAULT_CONFIG: InferenceConfig = {
     contextLength: 8192,
 };
 
+// Phase-8 compatibility marker: include additional local model identifiers.
+const SUPPORTED_MODEL_NAMES = new Set([
+    'qwen2.5-7b-instruct',
+    'phi-3.5-mini',
+]);
+
 // Simple tokenizer for Qwen 2.5 (BPE-based, ChatML format)
 // In production, use the actual tokenizer from the model
 class SimpleTokenizer {
@@ -150,6 +156,9 @@ export class InferenceEngine extends EventEmitter {
     constructor(config?: Partial<InferenceConfig>) {
         super();
         this.config = { ...DEFAULT_CONFIG, ...config };
+        if (!SUPPORTED_MODEL_NAMES.has(this.config.modelName)) {
+            console.warn(`[AI] Unrecognized modelName "${this.config.modelName}"; supported examples include ${Array.from(SUPPORTED_MODEL_NAMES).join(', ')}`);
+        }
         this.tokenizer = new SimpleTokenizer();
         this.metrics = {
             requestCount: 0,

@@ -40,7 +40,9 @@
         --success: 22 163 74;
         --warning: 217 119 6;
         --danger: 220 38 38;
+        --destructive: 220 38 38;
         --info: 8 145 178;
+        --error: 220 38 38;
 
         --success-50: 240 253 244;
         --success-100: 220 252 231;
@@ -189,23 +191,49 @@
 
     body {
         @apply bg-background text-foreground;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-family: var(--font-inter), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         font-size: 17px;
         line-height: 1.6;
         font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
+    }
+
+    h1 {
+        @apply text-[40px] md:text-[56px] font-bold leading-[1.1] tracking-[-0.02em];
+    }
+
+    h2 {
+        @apply text-[28px] md:text-[36px] font-bold leading-[1.2] tracking-[-0.015em];
+    }
+
+    h3 {
+        @apply text-[20px] md:text-[24px] font-bold leading-[1.2] tracking-[-0.01em];
+    }
+
+    /* Core UI elements from Style Guide */
+    .apex-card {
+        @apply bg-card rounded-lg border border-border transition-premium shadow-premium;
+    }
+
+    .apex-card:hover {
+        @apply border-primary/30 bg-muted/50 shadow-premium-hover;
     }
 }
 
 @layer components {
     /* Premium transitions */
     .transition-premium {
-        @apply transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)];
+        transition-property: all;
+        transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+        transition-duration: 300ms;
     }
 
     /* Card Component */
     .card {
-        @apply bg-card rounded-[18px] border border-border transition-premium;
-        box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 10px 20px rgba(16,24,40,0.06);
+        @apply bg-card rounded-lg border border-border transition-premium shadow-premium;
+    }
+
+    .card:hover {
+        @apply border-primary/30 bg-muted/50 shadow-premium-hover;
     }
 
     .card-header {
@@ -241,14 +269,14 @@
 
     /* Badge Styles */
     .badge {
-        @apply inline-flex items-center px-2.5 py-1 rounded-sm text-[14px] font-medium;
+        @apply inline-flex items-center px-2.5 py-1 rounded-sm text-[14px] font-medium border;
     }
 
-    .badge-primary { @apply badge bg-primary/10 text-primary; }
-    .badge-success { @apply badge bg-success/10 text-success; }
-    .badge-warning { @apply badge bg-warning/10 text-warning; }
-    .badge-danger { @apply badge bg-destructive/10 text-destructive; }
-    .badge-neutral { @apply badge bg-muted text-muted-foreground; }
+    .badge-primary { @apply badge bg-primary/10 text-primary border-primary/20; }
+    .badge-success { @apply badge bg-success/10 text-success border-success/20; }
+    .badge-warning { @apply badge bg-warning/10 text-warning border-warning/20; }
+    .badge-danger { @apply badge bg-destructive/10 text-destructive border-destructive/20; }
+    .badge-neutral { @apply badge bg-muted text-muted-foreground border-border; }
 
     /* Data Table */
     .data-table {

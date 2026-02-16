@@ -131,7 +131,7 @@ export default function TenantsPage() {
             </div>
 
             {/* Filters */}
-            <div className="bg-card rounded-[18px] border border-border p-4 mb-6 shadow-sm">
+            <div className="bg-card rounded-lg border border-border p-4 mb-6 shadow-sm">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <div>
                         <input
@@ -180,7 +180,7 @@ export default function TenantsPage() {
             </div>
 
             {/* Tenant List */}
-            <div className="bg-card rounded-[18px] border border-border shadow-sm">
+            <div className="bg-card rounded-lg border border-border shadow-sm">
                 <div className="overflow-x-auto">
                     <table className="w-full">
                         <thead className="sticky top-0 z-10">
@@ -254,7 +254,7 @@ export default function TenantsPage() {
             {/* Tenant Detail Modal */}
             {selectedTenant && (
                 <div className="fixed inset-0 bg-background/80 flex items-center justify-center z-50 backdrop-blur-sm" onClick={() => setSelectedTenant(null)}>
-                    <div className="bg-card rounded-[18px] p-6 w-full max-w-2xl shadow-xl border border-border max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                    <div className="bg-card rounded-lg p-6 w-full max-w-2xl shadow-xl border border-border max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-start justify-between mb-6">
                             <div>
                                 <h2 className="text-xl font-bold text-foreground">{selectedTenant.name}</h2>
@@ -265,7 +265,7 @@ export default function TenantsPage() {
                                 className="text-muted-foreground hover:text-foreground transition-colors"
                                 aria-label="Close modal"
                             >
-                                ✕
+                                Close
                             </button>
                         </div>
 
@@ -352,8 +352,7 @@ export default function TenantsPage() {
                                 }}
                                 className="flex-1 px-4 py-2 min-h-[44px] bg-warning text-warning-foreground rounded-sm text-center hover:bg-warning/90 font-medium transition-colors flex items-center justify-center gap-2"
                             >
-                                {/* TODO: Replace emoji with Lucide Eye icon */}
-                                <span>👁️</span> Impersonate User
+                                Impersonate User
                             </button>
                             <Link
                                 href={`/support?tenant=${selectedTenant.id}`}
