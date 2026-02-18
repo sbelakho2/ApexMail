@@ -13,6 +13,9 @@
  *   in supporting email clients
  * 
  * - **TLSRPT (RFC 8460)**: TLS Reporting for receiving feedback about TLS issues
+ *
+ * - **DANE (RFC 6698, 7671, 7672)**: DNS-based Authentication of Named Entities
+ *   for TLSA record validation and certificate pinning
  * 
  * These standards are critical for:
  * 1. Maximum deliverability with major providers (Gmail, Microsoft, Yahoo)
@@ -24,3 +27,4 @@
 export * from './arc.js';
 export * from './mta-sts.js';
 export * from './bimi.js';
+export * from './dane.js';

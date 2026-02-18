@@ -192,6 +192,29 @@ const createWebhookSchema = z.object({
     retryDelay: z.number().int().min(1000).max(3600000).default(60000),
     backoffMultiplier: z.number().min(1).max(5).default(2),
   }).optional(),
+  /**
+   * mTLS (Mutual TLS) Configuration
+   * Enables client certificate authentication when delivering webhooks.
+   * The webhook endpoint must be configured to require and verify client certificates.
+   */
+  mtls: z.object({
+    /** PEM-encoded X.509 client certificate */
+    certificate: z.string().min(100).max(16384).refine(
+      (c) => c.includes('-----BEGIN CERTIFICATE-----'),
+      { message: 'Certificate must be PEM-encoded' }
+    ),
+    /** PEM-encoded private key (RSA or EC) */
+    privateKey: z.string().min(100).max(16384).refine(
+      (k) => k.includes('-----BEGIN') && k.includes('PRIVATE KEY-----'),
+      { message: 'Private key must be PEM-encoded' }
+    ),
+    /** Optional passphrase for encrypted private keys */
+    passphrase: z.string().max(256).optional(),
+    /** Optional CA certificate for server verification (self-signed endpoints) */
+    caCertificate: z.string().max(32768).optional(),
+    /** Skip server certificate verification (NOT recommended for production) */
+    rejectUnauthorized: z.boolean().default(true),
+  }).optional(),
   metadata: z.record(z.unknown()).refine(
     (m) => JSON.stringify(m).length <= 8192,
     { message: 'Metadata payload too large (max 8KB)' }

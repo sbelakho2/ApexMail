@@ -345,6 +345,65 @@ export function useDashboardStats() {
     return useAPI<DashboardStats>('/api/dashboard/stats');
 }
 
+// Support tickets types & hooks
+export interface SupportTicket {
+    id: string;
+    subject: string;
+    description: string;
+    status: 'open' | 'in_progress' | 'waiting_on_customer' | 'resolved' | 'closed';
+    priority: 'low' | 'medium' | 'high' | 'urgent';
+    category: 'billing' | 'technical' | 'feature_request' | 'bug' | 'general';
+    createdAt: string;
+    updatedAt: string;
+    messages: SupportTicketMessage[];
+}
+
+export interface SupportTicketMessage {
+    id: string;
+    content: string;
+    author: string;
+    authorType: 'customer' | 'support' | 'bot';
+    createdAt: string;
+    attachments: string[];
+}
+
+export interface TicketsResponse {
+    tickets: SupportTicket[];
+    pagination: { total: number; limit: number; offset: number; hasMore: boolean };
+}
+
+export function useTickets(limit = 50, offset = 0) {
+    return useAPI<TicketsResponse>(`/v1/support/tickets?limit=${limit}&offset=${offset}`);
+}
+
+export function useTicket(id: string | null) {
+    return useAPI<{ ticket: SupportTicket }>(id ? `/v1/support/tickets/${id}` : null);
+}
+
+export function useCreateTicket() {
+    return useAPIMutation<{ ticket: SupportTicket }, {
+        subject: string;
+        description: string;
+        category: string;
+        priority?: string;
+    }>('/v1/support/tickets', {
+        onSuccess: () => {
+            globalMutate((key) => typeof key === 'string' && key.includes('/support/tickets'));
+        },
+    });
+}
+
+export function useAddTicketMessage(ticketId: string) {
+    return useAPIMutation<
+        { message: SupportTicketMessage; botReply?: SupportTicketMessage },
+        { content: string; attachments?: string[] }
+    >(`/v1/support/tickets/${ticketId}/messages`, {
+        onSuccess: () => {
+            globalMutate((key) => typeof key === 'string' && key.includes('/support/tickets'));
+        },
+    });
+}
+
 export {
     fetcher,
     postFetcher,

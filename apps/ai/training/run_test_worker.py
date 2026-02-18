@@ -25,6 +25,16 @@ try:
 except ImportError:
     pass
 
+try:
+    from stress_test_r34 import R34_TESTS
+    for k, v in R34_TESTS.items():
+        if k in STRESS_TESTS:
+            STRESS_TESTS[k].extend(v)
+        else:
+            STRESS_TESTS[k] = v
+except ImportError:
+    pass
+
 
 def flatten_tests():
     flat = []

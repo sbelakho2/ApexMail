@@ -905,6 +905,80 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
     });
   });
 
+  /**
+   * Reverse DNS (PTR) lookup for a given IP address
+   * Used by the chatbot to verify rDNS configuration for sending IPs
+   */
+  router.get('/rdns', requireScopes('domains:read'), async (c) => {
+    const ip = c.req.query('ip');
+    if (!ip) {
+      throw ApiError.badRequest('Missing required query parameter: ip', 'MISSING_PARAM');
+    }
+
+    // Validate IP format (IPv4 or IPv6)
+    const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    const ipv6Regex = /^[0-9a-fA-F:]+$/;
+    if (!ipv4Regex.test(ip) && !ipv6Regex.test(ip)) {
+      throw ApiError.badRequest('Invalid IP address format', 'INVALID_IP');
+    }
+
+    try {
+      const dns = await import('dns');
+      const { promisify } = await import('util');
+      const reverseAsync = promisify(dns.reverse);
+
+      const hostnames = await reverseAsync(ip);
+      
+      // Verify forward resolution matches (FCrDNS check)
+      const resolveAsync = promisify(dns.resolve4);
+      let forwardMatch = false;
+      for (const hostname of hostnames) {
+        try {
+          const ips = await resolveAsync(hostname);
+          if (ips.includes(ip)) {
+            forwardMatch = true;
+            break;
+          }
+        } catch {
+          // Forward resolution failed — not a match
+        }
+      }
+
+      return c.json({
+        data: {
+          ip,
+          ptrRecords: hostnames,
+          forwardConfirmed: forwardMatch,
+          status: forwardMatch ? 'pass' : 'warning',
+          message: forwardMatch
+            ? `rDNS is correctly configured: ${ip} → ${hostnames[0]} → ${ip}`
+            : `rDNS exists (${hostnames.join(', ')}) but forward confirmation failed (FCrDNS mismatch)`,
+          recommendations: forwardMatch
+            ? []
+            : ['Ensure your PTR record hostname resolves back to the same IP (Forward-Confirmed rDNS)'],
+        },
+      });
+    } catch (err: any) {
+      const isNotFound = err?.code === 'ENOTFOUND' || err?.code === 'ENODATA';
+      return c.json({
+        data: {
+          ip,
+          ptrRecords: [],
+          forwardConfirmed: false,
+          status: 'fail',
+          message: isNotFound
+            ? `No PTR record found for ${ip}. rDNS is not configured.`
+            : `rDNS lookup failed: ${err.message}`,
+          recommendations: [
+            'Configure a PTR record with your IP provider/hosting company',
+            'The PTR hostname should match your sending domain or mail server hostname',
+            'Ensure the PTR hostname resolves forward to the same IP (FCrDNS)',
+          ],
+        },
+      });
+    }
+  });
+
   return router;
 }
 

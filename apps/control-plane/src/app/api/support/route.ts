@@ -3,9 +3,10 @@
  *
  * FIX-500-141: DB-backed support ticket management — no demo data.
  * Queries support_tickets + support_ticket_messages tables.
+ * Now with full CRUD: GET (list), POST (reply), PUT (update status/assignee).
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -44,7 +45,7 @@ export async function GET() {
              ORDER BY
                 CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
                 updated_at DESC
-             LIMIT 100`
+             LIMIT 200`
         );
 
         if (tickets.length === 0) {
@@ -92,5 +93,112 @@ export async function GET() {
     } catch (error) {
         console.error('Support API error:', error);
         return NextResponse.json({ error: 'Failed to fetch support tickets' }, { status: 500 });
+    }
+}
+
+/**
+ * POST /api/support — Add a reply to a ticket
+ * Body: { ticketId: string, content: string, author: string, setStatus?: string }
+ */
+export async function POST(request: NextRequest) {
+    try {
+        const body = await request.json();
+        const { ticketId, content, author, setStatus } = body;
+
+        if (!ticketId || !content || !author) {
+            return NextResponse.json(
+                { error: 'ticketId, content, and author are required' },
+                { status: 400 }
+            );
+        }
+
+        const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        await query(
+            `INSERT INTO support_ticket_messages (id, ticket_id, content, author, author_type, attachments, created_at)
+             VALUES ($1, $2, $3, $4, 'support', '[]', NOW())`,
+            [msgId, ticketId, content, author]
+        );
+
+        // Update ticket's updated_at and optionally status
+        if (setStatus) {
+            await query(
+                `UPDATE support_tickets SET updated_at = NOW(), status = $1 WHERE id = $2`,
+                [setStatus, ticketId]
+            );
+        } else {
+            await query(
+                `UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`,
+                [ticketId]
+            );
+        }
+
+        return NextResponse.json({
+            id: msgId,
+            ticketId,
+            content,
+            author,
+            authorType: 'support',
+            createdAt: new Date().toISOString(),
+        }, { status: 201 });
+    } catch (error) {
+        console.error('Support reply error:', error);
+        return NextResponse.json({ error: 'Failed to add reply' }, { status: 500 });
+    }
+}
+
+/**
+ * PUT /api/support — Update ticket status, priority, or assignee
+ * Body: { ticketId: string, status?: string, priority?: string, assignee?: string | null }
+ */
+export async function PUT(request: NextRequest) {
+    try {
+        const body = await request.json();
+        const { ticketId, status, priority, assignee } = body;
+
+        if (!ticketId) {
+            return NextResponse.json({ error: 'ticketId is required' }, { status: 400 });
+        }
+
+        const setClauses: string[] = ['updated_at = NOW()'];
+        const params: unknown[] = [];
+        let idx = 1;
+
+        if (status !== undefined) {
+            setClauses.push(`status = $${idx++}`);
+            params.push(status);
+        }
+        if (priority !== undefined) {
+            setClauses.push(`priority = $${idx++}`);
+            params.push(priority);
+        }
+        if (assignee !== undefined) {
+            setClauses.push(`assignee = $${idx++}`);
+            params.push(assignee);
+        }
+
+        params.push(ticketId);
+
+        const result = await query<TicketRow>(
+            `UPDATE support_tickets SET ${setClauses.join(', ')} WHERE id = $${idx} RETURNING *`,
+            params
+        );
+
+        if (result.length === 0) {
+            return NextResponse.json({ error: 'Ticket not found' }, { status: 404 });
+        }
+
+        const t = result[0];
+        return NextResponse.json({
+            id: t.id,
+            subject: t.subject,
+            status: t.status,
+            priority: t.priority,
+            assignee: t.assignee,
+            updatedAt: t.updated_at,
+        });
+    } catch (error) {
+        console.error('Support update error:', error);
+        return NextResponse.json({ error: 'Failed to update ticket' }, { status: 500 });
     }
 }

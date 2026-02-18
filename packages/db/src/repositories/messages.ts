@@ -1451,4 +1451,74 @@ export class MessagesRepository {
       }))
     );
   }
+
+  // ════════════════════════════════════════════════════════════════
+  // CAMPAIGN MANAGEMENT
+  // ════════════════════════════════════════════════════════════════
+
+  async createCampaign(input: {
+    tenantId: string;
+    name: string;
+    subject?: string;
+    listId?: string;
+    templateId?: string;
+    scheduledAt?: Date;
+    status: string;
+  }): Promise<{ id: string; name: string; status: string }> {
+    const id = generateUuid();
+    const result = await this.db.query(
+      `INSERT INTO campaigns (id, tenant_id, name, subject, list_id, template_id, scheduled_at, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, name, status, created_at`,
+      [id, input.tenantId, input.name, input.subject, input.listId, input.templateId, input.scheduledAt, input.status]
+    );
+    if (!result.ok) throw result.error;
+    return result.value.rows[0] as { id: string; name: string; status: string };
+  }
+
+  async findCampaignByName(name: string, tenantId: string): Promise<{ id: string; name: string; status: string } | null> {
+    const result = await this.db.query(
+      `SELECT id, name, status, created_at, updated_at FROM campaigns WHERE name = $1 AND tenant_id = $2`,
+      [name, tenantId]
+    );
+    if (!result.ok) throw result.error;
+    return (result.value.rows[0] as { id: string; name: string; status: string }) ?? null;
+  }
+
+  async updateCampaignStatus(
+    campaignId: string,
+    tenantId: string,
+    status: string
+  ): Promise<{ id: string; name: string; status: string }> {
+    const result = await this.db.query(
+      `UPDATE campaigns SET status = $3, updated_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING id, name, status`,
+      [campaignId, tenantId, status]
+    );
+    if (!result.ok) throw result.error;
+    return result.value.rows[0] as { id: string; name: string; status: string };
+  }
+
+  async getCampaignStats(campaignId: string, tenantId: string): Promise<Record<string, number>> {
+    const result = await this.db.query(
+      `SELECT status, COUNT(*)::int as count
+       FROM messages
+       WHERE campaign_id = $1 AND tenant_id = $2
+       GROUP BY status`,
+      [campaignId, tenantId]
+    );
+    if (!result.ok) throw result.error;
+    const stats: Record<string, number> = { sent: 0, delivered: 0, bounced: 0, failed: 0, queued: 0 };
+    for (const row of result.value.rows) {
+      stats[row.status as string] = row.count as number;
+    }
+    return stats;
+  }
+
+  async deleteCampaign(campaignId: string, tenantId: string): Promise<void> {
+    const result = await this.db.query(
+      `DELETE FROM campaigns WHERE id = $1 AND tenant_id = $2`,
+      [campaignId, tenantId]
+    );
+    if (!result.ok) throw result.error;
+  }
 }

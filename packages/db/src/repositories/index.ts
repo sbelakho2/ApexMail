@@ -19,3 +19,4 @@ export * from './subscriptions.js';
 export * from './smtp-credentials.js';
 export * from './reputation.js';
 export * from './system.js';
+export * from './support-tickets.js';

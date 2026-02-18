@@ -944,6 +944,1105 @@ Want me to generate specific subject lines for your campaign? Tell me your topic
         ],
         relatedGlossaryTerms: ['Revenue Per Email', 'Conversion Rate', 'A/B Testing', 'Segmentation'],
     },
+
+    // ═══════════════════════════════════════════════════════════════
+    // SUPPORT / TROUBLESHOOTING PATTERNS — backing playbook KNOWLEDGE intents
+    // ═══════════════════════════════════════════════════════════════
+
+    // ── AUTH: SPF/DKIM/DMARC debugging ──
+    {
+        intent: 'debug_email_authentication',
+        keywords: ['spf', 'dkim', 'dmarc', 'authentication', 'spf fail', 'dkim fail', 'dmarc fail', 'permerror', 'softfail', 'alignment', 'spf record', 'dkim selector', 'dmarc policy', 'dns txt record', 'authentication results header'],
+        sampleQuestions: [
+            'My emails are failing SPF checks',
+            'DKIM signature is invalid',
+            'How do I fix DMARC alignment?',
+            'SPF permerror — too many DNS lookups',
+            'What does a DMARC failure report mean?',
+        ],
+        contextualResponse: `Here's a systematic approach to debugging email authentication issues:
+
+**SPF (Sender Policy Framework):**
+- SPF authorizes which IPs can send on behalf of your domain via a DNS TXT record
+- **Common failures:**
+  - \`permerror\` — Too many DNS lookups (max 10). Flatten your record by replacing \`include:\` with \`ip4:\`/\`ip6:\` ranges
+  - \`softfail (~all)\` — Update to \`-all\` (hard fail) after confirming all legitimate senders are listed
+  - \`temperror\` — DNS timeout. Check DNS provider reliability
+  - Multiple SPF records — You can have only ONE SPF TXT record per domain. Merge them
+- **Fix:** \`v=spf1 include:_spf.apexmail.com include:_spf.google.com ~all\`
+
+**DKIM (DomainKeys Identified Mail):**
+- Signs emails with a cryptographic key; receiving servers verify via DNS public key
+- **Common failures:**
+  - \`body hash did not verify\` — Message was modified in transit (mailing list, forwarding, AV scanner)
+  - \`no key for signature\` — DKIM DNS record not published or selector mismatch
+  - \`key too small\` — Use 2048-bit keys minimum (some older systems use 1024-bit)
+  - Selector rotation: Publish the new selector 24-48h before switching to allow DNS propagation
+- **Fix:** Run \`dig TXT selector._domainkey.yourdomain.com\` to verify the public key is published
+
+**DMARC (Domain-based Message Authentication, Reporting & Conformance):**
+- DMARC requires SPF OR DKIM to pass AND align with the From domain
+- **Alignment modes:**
+  - \`aspf=r\` / \`adkim=r\` = relaxed (subdomain OK) — recommended for most senders
+  - \`aspf=s\` / \`adkim=s\` = strict (exact domain match only)
+- **Policy ramp-up:** Start with \`p=none\` → monitor reports → \`p=quarantine pct=10\` → increase pct → \`p=reject\`
+- **Forwarding breaks DMARC:** When recipients forward your email, SPF fails for the new server. Solution: Ensure DKIM passes (it survives forwarding) and use relaxed alignment
+- **Aggregate reports (rua):** Set \`rua=mailto:dmarc-reports@yourdomain.com\` to receive XML reports showing pass/fail breakdown
+
+**Debugging checklist:**
+1. Check Authentication-Results header in a received email
+2. Verify DNS records with \`dig TXT\` or MXToolbox
+3. Run ApexMail's \`force_dns_recheck\` to clear cached state
+4. Check DMARC aggregate reports for unauthorized senders`,
+        suggestedFollowUps: [
+            'Force a DNS recheck on my domain',
+            'Help me flatten my SPF record',
+            'Set up DMARC reporting',
+            'Rotate my DKIM selector',
+        ],
+        relatedGlossaryTerms: ['SPF', 'DKIM', 'DMARC', 'Sender Reputation'],
+    },
+    {
+        intent: 'advanced_dns_auth',
+        keywords: ['bimi', 'mta-sts', 'tls-rpt', 'tlsa', 'dane', 'rdns', 'ptr', 'reverse dns', 'vmc', 'brand logo', 'tls reporting'],
+        sampleQuestions: [
+            'How do I set up BIMI for my brand logo?',
+            'What is MTA-STS and do I need it?',
+            'My reverse DNS / PTR record is wrong',
+            'How do I set up DANE/TLSA?',
+            'What is TLS-RPT?',
+        ],
+        contextualResponse: `Advanced DNS authentication enhances security and brand visibility:
+
+**BIMI (Brand Indicators for Message Identification):**
+- Displays your brand logo next to emails in supported inboxes (Gmail, Yahoo, Apple Mail)
+- **Requirements:**
+  1. DMARC at \`p=quarantine\` or \`p=reject\` (not \`p=none\`)
+  2. SVG Tiny PS logo (square, specific format)
+  3. VMC (Verified Mark Certificate) — required by Gmail, costs ~$1,500/year from DigiCert or Entrust
+  4. DNS record: \`default._bimi.yourdomain.com TXT "v=BIMI1; l=https://yourdomain.com/logo.svg; a=https://yourdomain.com/vmc.pem"\`
+- Use \`check_bimi_status\` to verify your setup
+
+**MTA-STS (Mail Transfer Agent Strict Transport Security):**
+- Enforces TLS encryption for mail delivery to your domain (prevents downgrade attacks)
+- **Setup:**
+  1. Publish policy file at \`https://mta-sts.yourdomain.com/.well-known/mta-sts.txt\`
+  2. Add DNS record: \`_mta-sts.yourdomain.com TXT "v=STSv1; id=20240101"\`
+  3. Policy modes: \`testing\` (report only) → \`enforce\` (reject unencrypted)
+  4. Set \`max_age\` to 604800 (1 week) initially, increase once stable
+
+**TLS-RPT (TLS Reporting):**
+- Receive reports about TLS delivery failures to your domain
+- DNS record: \`_smtp._tls.yourdomain.com TXT "v=TLSRPTv1; rua=mailto:tls-reports@yourdomain.com"\`
+
+**DANE/TLSA:**
+- Pins the TLS certificate in DNS using DNSSEC, preventing MITM attacks
+- Requires DNSSEC-signed domain (most registrars support this now)
+- Record: \`_25._tcp.mail.yourdomain.com TLSA 3 1 1 <certificate-hash>\`
+
+**Reverse DNS (PTR / rDNS):**
+- The PTR record for your sending IP must resolve to a hostname that resolves back to that IP (forward-confirmed rDNS)
+- **Why it matters:** Gmail, Microsoft, and other providers check rDNS. Missing or mismatched PTR = spam folder
+- Contact your IP provider (hosting/ISP) to set rDNS — it can't be set in your domain's DNS`,
+        suggestedFollowUps: [
+            'Check my BIMI configuration',
+            'Verify my reverse DNS record',
+            'Set up MTA-STS for my domain',
+            'Check my current DMARC policy level',
+        ],
+        relatedGlossaryTerms: ['DMARC', 'SPF', 'DKIM', 'Sender Reputation'],
+    },
+
+    // ── SEND: SMTP troubleshooting ──
+    {
+        intent: 'smtp_troubleshooting',
+        keywords: ['smtp', 'connection', 'timeout', 'ehlo', 'helo', 'tls', 'starttls', '25', '465', '587', '2525', 'connection refused', 'connection reset', 'rcpt to', 'mail from', 'smtp error', 'smtp code', 'pipeline', 'pipelining'],
+        sampleQuestions: [
+            'SMTP connection timeout on port 587',
+            'Connection refused when sending email',
+            'What SMTP port should I use?',
+            'EHLO/HELO rejected by server',
+            'TLS handshake failed during SMTP',
+        ],
+        contextualResponse: `Systematic SMTP troubleshooting guide:
+
+**Port Selection:**
+| Port | Protocol | Use Case |
+|------|----------|----------|
+| 587  | STARTTLS | Standard submission port (recommended) |
+| 465  | Implicit TLS | Legacy but re-standardized in RFC 8314 |
+| 25   | Plain/STARTTLS | Server-to-server relay only (often blocked by ISPs) |
+| 2525 | STARTTLS | Alternative when 587 is blocked |
+
+**Common SMTP Errors & Fixes:**
+
+- **Connection timeout** → Firewall blocking outbound port. Check with \`telnet smtp.apexmail.com 587\`. Corporate firewalls often block 587; try 2525
+- **Connection refused** → Wrong port, server down, or IP blocked. Verify hostname and port
+- **421 Too many connections** → Reduce concurrent SMTP connections (max 10 recommended)
+- **450 Requested action not taken** → Temporary failure, retry with exponential backoff
+- **550 5.1.1 User unknown** → Invalid recipient address (hard bounce, remove from list)
+- **550 5.7.1 Relaying denied** → Authentication required. Send AUTH LOGIN before MAIL FROM
+- **552 Message size exceeds limit** → Reduce attachment size or use links instead
+- **554 Transaction failed** → Content trigger (spam filter), blocked IP, or policy violation
+
+**TLS Issues:**
+- \`SSL routines:ssl3_get_server_certificate:certificate verify failed\` → Update CA certificates on your system
+- \`tlsv1 alert protocol version\` → Server requires TLS 1.2+. Update your client library
+- STARTTLS on port 465 won't work (465 uses implicit TLS — connect with SSL directly)
+
+**SMTP Pipelining:**
+- Sends multiple commands without waiting for individual responses
+- Can cause issues with some legacy servers — disable if seeing unexpected 5xx errors after RCPT TO
+
+**Debugging steps:**
+1. Run \`get_smtp_transcript\` to see the raw SMTP conversation
+2. Check \`trace_message\` for the full delivery pipeline
+3. Verify DNS with \`force_dns_recheck\`
+4. Test connectivity: \`openssl s_client -connect smtp.apexmail.com:587 -starttls smtp\``,
+        suggestedFollowUps: [
+            'Show me the SMTP transcript for a failed message',
+            'Trace a message through the pipeline',
+            'Check if my IP is blocked',
+            'What are the SMTP rate limits?',
+        ],
+        relatedGlossaryTerms: ['Bounce Rate', 'Hard Bounce', 'Soft Bounce', 'Sender Reputation'],
+    },
+
+    // ── DLV: Bounce classification & handling ──
+    {
+        intent: 'bounce_classification',
+        keywords: ['bounce', 'hard bounce', 'soft bounce', 'bounce code', 'bounce reason', 'ndr', 'dsn', '550', '421', '452', 'deferred', 'rejected', 'undeliverable', 'mailbox full', 'user unknown', 'over quota'],
+        sampleQuestions: [
+            'What does bounce code 550 5.1.1 mean?',
+            'Difference between hard and soft bounce',
+            'Why is Gmail deferring my emails?',
+            'Microsoft is blocking all my emails',
+            'How do I handle bounce backs?',
+        ],
+        contextualResponse: `Email bounce classification and handling guide:
+
+**Bounce Categories:**
+
+| Type | Codes | Meaning | Action |
+|------|-------|---------|--------|
+| **Hard** | 5.1.x | Invalid address, domain doesn't exist | Remove immediately — never retry |
+| **Soft (temp)** | 4.2.x | Mailbox full, temporarily unavailable | Retry with backoff, suppress after 3 failures |
+| **Block** | 5.7.x | Policy rejection (spam, reputation) | Investigate sender reputation |
+| **Content** | 5.6.x | Content rejected (attachment, encoding) | Fix content and resend |
+| **System** | 4.4.x | Network/routing failure | Retry automatically |
+
+**Common Bounce Codes Explained:**
+- \`550 5.1.1\` — Recipient address doesn't exist (HARD — remove now)
+- \`550 5.1.2\` — Domain doesn't exist (HARD — remove now)
+- \`550 5.7.1\` — Rejected by policy (blocklist, reputation, content)
+- \`550 5.7.25\` — DMARC/authentication failure
+- \`421 4.7.0\` — Connection rate limited by recipient server (slow down)
+- \`452 4.2.2\` — Mailbox full (SOFT — retry later)
+- \`550 5.2.1\` — Account disabled/suspended (HARD — remove)
+
+**Provider-Specific Behavior:**
+
+*Gmail:*
+- Uses \`421-4.7.28\` for reputation-based deferrals
+- Enforces <0.1% complaint rate (Postmaster Tools)
+- Defers heavily if you ramp volume too fast
+
+*Microsoft (Outlook/Hotmail):*
+- Uses \`550 5.7.606\` for Sender Reputation filtering
+- Requires enrolling in SNDS (Smart Network Data Services)
+- Throttles new senders aggressively — warm up slowly
+
+*Yahoo:*
+- Blocks senders without List-Unsubscribe header (since Feb 2024)
+- Uses \`421 4.7.0\` for temporary blocks
+
+**Best Practices:**
+1. Process bounces in real-time — don't batch
+2. Hard bounces → immediate suppression
+3. Soft bounces → suppress after 3 consecutive failures across 7 days
+4. Monitor bounce rate — keep under 2% (ideally <1%)
+5. Never re-add bounced addresses without verification
+6. Use \`get_bounce_report\` and \`check_suppression_status\` to investigate`,
+        suggestedFollowUps: [
+            'Show me my bounce report',
+            'Check suppression status for an address',
+            'Why is Microsoft blocking me?',
+            'Clean my list of bounced addresses',
+        ],
+        relatedGlossaryTerms: ['Bounce Rate', 'Hard Bounce', 'Soft Bounce', 'Suppression List', 'Sender Reputation'],
+    },
+
+    // ── SUP: Suppression management ──
+    {
+        intent: 'suppression_management',
+        keywords: ['suppression', 'suppression list', 'suppressed', 'unsuppress', 'remove suppression', 'globally suppressed', 're-add suppressed', 'suppression scope', 'suppressed recipient'],
+        sampleQuestions: [
+            'Why is this contact suppressed?',
+            'How do I remove someone from the suppression list?',
+            'What is the difference between campaign and global suppression?',
+            'A valid contact is suppressed and I need to re-send',
+            'Check if an email address is suppressed',
+        ],
+        contextualResponse: `Suppression list management guide:
+
+**Types of Suppression:**
+
+| Scope | Trigger | Can Unsuppress? | Risk Level |
+|-------|---------|-----------------|------------|
+| **Hard bounce** | 5.1.x bounce | Yes (with caution) | High — re-sending to invalid = reputation damage |
+| **Spam complaint** | FBL report | No (requires explicit re-consent) | Critical — violates anti-spam law |
+| **Manual unsubscribe** | User clicked unsub link | No (requires explicit re-consent) | Critical — violates CAN-SPAM/GDPR |
+| **Admin suppression** | Added manually by admin | Yes | Low |
+| **List-level** | Bounced on specific list | Yes (can try on different list) | Medium |
+| **Global/Tenant** | Bounced/complained on any list | Requires admin approval | High |
+
+**When it's safe to unsuppress:**
+1. You **verified the address is valid** (typo was fixed, mailbox was recreated)
+2. You have **documented re-consent** from the recipient
+3. The suppression was an **admin/manual** addition that is no longer needed
+4. The address was a **role address** (info@, support@) that was incorrectly bounced
+
+**When NOT to unsuppress:**
+- Spam complaints — NEVER unsuppress without explicit written re-consent
+- Unsubscribes — Requires the person to re-subscribe themselves (double opt-in)
+- Repeated hard bounces — Address is genuinely invalid
+
+**How to investigate and resolve:**
+1. \`check_suppression_status\` — See why and when the address was suppressed
+2. \`get_suppression_scope\` — Check if it's per-campaign, per-list, or tenant-wide
+3. \`remove_from_suppression\` — After confirming validity and re-consent (requires Editor role)
+4. Verify the address is deliverable before re-sending
+
+⚠️ **Compliance warning:** Unsuppressing spam complaints or unsubscribes without proper re-consent violates CAN-SPAM (up to $51,744/email) and GDPR (up to 4% of global revenue).`,
+        suggestedFollowUps: [
+            'Check if a specific address is suppressed',
+            'View suppression scope for an address',
+            'Remove an address from suppression (with re-consent)',
+            'Export my full suppression list',
+        ],
+        relatedGlossaryTerms: ['Suppression List', 'Bounce Rate', 'Complaint Rate', 'CAN-SPAM', 'GDPR'],
+    },
+
+    // ── EVT: Webhook setup & troubleshooting ──
+    {
+        intent: 'webhook_troubleshooting',
+        keywords: ['webhook', 'webhooks', 'webhook endpoint', 'webhook failure', 'webhook retry', 'webhook signature', 'hmac', 'event notification', 'callback', 'webhook disabled', 'idempotency', 'webhook events', 'webhook delivery'],
+        sampleQuestions: [
+            'My webhooks are not being delivered',
+            'How do I verify webhook signatures?',
+            'Webhook endpoint returning 500 errors',
+            'What webhook events does ApexMail send?',
+            'How do I handle duplicate webhook events?',
+        ],
+        contextualResponse: `Webhook configuration and troubleshooting guide:
+
+**Available Webhook Events:**
+| Event | Trigger | Payload Key |
+|-------|---------|-------------|
+| \`message.delivered\` | Email accepted by recipient server | messageId, recipient, timestamp |
+| \`message.bounced\` | Hard or soft bounce received | messageId, bounceType, code, reason |
+| \`message.opened\` | Tracking pixel loaded | messageId, recipient, userAgent, ip |
+| \`message.clicked\` | Link clicked | messageId, recipient, url, userAgent |
+| \`message.complained\` | Spam complaint (FBL) | messageId, recipient, feedbackType |
+| \`message.unsubscribed\` | Unsubscribe action | messageId, recipient, method |
+| \`list.subscribed\` | New subscriber added | listId, contact, source |
+| \`campaign.sent\` | Campaign finished sending | campaignId, stats |
+
+**Signature Verification (HMAC-SHA256):**
+\`\`\`
+signature = HMAC-SHA256(webhook_secret, timestamp + "." + raw_body)
+Compare: X-ApexMail-Signature header vs computed signature
+Reject if timestamp is >5 minutes old (replay protection)
+\`\`\`
+
+**Common Failures & Fixes:**
+
+1. **Endpoint returning 4xx/5xx** → Check your server logs. 2xx required within 30 seconds
+2. **Webhook disabled after failures** → Re-enable with \`enable_webhook_endpoint\` after fixing the issue
+3. **Events not arriving** → Check \`get_webhook_config\` for event type filters and endpoint URL
+4. **Duplicate events** → Implement idempotency using the \`eventId\` field. Store processed IDs for 24h
+5. **Firewall blocking** → Whitelist ApexMail webhook IPs (available in dashboard)
+6. **Signature mismatch** → Verify you're using raw request body (not parsed JSON) for HMAC computation
+7. **Timeout** → Respond with 200 immediately, process asynchronously. Don't do heavy work in the handler
+
+**Retry Policy:**
+- Failed deliveries are retried with exponential backoff: 1m, 5m, 30m, 2h, 8h, 24h
+- After 6 consecutive failures, the endpoint is automatically disabled
+- Use \`get_webhook_delivery_log\` to see all delivery attempts and response codes
+- Use \`resend_webhook_events\` to manually replay missed events
+
+**Best Practices:**
+- Always verify signatures before processing
+- Respond 200 before processing (use a queue)
+- Handle events idempotently (same event may arrive twice)
+- Log all incoming webhooks for debugging
+- Set up alerting on webhook failure rates`,
+        suggestedFollowUps: [
+            'Show me my webhook configuration',
+            'View webhook delivery logs',
+            'Resend failed webhook events',
+            'Re-enable my disabled webhook endpoint',
+        ],
+        relatedGlossaryTerms: ['Tracking Pixel', 'Feedback Loop'],
+    },
+
+    // ── API: Error diagnosis & integration ──
+    {
+        intent: 'api_error_diagnosis',
+        keywords: ['api error', '400', '401', '403', '404', '409', '422', '429', '500', '502', '503', '504', 'rate limit', 'api key', 'authentication failed', 'unauthorized', 'forbidden', 'content-type', 'request body', 'api timeout', 'gateway timeout'],
+        sampleQuestions: [
+            'I\'m getting a 429 rate limit error',
+            'API returns 401 unauthorized',
+            'What does a 422 validation error mean?',
+            'API is returning 500 internal server error',
+            'How do I fix a 403 forbidden error?',
+        ],
+        contextualResponse: `API error diagnosis guide:
+
+**HTTP Error Codes & Fixes:**
+
+| Code | Meaning | Common Cause | Fix |
+|------|---------|-------------|-----|
+| **400** | Bad Request | Missing required field, invalid JSON, wrong Content-Type | Check request body schema. Use \`Content-Type: application/json\` |
+| **401** | Unauthorized | Invalid, expired, or missing API key | Check \`Authorization: Bearer <key>\` header. Regenerate key if needed |
+| **403** | Forbidden | Key lacks required scope, IP not allowlisted, account suspended | Check API key permissions. Verify IP allowlist with \`manage_ip_allowlist\` |
+| **404** | Not Found | Wrong endpoint URL, resource doesn't exist | Check API docs for correct endpoint. Verify resource ID exists |
+| **409** | Conflict | Duplicate request, resource already exists | Use idempotency key to prevent duplicates. Check existing resources |
+| **422** | Unprocessable | Valid JSON but business logic rejection (invalid email, quota exceeded) | Read the error \`details\` field for specific validation failures |
+| **429** | Rate Limited | Too many requests | Check \`X-RateLimit-Remaining\` and \`Retry-After\` headers. Implement exponential backoff |
+| **500** | Internal Error | Server-side bug | Retry with backoff. If persistent, check \`get_api_health_detailed\` and contact support |
+| **502** | Bad Gateway | Upstream service unavailable | Usually transient. Retry after 30 seconds |
+| **503** | Service Unavailable | Maintenance or overload | Check status page. Retry with backoff |
+| **504** | Gateway Timeout | Request took too long | Reduce batch size. Use async endpoints for large operations |
+
+**Rate Limits:**
+| Plan | Requests/second | Burst | Daily |
+|------|-----------------|-------|-------|
+| Free | 1 | 5 | 1,000 |
+| Starter | 10 | 50 | 50,000 |
+| Business | 50 | 200 | 500,000 |
+| Enterprise | 200 | 1,000 | Unlimited |
+
+**Debugging Steps:**
+1. Check \`get_rate_limit_status\` for current quota state
+2. Check \`get_api_error_log\` for recent error patterns
+3. Verify API key scopes match the endpoint requirements
+4. Use \`enable_sdk_debug_mode\` for verbose request/response logging
+5. Test with curl before blaming client code
+
+**Idempotency:**
+- Include \`Idempotency-Key: <uuid>\` header on POST/PUT requests
+- Server returns cached response for duplicate keys (24h window)
+- Critical for payment, sending, and contact mutation endpoints`,
+        suggestedFollowUps: [
+            'Check my current rate limit status',
+            'View my API error log',
+            'Run an API health check',
+            'Enable SDK debug mode',
+        ],
+        relatedGlossaryTerms: [],
+    },
+
+    // ── API: SDK integration ──
+    {
+        intent: 'sdk_integration_help',
+        keywords: ['sdk', 'node sdk', 'python sdk', 'javascript', 'typescript', 'npm', 'pip', 'esm', 'commonjs', 'import', 'require', 'lambda', 'workers', 'cloudflare', 'next.js', 'nextjs', 'proxy', 'retry', 'timeout', 'sdk error'],
+        sampleQuestions: [
+            'How do I install the Node.js SDK?',
+            'Python SDK throwing import errors',
+            'ESM vs CommonJS import issue',
+            'How to use the SDK in AWS Lambda?',
+            'SDK timeout configuration',
+        ],
+        contextualResponse: `ApexMail SDK integration guide:
+
+**Node.js SDK:**
+\`\`\`
+npm install @apexmail/sdk
+// or
+pnpm add @apexmail/sdk
+\`\`\`
+
+*ESM (recommended):*
+\`\`\`javascript
+import { ApexMail } from '@apexmail/sdk';
+const client = new ApexMail({ apiKey: process.env.APEXMAIL_API_KEY });
+\`\`\`
+
+*CommonJS:*
+\`\`\`javascript
+const { ApexMail } = require('@apexmail/sdk');
+\`\`\`
+
+**Python SDK:**
+\`\`\`
+pip install apexmail
+\`\`\`
+\`\`\`python
+from apexmail import ApexMailClient
+client = ApexMailClient(api_key=os.environ['APEXMAIL_API_KEY'])
+\`\`\`
+
+**Configuration Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| \`timeout\` | 30000ms | Request timeout (increase for batch operations) |
+| \`retries\` | 3 | Auto-retry on 429/5xx with exponential backoff |
+| \`baseUrl\` | api.apexmail.com | Override for on-premise or proxy setups |
+| \`debug\` | false | Enable verbose logging |
+
+**Platform-Specific Notes:**
+
+*AWS Lambda:*
+- Set timeout > 30s to account for cold starts + API latency
+- Use connection keep-alive: \`keepAlive: true\`
+- Store API key in AWS Secrets Manager, not env vars
+
+*Cloudflare Workers:*
+- Use \`fetch\`-based transport (Workers don't support Node.js \`http\` module)
+- SDK auto-detects Workers runtime and uses appropriate transport
+
+*Next.js:*
+- Use SDK in Server Components or API Routes only (not in client components — API key exposure risk)
+- For App Router: use in \`route.ts\` handlers or Server Actions
+
+*Proxy/Corporate Network:*
+- Set \`proxy: 'http://proxy.corp.com:8080'\` in SDK config
+- Or use \`HTTPS_PROXY\` environment variable
+
+**Troubleshooting:**
+- \`ERR_MODULE_NOT_FOUND\` — Check your \`package.json\` has \`"type": "module"\` for ESM
+- \`Cannot find module\` — Run \`npm install\` again, check node_modules
+- \`ECONNREFUSED\` — Proxy or firewall issue, check network connectivity
+- \`ETIMEOUT\` — Increase timeout config, check for Lambda cold start`,
+        suggestedFollowUps: [
+            'Enable SDK debug mode',
+            'Show me a code sample for sending email',
+            'How do I handle SDK errors properly?',
+            'Check my API key permissions',
+        ],
+        relatedGlossaryTerms: [],
+    },
+
+    // ── TPL: Template & content rendering ──
+    {
+        intent: 'template_rendering_issues',
+        keywords: ['template', 'handlebars', 'mustache', 'variable', 'merge tag', 'render', 'rendering', 'placeholder', 'dynamic content', 'personalization', 'conditional', 'css', 'inline css', 'mobile', 'responsive', 'preheader', 'preview text', 'image', 'inline image', 'emoji', 'dark mode'],
+        sampleQuestions: [
+            'My template variables are not rendering',
+            'Handlebars {{name}} showing as blank',
+            'Email looks broken on Outlook',
+            'How do I add conditional content?',
+            'CSS styles not working in email',
+        ],
+        contextualResponse: `Email template rendering troubleshooting guide:
+
+**Variable/Merge Tag Issues:**
+- \`{{variable}}\` showing as blank → Variable key mismatch. Check the JSON payload key matches exactly (case-sensitive)
+- \`{{variable}}\` showing literally → Template engine not processing. Verify the template type is set to Handlebars
+- Nested variables: Use \`{{contact.firstName}}\` for nested objects
+- Default values: \`{{firstName fallback="there"}}\` to avoid blank greetings
+- Conditional blocks: \`{{#if premium}}...{{else}}...{{/if}}\`
+
+**CSS & Rendering:**
+- **Always inline CSS** — Most email clients strip \`<style>\` blocks. Use a CSS inliner tool
+- **Outlook limitations:** No \`display:flex\`, \`border-radius\`, \`background-image\` on table cells. Use \`<table>\` layout
+- **Gmail:** Strips \`<style>\` in \`<head>\`, keeps inline styles. Max width 600px
+- **Dark mode:** Use \`@media (prefers-color-scheme: dark)\` but also set explicit background colors on all elements
+- **Mobile responsive:** Use \`<meta name="viewport" content="width=device-width">\` and max-width on containers
+
+**Common Rendering Fixes:**
+1. **Images not showing** → Use absolute URLs, add \`alt\` text, keep total email size <102KB (Gmail clipping threshold)
+2. **Gmail clipping "View entire message"** → Email HTML exceeds 102KB. Reduce HTML, remove unnecessary whitespace
+3. **Broken layout in Outlook** → Use \`<!--[if mso]>\` conditional comments for Outlook-specific code
+4. **Emoji not rendering** → Use HTML entities (\`&#128522;\`) instead of raw emoji. Test across clients
+5. **Preheader text** → Add as the first element in \`<body>\`, then hide with \`display:none; max-height:0; overflow:hidden\`
+
+**Template Validation:**
+- Use \`validate_template\` to check for syntax errors, missing variables, and rendering issues
+- Use \`get_content_scan_result\` to check if content triggers spam filters
+- Test rendering in Litmus or Email on Acid before sending
+
+**Best Practices:**
+- 600px max width for email body
+- 14px minimum font size for body text
+- 44x44px minimum touch targets for mobile CTAs
+- Alt text on all images (some clients block images by default)
+- Plain-text version always included`,
+        suggestedFollowUps: [
+            'Validate my email template',
+            'Check content scan results',
+            'Preview my template on different email clients',
+            'Help me fix Outlook rendering issues',
+        ],
+        relatedGlossaryTerms: ['Preheader', 'Call-to-Action', 'Personalization'],
+    },
+
+    // ── EVT: Link tracking & branding ──
+    {
+        intent: 'link_tracking_branding',
+        keywords: ['tracking', 'link tracking', 'click tracking', 'open tracking', 'tracking domain', 'custom tracking', 'link branding', 'cname', 'ssl', 'ssl certificate', 'click rewriting', 'utm', 'utm parameters', 'bot clicks', 'bot filtering', 'prefetch'],
+        sampleQuestions: [
+            'How does link tracking work?',
+            'Set up custom tracking domain',
+            'Bot clicks inflating my click metrics',
+            'SSL certificate for tracking domain not working',
+            'How do I add UTM parameters?',
+        ],
+        contextualResponse: `Link tracking and branding guide:
+
+**How Tracking Works:**
+- **Open tracking:** 1x1 transparent pixel image loaded by email client → fires open event
+- **Click tracking:** Links rewritten through tracking domain → records click → redirects to original URL
+- **Default domain:** \`trk.apexmail.com\` → professional senders should use custom branded domain
+
+**Custom Tracking Domain Setup:**
+1. Choose a subdomain: \`email.yourdomain.com\` or \`links.yourdomain.com\`
+2. Add CNAME record: \`email.yourdomain.com → trk.apexmail.com\`
+3. SSL certificate is auto-provisioned (Let's Encrypt). Check status with \`check_cert_provisioning_status\`
+4. Allow 15-30 minutes for DNS propagation and certificate issuance
+5. Verify with \`get_tracking_domain_config\`
+
+**SSL Issues:**
+- Certificate pending → DNS not propagated yet. Wait and re-check
+- Certificate failed → CNAME record incorrect or CAA record blocking Let's Encrypt
+- Certificate expired → Auto-renewal should handle this. If failing, check DNS and run \`check_cert_provisioning_status\`
+
+**Bot Click Filtering:**
+- Security bots (Microsoft Defender, Barracuda) pre-fetch links in emails, inflating click metrics
+- **ApexMail auto-filters:** Clicks within 2 seconds of delivery, known bot user-agents, same-IP mass clicking
+- If bot clicks are still appearing, check your filter settings and review the user-agent patterns
+
+**UTM Parameters:**
+- Automatically appended: \`utm_source=apexmail&utm_medium=email&utm_campaign={campaign_name}\`
+- Custom UTM: Set in campaign settings or per-link overrides
+- UTM tracking is independent of click tracking — both can work together
+
+**Tracking Domain Rotation:**
+- Use \`rotate_tracking_domain\` if your current tracking domain is reputation-flagged
+- ⚠️ Old links in previously sent emails will still use the old domain — keep it active
+
+**Privacy Considerations:**
+- Apple MPP pre-loads tracking pixels (~60% of iOS users) → open tracking is less reliable
+- Some corporate email gateways strip tracking pixels — focus on click metrics
+- GDPR requires disclosure of tracking in privacy policy`,
+        suggestedFollowUps: [
+            'Check my tracking domain configuration',
+            'Check SSL certificate provisioning status',
+            'Set up a custom tracking domain',
+            'Show me click tracking analytics',
+        ],
+        relatedGlossaryTerms: ['Open Rate', 'Click-Through Rate', 'Apple MPP', 'Tracking Pixel'],
+    },
+
+    // ── ACC: Billing & quota management ──
+    {
+        intent: 'billing_quota_understanding',
+        keywords: ['quota', 'sending limit', 'plan limit', 'overage', 'what counts', 'send count', 'billing cycle', 'test sends', 'retry billing', 'burst', 'queue sla', 'invoice', 'reconciliation', 'usage breakdown'],
+        sampleQuestions: [
+            'What counts as a sent email for billing?',
+            'Am I being charged for test sends?',
+            'My invoice doesn\'t match my actual sends',
+            'What happens when I hit my quota limit?',
+            'How does burst sending affect my billing?',
+        ],
+        contextualResponse: `Billing and quota management guide:
+
+**What Counts as a "Send":**
+- Each unique recipient = 1 send (a campaign to 1,000 contacts = 1,000 sends)
+- Test sends (preview, proof) = YES, they count
+- Retries after soft bounce = NO, they don't count (same messageId)
+- Webhook event delivery = NO
+- Transactional emails = counted separately if on a transactional plan
+
+**Quota Behavior:**
+| Scenario | What Happens |
+|----------|-------------|
+| 80% of quota used | Warning notification |
+| 100% of quota reached | New sends queued (not rejected) |
+| 24h at 100% | Sends start being rejected with 429 |
+| Quota resets | Monthly on billing cycle date |
+
+**Invoice Reconciliation:**
+If your invoice doesn't match expectations:
+1. Run \`get_usage_breakdown\` — shows hourly/daily breakdown by type
+2. Run \`get_invoice_reconciliation\` — compares invoice vs actual API logs
+3. Common discrepancies:
+   - Test/preview emails counted in billing but not in campaign stats
+   - Automation sends not visible in campaign dashboard
+   - Multi-recipient API calls counted per recipient, not per API call
+
+**Burst Sending:**
+- Burst = sending above your sustained rate temporarily
+- Bursts are allowed up to 2x your plan's per-second rate for 60 seconds
+- Sustained bursting may trigger rate limiting (429)
+- Use \`get_rate_limit_status\` to check remaining burst capacity
+
+**Queue SLA:**
+- Campaign emails: delivered within 1 hour of schedule time (99.9% SLA)
+- Transactional emails: delivered within 30 seconds of API call (99.95% SLA)
+- Check \`get_worker_status\` if queue is backing up`,
+        suggestedFollowUps: [
+            'Check my current quota status',
+            'Show me my usage breakdown',
+            'Run an invoice reconciliation',
+            'What plan should I be on?',
+        ],
+        relatedGlossaryTerms: [],
+    },
+
+    // ── OPS: IP warmup & infrastructure ──
+    {
+        intent: 'ip_warmup_infrastructure',
+        keywords: ['warmup', 'warm up', 'ip warmup', 'dedicated ip', 'shared ip', 'ip pool', 'ip assignment', 'warmup schedule', 'warmup stalled', 'reputation building', 'new ip', 'ipv6', 'sending infrastructure', 'connection pooling'],
+        sampleQuestions: [
+            'How do I warm up a new dedicated IP?',
+            'My IP warmup seems to have stalled',
+            'Should I use dedicated or shared IP?',
+            'How do I request a dedicated IP?',
+            'What\'s the warmup schedule?',
+        ],
+        contextualResponse: `IP warmup and sending infrastructure guide:
+
+**Dedicated vs Shared IP:**
+| Factor | Shared IP | Dedicated IP |
+|--------|-----------|-------------|
+| Cost | Included in plan | Starter: N/A, Business: $30/mo, Enterprise: included |
+| Reputation | Shared with other senders | 100% yours to build |
+| Volume needed | Any | Minimum 50,000 emails/month recommended |
+| Warmup required | No (already warm) | Yes (4-8 weeks) |
+| Best for | Low-volume senders | High-volume, reputation-sensitive senders |
+
+**IP Warmup Schedule (Recommended):**
+| Week | Daily Volume | Target Recipients |
+|------|-------------|------------------|
+| 1 | 50-100 | Most engaged subscribers only |
+| 2 | 200-500 | Engaged (opened in last 30 days) |
+| 3 | 500-1,000 | Engaged (opened in last 60 days) |
+| 4 | 1,000-5,000 | Active subscribers |
+| 5 | 5,000-10,000 | Full list segments |
+| 6 | 10,000-50,000 | Expanding to full list |
+| 7-8 | 50,000+ | Full volume |
+
+**Critical Warmup Rules:**
+1. **Send to engaged users first** — Opens/clicks signal legitimacy to ISPs
+2. **Maintain consistency** — Don't skip days or have huge volume swings
+3. **Monitor bounce rate** — If >5% on any day, pause and investigate
+4. **Watch for deferrals** — 421 codes are normal during warmup, but excessive deferrals mean slow down
+5. **Don't switch IPs mid-warmup** — Stick with the same IP throughout
+6. **Authenticate** — SPF, DKIM, DMARC must be perfect before starting
+
+**Warmup Stalled?**
+- Check \`get_warmup_status\` — shows current progress, volume targets, and health metrics
+- Common causes: volume didn't increase for >3 days, bounce rate spiked, recipient engagement too low
+- Fix: Resume with engaged segment, verify list quality, check authentication
+
+**IPv6 Sending:**
+- Supported but not required. Gmail and Yahoo accept IPv6
+- IPv6 requires separate warmup from IPv4
+- PTR records required for IPv6 addresses too`,
+        suggestedFollowUps: [
+            'Check my IP warmup status',
+            'Request a dedicated IP',
+            'Show my current IP assignment',
+            'What\'s my sending reputation?',
+        ],
+        relatedGlossaryTerms: ['Sender Reputation', 'SPF', 'DKIM', 'DMARC'],
+    },
+
+    // ── SEC: Security best practices ──
+    {
+        intent: 'security_best_practices',
+        keywords: ['api key', 'api key security', 'ip allowlist', 'ip whitelist', 'rbac', 'role', 'permission', 'sso', 'saml', '2fa', 'mfa', 'two factor', 'scim', 'team member', 'audit log', 'access control', 'key rotation', 'least privilege'],
+        sampleQuestions: [
+            'How do I secure my API keys?',
+            'Set up IP allowlisting',
+            'What roles and permissions are available?',
+            'How do I enable SSO/SAML?',
+            'Best practices for API key management',
+        ],
+        contextualResponse: `Security best practices for ApexMail:
+
+**API Key Security:**
+1. **Never expose keys client-side** — Use server-side calls only
+2. **Use scoped keys** — Create keys with minimum required permissions (read-only, send-only, etc.)
+3. **Rotate keys regularly** — Every 90 days recommended. Old key stays valid for 24h overlap
+4. **Use environment variables** — Never hardcode keys in source code or commit to git
+5. **IP-restrict keys** — Bind keys to specific IPs with \`manage_ip_allowlist\`
+6. **Monitor usage** — Check \`get_api_access_log\` for unusual activity
+
+**Role-Based Access Control (RBAC):**
+| Role | Permissions |
+|------|------------|
+| **Viewer** | Read-only access to campaigns, stats, logs |
+| **Editor** | Create/edit campaigns, manage contacts, view reports |
+| **Admin** | Full access including billing, API keys, team management |
+| **Owner** | Admin + account deletion, plan changes, security settings |
+
+**Team Security:**
+- Enforce 2FA/MFA for all team members (especially Admins)
+- Use SSO/SAML for enterprise — eliminates password management
+- SCIM provisioning for automatic user lifecycle management
+- Review team member access quarterly — remove inactive accounts
+- Use \`get_user_permissions\` to audit current role assignments
+
+**Account Security Monitoring:**
+- Enable webhook for \`security.api_key_created\` and \`security.login\` events
+- Review \`get_audit_log\` regularly for unexpected changes
+- Set up alerts for API access from new geographic locations
+- Use \`get_api_access_log\` to monitor for key compromise indicators
+
+**Emergency Response:**
+- Compromised API key → Immediately revoke with \`revoke_api_key\`
+- Suspicious sending → Use \`set_emergency_throttle\` to halt sending
+- Account takeover → Use \`freeze_account\` to lock everything immediately
+- Post-incident → Export audit log for forensic review`,
+        suggestedFollowUps: [
+            'Check my current user permissions',
+            'View my audit log',
+            'Set up IP allowlisting',
+            'Check API access logs',
+        ],
+        relatedGlossaryTerms: [],
+    },
+
+    // ── CMP: Compliance procedures ──
+    {
+        intent: 'compliance_procedures',
+        keywords: ['gdpr erasure', 'data deletion', 'right to be forgotten', 'data subject request', 'dsar', 'dpa', 'data processing agreement', 'soc 2', 'hipaa', 'baa', 'data residency', 'data retention', 'legal hold', 'litigation hold', 'consent proof', 'opt-in proof', 'google yahoo 2024', 'list-unsubscribe'],
+        sampleQuestions: [
+            'How do I handle a GDPR data deletion request?',
+            'I need a Data Processing Agreement',
+            'Do you have SOC 2 certification?',
+            'How do I prove opt-in consent?',
+            'Google/Yahoo 2024 sender requirements',
+        ],
+        contextualResponse: `Compliance procedures guide:
+
+**GDPR Data Subject Requests:**
+1. **Right to Erasure (Article 17):**
+   - Must process within 30 days
+   - Use \`execute_gdpr_erasure\` — permanently deletes: contact record, all message content, activity logs, metadata
+   - ⚠️ Irreversible — confirm with customer before executing
+   - Generates compliance certificate with timestamp and scope
+
+2. **Right to Access (Article 15):**
+   - Export all data associated with the email address
+   - Includes: profile data, consent records, message history, activity logs
+   - Must respond within 30 days
+
+3. **Consent Proof:**
+   - Use \`get_consent_record\` — shows timestamp, method (form, API, import), IP address, and exact opt-in text
+   - Always use double opt-in — provides strongest consent evidence
+   - Store consent proof for the lifetime of the subscriber relationship + 3 years
+
+**Data Processing Agreement (DPA):**
+- Required when processing EU personal data
+- Use \`request_dpa\` — pre-signed DPA available for download
+- Covers: sub-processors, data transfers, security measures, breach notification
+
+**Certifications & Compliance Docs:**
+| Document | Status | Request |
+|----------|--------|---------|
+| SOC 2 Type II | Available | \`request_compliance_doc\` |
+| HIPAA BAA | Enterprise only | \`request_compliance_doc\` |
+| ISO 27001 | In progress | Contact sales |
+| GDPR DPA | Available | \`request_dpa\` |
+| CCPA Addendum | Available | \`request_compliance_doc\` |
+
+**Data Retention Policy:**
+- Default: Message content retained for 90 days, activity logs for 365 days
+- Customizable with \`set_retention_policy\` (minimum 30 days for operational needs)
+- \`set_legal_hold\` prevents deletion of specific data during litigation/investigation
+
+**Google/Yahoo 2024 Bulk Sender Requirements (>5,000/day):**
+1. ✅ SPF and DKIM authentication on sending domain
+2. ✅ DMARC policy published (at minimum p=none)
+3. ✅ One-click List-Unsubscribe (RFC 8058) in all marketing emails
+4. ✅ Spam rate below 0.3% (target <0.1%)
+5. ✅ Valid forward and reverse DNS (PTR) records
+6. ✅ TLS encryption for SMTP transmission
+7. ✅ From: header domain aligned with SPF or DKIM domain`,
+        suggestedFollowUps: [
+            'Process a GDPR erasure request',
+            'Request a DPA',
+            'Check my compliance risk score',
+            'Look up consent proof for a subscriber',
+        ],
+        relatedGlossaryTerms: ['GDPR', 'CAN-SPAM', 'CCPA', 'Double Opt-in', 'List-Unsubscribe Header'],
+    },
+
+    // ── SEC: Sending suspended scenarios ──
+    {
+        intent: 'sending_suspended',
+        keywords: ['suspended', 'account suspended', 'sending paused', 'sending disabled', 'sending blocked', 'complaint threshold', 'purchased list', 'content violation', 'phishing', 'abuse', 'tos violation', 'terms of service'],
+        sampleQuestions: [
+            'Why is my sending suspended?',
+            'My account was disabled for high complaints',
+            'How do I get my account reactivated?',
+            'Sending paused for content violation',
+            'I did not send spam, this is a mistake',
+        ],
+        contextualResponse: `Account suspension and sending pause troubleshooting:
+
+**Common Suspension Reasons:**
+
+| Reason | Trigger | Severity | Resolution |
+|--------|---------|----------|------------|
+| **High complaint rate** | >0.3% spam complaints | Critical | List cleanup + re-engagement required |
+| **High bounce rate** | >10% bounces in a send | High | Verify list, remove invalid addresses |
+| **Purchased/scraped list** | Detected spam trap hits | Critical | Remove the list, use only opt-in contacts |
+| **Content violation** | Phishing, malware, deceptive content | Critical | Content review required |
+| **Billing past due** | Payment failed for >7 days | Medium | Update payment method |
+| **TOS violation** | Prohibited content (per AUP) | Critical | Account review required |
+
+**Self-Service Resolution Steps:**
+1. \`get_sending_status\` — See exactly why sending was paused and what triggered it
+2. Check your bounce and complaint rates with \`get_bounce_report\` and \`get_complaint_rate\`
+3. Clean your list — remove all bounced, unsubscribed, and unengaged contacts
+4. If billing-related — update payment at billing.apexmail.com
+
+**Escalation Required For:**
+- "Purchased list" determination you believe is incorrect
+- Content violation you believe is a false positive
+- Account suspended for >7 days without resolution
+- Request to present evidence of legitimate list building
+
+**Reactivation Process:**
+1. Address the root cause (clean list, fix content, update billing)
+2. Submit reactivation request with remediation steps taken
+3. Support reviews within 24-48 hours
+4. If approved: sending resumes on probation (reduced limits for 14 days)
+5. Full limits restored after clean sending during probation
+
+**Prevention:**
+- Use double opt-in for all signups
+- Never import purchased or rented lists
+- Monitor complaint rate daily (target <0.1%)
+- Implement sunset policy for unengaged subscribers
+- Review content against AUP before sending`,
+        suggestedFollowUps: [
+            'Check my sending status',
+            'View my complaint rate',
+            'Get my bounce report',
+            'Contact support for reactivation',
+        ],
+        relatedGlossaryTerms: ['Complaint Rate', 'Bounce Rate', 'Spam Trap', 'Sender Reputation', 'Suppression List'],
+    },
+
+    // ── OPS: Performance diagnostics ──
+    {
+        intent: 'performance_diagnostics',
+        keywords: ['slow', 'latency', 'performance', 'api slow', 'sending slow', 'queue backed up', 'delayed', 'lag', 'timeout', 'worker', 'redis', 'postgres', 'database slow', 'nginx', 'high cpu', 'memory', 'disk'],
+        sampleQuestions: [
+            'API responses are slow',
+            'My emails are delayed in the queue',
+            'System seems sluggish today',
+            'Sending is taking longer than usual',
+            'Is there a system performance issue?',
+        ],
+        contextualResponse: `Performance diagnostics guide:
+
+**Symptoms & Diagnostic Actions:**
+
+| Symptom | Check | Action |
+|---------|-------|--------|
+| API latency >500ms | \`get_api_health_detailed\` | Check if specific endpoints are slow |
+| Emails delayed | \`get_worker_status\` | Check queue depth and processing rate |
+| Dashboard slow | \`get_system_health\` | Check PostgreSQL and Redis health |
+| Sends stalled | \`get_throttle_status\` | Check if rate limiting is active |
+| Webhooks delayed | \`get_webhook_delivery_log\` | Check webhook queue separately |
+
+**System Health Checks:**
+1. \`get_system_health\` — Overall status of all services (API, MTA, workers, databases)
+2. \`get_worker_status\` — Background job queue depth, processing rate, error rate
+3. \`get_api_health_detailed\` — Per-endpoint latency percentiles and error rates
+4. \`get_throttle_status\` — Any active rate limits or sending throttles
+
+**Common Performance Issues:**
+- **API latency spike:** Usually database-related. Check if large queries are running (analytics, exports)
+- **Queue backup:** Worker processes may be restarting or overwhelmed. Check \`get_worker_status\`
+- **Delayed sends:** Could be warmup throttling, recipient server deferrals, or queue backup
+- **Webhook delays:** Separate queue from email sending. Check endpoint response times
+
+**What You Can Do:**
+- Large batches → Use async API endpoints to avoid timeout
+- Rate limited → Spread sends over longer period or upgrade plan
+- Consistently slow → Check your region/datacenter selection
+- Intermittent → Check \`get_system_health\` — may be transient maintenance
+
+**Escalation triggers:**
+- API p95 latency >2 seconds for >15 minutes
+- Email queue depth >100,000 and not decreasing
+- Worker error rate >5%
+- Multiple service components showing degraded`,
+        suggestedFollowUps: [
+            'Check system health status',
+            'View worker queue status',
+            'Run an API health check',
+            'Check if rate limiting is active',
+        ],
+        relatedGlossaryTerms: [],
+    },
+
+    // ── SEND: Sender identity & addressing ──
+    {
+        intent: 'sender_identity_addressing',
+        keywords: ['from address', 'from name', 'sender', 'return-path', 'envelope sender', 'via', 'on behalf of', 'subdomain', 'free mailbox', 'gmail from', 'yahoo from', 'custom domain', 'reply-to', 'sender identity'],
+        sampleQuestions: [
+            'Why does my email show "via apexmail.com"?',
+            'Can I use a Gmail address as my From?',
+            'What is the Return-Path and why does it matter?',
+            'How do I remove the "on behalf of" text?',
+            'Should I use a subdomain for sending?',
+        ],
+        contextualResponse: `Sender identity and addressing guide:
+
+**"via" / "on behalf of" Message:**
+- Appears when the envelope sender (Return-Path) domain doesn't match the From header domain
+- **Fix:** Verify your custom domain so ApexMail sends with your domain in the Return-Path
+- After domain verification: both From and Return-Path use your domain → "via" disappears
+
+**From Address Best Practices:**
+- Use your own domain: \`hello@yourdomain.com\` (not a free mailbox)
+- ⚠️ **Don't use @gmail.com, @yahoo.com, @outlook.com as From** — these providers enforce strict DMARC (p=reject), so your emails will be rejected by all DMARC-enforcing receivers
+- Sender name: Use "Person at Company" format for best recognition and open rates
+
+**Return-Path / Envelope Sender:**
+- The address that receives bounce notifications (NDRs)
+- Should be on your verified domain for DMARC SPF alignment
+- ApexMail sets this automatically after domain verification
+
+**Reply-To:**
+- Set a different reply-to if you want replies going to a different inbox
+- Common: From: marketing@co.com, Reply-To: support@co.com
+- Reply-To does NOT affect authentication — SPF/DKIM check the From and Return-Path
+
+**Subdomain Strategy:**
+- Recommended: Use a subdomain for marketing email (\`mail.yourdomain.com\`)
+- **Why?** Isolates marketing reputation from your corporate domain
+- If marketing reputation takes a hit, corporate email (\`yourdomain.com\`) is unaffected
+- Use separate subdomains for transactional vs marketing if volume is significant
+
+**RFC 5322 Compliance:**
+- From address must be syntactically valid (local-part@domain)
+- Display name can include UTF-8 characters
+- Multiple From addresses NOT supported (use Sender header instead)`,
+        suggestedFollowUps: [
+            'Verify my custom domain',
+            'Check my sender reputation',
+            'Set up a subdomain for sending',
+            'Check my DMARC alignment',
+        ],
+        relatedGlossaryTerms: ['SPF', 'DKIM', 'DMARC', 'Sender Reputation'],
+    },
+
+    // ── DLV: Inbound email & processing ──
+    {
+        intent: 'inbound_email_setup',
+        keywords: ['inbound', 'receive email', 'incoming email', 'mx record', 'inbound parse', 'inbound webhook', 'email to webhook', 'receive and parse', 'reply processing', 'inbound routing'],
+        sampleQuestions: [
+            'How do I set up inbound email processing?',
+            'Can ApexMail receive emails?',
+            'How do I parse incoming emails?',
+            'Set up MX records for inbound',
+            'Route incoming emails to my webhook',
+        ],
+        contextualResponse: `Inbound email processing guide:
+
+**How Inbound Works:**
+1. Set MX record for your domain (or subdomain) to point to ApexMail's inbound servers
+2. ApexMail receives the email, parses it, and forwards as a webhook to your endpoint
+3. Your endpoint receives structured JSON with: from, to, subject, text body, HTML body, attachments
+
+**Setup Steps:**
+1. **DNS:** Add MX record: \`inbound.yourdomain.com MX 10 mx.apexmail.com\`
+2. **Configure endpoint:** Set your webhook URL in ApexMail inbound settings
+3. **Define routing rules:** Route by recipient address pattern, subject, or sender
+4. **Test:** Send an email to your inbound address and verify webhook delivery
+
+**Inbound Webhook Payload:**
+| Field | Type | Description |
+|-------|------|-------------|
+| \`from\` | string | Sender email address |
+| \`to\` | string[] | Recipient addresses |
+| \`subject\` | string | Email subject line |
+| \`text\` | string | Plain-text body |
+| \`html\` | string | HTML body |
+| \`attachments\` | object[] | File attachments (base64 encoded) |
+| \`headers\` | object | Full email headers |
+| \`spf\` | string | SPF check result |
+| \`dkim\` | string | DKIM verification result |
+
+**Use Cases:**
+- Reply processing (track replies to campaigns)
+- Support ticket creation
+- Lead capture from email
+- Email-to-task/CRM integration
+- Automated email parsing (invoices, notifications)
+
+**Limitations:**
+- Max inbound email size: 25MB (including attachments)
+- Attachment types can be filtered (block executables, etc.)
+- Rate limit: 100 inbound emails/minute (contact sales for higher limits)`,
+        suggestedFollowUps: [
+            'Set up inbound email for my domain',
+            'Configure inbound webhook',
+            'Test my inbound email setup',
+            'View inbound processing logs',
+        ],
+        relatedGlossaryTerms: ['SPF', 'DKIM'],
+    },
+
+    // ── LLM: AI chatbot diagnostics ──
+    {
+        intent: 'chatbot_diagnostics',
+        keywords: ['chatbot', 'ai', 'bot', 'assistant', 'wrong answer', 'not helpful', 'slow response', 'cut off', 'truncated', 'context window', 'hallucination', 'made up', 'irrelevant answer', 'broken chatbot', 'ai broken'],
+        sampleQuestions: [
+            'The chatbot gave me a wrong answer',
+            'AI response was cut off mid-sentence',
+            'The bot keeps misunderstanding my question',
+            'Chatbot is slow to respond',
+            'The AI made up information that is incorrect',
+        ],
+        contextualResponse: `AI assistant diagnostics guide:
+
+**Common Issues & Fixes:**
+
+| Issue | Cause | Diagnostic | Fix |
+|-------|-------|-----------|-----|
+| Wrong answer | Intent misclassification | \`get_intent_debug\` | Rephrase question more specifically |
+| Cut off response | Token limit reached | \`get_llm_config\` | Break complex questions into smaller parts |
+| Slow response | Model inference time | \`get_llm_session_log\` | Normal is 2-8 seconds. If consistently >15s, report |
+| Irrelevant info | RAG retrieval miss | \`get_rag_debug\` | Use more specific terminology |
+| Wrong action | Tool call misrouted | \`get_intent_debug\` | Specify exactly what action you want |
+| Hallucination | Model confabulation | \`get_llm_session_log\` | Verify information through actions (check status, get report) |
+
+**How the AI Assistant Works:**
+1. **Intent Detection** — Your message is classified into a category (support, billing, domain, etc.) and specific action
+2. **Security Check** — Your permissions are verified for the detected action
+3. **Response Generation** — The model generates a response with context from your account
+4. **Action Execution** — If an action is identified, it's executed (with confirmation for risky operations)
+5. **Verification** — Response quality is checked before delivery
+
+**Tips for Getting Better Answers:**
+- Be specific: "Check my SPF record for example.com" vs "email not working"
+- Provide context: Include error codes, message IDs, domain names
+- One question at a time: Complex multi-part questions may confuse intent detection
+- Use the correct terminology: "DMARC alignment" vs "that authentication thing"
+
+**When to Escalate:**
+- The assistant consistently gives wrong answers for your specific question
+- A critical action needs to be performed that the assistant can't handle
+- You need real-time human support for an urgent production issue`,
+        suggestedFollowUps: [
+            'Check the AI configuration',
+            'Debug the last intent classification',
+            'View the AI session log',
+            'Debug RAG retrieval quality',
+        ],
+        relatedGlossaryTerms: [],
+    },
 ];
 
 // ═══════════════════════════════════════════════════════════════

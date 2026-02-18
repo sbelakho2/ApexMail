@@ -34,6 +34,11 @@ import { suppressionsRoutes } from './routes/suppressions.js';
 import { eventsRoutes } from './routes/events.js';
 import { webhooksRoutes } from './routes/webhooks.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { supportRoutes } from './routes/support.js';
+import { scimRoutes } from './routes/scim.js';
+import { campaignsRoutes } from './routes/campaigns.js';
+import { contactsRoutes } from './routes/contacts.js';
+import { automationsRoutes } from './routes/automations.js';
 
 export interface AppContext {
   db: DatabasePool;
@@ -225,6 +230,11 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
   api.route('/events', eventsRoutes(ctx));
   api.route('/analytics', analyticsRoutes(ctx));
   api.route('/webhooks', webhooksRoutes(ctx));
+  api.route('/support', supportRoutes(ctx));
+  api.route('/scim', scimRoutes(ctx)); // SCIM 2.0 provisioning (RFC 7644)
+  api.route('/campaigns', campaignsRoutes(ctx));
+  api.route('/contacts', contactsRoutes(ctx));
+  api.route('/automations', automationsRoutes(ctx));
 
   // Mount API under /v1
   app.route('/v1', api);

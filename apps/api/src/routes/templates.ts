@@ -405,10 +405,10 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     }
 
     const versions = result.value;
-    const total = versions.length;
+    const total = versions.total;
 
     return c.json({
-      versions: versions.map((v: any) => ({
+      versions: versions.versions.map((v: any) => ({
         version: v.version,
         subject: v.subject,
         variables: v.variables,

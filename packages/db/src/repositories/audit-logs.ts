@@ -55,7 +55,27 @@ export type AuditAction =
   | 'export.completed'
   | 'data.deleted'
   | 'gdpr.request'
-  | 'gdpr.completed';
+  | 'gdpr.completed'
+  // Campaign lifecycle
+  | 'campaign.created'
+  | 'campaign.resumed'
+  | 'campaign.stopped'
+  | 'campaign.paused'
+  | 'campaign.deleted'
+  // Contact management
+  | 'contact.added'
+  | 'contact.removed'
+  | 'contact.bulk_added'
+  | 'contact.bulk_removed'
+  | 'contact.tagged'
+  | 'contact.bulk_tagged'
+  | 'contact.imported'
+  // Automation management
+  | 'automation.created'
+  | 'automation.updated'
+  | 'automation.enabled'
+  | 'automation.disabled'
+  | 'automation.deleted';
 
 export interface AuditLog {
   id: string;
