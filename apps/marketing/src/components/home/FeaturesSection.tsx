@@ -12,7 +12,7 @@ import {
  Cpu,
  AlertTriangle,
  History,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 
 const features = [
  {
@@ -126,8 +126,8 @@ export function FeaturesSection() {
  {features.map((category, categoryIndex) => (
  <div key={category.category}>
  <motion.h3
- initial={{ opacity: 0, x: -20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: categoryIndex * 0.1 }}
  className="text-sm font-bold uppercase tracking-widest text-surface-600 mb-8 flex items-center gap-3"
  >

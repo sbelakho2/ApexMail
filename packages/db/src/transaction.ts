@@ -135,7 +135,8 @@ export async function withTransaction<T>(
         if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 300000) {
           throw new Error(`Invalid statement_timeout value: ${opts.timeout}. Must be a positive integer up to 300000ms.`);
         }
-        await client.query('SET LOCAL statement_timeout = $1', [Math.floor(timeoutMs).toString()]);
+        const safeTimeoutMs = Math.floor(timeoutMs);
+        await client.query(`SET LOCAL statement_timeout = ${safeTimeoutMs}`);
       }
 
       // Create transaction context

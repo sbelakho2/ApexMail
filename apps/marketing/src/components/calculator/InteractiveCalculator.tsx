@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { useState, useMemo } from 'react';
-import { Mail, CheckCircle } from 'lucide-react';
+import { Mail, CheckCircle } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 interface PricingTier {

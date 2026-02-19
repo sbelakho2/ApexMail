@@ -4,26 +4,26 @@
 
 @layer base {
     :root {
-        --background: 248 250 252;
-        --foreground: 15 23 42;
+        --background: 248 246 243;
+        --foreground: 16 24 40;
         --card: 255 255 255;
-        --card-foreground: 15 23 42;
+        --card-foreground: 16 24 40;
         --popover: 255 255 255;
-        --popover-foreground: 15 23 42;
-        --primary: 37 99 235;
+        --popover-foreground: 16 24 40;
+        --primary: 52 78 165;
         --primary-foreground: 255 255 255;
-        --secondary: 241 245 249;
-        --secondary-foreground: 15 23 42;
-        --muted: 241 245 249;
-        --muted-foreground: 71 85 105;
-        --accent: 241 245 249;
-        --accent-foreground: 15 23 42;
+        --secondary: 242 241 236;
+        --secondary-foreground: 35 39 36;
+        --muted: 242 241 236;
+        --muted-foreground: 107 114 128;
+        --accent: 242 241 236;
+        --accent-foreground: 16 24 40;
         --destructive: 220 38 38;
         --destructive-foreground: 255 255 255;
         --error: 220 38 38;
-        --border: 226 232 240;
-        --input: 226 232 240;
-        --ring: 37 99 235;
+        --border: 224 226 220;
+        --input: 224 226 220;
+        --ring: 74 108 196;
         
         --radius-sm: 10px;
         --radius-md: 12px;
@@ -37,28 +37,28 @@
         --info: 8 145 178;
 
         /* Surface Colors (Style Guide v1) */
-        --surface-50: 248 250 252;
-        --surface-100: 241 245 249;
-        --surface-200: 226 232 240;
-        --surface-300: 203 213 225;
-        --surface-400: 148 163 184;
-        --surface-500: 100 116 139;
-        --surface-600: 71 85 105;
-        --surface-700: 51 65 85;
-        --surface-800: 30 41 59;
-        --surface-900: 15 23 42;
+        --surface-50: 248 246 243;
+        --surface-100: 240 238 234;
+        --surface-200: 225 226 218;
+        --surface-300: 203 206 196;
+        --surface-400: 160 163 153;
+        --surface-500: 111 116 108;
+        --surface-600: 80 84 78;
+        --surface-700: 58 62 58;
+        --surface-800: 38 42 40;
+        --surface-900: 20 24 30;
 
         /* Core Brand Colors (Style Guide v1) */
-        --brand-50: 239 246 255;
-        --brand-100: 219 234 254;
-        --brand-200: 191 219 254;
-        --brand-300: 147 197 253;
-        --brand-400: 96 165 250;
-        --brand-500: 37 99 235;
-        --brand-600: 29 78 216;
-        --brand-700: 23 66 180;
-        --brand-800: 30 64 175;
-        --brand-900: 30 58 138;
+        --brand-50: 237 242 252;
+        --brand-100: 219 228 247;
+        --brand-200: 191 205 239;
+        --brand-300: 150 175 228;
+        --brand-400: 109 140 212;
+        --brand-500: 74 108 196;
+        --brand-600: 52 78 165;
+        --brand-700: 39 58 130;
+        --brand-800: 29 45 102;
+        --brand-900: 20 32 73;
 
         --space-1: 4px;
         --space-2: 8px;
@@ -69,37 +69,37 @@
         --space-12: 48px;
     }
     .dark {
-        --background: 15 23 42;
-        --foreground: 248 250 252;
-        --card: 18 26 42;
-        --card-foreground: 229 231 235;
-        --popover: 15 23 42;
-        --popover-foreground: 229 231 235;
-        --primary: 37 99 235;
+        --background: 18 21 21;
+        --foreground: 250 250 248;
+        --card: 35 39 36;
+        --card-foreground: 250 250 248;
+        --popover: 35 39 36;
+        --popover-foreground: 250 250 248;
+        --primary: 91 120 210;
         --primary-foreground: 255 255 255;
-        --secondary: 18 26 42;
-        --secondary-foreground: 229 231 235;
-        --muted: 18 26 42;
-        --muted-foreground: 203 213 225;
-        --accent: 18 26 42;
-        --accent-foreground: 229 231 235;
+        --secondary: 56 60 55;
+        --secondary-foreground: 250 250 248;
+        --muted: 56 60 55;
+        --muted-foreground: 158 161 151;
+        --accent: 56 60 55;
+        --accent-foreground: 250 250 248;
         --destructive: 185 28 28;
         --destructive-foreground: 255 255 255;
         --error: 239 68 68;
-        --border: 31 41 55;
-        --input: 31 41 55;
-        --ring: 37 99 235;
+        --border: 56 60 55;
+        --input: 56 60 55;
+        --ring: 91 120 210;
 
-        --surface-50: 15 23 42;
-        --surface-100: 18 26 42;
-        --surface-200: 31 41 55;
-        --surface-300: 51 65 85;
-        --surface-400: 71 85 105;
-        --surface-500: 100 116 139;
-        --surface-600: 148 163 184;
-        --surface-700: 203 213 225;
-        --surface-800: 226 232 240;
-        --surface-900: 248 250 252;
+        --surface-50: 18 21 21;
+        --surface-100: 35 39 36;
+        --surface-200: 56 60 55;
+        --surface-300: 80 84 78;
+        --surface-400: 111 115 107;
+        --surface-500: 158 161 151;
+        --surface-600: 206 208 199;
+        --surface-700: 230 231 224;
+        --surface-800: 244 244 240;
+        --surface-900: 250 250 248;
     }
 }
 
@@ -110,20 +110,21 @@
 
     body {
         @apply bg-background text-foreground text-[17px] leading-[1.6];
-        font-family: var(--font-inter), -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
+        text-rendering: optimizeLegibility;
     }
 
     h1 {
-        @apply text-[40px] md:text-[56px] font-bold leading-[1.1] tracking-[-0.02em];
+        @apply font-display text-[40px] md:text-[56px] font-semibold leading-[1.1] tracking-[-0.02em];
     }
 
     h2 {
-        @apply text-[28px] md:text-[36px] font-bold leading-[1.2] tracking-[-0.015em];
+        @apply font-display text-[28px] md:text-[36px] font-semibold leading-[1.2] tracking-[-0.015em];
     }
 
     h3 {
-        @apply text-[20px] md:text-[24px] font-bold leading-[1.2] tracking-[-0.01em];
+        @apply font-display text-[20px] md:text-[24px] font-semibold leading-[1.2] tracking-[-0.01em];
     }
 
     /* Core UI elements from Style Guide */
@@ -137,6 +138,7 @@
 
     p {
         @apply max-w-[65ch];
+        overflow-wrap: anywhere;
     }
 
     small {

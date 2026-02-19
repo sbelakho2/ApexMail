@@ -1,10 +1,16 @@
 import type { Metadata } from 'next';
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import { Fraunces, IBM_Plex_Mono, Manrope } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
-const jetbrains = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains' });
+const manrope = Manrope({ subsets: ['latin'], variable: '--font-sans', display: 'swap' });
+const fraunces = Fraunces({ subsets: ['latin'], variable: '--font-display', display: 'swap' });
+const plexMono = IBM_Plex_Mono({
+    subsets: ['latin'],
+    weight: ['400', '500'],
+    variable: '--font-mono',
+    display: 'swap',
+});
 
 export const metadata: Metadata = {
     title: {
@@ -57,7 +63,7 @@ export default function RootLayout({
     children: React.ReactNode;
 }) {
     return (
-        <html lang="en" suppressHydrationWarning>
+        <html lang="en" suppressHydrationWarning className={`${manrope.variable} ${fraunces.variable} ${plexMono.variable}`}>
             <head>
                 <meta name="theme-color" content="#2563EB" />
                 <meta name="color-scheme" content="light dark" />
@@ -70,7 +76,7 @@ export default function RootLayout({
                     }}
                 />
             </head>
-            <body className={`${inter.variable} ${jetbrains.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
+            <body className="font-sans antialiased text-[17px] leading-[1.6]">
                 <main className="min-h-screen bg-background">{children}</main>
                 <Toaster />
             </body>

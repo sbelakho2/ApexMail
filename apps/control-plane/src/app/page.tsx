@@ -11,7 +11,7 @@ import {
     ShieldCheck, 
     Lock,
     ArrowRight,
-} from 'lucide-react';
+} from '../components/ui/icons';
 import { cn, formatNumber, timeAgo } from '../lib/utils';
 
 /**

@@ -148,7 +148,8 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
       contentType.includes('application/json')
     ) {
       const rawBody = await c.req.raw.clone().text();
-      if (rawBody.includes('\u0000')) {
+      const hasNullByte = rawBody.includes('\u0000') || rawBody.includes('\\u0000');
+      if (hasNullByte) {
         return c.json({ error: 'Request body contains invalid null bytes' }, 400);
       }
     }

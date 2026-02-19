@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Check, ArrowRight } from 'lucide-react';
+import { Check, ArrowRight } from '@/components/ui/icons';
 import Link from 'next/link';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 

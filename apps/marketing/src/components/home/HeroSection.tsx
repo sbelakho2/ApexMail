@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import Link from 'next/link';
-import { ArrowRight, Play, Check } from 'lucide-react';
+import { ArrowRight, Play, Check } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 
 const heroCode = `// Send your first email in 3 lines

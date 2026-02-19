@@ -20,8 +20,8 @@ import {
  ChevronRight,
  LogOut,
  X,
- type LucideIcon,
-} from 'lucide-react';
+ type ApexIconComponent,
+} from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { SimpleTooltip } from '@/components/ui/tooltip';
@@ -31,7 +31,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 interface NavItem {
  title: string;
  href: string;
- icon: LucideIcon;
+ icon: ApexIconComponent;
  badge?: string | number;
  disabled?: boolean;
 }
@@ -81,7 +81,7 @@ const mainNav: NavSection[] = [
 ];
 
 const sidebarVariants = cva(
-  'flex flex-col border-r border-surface-200 bg-surface-50/80 backdrop-blur-xl transition-all duration-300 ease-in-out',
+  'flex flex-col border-r border-surface-200/70 bg-white/90 backdrop-blur-2xl shadow-[0_18px_40px_rgba(15,23,42,0.08)] transition-all duration-300 ease-in-out',
   {
     variants: {
       collapsed: {
@@ -110,10 +110,10 @@ export function Sidebar({ className, onClose }: SidebarProps) {
       <div className="flex h-16 items-center justify-between px-4">
         {!collapsed && (
           <Link href="/dashboard" className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold shadow-sm">
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-gradient-to-br from-brand-500 via-brand-600 to-brand-700 text-white font-bold shadow-sm">
               A
             </div>
-            <span className="text-xl font-bold tracking-tight text-foreground">ApexMail</span>
+            <span className="text-xl font-bold tracking-tight text-surface-900">ApexMail</span>
           </Link>
         )}
         {onClose && (
@@ -128,7 +128,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
           </Button>
         )}
         {collapsed && (
-          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground font-bold mx-auto shadow-sm">
+          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-gradient-to-br from-brand-500 via-brand-600 to-brand-700 text-white font-bold mx-auto shadow-sm">
             A
           </div>
         )}
@@ -142,7 +142,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
           {mainNav.map((section, sectionIndex) => (
             <div key={sectionIndex} className="flex flex-col gap-1">
               {section.title && !collapsed && (
-                <h4 className="px-3 mb-2 text-[14px] font-semibold uppercase tracking-widest text-muted-foreground/60">
+                <h4 className="px-3 mb-2 text-[11px] font-semibold uppercase tracking-[0.28em] text-surface-500">
                   {section.title}
                 </h4>
               )}
@@ -158,21 +158,21 @@ export function Sidebar({ className, onClose }: SidebarProps) {
                     <Link
                       href={item.disabled ? '#' : item.href}
                       className={cn(
-                        'flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium transition-all duration-200',
+                        'relative flex items-center gap-3 rounded-xl px-3 py-3 text-[14px] font-medium transition-all duration-200',
                         isActive
-                          ? 'bg-primary/5 text-primary shadow-[inset_0_0_0_1px_rgba(37,99,235,0.1)]'
-                          : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                          ? 'bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(74,108,196,0.18)] before:absolute before:left-2 before:top-1/2 before:h-2 before:w-2 before:-translate-y-1/2 before:rounded-full before:bg-brand-500'
+                          : 'text-surface-600 hover:bg-white hover:text-surface-900',
                         item.disabled && 'cursor-not-allowed opacity-50',
                         collapsed && 'justify-center px-2.5'
                       )}
                       aria-current={isActive ? 'page' : undefined}
                     >
-                      <Icon className={cn('h-[18px] w-[18px]', isActive ? 'text-primary' : 'text-muted-foreground/70')} />
+                      <Icon className={cn('h-[18px] w-[18px]', isActive ? 'text-brand-600' : 'text-surface-400')} />
                       {!collapsed && (
                         <>
                           <span className="flex-1 truncate">{item.title}</span>
                           {item.badge && (
-                            <span className="rounded-sm bg-primary/10 px-1.5 py-0.5 text-[12px] font-bold text-primary">
+                            <span className="rounded-sm bg-brand-100 px-1.5 py-0.5 text-[12px] font-bold text-brand-700">
                               {item.badge}
                             </span>
                           )}
@@ -196,12 +196,12 @@ export function Sidebar({ className, onClose }: SidebarProps) {
       </ScrollArea>
 
  {/* Footer */}
- <div className="border-t p-4">
+ <div className="border-t border-surface-200/70 p-4">
  {!collapsed && (
  <div className="mb-4">
  <Link
                 href="/help"
-                className="flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                className="flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium text-surface-600 hover:bg-white hover:text-surface-900 transition-colors"
               >
  <HelpCircle className="h-5 w-5" />
  <span>Help & Support</span>
@@ -210,7 +210,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
  )}
  <div className="flex items-center justify-between">
  {!collapsed && (
- <Button variant="ghost" size="sm" className="text-muted-foreground">
+ <Button variant="ghost" size="sm" className="text-surface-500 hover:text-surface-900">
  <LogOut className="h-4 w-4 mr-2" />
  Sign Out
  </Button>

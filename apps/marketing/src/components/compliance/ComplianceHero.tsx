@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import Link from 'next/link';
-import { Shield, Scale, FileCheck, Lock, ArrowRight, Check } from 'lucide-react';
+import { Shield, Scale, FileCheck, Lock, ArrowRight, Check } from '@/components/ui/icons';
 
 const badges = [
  { name: 'GDPR' },
@@ -15,7 +15,7 @@ const badges = [
 export function ComplianceHero() {
  return (
  <section className="relative min-h-screen flex items-center pt-32 pb-20 overflow-hidden bg-surface-50">
-      <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-20">
+      <div className="relative max-w-[1200px] mx-auto px-5 sm:px-6 lg:px-8 py-12 lg:py-20">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left Column */}
  <motion.div
@@ -32,7 +32,7 @@ export function ComplianceHero() {
         </div>
 
  {/* Headline */}
- <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 leading-tight text-surface-900">
+ <h1 className="text-3xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 leading-tight text-surface-900 break-words">
             The Email API That <br />
             <span className="text-surface-500">Keeps You Out of Court.</span>
           </h1>
@@ -71,12 +71,12 @@ export function ComplianceHero() {
 
  {/* Right Column - Compliance Badges */}
  <motion.div
- initial={{ opacity: 0, x: 20 }}
- animate={{ opacity: 1, x: 0 }}
+ initial={{ opacity: 0, y: 16 }}
+ animate={{ opacity: 1, y: 0 }}
  transition={{ duration: 0.5, delay: 0.2 }}
  className="relative"
  >
- <div className="p-8 bg-white rounded-lg border border-surface-200">
+ <div className="p-6 sm:p-8 bg-white rounded-lg border border-surface-200">
  <h3 className="text-[14px] font-semibold text-surface-500 mb-8 text-center">
  Compliance Certifications
  </h3>

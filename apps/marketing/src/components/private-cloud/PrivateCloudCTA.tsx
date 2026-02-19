@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { ArrowRight, Calendar, Cloud, Phone } from 'lucide-react';
+import { ArrowRight, Calendar, Cloud, Phone } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function PrivateCloudCTA() {

@@ -155,8 +155,13 @@ class DatabasePool {
         this.logger.error('Invalid statement timeout value', { timeoutMs });
         return;
       }
-      // SECURITY FIX: Use parameterized query for statement_timeout
-      client.query('SET statement_timeout = $1', [timeoutMs]);
+      // Postgres does not accept parameters for SET statements; value is validated as int.
+      void client.query(`SET statement_timeout = ${timeoutMs}`).catch((error) => {
+        this.logger.error('Failed to set statement_timeout', {
+          error: error instanceof Error ? error.message : String(error),
+          timeoutMs,
+        });
+      });
       this.logger.debug('New database connection established');
     });
 

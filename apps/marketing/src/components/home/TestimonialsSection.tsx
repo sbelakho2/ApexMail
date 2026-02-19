@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { ChevronLeft, ChevronRight, Quote } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Quote } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 const testimonials = [
@@ -157,7 +157,7 @@ export function TestimonialsSection() {
  key={index}
  onClick={() => setActiveIndex(index)}
  className={cn(
- 'rounded-full transition-all duration-300 p-[21px] -m-[21px] relative',
+ 'rounded-full transition-all duration-300 p-2.5 relative',
  )}
  aria-label={`Go to testimonial ${index + 1}`}
  >

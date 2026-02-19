@@ -3,7 +3,7 @@
 import { useState, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Check, ArrowRight } from 'lucide-react';
+import { Check, ArrowRight } from '@/components/ui/icons';
 import Link from 'next/link';
 import { formatNumber, formatCurrency } from '@/lib/utils';
 import { cn } from '@/lib/utils';
@@ -144,9 +144,9 @@ export function PricingCalculator() {
   return (
     <section ref={ref} className="py-24 bg-surface-50 relative overflow-hidden" id="pricing">
       {/* Background Decorative Elements */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-full pointer-events-none overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-brand-500/5 blur-[120px] rounded-full" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-brand-500/5 blur-[120px] rounded-full" />
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-[4%] left-[4%] w-[28%] h-[28%] bg-brand-500/5 blur-[120px] rounded-full" />
+        <div className="absolute bottom-[4%] right-[4%] w-[28%] h-[28%] bg-brand-500/5 blur-[120px] rounded-full" />
       </div>
 
       <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
@@ -296,7 +296,8 @@ export function PricingCalculator() {
 
 function ComparisonRow({ name, price, apexPrice }: { name: string; price: number; apexPrice: number }) {
   const savings = Math.max(0, price - apexPrice);
-  const percentage = Math.round((savings / price) * 100);
+  const percentage = price > 0 ? Math.round((savings / price) * 100) : 0;
+  const usageWidth = price > 0 ? Math.min(100, Math.max(0, (apexPrice / price) * 100)) : 100;
 
   return (
     <div className="p-5 bg-white rounded-xl border border-surface-200 shadow-sm">
@@ -307,7 +308,7 @@ function ComparisonRow({ name, price, apexPrice }: { name: string; price: number
       <div className="relative h-2 bg-surface-100 rounded-full overflow-hidden">
         <div 
           className="absolute top-0 left-0 h-full bg-brand-500 transition-all duration-500" 
-          style={{ width: `${(apexPrice / price) * 100}%` }} 
+          style={{ width: `${usageWidth}%` }} 
         />
       </div>
       <div className="flex justify-between mt-2">

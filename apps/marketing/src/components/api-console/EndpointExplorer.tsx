@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { useState } from 'react';
-import { ChevronRight, Send, Users, BarChart3, Webhook, Settings } from 'lucide-react';
+import { ChevronRight, Send, Users, BarChart3, Webhook, Settings } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 interface Endpoint {

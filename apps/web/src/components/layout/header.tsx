@@ -11,7 +11,7 @@ import {
  Monitor,
  Plus,
  Menu,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -74,7 +74,7 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  return (
  <header
       className={cn(
-        'sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200 bg-surface-50/80 backdrop-blur-xl px-6 transition-all duration-200',
+        'sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-white via-white to-brand-50/60 backdrop-blur-2xl px-6 shadow-[0_10px_30px_rgba(15,23,42,0.06)] transition-all duration-200',
         className
       )}
     >
@@ -97,7 +97,7 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
           <Input
             type="search"
             placeholder="Search campaigns, contacts..."
-            className="w-64 pl-9 lg:w-80 bg-white border-surface-200 focus:ring-primary/10 shadow-sm"
+            className="w-64 pl-9 lg:w-80 bg-white/90 border-surface-200/70 focus:ring-primary/10 shadow-sm"
           />
           <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 bg-surface-50 px-1.5 font-mono text-[13px] font-bold text-surface-400 shadow-[0_1px_1px_0_rgba(0,0,0,0.05)]">
             ⌘K

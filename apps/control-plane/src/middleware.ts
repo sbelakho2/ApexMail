@@ -72,6 +72,19 @@ const CONTROL_PLANE_API_KEY_HEADER = 'x-control-plane-key';
 const CSRF_HEADER = 'x-csrf-token';
 const CSRF_COOKIE = 'csrf_token';
 const CSRF_SIG_COOKIE = 'csrf_token_sig';
+const E2E_BYPASS_HEADER = 'x-e2e-bypass-key';
+
+function hasValidE2EBypass(request: NextRequest): boolean {
+    const enabled = process.env.E2E_TEST_MODE === 'true';
+    const expected = process.env.E2E_BYPASS_KEY;
+    const provided = request.headers.get(E2E_BYPASS_HEADER);
+
+    if (!enabled || !expected || !provided) {
+        return false;
+    }
+
+    return _constTimeEq(expected, provided);
+}
 
 /**
  * Validates the control plane session token
@@ -244,6 +257,19 @@ export async function middleware(request: NextRequest) {
     // Allow public paths
     if (PUBLIC_PATHS.includes(path) || PUBLIC_PREFIXES.some(prefix => path.startsWith(prefix))) {
         return NextResponse.next();
+    }
+
+    // Test-only bypass for deterministic Chromium E2E coverage.
+    // Requires explicit E2E_TEST_MODE and matching bypass secret.
+    if (hasValidE2EBypass(request)) {
+        const response = NextResponse.next();
+        response.headers.set('X-E2E-Bypass', '1');
+        response.headers.set('X-Frame-Options', 'DENY');
+        response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+        response.headers.set('X-Control-Plane', 'authenticated');
+        response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+        response.headers.set('Pragma', 'no-cache');
+        return response;
     }
     
     // ==== SECURITY LAYER 1: IP Whitelist ====

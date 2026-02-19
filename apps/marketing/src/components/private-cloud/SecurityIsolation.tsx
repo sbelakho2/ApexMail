@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Shield, Lock, Eye, Database, Network, Key } from 'lucide-react';
+import { Shield, Lock, Eye, Database, Network, Key } from '@/components/ui/icons';
 
 export function SecurityIsolation() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
@@ -120,12 +120,12 @@ export function SecurityIsolation() {
  Shared vs Private Cloud Security
  </h3>
  <div className="overflow-x-auto">
- <table className="w-full text-sm">
+ <table className="w-full table-fixed text-xs sm:text-sm">
  <thead>
  <tr className="border-b border-surface-100">
- <th className="text-left py-4 px-6 text-xs font-medium text-surface-500">Security Aspect</th>
- <th className="text-center py-4 px-6 text-xs font-medium text-surface-500">Shared Cloud</th>
- <th className="text-center py-4 px-6 text-xs font-semibold text-surface-900 bg-surface-50/50 rounded-t-lg">Private Cloud</th>
+ <th className="text-left py-3 px-2 sm:px-4 text-[11px] sm:text-xs font-medium text-surface-500">Security Aspect</th>
+ <th className="text-center py-3 px-2 sm:px-4 text-[11px] sm:text-xs font-medium text-surface-500">Shared Cloud</th>
+ <th className="text-center py-3 px-2 sm:px-4 text-[11px] sm:text-xs font-semibold text-surface-900 bg-surface-50/50 rounded-t-lg">Private Cloud</th>
  </tr>
  </thead>
  <tbody className="divide-y divide-surface-100">
@@ -139,9 +139,9 @@ export function SecurityIsolation() {
  ['Incident Response', 'Provider-led', 'Customer-led'],
  ].map(([aspect, shared, privateCloud]) => (
  <tr key={aspect} className="hover:bg-surface-50/50 transition-colors group">
- <td className="py-4 px-6 text-surface-900 font-medium">{aspect}</td>
- <td className="py-4 px-6 text-center text-surface-500">{shared}</td>
- <td className="py-4 px-6 text-center text-surface-900 font-medium bg-surface-50/30 group-hover:bg-surface-50/60">{privateCloud}</td>
+ <td className="py-3 px-2 sm:px-4 text-surface-900 font-medium break-words">{aspect}</td>
+ <td className="py-3 px-2 sm:px-4 text-center text-surface-500 break-words">{shared}</td>
+ <td className="py-3 px-2 sm:px-4 text-center text-surface-900 font-medium bg-surface-50/30 group-hover:bg-surface-50/60 break-words">{privateCloud}</td>
  </tr>
  ))}
  </tbody>

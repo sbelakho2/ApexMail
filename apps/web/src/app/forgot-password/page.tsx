@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Mail } from 'lucide-react';
+import { ArrowLeft, Mail } from '@/components/ui/icons';
 
 /**
  * FIX-065: Forgot Password page

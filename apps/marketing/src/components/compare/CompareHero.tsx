@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import Link from 'next/link';
-import { ArrowRight, ArrowLeftRight } from 'lucide-react';
+import { ArrowRight, ArrowLeftRight } from '@/components/ui/icons';
 
 interface CompareHeroProps {
   competitor: {
@@ -31,9 +31,9 @@ export function CompareHero({ competitor }: CompareHeroProps) {
             Feature Comparison
           </div>
 
-          <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
+          <h1 className="text-3xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6 break-words">
             <span className="text-primary-500">ApexMail</span>
-            <span className="text-surface-400 mx-4">vs</span>
+            <span className="text-surface-400 mx-2 sm:mx-4">vs</span>
             <span className="text-surface-900">{competitor.name}</span>
           </h1>
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Terminal, Zap, Lock } from 'lucide-react';
+import { Terminal, Zap, Lock } from '@/components/ui/icons';
 
 export function APIConsoleHero() {
   return (

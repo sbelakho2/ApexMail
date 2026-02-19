@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { CheckCircle, Zap } from 'lucide-react';
+import { CheckCircle, Zap } from '@/components/ui/icons';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 

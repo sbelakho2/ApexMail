@@ -1,13 +1,13 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Cloud, Server, Shield, Zap } from 'lucide-react';
+import { Cloud, Server, Shield, Zap } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function PrivateCloudHero() {
  return (
  <section className="relative min-h-[80vh] flex items-center pt-32 pb-20 bg-surface-50">
- <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+ <div className="max-w-7xl mx-auto px-5 sm:px-6 lg:px-8 relative">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
  <div>
@@ -24,7 +24,7 @@ export function PrivateCloudHero() {
  initial={{ opacity: 0, y: 20 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ delay: 0.1 }}
- className="text-4xl lg:text-6xl font-bold text-surface-900 mb-6 leading-tight tracking-tight"
+ className="text-3xl sm:text-4xl lg:text-6xl font-bold text-surface-900 mb-6 leading-tight tracking-tight break-words"
  >
  Your VPC.
  <br />
@@ -37,7 +37,7 @@ export function PrivateCloudHero() {
  initial={{ opacity: 0, y: 20 }}
  animate={{ opacity: 1, y: 0 }}
  transition={{ delay: 0.2 }}
- className="text-xl text-surface-600 mb-8 leading-relaxed"
+ className="text-lg sm:text-xl text-surface-600 mb-8 leading-relaxed"
  >
  Deploy the full ApexMail stack in your own AWS, GCP, or Azure VPC. 
  Complete data sovereignty with zero shared infrastructure.

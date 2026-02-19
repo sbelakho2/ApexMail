@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Shield, ArrowRight } from 'lucide-react';
+import { ArrowRight, CheckCircle2 } from '@/components/ui/icons';
 
 /**
  * Customer Console Login Page
@@ -85,26 +85,58 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <div className="w-full max-w-[400px]">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 mb-6">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
-              <path d="M22 17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9.5C2 7 4 5 5.5 5H18.5C20 5 22 7 22 9.5V17Z" />
-              <path d="M6 8L12 12L18 8" />
-            </svg>
+    <div className="min-h-screen bg-surface-50 relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-32 left-1/2 h-72 w-[520px] -translate-x-1/2 rounded-full bg-brand-200/40 blur-3xl" />
+        <div className="absolute -bottom-24 right-[-120px] h-72 w-72 rounded-full bg-brand-100/60 blur-3xl" />
+      </div>
+      <div className="relative mx-auto flex min-h-screen w-full max-w-6xl items-center px-6 py-12">
+        <div className="grid w-full items-center gap-10 lg:grid-cols-[1.1fr_0.9fr]">
+          <div className="hidden lg:block">
+            <div className="inline-flex items-center gap-2 rounded-full border border-brand-200/60 bg-white/80 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-brand-700">
+              Console Access
+            </div>
+            <h1 className="mt-6 text-4xl font-semibold text-surface-900 tracking-tight">
+              Your premium command center for delivery, trust, and analytics.
+            </h1>
+            <p className="mt-4 max-w-[520px] text-[16px] text-surface-600 leading-relaxed">
+              Monitor every campaign, verify your domains, and spot deliverability risks before they impact your reputation.
+            </p>
+            <div className="mt-8 space-y-3 text-sm text-surface-600">
+              {[
+                'Real-time delivery intelligence across regions',
+                'Enterprise-grade compliance workflows',
+                'Executive-ready performance reporting',
+              ].map((item) => (
+                <div key={item} className="flex items-center gap-3">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand-100 text-brand-700">
+                    <CheckCircle2 className="h-4 w-4" />
+                  </span>
+                  <span>{item}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            Welcome back
-          </h1>
-          <p className="text-sm text-muted-foreground mt-2 font-medium">
-            Enter your credentials to access the console
-          </p>
-        </div>
 
-        {/* Login Card */}
-        <div className="bg-card rounded-2xl shadow-xl border border-border overflow-hidden">
+          <div className="w-full">
+            {/* Header */}
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20 mb-6">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
+                  <path d="M22 17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9.5C2 7 4 5 5.5 5H18.5C20 5 22 7 22 9.5V17Z" />
+                  <path d="M6 8L12 12L18 8" />
+                </svg>
+              </div>
+              <h1 className="text-2xl font-bold tracking-tight text-foreground">
+                Welcome back
+              </h1>
+              <p className="text-sm text-muted-foreground mt-2 font-medium">
+                Enter your credentials to access the console
+              </p>
+            </div>
+
+            {/* Login Card */}
+            <div className="bg-card rounded-3xl shadow-[0_24px_60px_rgba(15,23,42,0.15)] border border-surface-200/70 overflow-hidden">
           <form onSubmit={handleSubmit} className="p-8 space-y-5">
             {error && (
               <div className="bg-destructive/10 border border-destructive/20 text-destructive text-sm rounded-lg p-3">
@@ -121,7 +153,7 @@ export default function LoginPage() {
                 type="email"
                 required
                 placeholder="name@company.com"
-                className="w-full px-4 py-3 rounded-lg border border-input focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all placeholder:text-muted-foreground bg-muted/30 text-sm font-medium text-foreground"
+                className="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-white/90 text-sm font-medium text-foreground"
               />
             </div>
 
@@ -142,7 +174,7 @@ export default function LoginPage() {
                 name="password"
                 type="password"
                 required
-                className="w-full px-4 py-3 rounded-lg border border-input focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all bg-muted/30 text-foreground"
+                className="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all bg-white/90 text-foreground"
               />
             </div>
 
@@ -176,7 +208,7 @@ export default function LoginPage() {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button disabled title="SSO coming soon" className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-border hover:bg-accent hover:border-accent-foreground/10 transition-all opacity-60 cursor-not-allowed">
+              <button disabled title="SSO coming soon" className="flex flex-wrap items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-border hover:bg-accent hover:border-accent-foreground/10 transition-all opacity-60 cursor-not-allowed">
                 <svg className="w-5 h-5" viewBox="0 0 24 24">
                   <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
                   <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
@@ -186,7 +218,7 @@ export default function LoginPage() {
                 <span className="text-sm font-semibold text-foreground">Google</span>
                 <span className="text-[10px] text-muted-foreground ml-1">(Coming Soon)</span>
               </button>
-              <button disabled title="SSO coming soon" className="flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-border hover:bg-accent hover:border-accent-foreground/10 transition-all opacity-60 cursor-not-allowed">
+              <button disabled title="SSO coming soon" className="flex flex-wrap items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-border hover:bg-accent hover:border-accent-foreground/10 transition-all opacity-60 cursor-not-allowed">
                 <svg className="w-5 h-5 text-foreground" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.03.555-3.885-1.425-3.885-1.425-.546-1.38-1.335-1.755-1.335-1.755-1.005-.69.075-.675.075-.675 1.11.075 1.695 1.14 1.695 1.14 1.005 1.725 2.64 1.23 3.285.945.105-.72.39-1.215.705-1.485-2.565-.285-5.265-1.29-5.265-5.73 0-1.26.45-2.295 1.185-3.09-.12-.285-.525-1.455.105-3.045 0 0 .96-.3 3.15 1.2A10.965 10.965 0 0 1 12 5.805c.9.015 1.785.12 2.64.24 2.19-1.5 3.15-1.2 3.15-1.2.63 1.59.225 2.76.105 3.045.735.795 1.185 1.83 1.185 3.09 0 4.455-2.715 5.43-5.295 5.715.39.345.735 1.02.735 2.055 0 1.485-.015 2.685-.015 3.045 0 .315.225.69.84.57C20.565 21.795 24 17.31 24 12c0-6.63-5.37-12-12-12" />
                 </svg>
@@ -195,22 +227,10 @@ export default function LoginPage() {
               </button>
             </div>
           </div>
-          
-          <div className="bg-muted/30 px-8 py-4 border-t border-border flex items-center justify-center gap-2">
-             <Shield className="w-3 h-3 text-muted-foreground" />
-             <span className="text-xs font-semibold text-muted-foreground">
-               Secured by ApexMail Identity
-             </span>
+            </div>
           </div>
-        </div>
 
-        {/* Footer */}
-        <p className="text-center mt-8 text-xs text-muted-foreground">
-          Don&apos;t have an account?{' '}
-          <Link href="https://apexmail.ee/signup" className="font-semibold text-primary hover:underline">
-            Get your API keys
-          </Link>
-        </p>
+        </div>
       </div>
     </div>
   );

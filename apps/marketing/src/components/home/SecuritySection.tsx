@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Shield, Lock, Key, Eye, Server, FileCheck, AlertTriangle, Fingerprint } from 'lucide-react';
+import { Shield, Lock, Key, Eye, Server, FileCheck, AlertTriangle, Fingerprint } from '@/components/ui/icons';
 
 const securityFeatures = [
  {

@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Server, Cloud, Building, CheckCircle } from 'lucide-react';
+import { Server, Cloud, Building, CheckCircle } from '@/components/ui/icons';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
 
@@ -188,7 +188,7 @@ export function DeploymentOptions() {
  <div className="mt-12 pt-12 border-t border-surface-200">
  <div className="text-xs font-semibold text-surface-500 mb-6 text-center">Reference Architecture</div>
  <div className="bg-surface-950 rounded-lg p-8 font-mono text-[13px] text-surface-300 shadow-sm overflow-x-auto border border-surface-900">
- <pre className="whitespace-pre">
+ <pre className="whitespace-pre-wrap break-words">
 {`┌─────────────────────────────────────────────────────────────┐
 │ Your ${selected.name} Environment │
 ├─────────────────────────────────────────────────────────────┤

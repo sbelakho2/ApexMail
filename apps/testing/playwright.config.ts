@@ -145,7 +145,8 @@ export default defineConfig({
         // Visual regression project
         {
             name: 'visual',
-            testMatch: '**/*.visual.ts',
+            testDir: './src/visual',
+            testMatch: '**/visual.spec.ts',
             use: {
                 ...devices['Desktop Chrome'],
             },

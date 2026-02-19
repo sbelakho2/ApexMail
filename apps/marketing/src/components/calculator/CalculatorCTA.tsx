@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { ArrowRight, Calculator, MessageCircle } from 'lucide-react';
+import { ArrowRight, Calculator, MessageCircle } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function CalculatorCTA() {

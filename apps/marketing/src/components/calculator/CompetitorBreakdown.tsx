@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { CheckCircle, AlertCircle } from 'lucide-react';
+import { CheckCircle, AlertCircle } from '@/components/ui/icons';
 
 interface FeatureComparison {
   feature: string;
@@ -148,26 +148,26 @@ export function CompetitorBreakdown() {
           className="bg-white border border-surface-200 shadow-sm rounded-lg overflow-hidden"
         >
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full table-fixed">
               <thead>
                 <tr className="bg-surface-50 border-b border-surface-200">
-                  <th className="text-left py-4 px-6 text-xs font-semibold text-surface-900">Feature</th>
-                  <th className="text-center py-4 px-4 text-xs font-semibold text-primary-700 bg-primary-50/50">ApexMail</th>
-                  <th className="text-center py-4 px-4 text-xs font-semibold text-surface-500">SendGrid</th>
-                  <th className="text-center py-4 px-4 text-xs font-semibold text-surface-500">Mailchimp</th>
-                  <th className="text-center py-4 px-4 text-xs font-semibold text-surface-500">AWS SES</th>
+                  <th className="text-left py-3 px-2 sm:px-4 text-[11px] sm:text-xs font-semibold text-surface-900">Feature</th>
+                  <th className="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-primary-700 bg-primary-50/50">ApexMail</th>
+                  <th className="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-surface-500">SendGrid</th>
+                  <th className="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-surface-500">Mailchimp</th>
+                  <th className="text-center py-3 px-2 sm:px-3 text-[11px] sm:text-xs font-semibold text-surface-500">AWS SES</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-100">
                 {features.map((row) => (
                   <tr key={row.feature} className="hover:bg-surface-50/50 transition-colors group">
-                    <td className="py-4 px-6 text-sm font-medium text-surface-900">{row.feature}</td>
-                    <td className="py-4 px-4 text-center bg-primary-50/20 group-hover:bg-primary-50/40 transition-colors">
+                    <td className="py-3 px-2 sm:px-4 text-xs sm:text-sm font-medium text-surface-900 break-words">{row.feature}</td>
+                    <td className="py-3 px-2 sm:px-3 text-center bg-primary-50/20 group-hover:bg-primary-50/40 transition-colors">
                       {renderValue(row.apexmail)}
                     </td>
-                    <td className="py-4 px-4 text-center">{renderValue(row.sendgrid)}</td>
-                    <td className="py-4 px-4 text-center">{renderValue(row.mailchimp)}</td>
-                    <td className="py-4 px-4 text-center">{renderValue(row.ses)}</td>
+                    <td className="py-3 px-2 sm:px-3 text-center">{renderValue(row.sendgrid)}</td>
+                    <td className="py-3 px-2 sm:px-3 text-center">{renderValue(row.mailchimp)}</td>
+                    <td className="py-3 px-2 sm:px-3 text-center">{renderValue(row.ses)}</td>
                   </tr>
                 ))}
               </tbody>

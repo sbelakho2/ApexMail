@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { Plus, Search, Users, Upload, MoreHorizontal, Trash2, Pencil } from 'lucide-react';
+import { Plus, Search, Users, Upload, MoreHorizontal, Trash2, Pencil } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';

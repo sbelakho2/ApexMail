@@ -17,7 +17,7 @@ import {
     Shield,
     FileText,
     Code2,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -193,7 +193,7 @@ export default function DashboardPage() {
                     { title: 'Open Rate', value: 0, change: 0, changeType: 'positive' as const, icon: Eye, color: 'text-brand-600', bgColor: 'bg-brand-50', isPercent: true },
                     { title: 'Click Rate', value: 0, change: 0, changeType: 'positive' as const, icon: MousePointer, color: 'text-brand-600', bgColor: 'bg-brand-50', isPercent: true },
                 ]).map((stat) => (
-                    <Card key={stat.title} className="border-none shadow-premium hover:shadow-premium-hover transition-all duration-300 group">
+                    <Card key={stat.title} className="border-none shadow-premium hover:shadow-premium-hover transition-all duration-300 group min-w-0">
                         <CardContent className="p-6">
                             <div className="flex items-center justify-between">
                                 <div className={cn('rounded-xl p-2.5 transition-colors group-hover:bg-brand-100', stat.bgColor)}>
@@ -206,8 +206,8 @@ export default function DashboardPage() {
                                     </div>
                                 )}
                             </div>
-                            <div className="mt-4 space-y-1">
-                                <p className="text-xs font-bold uppercase tracking-widest text-surface-500">{stat.title}</p>
+                            <div className="mt-4 space-y-1 min-w-0">
+                                <p className="text-xs font-bold uppercase tracking-widest text-surface-500 truncate">{stat.title}</p>
                                 <p className="text-3xl font-bold tabular-nums tracking-tight">
                                     {'isPercent' in stat && stat.isPercent ? formatPercent(stat.value / 100) : formatNumber(stat.value)}
                                 </p>
@@ -298,8 +298,10 @@ export default function DashboardPage() {
                                         const style = statusStyles[c.status] || { label: c.status, variant: 'default' as const };
                                         return (
                                             <TableRow key={c.id} className="group hover:bg-surface-50/50 transition-colors">
-                                                <TableCell className="pl-6">
-                                                    <p className="font-bold text-surface-900 group-hover:text-brand-700 transition-colors">{c.name}</p>
+                                                <TableCell className="pl-6 min-w-0">
+                                                    <p className="font-bold text-surface-900 group-hover:text-brand-700 transition-colors truncate max-w-[240px]">
+                                                        {c.name}
+                                                    </p>
                                                     <p className="text-xs text-surface-500 font-medium">
                                                         {c.sentAt ? formatRelativeTime(new Date(c.sentAt)) : c.scheduledAt ? `Scheduled ${formatRelativeTime(new Date(c.scheduledAt))}` : '—'}
                                                     </p>

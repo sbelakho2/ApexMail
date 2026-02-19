@@ -72,8 +72,9 @@ const config: Config = {
         '12': 'var(--space-12)',
       },
       fontFamily: {
-        sans: ['var(--font-inter)', 'system-ui', 'sans-serif'],
-        mono: ['var(--font-jetbrains)', 'monospace'],
+        sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        display: ['var(--font-display)', 'serif'],
+        mono: ['var(--font-mono)', 'monospace'],
       },
       animation: {
         'gradient': 'gradient 8s linear infinite',

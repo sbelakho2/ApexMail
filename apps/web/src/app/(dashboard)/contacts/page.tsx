@@ -15,7 +15,7 @@ import {
     ChevronRight,
     Mail,
     UserPlus,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';

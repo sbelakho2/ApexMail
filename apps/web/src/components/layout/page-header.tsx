@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { ChevronRight, Home } from 'lucide-react';
+import { ChevronRight, Home } from '@/components/ui/icons';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 
@@ -28,7 +28,7 @@ export function PageHeader({
   children,
 }: PageHeaderProps) {
   return (
-    <div className={cn('relative pb-6 mb-8 border-b border-surface-200', className)}>
+    <div className={cn('relative pb-6 mb-8 border-b border-surface-200/70', className)}>
       <div className="flex flex-col gap-4">
         {/* Breadcrumbs */}
         {breadcrumbs && breadcrumbs.length > 0 && (
@@ -66,7 +66,7 @@ export function PageHeader({
               {title}
             </h1>
             {description && (
-              <p className="text-[15px] text-surface-500 max-w-[800px] leading-relaxed">
+              <p className="text-[15px] text-surface-600 max-w-[720px] leading-relaxed">
                 {description}
               </p>
             )}

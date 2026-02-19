@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Check, X, Minus, Trophy } from 'lucide-react';
+import { Check, X, Minus, Trophy } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 interface Feature {

@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Zap, Github, Twitter, Linkedin, Mail } from 'lucide-react';
+import { Zap, Github, Twitter, Linkedin, Mail } from '@/components/ui/icons';
 
 const footerLinks = {
   product: [

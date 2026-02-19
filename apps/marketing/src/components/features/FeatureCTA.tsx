@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import Link from 'next/link';
-import { ArrowRight, Zap, MessageCircle } from 'lucide-react';
+import { ArrowRight, Zap, MessageCircle } from '@/components/ui/icons';
 
 export function FeatureCTA() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });

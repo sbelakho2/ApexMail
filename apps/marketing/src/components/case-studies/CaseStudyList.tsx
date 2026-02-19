@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Mail, TrendingUp, Shield, Clock, Building2, Users } from 'lucide-react';
+import { Mail, TrendingUp, Shield, Clock, Building2, Users } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 const caseStudies = [

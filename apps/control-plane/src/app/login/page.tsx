@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Shield, ArrowRight, AlertTriangle, Lock } from 'lucide-react';
+import { Shield, ArrowRight, AlertTriangle, Lock } from '../../components/ui/icons';
 
 /**
  * Control Plane Login Page

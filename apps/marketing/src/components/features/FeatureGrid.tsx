@@ -19,7 +19,7 @@ import {
   Zap,
   CheckCircle,
   Key,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 const featureCategories = [

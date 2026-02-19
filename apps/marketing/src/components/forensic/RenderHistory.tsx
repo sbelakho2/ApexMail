@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { History, Layers, GitBranch, Eye } from 'lucide-react';
+import { History, Layers, GitBranch, Eye } from '@/components/ui/icons';
 
 export function RenderHistory() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });

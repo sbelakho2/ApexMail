@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { ScrollText, Search, Filter, Download, Clock, User, Shield, Database } from 'lucide-react';
+import { ScrollText, Search, Filter, Download, Clock, User, Shield, Database } from '@/components/ui/icons';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
 
@@ -84,19 +84,19 @@ export function AuditTrail() {
 
  return (
  <section ref={ref} className="py-24 relative bg-white">
-      <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
+      <div className="max-w-[1200px] mx-auto px-5 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-start">
  {/* Left - Copy */}
  <motion.div
- initial={{ opacity: 0, x: -20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  className="lg:sticky lg:top-32"
  >
  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-sm bg-surface-100/50 border border-surface-200 text-[14px] font-medium text-surface-700 mb-6">
  <ScrollText className="w-4 h-4" />
  Audit Trail
  </div>
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
+ <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight break-words">
  Every Action. Forever Logged.
  </h2>
  <p className="text-lg text-surface-600 mb-8 leading-relaxed">
@@ -142,8 +142,8 @@ export function AuditTrail() {
 
  {/* Right - Interactive Audit Log */}
  <motion.div
- initial={{ opacity: 0, x: 20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
  >
  <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">

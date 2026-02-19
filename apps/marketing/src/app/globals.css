@@ -4,28 +4,28 @@
 
 :root {
   /* Core Brand Colors (Style Guide v1) */
-  --brand-50: 239 246 255;
-  --brand-100: 219 234 254;
-  --brand-200: 191 219 254;
-  --brand-300: 147 197 253;
-  --brand-400: 96 165 250;
-  --brand-500: 37 99 235;
-  --brand-600: 29 78 216;
-  --brand-700: 23 66 180;
-  --brand-800: 30 64 175;
-  --brand-900: 30 58 138;
+  --brand-50: 238 243 255;
+  --brand-100: 221 229 252;
+  --brand-200: 198 211 247;
+  --brand-300: 167 186 239;
+  --brand-400: 126 150 226;
+  --brand-500: 91 120 210;
+  --brand-600: 63 92 184;
+  --brand-700: 45 67 148;
+  --brand-800: 33 50 113;
+  --brand-900: 23 35 82;
 
   /* Surfaces */
-  --surface-50: 248 250 252;
-  --surface-100: 241 245 249;
-  --surface-200: 226 232 240;
-  --surface-300: 203 213 225;
-  --surface-400: 148 163 184;
-  --surface-500: 100 116 139;
-  --surface-600: 71 85 105;
-  --surface-700: 51 65 85;
-  --surface-800: 30 41 59;
-  --surface-900: 15 23 42;
+  --surface-50: 250 250 248;
+  --surface-100: 244 244 240;
+  --surface-200: 230 231 224;
+  --surface-300: 206 208 199;
+  --surface-400: 158 161 151;
+  --surface-500: 111 115 107;
+  --surface-600: 80 84 78;
+  --surface-700: 56 60 55;
+  --surface-800: 35 39 36;
+  --surface-900: 18 21 21;
 
   /* Semantic Colors */
   --success: 22 163 74;
@@ -94,6 +94,7 @@
     @apply bg-surface-50 text-surface-900 font-sans text-[17px] leading-[1.6];
     font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
     min-height: 100vh;
+    text-rendering: optimizeLegibility;
   }
   p {
     @apply max-w-[65ch];
@@ -106,15 +107,15 @@
   }
 
   h1 {
-    @apply text-[44px] md:text-[64px] font-bold leading-[1.05] tracking-[-0.03em];
+    @apply font-display text-[44px] md:text-[64px] font-semibold leading-[1.05] tracking-[-0.03em];
   }
 
   h2 {
-    @apply text-[32px] md:text-[42px] font-bold leading-[1.1] tracking-[-0.02em];
+    @apply font-display text-[32px] md:text-[42px] font-semibold leading-[1.1] tracking-[-0.02em];
   }
 
   h3 {
-    @apply text-[22px] md:text-[28px] font-bold leading-[1.2] tracking-[-0.01em];
+    @apply font-display text-[22px] md:text-[28px] font-semibold leading-[1.2] tracking-[-0.01em];
   }
 
   /* Core UI elements from Style Guide */
@@ -181,7 +182,14 @@
   }
 
   .code-block {
-    @apply font-mono text-[13px] bg-surface-900 text-white rounded-sm border border-surface-700 overflow-x-auto p-4;
+    @apply font-mono text-[13px] bg-surface-900 text-white rounded-sm border border-surface-700 overflow-hidden;
+  }
+
+  .code-block pre,
+  .code-block code {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .nav-link {

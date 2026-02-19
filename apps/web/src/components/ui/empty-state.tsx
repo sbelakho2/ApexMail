@@ -1,10 +1,10 @@
 import * as React from 'react';
-import { LucideIcon } from 'lucide-react';
+import { type ApexIconComponent } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 
 interface EmptyStateProps {
-  icon?: LucideIcon;
+  icon?: ApexIconComponent;
   title: string;
   description?: string;
   action?: {

@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Calculator, DollarSign, TrendingDown } from 'lucide-react';
+import { Calculator, DollarSign, TrendingDown } from '@/components/ui/icons';
 
 export function CalculatorHero() {
   return (

@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import Link from 'next/link';
-import { ArrowRight, Zap, Clock, Shield, Headphones } from 'lucide-react';
+import { ArrowRight, Zap, Clock, Shield, Headphones } from '@/components/ui/icons';
 
 const ctaFeatures = [
  { icon: Zap, text: 'Send your first email in < 60 seconds' },
@@ -41,8 +41,8 @@ export function CTASection() {
    {ctaFeatures.map((feature, index) => (
      <motion.div
        key={feature.text}
-       initial={{ opacity: 0, x: -20 }}
-       animate={inView ? { opacity: 1, x: 0 } : {}}
+       initial={{ opacity: 0, y: 12 }}
+       animate={inView ? { opacity: 1, y: 0 } : {}}
        transition={{ delay: 0.2 + index * 0.1 }}
        className="flex items-center gap-3 text-left"
      >

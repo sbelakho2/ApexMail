@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { FileText, Download, CheckCircle } from 'lucide-react';
+import { FileText, Download, CheckCircle } from '@/components/ui/icons';
 
 export function AutoDPA() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
@@ -13,14 +13,14 @@ export function AutoDPA() {
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
  <motion.div
- initial={{ opacity: 0, x: -20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  >
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-100/50 text-xs font-medium text-emerald-700 mb-6">
             <FileText className="w-4 h-4" />
             Auto-DPA
           </div>
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
+ <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight break-words">
  Data Processing Agreements on Autopilot
  </h2>
  <p className="text-lg text-surface-600 mb-8 leading-relaxed">
@@ -46,11 +46,11 @@ export function AutoDPA() {
 
  {/* Right - Visual */}
  <motion.div
- initial={{ opacity: 0, x: 20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
  >
- <div className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm">
+ <div className="bg-white rounded-lg border border-surface-200 p-6 sm:p-8 shadow-sm">
  {/* Document Preview */}
  <div className="bg-surface-50/50 rounded-lg p-6 mb-6 border border-surface-200">
  <div className="flex items-center gap-4 mb-6">

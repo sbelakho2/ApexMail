@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { CheckCircle2, AlertTriangle, XCircle, Activity } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, XCircle, Activity } from '@/components/ui/icons';
 
 type SystemStatus = 'operational' | 'degraded' | 'outage' | 'maintenance';
 

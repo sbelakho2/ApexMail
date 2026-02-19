@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Mail, Code } from 'lucide-react';
+import { Mail, Code } from '@/components/ui/icons';
 
 interface PaygUsage {
   period: {

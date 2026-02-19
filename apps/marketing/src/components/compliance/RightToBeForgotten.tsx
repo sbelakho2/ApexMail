@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Trash2, Database, Server, Cloud, CheckCircle2 } from 'lucide-react';
+import { Trash2, Database, Server, Cloud, CheckCircle2 } from '@/components/ui/icons';
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 

@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { useState } from 'react';
-import { Send, Clock, CheckCircle, Copy, Play } from 'lucide-react';
+import { Send, Clock, CheckCircle, Copy, Play } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 import DOMPurify from 'isomorphic-dompurify';
 

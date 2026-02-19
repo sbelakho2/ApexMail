@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Check, ArrowRight, Minus } from 'lucide-react';
+import { Check, ArrowRight, Minus } from '@/components/ui/icons';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
 
@@ -90,24 +90,24 @@ export function ComparisonSection() {
           className="overflow-x-auto bg-white rounded-lg border border-surface-200 shadow-sm"
         >
           {/* Table Header */}
-          <div className="min-w-[900px]">
-            <div className="grid grid-cols-5 gap-4 p-4 lg:p-6 border-b border-surface-200 bg-surface-50/50">
+          <div className="min-w-0">
+            <div className="grid grid-cols-5 gap-2 sm:gap-4 p-3 sm:p-4 lg:p-6 border-b border-surface-200 bg-surface-50/50">
               <div className="font-bold text-surface-900 text-sm flex items-center">Feature</div>
               <div className="text-center">
-                <div className="font-bold text-brand-700">ApexMail</div>
-                <div className="text-sm text-brand-500 font-medium">Our Platform</div>
+                <div className="font-bold text-brand-700 text-xs sm:text-base">ApexMail</div>
+                <div className="text-[11px] sm:text-sm text-brand-500 font-medium">Our Platform</div>
               </div>
               <div className="text-center text-surface-900">
-                <div className="font-semibold text-surface-700">SendGrid</div>
-                <div className="text-sm text-surface-500 font-medium">Twilio</div>
+                <div className="font-semibold text-surface-700 text-xs sm:text-base">SendGrid</div>
+                <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Twilio</div>
               </div>
               <div className="text-center text-surface-900">
-                <div className="font-semibold text-surface-700">Mailchimp</div>
-                <div className="text-sm text-surface-500 font-medium">Intuit</div>
+                <div className="font-semibold text-surface-700 text-xs sm:text-base">Mailchimp</div>
+                <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Intuit</div>
               </div>
               <div className="text-center text-surface-900">
-                <div className="font-semibold text-surface-700">AWS SES</div>
-                <div className="text-sm text-surface-500 font-medium">Amazon</div>
+                <div className="font-semibold text-surface-700 text-xs sm:text-base">AWS SES</div>
+                <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Amazon</div>
               </div>
             </div>
 
@@ -115,7 +115,7 @@ export function ComparisonSection() {
             {comparisonData.categories.map((category, categoryIndex) => (
               <div key={category.name}>
                 {/* Category Header */}
-                <div className="px-4 lg:px-6 py-2 bg-surface-50/30 border-b border-surface-100">
+                  <div className="px-3 sm:px-4 lg:px-6 py-2 bg-surface-50/30 border-b border-surface-100">
                   <span className="text-sm font-bold uppercase tracking-widest text-surface-600">
                     {category.name}
                   </span>
@@ -129,11 +129,11 @@ export function ComparisonSection() {
                     animate={inView ? { opacity: 1, x: 0 } : {}}
                     transition={{ delay: categoryIndex * 0.1 + featureIndex * 0.05 }}
                     className={cn(
-                      'grid grid-cols-5 gap-4 px-4 lg:px-6 py-4 items-center hover:bg-surface-50/50 transition-colors',
+                      'grid grid-cols-5 gap-2 sm:gap-4 px-3 sm:px-4 lg:px-6 py-3 sm:py-4 items-center hover:bg-surface-50/50 transition-colors',
                       featureIndex !== category.features.length - 1 && 'border-b border-surface-100'
                     )}
                   >
-                    <div className="text-sm font-semibold text-surface-700">{feature.name}</div>
+                    <div className="text-xs sm:text-sm font-semibold text-surface-700 break-words">{feature.name}</div>
                     <div className="flex justify-center font-bold text-brand-700">
                       {renderValue(feature.apexmail)}
                     </div>

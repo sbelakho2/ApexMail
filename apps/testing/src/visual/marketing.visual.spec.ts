@@ -14,7 +14,7 @@ test.describe('Marketing Visual Regression', () => {
     // But for this task, we want to debug UI/UX so we run it.
     
     test.beforeEach(async ({ page }) => {
-        const MARKETING_URL = process.env.MARKETING_URL || 'http://localhost:3001';
+        const MARKETING_URL = process.env.MARKETING_URL || 'http://localhost:3003';
         await page.goto(MARKETING_URL);
     });
 

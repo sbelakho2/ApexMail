@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import Link from 'next/link';
-import { ArrowRight, Zap } from 'lucide-react';
+import { ArrowRight, Zap } from '@/components/ui/icons';
 
 const stats = [
   { value: '99.9%', label: 'Delivery Rate' },

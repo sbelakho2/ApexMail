@@ -5,7 +5,7 @@ import {
   BookOpen, MessageSquare, Mail, Zap, Shield, Key, Plus,
   Send, Bot, ChevronDown, ChevronRight, ArrowLeft, Clock,
   AlertCircle, CheckCircle2, Loader2, Tag, X
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';

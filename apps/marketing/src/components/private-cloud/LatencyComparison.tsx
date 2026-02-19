@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { useState, useEffect } from 'react';
-import { Gauge, Zap, Globe } from 'lucide-react';
+import { Gauge, Zap, Globe } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 interface LatencyData {

@@ -50,10 +50,10 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
  };
 
  return (
- <div className="code-block overflow-x-auto">
- <pre className="p-4 text-[13px] leading-relaxed">
+ <div className="code-block overflow-hidden">
+ <pre className="p-4 text-[13px] leading-relaxed whitespace-pre-wrap break-words">
  <code
- className="font-mono"
+ className="font-mono block whitespace-pre-wrap break-words"
  dangerouslySetInnerHTML={{
  __html: highlightCode(code, language),
  }}

@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import Link from 'next/link';
-import { ArrowRight, MessageCircle } from 'lucide-react';
+import { ArrowRight, MessageCircle } from '@/components/ui/icons';
 
 export function CaseStudiesCTA() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });

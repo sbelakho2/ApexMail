@@ -11,7 +11,7 @@ import {
     Webhook,
     Building2,
     Save,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';

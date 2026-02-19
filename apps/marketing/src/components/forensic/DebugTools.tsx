@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Bug, Terminal, Smartphone, Mail, AlertTriangle } from 'lucide-react';
+import { Bug, Terminal, Smartphone, Mail, AlertTriangle } from '@/components/ui/icons';
 
 export function DebugTools() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });

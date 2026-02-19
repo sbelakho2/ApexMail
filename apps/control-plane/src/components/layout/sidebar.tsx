@@ -24,7 +24,7 @@ import {
     Settings,
     Lock,
     LogOut
-} from 'lucide-react';
+} from '../ui/icons';
 import { cn } from '../../lib/utils';
 
 interface NavItem {

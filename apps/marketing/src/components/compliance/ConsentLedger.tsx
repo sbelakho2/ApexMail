@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Database, Link as LinkIcon, Shield, Hash } from 'lucide-react';
+import { Database, Link as LinkIcon, Shield, Hash } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 
 const ledgerCode = `// Every consent event is cryptographically linked
@@ -31,8 +31,8 @@ export function ConsentLedger() {
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Visual */}
  <motion.div
- initial={{ opacity: 0, x: -20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  className="order-2 lg:order-1"
  >
  <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">
@@ -46,10 +46,10 @@ export function ConsentLedger() {
  </div>
 
  {/* Hash Chain Visualization */}
- <div className="p-6 border-t border-surface-200 bg-white">
- <div className="flex items-center justify-between gap-4">
+ <div className="p-4 sm:p-6 border-t border-surface-200 bg-white">
+ <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
  {[1, 2, 3, 4, 5].map((block, i) => (
- <div key={i} className="flex items-center gap-2">
+ <div key={i} className="flex items-center gap-1.5 sm:gap-2">
  <div className="w-10 h-10 rounded-lg bg-surface-50 border border-surface-200 flex items-center justify-center ">
  <Hash className="w-4 h-4 text-surface-900" />
  </div>
@@ -68,8 +68,8 @@ export function ConsentLedger() {
 
  {/* Right - Copy */}
  <motion.div
- initial={{ opacity: 0, x: 20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
  className="order-1 lg:order-2"
  >
@@ -77,7 +77,7 @@ export function ConsentLedger() {
           <Database className="w-4 h-4" />
           Consent Ledger
         </div>
- <h2 className="text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight">
+ <h2 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-surface-900 mb-6 tracking-tight break-words">
  Immutable Consent Records
  </h2>
  <p className="text-lg text-surface-600 mb-8 leading-relaxed">

@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Globe, Shield, TrendingUp, CheckCircle } from 'lucide-react';
+import { Globe, Shield, TrendingUp, CheckCircle } from '@/components/ui/icons';
 
 export function DedicatedIPs() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
@@ -13,8 +13,8 @@ export function DedicatedIPs() {
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
  {/* Left - Copy */}
  <motion.div
- initial={{ opacity: 0, x: -20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  >
  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-surface-100 border border-surface-200 text-xs font-medium text-surface-900 mb-6">
             <Globe className="w-4 h-4" />
@@ -61,8 +61,8 @@ export function DedicatedIPs() {
 
  {/* Right - IP Pool Visual */}
  <motion.div
- initial={{ opacity: 0, x: 20 }}
- animate={inView ? { opacity: 1, x: 0 } : {}}
+ initial={{ opacity: 0, y: 16 }}
+ animate={inView ? { opacity: 1, y: 0 } : {}}
  transition={{ delay: 0.2 }}
  >
  <div className="bg-white rounded-lg border border-surface-200 p-8 shadow-sm">

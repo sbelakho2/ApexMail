@@ -1,11 +1,17 @@
 import type { Metadata } from 'next';
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import { Fraunces, IBM_Plex_Mono, Manrope } from 'next/font/google';
 import './globals.css';
 import { ControlPlaneShell } from '../components/layout/control-plane-shell';
 import { Providers } from '../components/layout/providers';
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
-const jetbrains = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains' });
+const manrope = Manrope({ subsets: ['latin'], variable: '--font-sans', display: 'swap' });
+const fraunces = Fraunces({ subsets: ['latin'], variable: '--font-display', display: 'swap' });
+const plexMono = IBM_Plex_Mono({
+    subsets: ['latin'],
+    weight: ['400', '500'],
+    variable: '--font-mono',
+    display: 'swap',
+});
 
 export const metadata: Metadata = {
     title: 'ApexMail Control Plane',
@@ -34,8 +40,8 @@ export default function RootLayout({
     children: React.ReactNode;
 }) {
     return (
-        <html lang="en">
-            <body className={`${inter.variable} ${jetbrains.variable} font-sans antialiased text-[17px] leading-[1.6]`}>
+        <html lang="en" className={`${manrope.variable} ${fraunces.variable} ${plexMono.variable}`}>
+            <body className="font-sans antialiased text-[17px] leading-[1.6]">
                 <Providers>
                     <ControlPlaneShell>{children}</ControlPlaneShell>
                 </Providers>

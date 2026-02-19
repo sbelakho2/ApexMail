@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Search, Clock, Eye, Bug } from 'lucide-react';
+import { Search, Clock, Eye, Bug } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function ForensicHero() {

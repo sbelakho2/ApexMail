@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Play, Copy, Check, Terminal, Loader2 } from 'lucide-react';
+import { Play, Copy, Check, Terminal, Loader2 } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 import { cn } from '@/lib/utils';
 
@@ -168,8 +168,8 @@ export function LiveAPIConsole() {
           className="grid lg:grid-cols-2 gap-8 mb-16"
         >
           {/* Left - Interactive Demo */}
-          <div className="p-8 bg-white rounded-lg border border-surface-200 shadow-sm">
-            <div className="flex items-center gap-3 mb-8">
+          <div className="p-6 sm:p-8 bg-white rounded-lg border border-surface-200 shadow-sm">
+            <div className="flex flex-wrap items-center gap-3 mb-8">
               <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                 <Terminal className="w-5 h-5" strokeWidth={1.5} />
               </div>
@@ -255,7 +255,7 @@ export function LiveAPIConsole() {
           </div>
 
           {/* Right - SDK Examples */}
-          <div className="p-8 bg-white rounded-lg border border-surface-200 shadow-sm flex flex-col">
+          <div className="p-6 sm:p-8 bg-white rounded-lg border border-surface-200 shadow-sm flex flex-col">
             <div className="flex items-center justify-between mb-8">
               <div>
                 <h3 className="font-bold text-surface-900 text-sm">Official SDKs</h3>
@@ -269,7 +269,7 @@ export function LiveAPIConsole() {
             </div>
 
             {/* Language Tabs */}
-            <div className="flex items-center gap-1 mb-6 border-b border-surface-100 pb-0">
+            <div className="flex flex-wrap items-center gap-1 mb-6 border-b border-surface-100 pb-0">
               {languages.map((lang) => (
                 <button
                   key={lang.id}

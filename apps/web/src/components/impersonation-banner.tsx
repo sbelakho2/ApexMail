@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { X, Eye, AlertTriangle } from 'lucide-react';
+import { X, Eye, AlertTriangle } from '@/components/ui/icons';
 
 interface ImpersonationInfo {
     operatorName: string;

@@ -2,7 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { ArrowRight, Terminal, Book } from 'lucide-react';
+import { ArrowRight, Terminal, Book } from '@/components/ui/icons';
 import Link from 'next/link';
 
 export function APIConsoleCTA() {

@@ -17,7 +17,7 @@ import {
     ArrowUpDown,
     ChevronLeft,
     ChevronRight,
-} from 'lucide-react';
+} from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
