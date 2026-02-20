@@ -20,43 +20,63 @@ marketing platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).
 - Dashboard: https://app.apexmail.ee
 
 ## Pricing (monthly)
-| Plan       | Price    | Emails/mo | API calls/mo | Team members | Sending domains |
-|------------|----------|-----------|--------------|--------------|-----------------|
-| Free       | $0       | 1 000     | 10 000       | 1            | 1               |
-| Starter    | $29      | 25 000    | 250 000      | 5            | 3               |
-| Pro        | $59      | 50 000    | 500 000      | 5            | 5               |
-| Growth     | $129     | 100 000   | 2 000 000    | 10           | 10              |
-| Scale      | $399     | 500 000   | 10 000 000   | 25           | 25              |
-| Enterprise | $1 299   | Custom    | Unlimited    | Unlimited    | Unlimited       |
+| Plan       | Price    | Emails/mo   | API calls/mo | Team | Domains    | Contacts    |
+|------------|----------|-------------|--------------|------|------------|-------------|
+| Free       | $0       | 1,000       | 10,000       | 1    | 1          | 100         |
+| Starter    | $29      | 25,000      | 250,000      | 3    | 3          | 5,000       |
+| Pro        | $59      | 50,000      | 500,000      | 5    | 5          | 10,000      |
+| Growth     | $129     | 100,000     | 1,000,000    | 10   | 10         | 25,000      |
+| Scale      | $399     | 500,000     | 5,000,000    | 25   | Unlimited  | 100,000     |
+| Enterprise | $1,299   | 2,000,000   | 20,000,000   | Unlimited | Unlimited | Unlimited |
 
 Pay-as-you-go (PAYG): $0.001/email (first 10k), $0.0008 (10k–100k), \
 $0.0005 (100k–1M), $0.0003 (1M+). Email overages: $0.50/1 000 extra. \
 API overages: first 100k free, then $0.10 per 1 000 calls.
 
 ## Plan features
-- **Free:** Basic sending, 1 domain, email support. NO webhooks.
-- **Starter ($29):** Webhooks, 3 domains, email support, 5 team members. NO A/B testing. NO send-time optimization. NO dedicated IP.
-- **Pro ($59):** Webhooks, analytics, 5 domains, 5 team members. NO A/B testing. NO send-time optimization. NO dedicated IP.
-- **Growth ($129):** Everything in Pro + send-time optimisation (AI), A/B testing, 10 domains, dedicated IP option, priority support, 10 team members.
-- **Scale ($399):** Everything in Growth + advanced analytics, 25 domains, 3 dedicated IPs, SSO, priority support, 25 team members.
-- **Enterprise ($1,299):** Custom everything, unlimited domains/IPs/team members, SLA, dedicated account manager.
+- **Free:** Basic sending, 1 domain, email support, 7-day retention. NO webhooks, NO custom tracking domain.
+- **Starter ($29):** Webhooks, 3 domains, 3 team members, email support, 30-day retention. NO A/B testing. NO dedicated IP.
+- **Pro ($59):** Custom tracking domain, 5 domains, 5 team members, email support, 60-day retention. NO A/B testing. NO dedicated IP.
+- **Growth ($129):** A/B testing, send-time optimisation (AI), 1 dedicated IP, 10 domains, 10 team members, audit logs, priority support, 90-day retention.
+- **Scale ($399):** 3 dedicated IPs, SSO/SAML, unlimited domains, 25 team members, phone support, subaccounts, inbound receiving, SLA 99.9%, 365-day retention.
+- **Enterprise ($1,299):** 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, 730-day retention.
 
 Note: A/B testing is available ONLY from Growth ($129) and above. NOT on Free, Starter, or Pro.
 Note: Send-time optimisation is available ONLY from Growth ($129) and above.
 Note: SSO is available from Scale ($399) and above.
-Note: Dedicated IPs: Growth gets 1 (option), Scale includes 3, Enterprise unlimited.
+Note: Dedicated IPs: Growth 1 included, Scale 3 included, Enterprise 10 included. Add-on: $49/month.
 Note: Priority support: available from Growth ($129) and above. Starter and Pro have standard email support only.
+Note: Inbound email receiving: available on Scale and Enterprise only.
+Note: SLA credits: Scale 10%, Enterprise 25%.
 
 ## Key capabilities
 - Transactional & bulk email via REST API or SMTP relay
-- Domain auth: SPF, DKIM (2048-bit), DMARC, ARC, BIMI
-- Webhooks (delivered, opened, clicked, bounced, complained, unsubscribed)
-- Templates (Handlebars), dynamic content, attachments (≤25 MB)
+- Domain auth: SPF (include:_spf.apexmail.ee), DKIM (selector: apexmail._domainkey, 2048-bit), DMARC, ARC, BIMI
+- Return-Path CNAME: bounce.yourdomain.com → bounce.apexmail.ee
+- Webhooks (message.delivered, message.opened, message.clicked, message.bounced, message.complained, message.unsubscribed)
+- Webhook signing: HMAC-SHA256, X-ApexMail-Signature header. Signing secret ≠ API key.
+- Templates (Handlebars), dynamic content, attachments (≤25 MB per file, ≤50 MB total per message)
+- Max recipients per email: 50 to + 50 cc + 50 bcc. Batch: up to 1,000 per call.
 - Suppression lists (auto + manual), bounce/complaint handling
 - Analytics: opens, clicks, heatmaps, deliverability score
-- SDKs: Node.js (@apexmail/sdk), Python (apexmail-python)
+- SDKs: Node.js (@apexmail/node), Python (apexmail), Go, Ruby (apexmail gem), PHP (apexmail/apexmail-php), Java (ee.apexmail:apexmail-java)
 - Send-time optimisation (AI-powered per-subscriber, Growth plan and above)
 - A/B testing (Growth plan and above)
+- Custom tracking domain: CNAME → t.apexmail.ee (default). Pro plan and above.
+- API rate limit: 1,000 req/min per tenant (all plans, Redis sliding window). Enterprise may negotiate higher.
+- Idempotency: X-Idempotency-Key header, 1-256 chars, 24h TTL. Same key + different body → 409 Conflict.
+- Scheduled sends: up to 72 hours ahead, minimum 1 minute, ISO 8601 format.
+- Account lockout: 5 failed login attempts → 15-minute lockout.
+- Soft bounce retry: exponential backoff 30s × 2^(attempt−1), capped at 30 min. Default max 3 attempts.
+- Hard bounces: auto-added to suppression list. Soft bounces retried then suppressed after max retries.
+- IP warmup: Day 1: 50, Day 2: 100, Day 3: 250, Day 4: 500, Day 5: 1K, Day 6: 2.5K, Day 7: 5K, Days 8-14: 10K, Days 15-21: 25K, Days 22-28: 50K, Day 29+: 100K+.
+- Webhook auto-disable: 10+ consecutive failures in 1 hour OR 50%+ failure rate with 20+ attempts.
+- Webhook retry: default 3 retries (max 5 system cap), exponential backoff starting at 60s, 2× multiplier.
+- SMTP ports: outbound 25, 465, 587; inbound 25, 465 (Scale/Enterprise).
+- MTA-STS and DANE (RFC 6698): fully implemented.
+- SCIM 2.0 (RFC 7644) for user provisioning: Scale and Enterprise.
+- SSO: SAML 2.0 / OIDC. Scale and Enterprise only.
+- Gmail clipping: HTML > 102 KB is clipped. Keep emails under 102 KB.
 
 ## Industry benchmarks
 - Average email open rate: 21.5 % (varies by industry)

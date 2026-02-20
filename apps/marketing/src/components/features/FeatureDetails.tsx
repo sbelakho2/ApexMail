@@ -73,37 +73,34 @@ await apexmail.compliance.consent.record({
   },
   {
     id: 'ai',
-    title: 'Local AI Intelligence',
-    subtitle: 'Smart Features',
+    title: 'AI-Powered Optimization',
+    subtitle: 'Automatic Intelligence',
     description:
-      'Our AI runs entirely on local ONNX models. No data leaves your infrastructure, no per-request API costs, sub-50ms latency.',
+      'AI-powered send-time optimization runs entirely within our infrastructure — no third-party API calls, no extra cost. The platform automatically learns each recipient\'s engagement patterns to maximize open rates.',
     benefits: [
-      'Send-time optimization via ML',
-      'Subject line generation & scoring',
-      'Content readability analysis',
-      'Spam score prediction',
-      'Engagement forecasting',
+      'Automatic send-time optimization per recipient',
+      'Bayesian engagement modeling with cold-start priors',
+      'ML-based A/B test autopilot (Thompson Sampling)',
+      'Inbox placement scoring and deliverability insights',
+      'Churn prediction and re-engagement signals',
     ],
-    code: `// Optimize send time
-const optimal = await apexmail.ai.sto.predict({
-  subscriberIds: ['sub_123', 'sub_456'],
-  timezone: 'America/New_York',
-});
-// { recommendedTime: '2024-01-15T09:30:00Z', confidence: 0.87 }
-
-// Generate subject lines
-const subjects = await apexmail.ai.content.generateSubjects({
-  topic: 'Welcome email for SaaS trial',
-  tone: 'friendly',
-  count: 5,
+    code: `// Schedule with send-time optimization enabled
+const { id } = await apexmail.emails.send({
+  from: 'hello@company.com',
+  to: 'user@example.com',
+  subject: 'Your weekly digest',
+  html: '<p>Here\'s what\'s new...</p>',
+  // Platform automatically selects the optimal
+  // delivery time based on recipient engagement history
+  optimizeSendTime: true,
 });
 
-// Analyze content
-const analysis = await apexmail.ai.content.analyze({
-  html: emailHtml,
+// Retrieve message analytics
+const events = await apexmail.events.list({
+  messageId: id,
 });
-// { spamScore: 0.12, readability: 72, issues: [] }`,
-    cta: { text: 'Explore AI Features', href: '/docs/ai' },
+console.log(events); // delivered, opened, clicked...`,
+    cta: { text: 'View Analytics Docs', href: '/docs/analytics' },
   },
 ];
 

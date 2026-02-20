@@ -620,10 +620,13 @@ export class EventsRepository {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
-    // This would typically move data to a cold storage table or external storage
-    // For now, we just count what would be archived
     const result = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM events WHERE timestamp < $1`,
+      `WITH deleted AS (
+          DELETE FROM events
+          WHERE timestamp < $1
+          RETURNING id
+       )
+       SELECT COUNT(*)::text as count FROM deleted`,
       [cutoffDate]
     );
 

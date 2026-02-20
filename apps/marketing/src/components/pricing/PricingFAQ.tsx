@@ -37,6 +37,11 @@ const faqs: FAQ[] = [
  answer:
  'No. Monthly plans are cancel-anytime. Annual plans offer a discount in exchange for a one-year commitment.',
  },
+ {
+ question: 'How can I reach billing for urgent invoice issues?',
+ answer:
+ 'Use billing@apexmail.ee first. For legal invoice escalations, phone support is available at: plus-three-seven-two, five-six-three, eight-zero-nine, two-seven.',
+ },
 ];
 
 export function PricingFAQ() {

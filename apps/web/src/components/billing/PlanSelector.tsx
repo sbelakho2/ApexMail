@@ -219,7 +219,7 @@ export function PlanSelector({ currentPlan, onPlanChange, trigger }: PlanSelecto
                 <div className="mb-4">
                   <h3 className="font-medium text-base">{plan.displayName}</h3>
                   <div className="mt-1 flex items-baseline gap-1">
-                    <span className="text-2xl font-semibold tabular-nums">
+                    <span className="text-2xl font-semibold apex-metric-number">
                       {plan.priceMonthly === 0 ? '$0' : formatPrice(price)}
                     </span>
                     <span className="text-muted-foreground text-sm">/mo</span>

@@ -395,7 +395,7 @@ function OverviewTab({ overview, metrics, baseline }: { overview: Overview; metr
             {baseline?.hasBaseline && baseline.comparison && (
                 <div>
                     <h2 className="text-lg font-semibold mb-3">Baseline Comparison</h2>
-                    <div className="rounded-lg border border-border bg-card p-4 space-y-4">
+                    <div className="apex-card p-4 space-y-4">
                         <div className="flex items-center gap-2">
                             <span className="text-sm font-medium">Verdict:</span>
                             <span className={cn(
@@ -459,7 +459,7 @@ function CandidatesTab({ candidates }: { candidates: Candidate[] }) {
     return (
         <div className="space-y-4">
             <h2 className="text-lg font-semibold">Candidate Arms ({candidates.length})</h2>
-            <div className="rounded-lg border border-border overflow-x-auto">
+            <div className="apex-card overflow-x-auto">
                 <table className="w-full text-sm">
                     <thead>
                         <tr className="border-b border-border bg-muted/50">
@@ -481,14 +481,14 @@ function CandidatesTab({ candidates }: { candidates: Candidate[] }) {
                                     {c.label}
                                 </td>
                                 <td className="px-3 py-2 text-muted-foreground">{c.icpCluster}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatNumber(c.impressions)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatPercentage(c.openRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums font-medium">{formatPercentage(c.replyRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatPercentage(c.negativeRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums text-xs text-muted-foreground">
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatNumber(c.impressions)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatPercentage(c.openRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number font-medium">{formatPercentage(c.replyRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatPercentage(c.negativeRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number text-xs text-muted-foreground">
                                     [{formatPercentage(c.lowerBound)} – {formatPercentage(c.upperBound)}]
                                 </td>
-                                <td className="px-3 py-2 text-right tabular-nums">{c.consecutiveHoursBeating}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{c.consecutiveHoursBeating}</td>
                                 <td className="px-3 py-2 text-center">
                                     <span className={cn('px-2 py-0.5 rounded-full text-xs font-semibold', statusBadge(c.status))}>
                                         {c.status}
@@ -536,7 +536,7 @@ function ApprovalsTab({ pending, approveEmail, rejectEmail, approveAll, acting }
 
             <div className="space-y-3">
                 {pending.map((email) => (
-                    <div key={email.id} className="rounded-lg border border-border bg-card p-4">
+                    <div key={email.id} className="apex-card p-4">
                         <div className="flex items-start justify-between gap-4">
                             <div className="flex-1 min-w-0 space-y-1">
                                 <p className="font-medium">{email.subject}</p>
@@ -578,7 +578,7 @@ function OutcomesTab({ outcomes }: { outcomes: HourlyOutcome[] }) {
     return (
         <div className="space-y-4">
             <h2 className="text-lg font-semibold">Hourly Outcomes ({outcomes.length})</h2>
-            <div className="rounded-lg border border-border overflow-x-auto">
+            <div className="apex-card overflow-x-auto">
                 <table className="w-full text-sm">
                     <thead>
                         <tr className="border-b border-border bg-muted/50">
@@ -598,20 +598,20 @@ function OutcomesTab({ outcomes }: { outcomes: HourlyOutcome[] }) {
                     <tbody>
                         {outcomes.map((o) => (
                             <tr key={o.hour} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                                <td className="px-3 py-2 tabular-nums font-medium">H{o.hour}</td>
+                                <td className="px-3 py-2 apex-metric-number font-medium">H{o.hour}</td>
                                 <td className="px-3 py-2 text-center">
                                     <span className={cn('px-2 py-0.5 rounded-full text-xs font-semibold', verdictBadge(o.verdict))}>
                                         {o.verdict.replace('_', ' ')}
                                     </span>
                                 </td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatPercentage(o.baselineOpenRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatPercentage(o.aggregateOpenRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatPercentage(o.baselineReplyRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{formatPercentage(o.aggregateReplyRate)}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{o.candidatesPromoted.length}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{o.candidatesPruned.length}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{o.candidatesKilled.length}</td>
-                                <td className="px-3 py-2 text-right tabular-nums">{o.newVariantsSeeded}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatPercentage(o.baselineOpenRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatPercentage(o.aggregateOpenRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatPercentage(o.baselineReplyRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{formatPercentage(o.aggregateReplyRate)}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{o.candidatesPromoted.length}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{o.candidatesPruned.length}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{o.candidatesKilled.length}</td>
+                                <td className="px-3 py-2 text-right apex-metric-number">{o.newVariantsSeeded}</td>
                                 <td className="px-3 py-2 text-center">
                                     {o.safeModeTriggered ? <span className="text-red-600 dark:text-red-400">Warn</span> : <span className="text-green-600 dark:text-green-400">OK</span>}
                                 </td>
@@ -673,7 +673,7 @@ function ActionsTab({ actions }: { actions: ActionEntry[] }) {
             ) : (
                 <div className="space-y-2">
                     {actions.map((a, i) => (
-                        <div key={i} className="flex items-start gap-3 rounded-lg border border-border bg-card px-4 py-3">
+                        <div key={i} className="apex-card px-4 py-3 flex items-start gap-3">
                             <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded shrink-0 mt-0.5">{a.action}</span>
                             <div className="flex-1 min-w-0">
                                 <p className="text-sm">{a.detail}</p>
@@ -691,7 +691,7 @@ function ActionsTab({ actions }: { actions: ActionEntry[] }) {
 
 function Card({ label, children }: { label: string; children: React.ReactNode }) {
     return (
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="apex-card p-4">
             <p className="text-xs font-medium text-muted-foreground mb-1">{label}</p>
             {children}
         </div>

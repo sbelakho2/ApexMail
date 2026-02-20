@@ -31,6 +31,18 @@ export async function stabilizePage(page: Page): Promise<void> {
 export async function assertNoHorizontalOverflow(page: Page, label: string): Promise<void> {
     const offenders = await page.evaluate(() => {
         const vw = window.innerWidth;
+
+        function isInsideScrollContainer(el: Element): boolean {
+            let parent = el.parentElement;
+            while (parent && parent !== document.body) {
+                const ps = window.getComputedStyle(parent);
+                const ox = ps.overflowX;
+                if (ox === 'auto' || ox === 'hidden' || ox === 'scroll') return true;
+                parent = parent.parentElement;
+            }
+            return false;
+        }
+
         const elements = Array.from(document.querySelectorAll('body *'));
         const issues: Array<{ tag: string; id: string; cls: string; left: number; right: number; width: number }> = [];
         for (const el of elements) {
@@ -38,6 +50,10 @@ export async function assertNoHorizontalOverflow(page: Page, label: string): Pro
             if (style.display === 'none' || style.visibility === 'hidden') continue;
             const rect = el.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) continue;
+            // Skip elements entirely off-screen (e.g. hidden mobile sidebars via -translate-x-full)
+            if (rect.right <= 2 || rect.left >= vw - 2) continue;
+            // Skip elements inside scroll containers (overflow-x: auto/hidden/scroll)
+            if (isInsideScrollContainer(el)) continue;
             if (rect.right > vw + 1 || rect.left < -1) {
                 issues.push({
                     tag: el.tagName.toLowerCase(),

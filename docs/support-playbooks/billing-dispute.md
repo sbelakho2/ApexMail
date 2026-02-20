@@ -80,14 +80,14 @@ GROUP BY DATE_TRUNC('month', sent_at);
 
 ### Step 4: Cross-reference plan limits
 
-| Plan | Monthly price | Email limit | Contacts | Dedicated IP | SLA |
-|------|---------------|-------------|----------|--------------|-----|
-| Free | $0 | 1,000/mo | 500 | No | None |
-| Starter | $29/mo | 15,000/mo | 2,500 | No | 99.5% |
-| Pro | $59/mo | 50,000/mo | 10,000 | No | 99.9% |
-| Growth | $129/mo | 150,000/mo | 25,000 | Optional (+$49) | 99.9% |
-| Scale | $399/mo | 500,000/mo | 100,000 | Included | 99.95% |
-| Enterprise | $1,299/mo | Unlimited | Unlimited | Included (multiple) | 99.99% |
+| Plan | Monthly price | Email limit | Contacts | Dedicated IP | SLA Guarantee |
+|------|---------------|-------------|----------|--------------|---------------|
+| Free | $0 | 1,000/mo | 100 | No | No |
+| Starter | $29/mo | 25,000/mo | 5,000 | No | No |
+| Pro | $59/mo | 50,000/mo | 10,000 | No | No |
+| Growth | $129/mo | 100,000/mo | 25,000 | 1 included | No |
+| Scale | $399/mo | 500,000/mo | 100,000 | 3 included | Yes (10% credit) |
+| Enterprise | $1,299/mo | 2,000,000/mo | Unlimited | 10 included | Yes (25% credit) |
 
 **Overage rates** (when applicable):
 - Emails beyond limit: $0.50 per 1,000
@@ -120,20 +120,25 @@ ORDER BY i.started_at;
 
 **SLA credit calculation:**
 
-| Monthly uptime | Credit (% of monthly bill) |
-|----------------|---------------------------|
-| 99.9% - 99.99% | No credit (within SLA for most plans) |
-| 99.0% - 99.9% | 10% credit |
-| 95.0% - 99.0% | 25% credit |
-| 90.0% - 95.0% | 50% credit |
-| < 90.0% | 100% credit |
+> **Note:** SLA guarantees are only available on **Scale** and **Enterprise** plans. The SLA target is **99.9% availability**.
+
+| Breach below 99.9% target | Credit (% of monthly bill) |
+|----------------------------|---------------------------|
+| 0.1% below (99.8%) | 10% credit |
+| 0.5% below (99.4%) | 25% credit |
+| 1.0% below (98.9%) | 50% credit |
+| 5.0%+ below (<94.9%) | 100% credit |
+
+**Plan-specific max credit:** Scale plans receive up to 10% invoice credit, Enterprise plans receive up to 25%.
 
 **Formula:**
 $$\text{Uptime \%} = \frac{\text{Total minutes} - \text{Downtime minutes}}{\text{Total minutes}} \times 100$$
 
 Example for January (44,640 minutes):
 - 60 minutes downtime = $(44640 - 60) / 44640 \times 100 = 99.87\%$
-- Pro plan ($59) with 99.9% SLA → 99.87% < 99.9% → 10% credit = $5.90
+- Scale plan ($399) → 99.87% is 0.03% below 99.9% target → does not breach 0.1% threshold → No credit
+- 90 minutes downtime = $(44640 - 90) / 44640 \times 100 = 99.80\%$
+- Scale plan ($399) → 99.80% is 0.1% below 99.9% target → 10% credit = $39.90
 
 ### Step 6: Check for billing system issues
 

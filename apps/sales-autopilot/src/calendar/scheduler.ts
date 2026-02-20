@@ -653,9 +653,9 @@ export function getLeadBookings(leadId: string): DemoSlot[] {
  * Generates a meeting link
  */
 function generateMeetingLink(slot: DemoSlot): string {
-    // In production, integrate with actual video conferencing service
-    // For now, generate a placeholder link
-    return `https://meet.apexmail.ee/${slot.id}`;
+    const tokenPayload = `${slot.id}:${new Date(slot.startTime).toISOString()}:${slot.userId}`;
+    const token = Buffer.from(tokenPayload).toString('base64url');
+    return `https://meet.apexmail.ee/${slot.id}?t=${token}`;
 }
 
 /**

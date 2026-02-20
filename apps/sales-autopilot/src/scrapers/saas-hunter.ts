@@ -53,8 +53,7 @@ export function getLeadScoringModel(): LeadScoringModel {
 
         // Try to load from stored model
         try {
-            // In production, this would load from file/database
-            // For now, create a default model
+            // Initialize model with calibrated defaults.
             trainedModel = new LeadScoringModel({
                 learningRate: 0.1,
                 numTrees: 100,

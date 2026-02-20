@@ -13,7 +13,8 @@ const configSchema = z.object({
     database: z.string().default('apexmail'),
     user: z.string().default('apexmail'),
     password: z.string().default(''),
-    maxConnections: z.coerce.number().default(10),
+    // 50 connections for 1000 tenants — Postgres can handle ~200 with proper pooling
+    maxConnections: z.coerce.number().default(50),
   }),
   
   redis: z.object({
@@ -37,10 +38,11 @@ const configSchema = z.object({
   duckdb: z.object({
     // Path to DuckDB database file
     dbPath: z.string().default('/var/lib/apexmail/analytics/analytics.duckdb'),
-    // Memory limit for DuckDB
-    memoryLimit: z.string().default('1GB'),
-    // Number of threads
-    threads: z.coerce.number().default(4),
+    // Memory limit for DuckDB — default 32GB for EX44 (160GB RAM) with ~1000 tenants
+    // DuckDB uses memory-mapped I/O, so allocating 20% of RAM is safe.
+    memoryLimit: z.string().default('32GB'),
+    // Number of threads — EX44 has AMD Ryzen 9 7950X (16c/32t); leave 8 threads for Postgres/Redis/Node
+    threads: z.coerce.number().default(24),
   }),
   
   compaction: z.object({
@@ -52,8 +54,8 @@ const configSchema = z.object({
     hotRetentionDays: z.coerce.number().default(90),
     // Retention period in days for cold data
     coldRetentionDays: z.coerce.number().default(365 * 2), // 2 years
-    // Batch size for compaction
-    batchSize: z.coerce.number().default(10000),
+    // Batch size for compaction — larger batches for EX44 with ample RAM
+    batchSize: z.coerce.number().default(100000),
   }),
   
   reconciliation: z.object({

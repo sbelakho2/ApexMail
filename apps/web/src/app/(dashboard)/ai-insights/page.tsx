@@ -25,34 +25,72 @@ const impactColors = { high: 'bg-success/10 text-success border-success/20', med
 export default function AIInsightsPage() {
     const [insights, setInsights] = React.useState<Insight[]>([]);
     const [loading, setLoading] = React.useState(true);
+    const [aiScores, setAiScores] = React.useState<{ subjectLines: number; sendTiming: number; targeting: number; deliverability: number }>({ subjectLines: 0, sendTiming: 0, targeting: 0, deliverability: 0 });
+    const [aiRecommendations, setAiRecommendations] = React.useState<string[]>([]);
 
-    React.useEffect(() => {
-        // Fetch AI insights from the analytics endpoint
-        fetch('/api/v1/analytics/dashboard')
-            .then(r => r.ok ? r.json() : Promise.reject())
-            .then(json => {
-                const d = json.dashboard;
-                const generated: Insight[] = [];
-                if (d?.engagement) {
-                    const openRate = parseFloat(d.engagement.rates.open);
-                    const clickRate = parseFloat(d.engagement.rates.click);
-                    const bounceRate = parseFloat(d.engagement.rates.bounce);
-                    if (openRate < 20) generated.push({ id: '1', type: 'subject_line', title: 'Improve subject lines', description: `Your open rate is ${openRate}%. Try A/B testing subject lines with personalization, emojis, or urgency to boost opens above 20%.`, impact: 'high', confidence: 85 });
-                    if (clickRate < 2) generated.push({ id: '2', type: 'audience', title: 'Refine audience targeting', description: `Your click rate is ${clickRate}%. Consider segmenting your audience by engagement level and sending more relevant content to active subscribers.`, impact: 'high', confidence: 78 });
-                    if (bounceRate > 2) generated.push({ id: '3', type: 'deliverability', title: 'Clean your email list', description: `Your bounce rate is ${bounceRate}%. Remove invalid addresses and implement double opt-in to improve deliverability.`, impact: 'high', confidence: 92 });
-                    generated.push({ id: '4', type: 'send_time', title: 'Optimize send times', description: 'Based on engagement patterns, Tuesday and Thursday mornings (9-11 AM) show the highest open rates for your audience.', impact: 'medium', confidence: 72 });
-                }
-                if (generated.length === 0) {
-                    generated.push(
-                        { id: '1', type: 'subject_line', title: 'Start sending campaigns', description: 'Send your first campaign to get AI-powered insights on subject lines, timing, and audience targeting.', impact: 'medium', confidence: 100 },
-                        { id: '2', type: 'send_time', title: 'Optimal send time analysis', description: 'Once you have sending data, AI will analyze engagement patterns to recommend the best times to reach your audience.', impact: 'medium', confidence: 100 },
-                    );
-                }
-                setInsights(generated);
-            })
-            .catch(() => setInsights([]))
-            .finally(() => setLoading(false));
+    const refreshInsights = React.useCallback(() => {
+        setLoading(true);
+
+        // Fetch both dashboard stats and AI insight scores in parallel
+        Promise.all([
+            fetch('/api/v1/analytics/dashboard').then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch('/api/v1/analytics/ai/insights').then(r => r.ok ? r.json() : null).catch(() => null),
+        ]).then(([dashboardJson, aiJson]) => {
+            // ── AI Scores ──
+            if (aiJson?.insights?.scores) {
+                setAiScores(aiJson.insights.scores);
+            }
+            if (aiJson?.insights?.recommendations) {
+                setAiRecommendations(aiJson.insights.recommendations);
+            }
+
+            // ── Insights from dashboard data ──
+            const d = dashboardJson?.dashboard;
+            const generated: Insight[] = [];
+
+            if (d?.engagement) {
+                const openRate = parseFloat(d.engagement.rates.open);
+                const clickRate = parseFloat(d.engagement.rates.click);
+                const bounceRate = parseFloat(d.engagement.rates.bounce);
+
+                if (openRate < 20) generated.push({ id: '1', type: 'subject_line', title: 'Improve subject lines', description: `Your open rate is ${openRate}%. Try A/B testing subject lines with personalization, emojis, or urgency to boost opens above 20%.`, impact: 'high', confidence: 85 });
+                if (clickRate < 2) generated.push({ id: '2', type: 'audience', title: 'Refine audience targeting', description: `Your click rate is ${clickRate}%. Consider segmenting your audience by engagement level and sending more relevant content to active subscribers.`, impact: 'high', confidence: 78 });
+                if (bounceRate > 2) generated.push({ id: '3', type: 'deliverability', title: 'Clean your email list', description: `Your bounce rate is ${bounceRate}%. Remove invalid addresses and implement double opt-in to improve deliverability.`, impact: 'high', confidence: 92 });
+                generated.push({ id: '4', type: 'send_time', title: 'Optimize send times', description: 'Use Send Time Optimizer to schedule emails at each recipient\'s peak engagement time.', impact: 'medium', confidence: 72 });
+            }
+
+            // Merge AI-generated recommendations as insights
+            if (aiJson?.insights?.recommendations) {
+                (aiJson.insights.recommendations as string[]).forEach((rec: string, i: number) => {
+                    const existing = generated.find(g => rec.toLowerCase().includes(g.type));
+                    if (!existing) {
+                        generated.push({
+                            id: `ai-${i}`,
+                            type: rec.toLowerCase().includes('subject') ? 'subject_line'
+                                : rec.toLowerCase().includes('send') ? 'send_time'
+                                : rec.toLowerCase().includes('churn') || rec.toLowerCase().includes('segment') ? 'audience'
+                                : 'deliverability',
+                            title: rec.split('.')[0] || rec,
+                            description: rec,
+                            impact: 'medium',
+                            confidence: 75,
+                        });
+                    }
+                });
+            }
+
+            if (generated.length === 0) {
+                generated.push(
+                    { id: '1', type: 'subject_line', title: 'Start sending campaigns', description: 'Send your first campaign to get AI-powered insights on subject lines, timing, and audience targeting.', impact: 'medium', confidence: 100 },
+                    { id: '2', type: 'send_time', title: 'Optimal send time analysis', description: 'Once you have sending data, AI will analyze engagement patterns to recommend the best times to reach your audience.', impact: 'medium', confidence: 100 },
+                );
+            }
+
+            setInsights(generated);
+        }).finally(() => setLoading(false));
     }, []);
+
+    React.useEffect(() => { refreshInsights(); }, [refreshInsights]);
 
     return (
         <div className="flex flex-col gap-6">
@@ -60,16 +98,16 @@ export default function AIInsightsPage() {
                 title="AI Insights"
                 description="AI-powered recommendations to optimize your email campaigns."
                 breadcrumbs={[{ label: 'AI Insights' }]}
-                actions={<Button><Sparkles className="mr-2 h-4 w-4" />Refresh Insights</Button>}
+                actions={<Button onClick={refreshInsights} disabled={loading}><Sparkles className="mr-2 h-4 w-4" />Refresh Insights</Button>}
             />
 
-            {/* AI score overview */}
+            {/* AI score overview — computed from real analytics engines */}
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 {[
-                    { icon: Lightbulb, label: 'Subject Lines', score: 72, color: 'text-primary' },
-                    { icon: Clock, label: 'Send Timing', score: 65, color: 'text-warning' },
-                    { icon: Target, label: 'Targeting', score: 58, color: 'text-success' },
-                    { icon: TrendingUp, label: 'Deliverability', score: 85, color: 'text-info' },
+                    { icon: Lightbulb, label: 'Subject Lines', score: aiScores.subjectLines, color: 'text-primary' },
+                    { icon: Clock, label: 'Send Timing', score: aiScores.sendTiming, color: 'text-warning' },
+                    { icon: Target, label: 'Targeting', score: aiScores.targeting, color: 'text-success' },
+                    { icon: TrendingUp, label: 'Deliverability', score: aiScores.deliverability, color: 'text-info' },
                 ].map(s => (
                     <Card key={s.label}>
                         <CardContent className="p-6">
@@ -77,7 +115,7 @@ export default function AIInsightsPage() {
                                 <s.icon className={cn('h-5 w-5', s.color)} />
                                 <span className="text-sm font-medium">{s.label}</span>
                             </div>
-                            <p className="text-2xl font-bold tabular-nums">{s.score}/100</p>
+                            <p className="text-2xl apex-metric-number">{s.score}/100</p>
                             <Progress value={s.score} className="h-1.5 mt-2" />
                         </CardContent>
                     </Card>

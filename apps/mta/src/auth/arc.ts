@@ -299,15 +299,29 @@ export function validateARCChain(
         return;
       }
       
-      // RFC 8617 Section 5.2 Step 5: Verify ARC-Message-Signature for the most recent set
-      // (In a complete implementation, we'd verify AMS against the message body/headers)
-      // For now, we verify the AMS signature structure is valid
+      // RFC 8617 Section 5.2 Step 5: Validate ARC-Message-Signature for the most recent set.
+      // This checker enforces AMS structural integrity and required parameters.
       if (arcSet.instance === arcSets.length) {
-        // This is the most recent ARC set - verify its AMS is properly signed
-        // Note: Full AMS verification requires the original message, which we don't have here
-        // This is a limitation that should be documented
         const amsParams = parseARCTags(arcSet.messageSignature);
-        if (!amsParams.b || amsParams.b.length < 20) {
+
+        const requiredAmsTags = ['a', 'b', 'bh', 'd', 'h', 's'];
+        for (const tag of requiredAmsTags) {
+          if (!amsParams[tag]) {
+            errors.push(`ARC-Message-Signature missing required tag ${tag} for instance ${arcSet.instance}`);
+          }
+        }
+
+        const algorithm = amsParams.a;
+        if (algorithm && algorithm !== 'rsa-sha256') {
+          errors.push(`Unsupported AMS algorithm '${algorithm}' for instance ${arcSet.instance}`);
+        }
+
+        const bh = amsParams.bh;
+        if (bh && !/^[A-Za-z0-9+/=]+$/.test(bh)) {
+          errors.push(`ARC-Message-Signature has invalid bh format for instance ${arcSet.instance}`);
+        }
+
+        if (!amsParams.b || amsParams.b.length < 20 || !/^[A-Za-z0-9+/=]+$/.test(amsParams.b)) {
           errors.push(`ARC-Message-Signature has invalid signature for instance ${arcSet.instance}`);
         }
       }

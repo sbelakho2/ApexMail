@@ -234,7 +234,7 @@ For legitimate suspensions, the following process applies:
    - Steps taken to prevent recurrence
    - List hygiene improvements (if applicable)
    - Unsubscribe mechanism improvements (if applicable)
-3. **Compliance review:** Forward the plan to `compliance@apexmail.com` for review
+3. **Compliance review:** Forward the plan to `compliance@apexmail.ee` for review
 4. **Gradual re-enablement:** If approved, re-enable with sending limits:
 
 ```sql
@@ -308,7 +308,7 @@ Provide:
 - **P0:** Phishing campaign actively running through our infrastructure → Page on-call SRE to kill sending immediately + Security team + Compliance lead
 
 **Escalation contacts:**
-- Compliance Team: `compliance@apexmail.com` / Slack `#compliance`
+- Compliance Team: `compliance@apexmail.ee` / Slack `#compliance`
 - Legal (Bel Consulting OÜ): `legal@belconsulting.ee`
 - On-call SRE pager: PagerDuty `apexmail-platform`
 

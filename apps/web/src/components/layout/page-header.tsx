@@ -32,25 +32,25 @@ export function PageHeader({
       <div className="flex flex-col gap-4">
         {/* Breadcrumbs */}
         {breadcrumbs && breadcrumbs.length > 0 && (
-          <nav className="flex items-center space-x-1.5 text-[13px] text-surface-500">
+          <nav className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[13px] text-surface-500 min-w-0">
             <Link
               href="/dashboard"
-              className="flex items-center hover:text-surface-900 transition-all duration-200"
+              className="flex items-center shrink-0 hover:text-surface-900 transition-all duration-200"
             >
               <Home className="h-3.5 w-3.5" />
             </Link>
             {breadcrumbs.map((item, index) => (
               <React.Fragment key={index}>
-                <ChevronRight className="h-3 w-3 opacity-40" />
+                <ChevronRight className="h-3 w-3 opacity-40 shrink-0" />
                 {item.href ? (
                   <Link
                     href={item.href}
-                    className="hover:text-surface-900 transition-all duration-200"
+                    className="max-w-[240px] truncate hover:text-surface-900 transition-all duration-200"
                   >
                     {item.label}
                   </Link>
                 ) : (
-                  <span className="font-medium text-surface-900">
+                  <span className="max-w-[240px] truncate font-medium text-surface-900">
                     {item.label}
                   </span>
                 )}
@@ -61,18 +61,18 @@ export function PageHeader({
 
         {/* Header content */}
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1.5">
-            <h1 className="text-2xl font-bold tracking-tight md:text-3xl text-surface-900">
+          <div className="space-y-1.5 min-w-0">
+            <h1 className="text-2xl font-bold tracking-tight md:text-3xl text-surface-900 break-words">
               {title}
             </h1>
             {description && (
-              <p className="text-[15px] text-surface-600 max-w-[720px] leading-relaxed">
+              <p className="text-[15px] text-surface-600 max-w-[720px] leading-relaxed break-words">
                 {description}
               </p>
             )}
           </div>
           {actions && (
-            <div className="flex flex-wrap items-center gap-3">{actions}</div>
+            <div className="flex flex-wrap items-center gap-3 shrink-0">{actions}</div>
           )}
         </div>
 

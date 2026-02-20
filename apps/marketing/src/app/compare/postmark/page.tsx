@@ -55,11 +55,10 @@ const comparisonData = {
     {
       name: 'Enterprise',
       features: [
-        { name: 'SSO/SAML', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
-        { name: 'White-Label', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'SSO/SAML', apexmail: 'Scale & Enterprise', competitor: 'No', winner: 'apexmail' },
+        { name: 'White-Label', apexmail: 'Enterprise', competitor: 'No', winner: 'apexmail' },
         { name: 'Self-Hosted Option', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
-        { name: 'Private Cloud', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
-        { name: 'Built-in CRM', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'Private Cloud', apexmail: 'Enterprise', competitor: 'No', winner: 'apexmail' },
       ],
     },
     {
@@ -78,7 +77,6 @@ const comparisonData = {
       'Unified API for transactional AND marketing email',
       'Self-hosted option for zero per-email costs',
       'Enterprise SSO, white-label, and sub-accounts',
-      'Built-in CRM for lead management',
       'Scheduled sending support',
       'More generous free tier (1,000 vs 100 emails/month)',
     ],

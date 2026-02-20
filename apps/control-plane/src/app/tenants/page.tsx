@@ -217,10 +217,10 @@ export default function TenantsPage() {
                                             {tenant.riskLevel}
                                         </span>
                                     </td>
-                                    <td className="px-4 py-4 font-medium text-foreground/80 tabular-nums">
+                                    <td className="px-4 py-4 font-medium text-foreground/80 apex-metric-number">
                                         {formatNumber(tenant.metrics.emailsSentMonth)}
                                     </td>
-                                    <td className="px-4 py-4 font-medium text-foreground/80 tabular-nums">
+                                    <td className="px-4 py-4 font-medium text-foreground/80 apex-metric-number">
                                         {tenant.billing.mrr > 0 ? formatCurrency(tenant.billing.mrr) : '—'}
                                     </td>
                                     <td className="px-4 py-4 text-sm text-muted-foreground">
@@ -271,15 +271,15 @@ export default function TenantsPage() {
 
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                             <div className="bg-muted rounded-lg p-3 text-center border border-border">
-                                <div className="text-xl font-bold text-foreground tabular-nums">{formatNumber(selectedTenant.metrics.emailsSentMonth)}</div>
+                                <div className="text-xl font-bold text-foreground apex-metric-number">{formatNumber(selectedTenant.metrics.emailsSentMonth)}</div>
                                 <div className="text-sm text-muted-foreground font-medium">Emails this month</div>
                             </div>
                             <div className="bg-muted rounded-lg p-3 text-center border border-border">
-                                <div className="text-xl font-bold text-foreground tabular-nums">{selectedTenant.metrics.domainsVerified}</div>
+                                <div className="text-xl font-bold text-foreground apex-metric-number">{selectedTenant.metrics.domainsVerified}</div>
                                 <div className="text-sm text-muted-foreground font-medium">Verified domains</div>
                             </div>
                             <div className="bg-muted rounded-lg p-3 text-center border border-border">
-                                <div className="text-xl font-bold text-foreground tabular-nums">{selectedTenant.metrics.teamMembers}</div>
+                                <div className="text-xl font-bold text-foreground apex-metric-number">{selectedTenant.metrics.teamMembers}</div>
                                 <div className="text-sm text-muted-foreground font-medium">Team members</div>
                             </div>
                         </div>
@@ -303,7 +303,7 @@ export default function TenantsPage() {
                             </div>
                             <div>
                                 <label className="text-sm text-muted-foreground font-semibold">MRR</label>
-                                <div className="font-medium text-foreground mt-1 tabular-nums">{selectedTenant.billing.mrr > 0 ? formatCurrency(selectedTenant.billing.mrr) : 'N/A'}</div>
+                                <div className="font-medium text-foreground mt-1 apex-metric-number">{selectedTenant.billing.mrr > 0 ? formatCurrency(selectedTenant.billing.mrr) : 'N/A'}</div>
                             </div>
                             <div>
                                 <label className="text-sm text-muted-foreground font-semibold">Payment method</label>

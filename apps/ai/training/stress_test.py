@@ -250,7 +250,7 @@ STRESS_TESTS = {
         {"q": "Give me the rundown on what I get for four hundred bucks a month.", "checks": {"must_contain_any": ["$399", "Scale", "500,000"]}},
         {"q": "I'm bootstrapped and broke. What can you do for free?", "checks": {"must_contain_any": ["Free", "free", "$0", "1,000"]}},
         {"q": "We need to pipe our app's password reset emails through your system. How?", "checks": {"must_contain_any": ["transactional", "API", "SMTP", "api"]}},
-        {"q": "Our devs want to hit your endpoints from a Python script. What's the package name?", "checks": {"must_contain_any": ["apexmail-python", "Python", "pip"]}},
+        {"q": "Our devs want to hit your endpoints from a Python script. What's the package name?", "checks": {"must_contain_any": ["apexmail", "Python", "pip"]}},
         {"q": "Is there a way to tell if people actually read my newsletters?", "checks": {"must_contain_any": ["open", "click", "analytics", "track", "engagement", "webhook"]}},
         {"q": "My boss wants to know the ROI numbers for email vs other channels.", "checks": {"must_contain": ["$36"], "must_contain_any": ["ROI", "return"]}},
     ],

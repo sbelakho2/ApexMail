@@ -224,7 +224,7 @@ export default function ControlPlaneDashboard() {
             {/* Main Content Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Sales Overview */}
-                <div className="lg:col-span-2 bg-white rounded-2xl border-none p-6 shadow-premium">
+                <div className="lg:col-span-2 apex-card rounded-2xl p-6">
                     <div className="flex items-center justify-between mb-6">
                         <h2 className="text-lg font-bold text-foreground">Sales Pipeline</h2>
                         <Link href="/crm" className="text-sm text-brand-600 hover:text-brand-700 font-bold">
@@ -241,7 +241,7 @@ export default function ControlPlaneDashboard() {
                     <div className="mt-8 pt-6 border-t border-surface-50">
                         <div className="flex items-center justify-between text-sm">
                             <span className="font-bold text-surface-500 uppercase tracking-widest text-[11px]">Conversion Rate</span>
-                            <span className="font-bold text-surface-900 tabular-nums flex items-center gap-1">
+                            <span className="font-bold text-surface-900 apex-metric-number flex items-center gap-1">
                                 {(stats.sales.conversionRate * 100).toFixed(1)}%
                                 <ArrowRight className="w-3.5 h-3.5 text-surface-400" />
                             </span>
@@ -250,7 +250,7 @@ export default function ControlPlaneDashboard() {
                 </div>
 
                 {/* Compliance Status */}
-                <div className="bg-white rounded-2xl border-none p-6 shadow-premium">
+                <div className="apex-card rounded-2xl p-6">
                     <div className="flex items-center justify-between mb-6">
                         <h2 className="text-lg font-bold text-foreground">Compliance</h2>
                         <Link href="/compliance" className="text-sm text-brand-600 hover:text-brand-700 font-bold">
@@ -283,7 +283,7 @@ export default function ControlPlaneDashboard() {
             </div>
 
             {/* Recent Activity */}
-            <div className="mt-8 bg-white rounded-2xl border-none p-6 shadow-premium">
+            <div className="mt-8 apex-card rounded-2xl p-6">
                 <h2 className="text-lg font-bold text-foreground mb-6">Recent Activity</h2>
                 <div className="space-y-1">
                     {stats.recentActivity.map((activity) => (
@@ -296,7 +296,7 @@ export default function ControlPlaneDashboard() {
                                 {activity.type === 'revenue' && <Euro className="w-4 h-4" />}
                             </span>
                             <span className="flex-1 text-sm font-medium text-surface-700">{activity.message}</span>
-                            <span className="text-xs text-surface-400 font-bold tabular-nums uppercase">{timeAgo(activity.timestamp)}</span>
+                            <span className="text-xs text-surface-400 font-bold apex-metric-number uppercase">{timeAgo(activity.timestamp)}</span>
                         </div>
                     ))}
                 </div>
@@ -343,10 +343,8 @@ function StatCard({
 }) {
     const content = (
         <div className={cn(
-            "rounded-2xl border-none p-6 shadow-premium transition-all duration-300 hover:shadow-premium-hover",
-            variant === 'success' ? 'bg-white' :
-            variant === 'warning' ? 'bg-white' :
-            'bg-white'
+            'apex-card rounded-2xl p-6 transition-premium hover:-translate-y-0.5',
+            variant === 'success' ? 'border-success/30' : variant === 'warning' ? 'border-warning/30' : ''
         )}>
             <div className="flex items-center justify-between mb-4">
                 <div className={cn('p-2.5 rounded-xl transition-colors', bgColor)}>
@@ -354,7 +352,7 @@ function StatCard({
                 </div>
                 {href && <ArrowRight className="w-4 h-4 text-surface-400 group-hover:text-brand-600 transition-colors" />}
             </div>
-            <div className="text-3xl font-bold text-foreground tabular-nums tracking-tight">{value}</div>
+            <div className="text-3xl apex-metric-number">{value}</div>
             <div className="text-xs font-bold uppercase tracking-widest text-surface-500 mt-2">{title}</div>
             <div className="text-sm font-medium text-surface-400 mt-1">{change}</div>
         </div>
@@ -371,7 +369,7 @@ function PipelineStage({ label, count, color }: { label: string; count: number; 
     return (
         <div className="text-center group">
             <div className={cn(color, "rounded-2xl py-8 mb-3 transition-all duration-300 group-hover:scale-105 group-hover:shadow-md border border-transparent group-hover:border-surface-100")}>
-                <div className="text-3xl font-bold text-foreground tabular-nums tracking-tight">{count}</div>
+                <div className="text-3xl apex-metric-number">{count}</div>
             </div>
             <div className="text-[11px] font-bold uppercase tracking-widest text-surface-400 group-hover:text-surface-600 transition-colors">{label}</div>
         </div>
@@ -397,7 +395,7 @@ function ComplianceItem({
     return (
         <div className="flex items-center justify-between py-2 border-b border-surface-50 last:border-0">
             <span className="text-[13px] font-bold text-surface-500 uppercase tracking-widest">{label}</span>
-            <span className={cn("px-3 py-1 rounded-full text-xs font-bold tabular-nums border shadow-sm", statusColors[status])}>
+            <span className={cn("px-3 py-1 rounded-full text-xs font-bold apex-metric-number border shadow-sm", statusColors[status])}>
                 {formatNumber(value)}
             </span>
         </div>
@@ -416,7 +414,7 @@ function ProcessCard({
     return (
         <div className="bg-white/10 backdrop-blur-md rounded-xl p-5 border border-white/10 hover:bg-white/15 transition-colors">
             <div className="text-[11px] font-bold uppercase tracking-widest text-white/60 mb-1">{name}</div>
-            <div className="text-xl font-bold tabular-nums">Port {port}</div>
+            <div className="text-xl apex-metric-number">Port {port}</div>
             <div className={`text-xs font-bold flex items-center gap-2 mt-3 ${status === 'isolated' ? 'text-success-400' : 'text-white/40'}`}>
                 <span className={`w-2 h-2 rounded-full ${status === 'isolated' ? 'bg-success-400 shadow-[0_0_8px_rgba(74,222,128,0.5)]' : 'bg-white/20'}`}></span>
                 {status === 'isolated' ? 'Isolated' : 'Disconnected'}

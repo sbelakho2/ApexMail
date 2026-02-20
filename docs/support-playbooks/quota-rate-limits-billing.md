@@ -19,20 +19,21 @@
 
 ### Plan Quotas
 
-| Plan | Emails/Month | API Rate (req/min) | Burst | Daily Max | Contacts |
-|------|-------------|-------------------|-------|-----------|----------|
-| Free | 1,000 | 30 | 10 | 100 | 500 |
-| Starter | 15,000 | 60 | 20 | 1,500 | 2,500 |
-| Pro | 50,000 | 120 | 40 | 5,000 | 10,000 |
-| Growth | 150,000 | 300 | 100 | 15,000 | 25,000 |
-| Scale | 500,000 | 600 | 200 | 50,000 | 100,000 |
-| Enterprise | Custom | Custom (1,200+) | Custom | Custom | Unlimited |
+| Plan | Emails/Month | API Rate (req/min) | Daily Max (approx) | Contacts |
+|------|-------------|-------------------|---------------------|----------|
+| Free | 1,000 | 1,000 | ~35 | 100 |
+| Starter | 25,000 | 1,000 | ~835 | 5,000 |
+| Pro | 50,000 | 1,000 | ~1,667 | 10,000 |
+| Growth | 100,000 | 1,000 | ~3,333 | 25,000 |
+| Scale | 500,000 | 1,000 | ~16,667 | 100,000 |
+| Enterprise | 2,000,000 | 1,000 | ~66,667 | Unlimited |
+
+> **Note:** The API rate limit (1,000 req/min) is a global default enforced per-tenant/API-key via Redis sliding window. Enterprise customers may negotiate higher limits. Daily max is approximate (monthly quota ÷ 30).
 
 **Reset schedule:**
 - Daily quota resets at **00:00 UTC** each day.
 - Monthly quota resets at **00:00 UTC on the 1st** of each calendar month.
 - API rate limit window: **1 minute** (sliding window).
-- Burst window: **10 seconds**.
 
 ### What Counts as a "Send"
 
@@ -187,10 +188,10 @@ GROUP BY 1 ORDER BY 1;
 **Resolution:**
 1. **Client retries (API 4xx/5xx):** Failed API calls (4xx/5xx responses) are NOT counted and NOT billed. Only `2xx accepted` responses count.
 2. **Delivery retries (soft bounces):** When ApexMail retries a soft-bounced email, the retries do NOT add to the send count. The email was counted once when accepted.
-3. **Idempotency protection:** If customer uses `Idempotency-Key` header and retries, the second call returns the cached response — the email is only sent once and counted once.
+3. **Idempotency protection:** If customer uses `X-Idempotency-Key` header and retries, the second call returns the cached response — the email is only sent once and counted once.
 4. **Best practice:** Always use idempotency keys for production sends:
    ```
-   Idempotency-Key: <UUID-v4>
+   X-Idempotency-Key: <UUID-v4>
    ```
 
 ---
@@ -212,7 +213,7 @@ GROUP BY 1 ORDER BY 1;
 **Symptoms:** Customer's application retried a send (network timeout, unclear response) and the email was sent twice.
 
 **Resolution:**
-1. **Use idempotency keys:** Include `Idempotency-Key` header with every send request.
+1. **Use idempotency keys:** Include `X-Idempotency-Key` header with every send request.
 2. **How it works:**
    - First request: processed normally, response cached for 24 hours.
    - Retry with same key + same body: returns cached response, email NOT re-sent.
@@ -305,7 +306,7 @@ GROUP BY 1 ORDER BY 1;
 
 **Resolution:**
 1. ApexMail has automatic protection that pauses sending when:
-   - **Complaint rate > 0.3%** over a rolling 7-day window.
+   - **Complaint rate > 0.1%** over a rolling 7-day window.
    - **Hard bounce rate > 10%** in a 24-hour window.
    - **Content scan detects phishing/malware.**
    - **Sudden volume spike > 10x** normal daily average.
@@ -336,8 +337,8 @@ redis-cli -h redis.apexmail.internal SET "ratelimit:override:<TENANT_ID>" "<HIGH
    - If on dedicated IP: warmup must be complete.
 3. **Process:** Customer submits request to `contact@apexmail.ee` at least 48 hours before the launch.
 4. **Limit guidelines:**
-   - Growth: up to 2x (600 req/min for 24h)
-   - Scale: up to 3x (1,800 req/min for 24h)
+   - Growth: up to 2x (2,000 req/min for 24h)
+   - Scale: up to 3x (3,000 req/min for 24h)
    - Enterprise: custom arrangement
 
 ---
@@ -416,12 +417,12 @@ ssh apexmail-worker "systemctl status apexmail-worker"
 |---------|---------|-----|--------|-------|-------|
 | Webhooks | ✅ | ✅ | ✅ | ✅ | Free plan: ❌ |
 | Custom tracking domain | ❌ | ✅ | ✅ | ✅ | Reverts to default |
-| Dedicated IP | ❌ | ❌ | Optional | Included | IP released |
+| Dedicated IP | ❌ | ❌ | 1 included | 3 included | IP released on downgrade |
 | A/B testing | ❌ | ❌ | ✅ | ✅ | |
+| SSO | ❌ | ❌ | ❌ | ✅ | |
 | Team members | 3 | 5 | 10 | 25 | Extra users deactivated |
-| Domains | 1 | 3 | 10 | 25 | Extra domains NOT deleted but verification may lapse |
-| API keys | 2 | 5 | 10 | 25 | Extra keys deactivated |
-| Audit logs | ❌ | 30 days | 90 days | 1 year | Older logs become inaccessible |
+| Domains | 3 | 5 | 10 | Unlimited | Extra domains de-verified but DNS records remain |
+| Audit logs | ❌ | ❌ | ✅ | ✅ | Older logs become inaccessible |
 
 2. **What does NOT break on downgrade:**
    - Existing sent message data (within retention period).
@@ -502,14 +503,14 @@ node apps/ops/dist/cli.js billing reconcile \
 **Resolution:**
 1. **Retention periods by plan:**
 
-| Plan | Message Activity | Analytics | Audit Logs |
-|------|-----------------|-----------|------------|
-| Free | 1 day | 7 days | None |
-| Starter | 3 days | 30 days | None |
-| Pro | 7 days | 60 days | 30 days |
-| Growth | 30 days | 90 days | 90 days |
-| Scale | 60 days | 180 days | 1 year |
-| Enterprise | Custom (up to 365 days) | Custom | 2 years |
+| Plan | Max Retention (all data) | Audit Logs | Custom Retention |
+|------|------------------------|------------|------------------|
+| Free | 7 days | ❌ | ❌ |
+| Starter | 30 days | ❌ | ❌ |
+| Pro | 60 days | ❌ | ✅ |
+| Growth | 90 days | ✅ | ✅ |
+| Scale | 365 days (1 year) | ✅ | ✅ |
+| Enterprise | 730 days (2 years) | ✅ | ✅ |
 
 2. **After retention expires:** Data is permanently deleted. It cannot be recovered.
 3. **Before downgrading:** Recommend customer exports their data via API or dashboard.

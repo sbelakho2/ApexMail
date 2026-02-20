@@ -28,7 +28,7 @@ export default function BillingPage() {
                     <div className="flex items-center justify-between">
                         <div>
                             <CardTitle>Current Plan</CardTitle>
-                            <CardDescription><span className="tabular-nums">{activePlan?.displayName ?? 'Free'} — {activePlan ? `$${(activePlan.priceMonthly / 100).toFixed(0)}/mo` : 'Free'}</span></CardDescription>
+                            <CardDescription><span className="apex-metric-number">{activePlan?.displayName ?? 'Free'} — {activePlan ? `$${(activePlan.priceMonthly / 100).toFixed(0)}/mo` : 'Free'}</span></CardDescription>
                         </div>
                         <PlanSelector currentPlan={currentPlan} onPlanChange={async (p) => setCurrentPlan(p)} />
                     </div>
@@ -41,8 +41,8 @@ export default function BillingPage() {
                     <Card key={plan.name} className={cn(plan.name === currentPlan && 'border-primary ring-1 ring-primary')}>
                         <CardContent className="p-6">
                             <h3 className="font-semibold text-lg">{plan.displayName}</h3>
-                            <p className="text-2xl font-bold mt-2 tabular-nums">${(plan.priceMonthly / 100).toFixed(0)}<span className="text-sm font-normal text-muted-foreground">/mo</span></p>
-                            <p className="text-sm text-muted-foreground mt-1 tabular-nums">{plan.emailLimit.toLocaleString()} emails/mo</p>
+                            <p className="text-2xl apex-metric-number mt-2">${(plan.priceMonthly / 100).toFixed(0)}<span className="text-sm font-normal text-muted-foreground">/mo</span></p>
+                            <p className="text-sm text-muted-foreground mt-1 apex-metric-number">{plan.emailLimit.toLocaleString()} emails/mo</p>
                             <Separator className="my-4" />
                             <ul className="space-y-2">
                                 {['Email sending', 'Analytics', 'API access', ...(plan.name === 'pro' ? ['Priority support'] : []), ...(plan.name === 'enterprise' ? ['Priority support', 'Dedicated IP', 'SSO/SAML'] : [])].map(f => (

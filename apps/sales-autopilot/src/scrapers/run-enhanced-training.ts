@@ -505,9 +505,49 @@ function createEmailModel(): EmailScoringModel {
             
             return Math.max(0, Math.min(1, score));
         },
-        train: (_features: EmailPersonalizationFeatures[], _labels: EmailPerformanceLabel[]): void => {
-            // In a real implementation, this would use gradient descent
-            // For now, we use pre-tuned weights based on industry research
+        train: (features: EmailPersonalizationFeatures[], labels: EmailPerformanceLabel[]): void => {
+            if (features.length === 0 || labels.length === 0 || features.length !== labels.length) {
+                return;
+            }
+
+            const paired: Array<{ f: EmailPersonalizationFeatures; l: EmailPerformanceLabel }> = [];
+            for (let idx = 0; idx < features.length; idx++) {
+                const f = features[idx];
+                const l = labels[idx];
+                if (!f || !l) continue;
+                paired.push({ f, l });
+            }
+
+            if (paired.length === 0) return;
+
+            const positive = paired.filter(({ l }) => l.clicked || l.replied || l.engagementScore >= 0.5);
+            const negative = paired.filter(({ l }) => !(l.clicked || l.replied || l.engagementScore >= 0.5));
+            if (positive.length === 0 || negative.length === 0) return;
+
+            const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+            const boolRate = (arr: boolean[]) => avg(arr.map((v) => (v ? 1 : 0)));
+            const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+            const lr = 0.05;
+
+            const posCalendar = boolRate(positive.map((p) => p.f.hasCalendarLink));
+            const negCalendar = boolRate(negative.map((p) => p.f.hasCalendarLink));
+            weights.hasCalendarLink = clamp(weights.hasCalendarLink + (posCalendar - negCalendar) * lr, -0.3, 0.3);
+
+            const posSocial = boolRate(positive.map((p) => p.f.hasSocialProof));
+            const negSocial = boolRate(negative.map((p) => p.f.hasSocialProof));
+            weights.hasSocialProof = clamp(weights.hasSocialProof + (posSocial - negSocial) * lr, -0.3, 0.3);
+
+            const posMetric = boolRate(positive.map((p) => p.f.hasSpecificMetric));
+            const negMetric = boolRate(negative.map((p) => p.f.hasSpecificMetric));
+            weights.hasSpecificMetric = clamp(weights.hasSpecificMetric + (posMetric - negMetric) * lr, -0.3, 0.3);
+
+            const posWarm = boolRate(positive.map((p) => p.f.isWarmLead));
+            const negWarm = boolRate(negative.map((p) => p.f.isWarmLead));
+            weights.isWarmLead = clamp(weights.isWarmLead + (posWarm - negWarm) * lr, -0.4, 0.5);
+
+            const posEngagement = avg(positive.map((p) => p.f.previousEngagement));
+            const negEngagement = avg(negative.map((p) => p.f.previousEngagement));
+            weights.previousEngagement = clamp(weights.previousEngagement + (posEngagement - negEngagement) * lr, -0.3, 0.5);
         },
     };
 }

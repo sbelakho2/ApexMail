@@ -768,27 +768,103 @@ export class AuditLogger {
      * Convert entries to PDF format
      */
     private async entriesToPdf(entries: AuditLogEntry[]): Promise<string> {
-        // Generate a simple PDF-like structure
-        // In production, use a proper PDF library like pdfkit
-        const content = {
-            title: 'Audit Log Export',
-            generated: new Date().toISOString(),
-            totalEntries: entries.length,
-            entries: entries.map((e) => ({
-                id: e.id,
-                timestamp: e.timestamp.toISOString(),
-                action: e.action,
-                resource: e.resource,
-                resourceId: e.resourceId,
-                outcome: e.outcome,
-                userId: e.userId,
-                tenantId: e.tenantId,
-            })),
-        };
+        const pageWidth = 612;
+        const pageHeight = 792;
+        const marginLeft = 40;
+        const marginTop = 40;
+        const lineHeight = 14;
+        const footerPadding = 30;
+        const maxLinesPerPage = Math.floor((pageHeight - marginTop * 2 - footerPadding) / lineHeight);
 
-        // Return Base64-encoded JSON as placeholder
-        // Replace with actual PDF generation in production
-        return Buffer.from(JSON.stringify(content, null, 2)).toString('base64');
+        const escapePdf = (text: string): string =>
+            text
+                .replace(/\\/g, '\\\\')
+                .replace(/\(/g, '\\(')
+                .replace(/\)/g, '\\)');
+
+        const lines: string[] = [
+            `ApexMail Audit Log Export`,
+            `Generated: ${new Date().toISOString()}`,
+            `Total Entries: ${entries.length}`,
+            ``,
+            `Format: timestamp | action | resource | resourceId | outcome | userId | tenantId`,
+            ``,
+        ];
+
+        for (const entry of entries) {
+            lines.push(
+                `${entry.timestamp.toISOString()} | ${entry.action} | ${entry.resource} | ${entry.resourceId || '-'} | ${entry.outcome} | ${entry.userId || '-'} | ${entry.tenantId || '-'}`
+            );
+        }
+
+        const pages: string[][] = [];
+        for (let i = 0; i < lines.length; i += maxLinesPerPage) {
+            pages.push(lines.slice(i, i + maxLinesPerPage));
+        }
+
+        const objects: string[] = [];
+        const pageObjectIds: number[] = [];
+
+        const pagesObjectId = 2;
+        const fontObjectId = 3;
+        let nextObjectId = 4;
+
+        for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+            const pageObjectId = nextObjectId++;
+            const contentObjectId = nextObjectId++;
+            pageObjectIds.push(pageObjectId);
+
+            const pageLines = pages[pageIndex] || [];
+            const textOperators = [
+                'BT',
+                '/F1 10 Tf',
+                `${marginLeft} ${pageHeight - marginTop} Td`,
+            ];
+
+            for (let i = 0; i < pageLines.length; i++) {
+                const line = escapePdf(pageLines[i] || '');
+                if (i === 0) {
+                    textOperators.push(`(${line}) Tj`);
+                } else {
+                    textOperators.push(`0 -${lineHeight} Td (${line}) Tj`);
+                }
+            }
+
+            textOperators.push('ET');
+            const streamContent = `${textOperators.join('\n')}\n`;
+
+            objects[contentObjectId] = `${contentObjectId} 0 obj\n<< /Length ${Buffer.byteLength(streamContent, 'utf8')} >>\nstream\n${streamContent}endstream\nendobj\n`;
+            objects[pageObjectId] = `${pageObjectId} 0 obj\n<< /Type /Page /Parent ${pagesObjectId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>\nendobj\n`;
+        }
+
+        objects[1] = `1 0 obj\n<< /Type /Catalog /Pages ${pagesObjectId} 0 R >>\nendobj\n`;
+        objects[pagesObjectId] = `${pagesObjectId} 0 obj\n<< /Type /Pages /Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageObjectIds.length} >>\nendobj\n`;
+        objects[fontObjectId] = `${fontObjectId} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n`;
+
+        let pdf = '%PDF-1.4\n';
+        const offsets: number[] = [];
+
+        for (let i = 1; i < objects.length; i++) {
+            const object = objects[i];
+            if (!object) continue;
+            offsets[i] = Buffer.byteLength(pdf, 'utf8');
+            pdf += object;
+        }
+
+        const xrefStart = Buffer.byteLength(pdf, 'utf8');
+        const objectCount = objects.length;
+
+        pdf += `xref\n0 ${objectCount}\n`;
+        pdf += '0000000000 65535 f \n';
+
+        for (let i = 1; i < objectCount; i++) {
+            const offset = offsets[i] ?? 0;
+            pdf += `${offset.toString().padStart(10, '0')} 00000 n \n`;
+        }
+
+        pdf += `trailer\n<< /Size ${objectCount} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+        return Buffer.from(pdf, 'utf8').toString('base64');
     }
 
     /**

@@ -1,9 +1,8 @@
 import type { Metadata } from 'next';
-import { Fraunces, IBM_Plex_Mono, Manrope } from 'next/font/google';
+import { Fraunces, IBM_Plex_Mono } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
 
-const manrope = Manrope({ subsets: ['latin'], variable: '--font-sans', display: 'swap' });
 const fraunces = Fraunces({ subsets: ['latin'], variable: '--font-display', display: 'swap' });
 const plexMono = IBM_Plex_Mono({
     subsets: ['latin'],
@@ -63,7 +62,7 @@ export default function RootLayout({
     children: React.ReactNode;
 }) {
     return (
-        <html lang="en" suppressHydrationWarning className={`${manrope.variable} ${fraunces.variable} ${plexMono.variable}`}>
+        <html lang="en" suppressHydrationWarning className={`${fraunces.variable} ${plexMono.variable}`}>
             <head>
                 <meta name="theme-color" content="#2563EB" />
                 <meta name="color-scheme" content="light dark" />
@@ -76,7 +75,7 @@ export default function RootLayout({
                     }}
                 />
             </head>
-            <body className="font-sans antialiased text-[17px] leading-[1.6]">
+            <body className="font-display antialiased text-[17px] leading-[1.6]">
                 <main className="min-h-screen bg-background">{children}</main>
                 <Toaster />
             </body>

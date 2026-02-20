@@ -182,8 +182,8 @@ export async function validateEmailExists(
         return { valid: false, reason: 'No MX records for domain' };
     }
 
-    // For now, we consider emails with valid MX as potentially valid
-    // Full SMTP validation would require actual connection which many servers block
+    // Treat valid MX as potentially deliverable; SMTP-level mailbox validation
+    // is intentionally skipped because many servers block VRFY/RCPT probing.
     return { valid: true, reason: 'MX records present' };
 }
 

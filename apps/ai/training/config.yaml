@@ -1,13 +1,13 @@
 # =============================================================================
 #  ApexMail AI — Training Configuration
 # =============================================================================
-#  Central config for Qwen 2.5-7B-Instruct QLoRA fine-tuning.
-#  Loaded by train.py, generate_dataset.py, eval.py, and export_onnx.py.
+#  Central config for Qwen3.5-8B QLoRA fine-tuning.
+#  Loaded by train.py, build_agent.py, eval.py, and export_gguf.py.
 # =============================================================================
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
-  base: "/workspace/models/Qwen3-8B"
+  base: "/workspace/models/Qwen3.5-8B"
   revision: "main"
   torch_dtype: "bfloat16"
   attn_implementation: "sdpa"

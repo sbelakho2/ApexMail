@@ -17,6 +17,10 @@ const loginSchema = z.object({
   tenantId: z.string().uuid().optional(),
 });
 
+const forgotPasswordSchema = z.object({
+  email: z.string().email().max(254),
+});
+
 const ALLOWED_SCOPES = [
   'messages:send',
   'messages:read',
@@ -139,6 +143,45 @@ export function publicAuthRoutes(ctx: AppContext): Hono<AppEnv> {
         role: user.role,
         tenantId: user.tenantId,
       },
+    });
+  });
+
+  // Forgot password - intentionally returns success for all inputs to prevent email enumeration
+  publicRouter.post('/forgot-password', async (c) => {
+    const body = await c.req.json();
+    const { email } = forgotPasswordSchema.parse(body);
+    const logger = c.get('logger');
+
+    const userResult = await usersRepo.findByEmail(email);
+    if (!userResult.ok) {
+      logger.error('Forgot password lookup failed', { error: userResult.error.message });
+      return c.json({
+        success: true,
+        message: 'If an account exists for that email, a password reset link has been sent.',
+      });
+    }
+
+    const user = userResult.value;
+    if (user) {
+      await auditRepo.create({
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: 'user.password_reset_requested',
+        resourceType: 'user',
+        resourceId: user.id,
+        ipAddress: c.req.header('X-Forwarded-For') ?? undefined,
+        userAgent: c.req.header('User-Agent') ?? undefined,
+        metadata: {
+          delivery: 'pending',
+          note: 'Email delivery hook not yet integrated',
+        },
+      });
+      logger.info('Password reset requested', { userId: user.id });
+    }
+
+    return c.json({
+      success: true,
+      message: 'If an account exists for that email, a password reset link has been sent.',
     });
   });
 

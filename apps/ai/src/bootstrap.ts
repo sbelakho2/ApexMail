@@ -199,10 +199,14 @@ export class ServiceBootstrap extends EventEmitter {
     }
 
     /**
-     * Load a single model
+     * Load a single model.
+     *
+     * With the llama-server migration, "loading" means verifying the
+     * sidecar is reachable and has finished model warmup.  The actual
+     * GGUF model is held by the llama-server process, not Node.
      */
     private async loadModel(model: ModelConfig): Promise<void> {
-        console.log(`📥 Loading model: ${model.name}`);
+        console.log(`📥 Connecting to llama-server for model: ${model.name}`);
         this.emit('model:loading' as BootstrapEvent, { modelName: model.name });
 
         try {
@@ -219,17 +223,19 @@ export class ServiceBootstrap extends EventEmitter {
                 });
                 this.lifecycleManagers.set(model.name, lifecycleManager);
 
-                // Create inference engine for this model
+                // Create inference engine — this is now an HTTP client to llama-server
                 const engine = new InferenceEngine({
                     modelPath: model.path,
                     modelName: model.name,
                 });
                 this.engines.set(model.name, engine);
 
-                // Load model through lifecycle manager
+                // loadModel() polls llama-server /health until 'ok'
+                await engine.loadModel(model.path);
+
+                // Load through lifecycle manager for event tracking
                 await lifecycleManager.load(async () => {
-                    // Engine initialization
-                    console.log(`  Initializing ${model.name}...`);
+                    console.log(`  llama-server confirmed ready for ${model.name}`);
                 });
 
                 // Set up event forwarding
@@ -247,9 +253,9 @@ export class ServiceBootstrap extends EventEmitter {
             })();
 
             await Promise.race([loadPromise, timeoutPromise]);
-            console.log(`✅ Model loaded: ${model.name}`);
+            console.log(`✅ llama-server ready: ${model.name}`);
         } catch (error) {
-            console.error(`❌ Failed to load model ${model.name}:`, error);
+            console.error(`❌ Failed to connect to llama-server for ${model.name}:`, error);
             this.emit('model:error' as BootstrapEvent, { modelName: model.name, error });
             // Don't throw - allow other models to load
         }

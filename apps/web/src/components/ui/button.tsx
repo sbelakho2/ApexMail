@@ -4,15 +4,16 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-medium ring-offset-background transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]',
+  'inline-flex items-center justify-center whitespace-nowrap rounded-lg text-[14px] font-display font-semibold tracking-[0.01em] ring-offset-background transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]',
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm',
+        apex: 'font-display bg-gradient-to-b from-brand-500 to-brand-700 text-white border border-brand-500/60 shadow-[0_12px_34px_rgba(52,78,165,0.38),inset_0_1px_0_rgba(255,255,255,0.25)] hover:from-brand-500 hover:to-brand-600 hover:shadow-[0_16px_40px_rgba(52,78,165,0.45)] dark:from-brand-400 dark:to-brand-600 dark:border-brand-300/60 dark:text-surface-900 dark:shadow-[0_14px_36px_rgba(91,120,210,0.48),inset_0_1px_0_rgba(255,255,255,0.18)] dark:hover:from-brand-400 dark:hover:to-brand-500',
+        default: 'font-display bg-gradient-to-b from-brand-500 to-brand-700 text-white border border-brand-500/60 shadow-[0_12px_34px_rgba(52,78,165,0.38),inset_0_1px_0_rgba(255,255,255,0.25)] hover:from-brand-500 hover:to-brand-600 hover:shadow-[0_16px_40px_rgba(52,78,165,0.45)] dark:from-brand-400 dark:to-brand-600 dark:border-brand-300/60 dark:text-surface-900 dark:shadow-[0_14px_36px_rgba(91,120,210,0.48),inset_0_1px_0_rgba(255,255,255,0.18)] dark:hover:from-brand-400 dark:hover:to-brand-500',
         destructive:
           'bg-destructive text-destructive-foreground hover:bg-destructive/90 shadow-sm',
         outline:
-          'border border-input bg-background hover:bg-accent hover:text-accent-foreground shadow-sm hover:shadow-md',
+          'border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground hover:shadow-md dark:border-surface-300/70 dark:bg-surface-100/90 dark:hover:bg-surface-200/80',
         secondary:
           'bg-secondary text-secondary-foreground hover:bg-secondary/80 shadow-sm',
         ghost: 'hover:bg-accent hover:text-accent-foreground',
@@ -33,7 +34,7 @@ const buttonVariants = cva(
       },
     },
  defaultVariants: {
- variant: 'default',
+ variant: 'apex',
  size: 'default',
  },
  }

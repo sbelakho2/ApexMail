@@ -57,7 +57,7 @@ const comparisonData = {
       features: [
         { name: 'Free Tier', apexmail: '1,000 emails/mo', competitor: '100 emails/day', winner: 'apexmail' },
         { name: '100K emails/mo', apexmail: '$129', competitor: '$89.95', winner: 'apexmail' },
-        { name: 'SSO Included', apexmail: 'All plans', competitor: '$500/mo add-on', winner: 'apexmail' },
+        { name: 'SSO Included', apexmail: 'Scale & Enterprise plans', competitor: '$500/mo add-on', winner: 'apexmail' },
         { name: 'Self-Hosted Option', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
       ],
     },
@@ -78,7 +78,7 @@ const comparisonData = {
       'True GDPR compliance automation, not just checkboxes',
       'Local AI features without per-request API costs',
       'Self-hosted option for complete data control',
-      'SSO included in all plans, not a $500/mo add-on',
+      'SSO on Scale & Enterprise — still far cheaper than SendGrid\'s $500/mo add-on',
     ],
   },
 } as const;

@@ -1,0 +1,411 @@
+<?php
+/**
+ * Functional simulation tests for the ApexMail PHP SDK.
+ * Uses a mock subclass to intercept HTTP calls without a live server.
+ *
+ * Run: php test.php
+ */
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/src/Client.php';
+
+// ── Test harness ──────────────────────────────────────────────────────────
+
+$passed = 0;
+$failed = 0;
+
+function assert_pass(string $name): void {
+    global $passed;
+    $passed++;
+    echo "\033[32m  PASS\033[0m  $name\n";
+}
+
+function assert_fail(string $name, string $reason): void {
+    global $failed;
+    $failed++;
+    echo "\033[31m  FAIL\033[0m  $name: $reason\n";
+}
+
+function expect(string $name, bool $condition, string $failMsg = ''): void {
+    $condition ? assert_pass($name) : assert_fail($name, $failMsg ?: 'assertion failed');
+}
+
+// ── Mock client ───────────────────────────────────────────────────────────
+
+class MockClient extends \ApexMail\Client
+{
+    /** @var array Recorded calls: [method, path, body, idempotencyKey][] */
+    public array $calls = [];
+
+    /** Preset response queue: each element returned for next call */
+    private array $responses = [];
+
+    /** Preset errors: each element thrown for next call */
+    private array $errors = [];
+
+    public function __construct(string $apiKey = 'test_key')
+    {
+        parent::__construct($apiKey, ['baseUrl' => 'http://mock.local']);
+    }
+
+    /** Queue a successful response for the next request */
+    public function queueResponse(array $response): void
+    {
+        $this->responses[] = $response;
+    }
+
+    /** Queue an exception to be thrown on the next request */
+    public function queueException(\ApexMail\Exceptions\ApexMailException $e): void
+    {
+        $this->errors[] = $e;
+    }
+
+    public function request(
+        string  $method,
+        string  $path,
+        ?array  $body = null,
+        ?string $idempotencyKey = null,
+    ): array {
+        $this->calls[] = compact('method', 'path', 'body', 'idempotencyKey');
+
+        if (!empty($this->errors)) {
+            throw array_shift($this->errors);
+        }
+        if (!empty($this->responses)) {
+            return array_shift($this->responses);
+        }
+        return [];
+    }
+}
+
+// ── Email resource tests ──────────────────────────────────────────────────
+
+echo "\nEmails\n";
+
+// send()
+$client = new MockClient();
+$client->queueResponse([
+    'message' => ['id' => 'msg_123', 'status' => 'queued', 'recipients' => 1, 'createdAt' => '2025-01-01']
+]);
+$resp = $client->emails->send([
+    'from'    => 'a@example.com',
+    'to'      => 'b@example.com',
+    'subject' => 'Hello',
+    'html'    => '<p>hi</p>',
+]);
+expect('send() calls POST /v1/messages', $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/messages');
+expect('send() returns message id', $resp['message']['id'] === 'msg_123');
+
+// send() with idempotency key
+$client = new MockClient();
+$client->queueResponse(['message' => ['id' => 'msg_456', 'status' => 'queued', 'createdAt' => '2025-01-01']]);
+$client->emails->send([
+    'from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi',
+    'idempotency_key' => 'key-001',
+]);
+expect('send() forwards idempotencyKey', $client->calls[0]['idempotencyKey'] === 'key-001');
+
+// batch()
+$client = new MockClient();
+$client->queueResponse([
+    'results' => [
+        ['index' => 0, 'success' => true, 'messageId' => 'm1'],
+        ['index' => 1, 'success' => true, 'messageId' => 'm2'],
+    ],
+    'summary' => ['total' => 2, 'success' => 2, 'failed' => 0],
+]);
+$resp = $client->emails->batch([
+    ['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'msg 1'],
+    ['from' => 'a@b.c', 'to' => 'p@q.r', 'subject' => 'msg 2'],
+]);
+expect('batch() calls POST /v1/messages/batch', $client->calls[0]['path'] === '/v1/messages/batch');
+expect('batch() returns results', count($resp['results']) === 2);
+expect('batch() summary total', $resp['summary']['total'] === 2);
+
+// get()
+$client = new MockClient();
+$client->queueResponse(['message' => ['id' => 'msg_789', 'status' => 'delivered']]);
+$resp = $client->emails->get('msg_789');
+expect('get() calls GET /v1/messages/{id}', 
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/messages/msg_789');
+expect('get() returns message', $resp['message']['id'] === 'msg_789');
+
+// list()
+$client = new MockClient();
+$client->queueResponse(['messages' => [], 'pagination' => ['total' => 0, 'limit' => 20, 'offset' => 0]]);
+$resp = $client->emails->list();
+expect('list() calls GET /v1/messages', str_starts_with($client->calls[0]['path'], '/v1/messages'));
+expect('list() returns pagination', isset($resp['pagination']));
+
+// ── Domain resource tests ─────────────────────────────────────────────────
+
+echo "\nDomains\n";
+
+$client = new MockClient();
+$client->queueResponse(['domain' => ['id' => 'dom_1', 'domain' => 'mail.example.com', 'status' => 'pending'], 'dnsRecords' => []]);
+$resp = $client->domains->create('mail.example.com');
+expect('domains.create() POST /v1/domains', $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/domains');
+expect('domains.create() returns domain', $resp['domain']['domain'] === 'mail.example.com');
+
+$client = new MockClient();
+$client->queueResponse(['domains' => [], 'pagination' => ['total' => 0]]);
+$client->domains->list();
+expect('domains.list() GET /v1/domains', $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/domains');
+
+$client = new MockClient();
+$client->queueResponse(['domain' => ['id' => 'dom_1', 'domain' => 'mail.example.com']]);
+$client->domains->get('dom_1');
+expect('domains.get() GET /v1/domains/{id}', $client->calls[0]['path'] === '/v1/domains/dom_1');
+
+$client = new MockClient();
+$client->queueResponse(['verified' => false, 'message' => 'DNS not propagated']);
+$resp = $client->domains->verify('dom_1');
+expect('domains.verify() POST /v1/domains/{id}/verify', 
+    $client->calls[0]['path'] === '/v1/domains/dom_1/verify' && $client->calls[0]['method'] === 'POST');
+expect('domains.verify() returns verified field', array_key_exists('verified', $resp));
+
+$client = new MockClient();
+$client->queueResponse([]);
+$client->domains->delete('dom_1');
+expect('domains.delete() DELETE /v1/domains/{id}', 
+    $client->calls[0]['method'] === 'DELETE' && $client->calls[0]['path'] === '/v1/domains/dom_1');
+
+$client = new MockClient();
+$client->queueResponse(['healthy' => true, 'spf' => 'pass', 'dkim' => 'pass', 'dmarc' => 'pass']);
+$resp = $client->domains->health('dom_1');
+expect('domains.health() GET /v1/domains/{id}/health',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/domains/dom_1/health');
+expect('domains.health() returns healthy field', array_key_exists('healthy', $resp));
+
+// ── Webhook resource tests ────────────────────────────────────────────────
+
+echo "\nWebhooks\n";
+
+$client = new MockClient();
+$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://ex.com/hook', 'events' => ['email.delivered']]]);
+$resp = $client->webhooks->create(['url' => 'https://ex.com/hook', 'events' => ['email.delivered']]);
+expect('webhooks.create() POST /v1/webhooks', 
+    $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/webhooks');
+expect('webhooks.create() returns webhook id', $resp['webhook']['id'] === 'wh_1');
+
+$client = new MockClient();
+$client->queueResponse(['webhooks' => [['id' => 'wh_1'], ['id' => 'wh_2']]]);
+$resp = $client->webhooks->list();
+expect('webhooks.list() GET /v1/webhooks',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/webhooks');
+expect('webhooks.list() returns webhooks', count($resp['webhooks']) === 2);
+
+$client = new MockClient();
+$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://ex.com/hook']]);
+$resp = $client->webhooks->get('wh_1');
+expect('webhooks.get() GET /v1/webhooks/{id}',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
+expect('webhooks.get() returns webhook', $resp['webhook']['id'] === 'wh_1');
+
+$client = new MockClient();
+$client->queueResponse(['webhook' => ['id' => 'wh_1', 'url' => 'https://new.com/hook', 'events' => ['email.bounced']]]);
+$resp = $client->webhooks->update('wh_1', ['url' => 'https://new.com/hook', 'events' => ['email.bounced']]);
+expect('webhooks.update() PATCH /v1/webhooks/{id}',
+    $client->calls[0]['method'] === 'PATCH' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
+expect('webhooks.update() body has url', $client->calls[0]['body']['url'] === 'https://new.com/hook');
+expect('webhooks.update() body has events', $client->calls[0]['body']['events'] === ['email.bounced']);
+
+$client = new MockClient();
+$client->queueResponse([]);
+$client->webhooks->delete('wh_1');
+expect('webhooks.delete() DELETE /v1/webhooks/{id}',
+    $client->calls[0]['method'] === 'DELETE' && $client->calls[0]['path'] === '/v1/webhooks/wh_1');
+
+// ── Template resource tests ───────────────────────────────────────────────
+
+echo "\nTemplates\n";
+
+$client = new MockClient();
+$client->queueResponse(['template' => ['id' => 'tpl_1', 'name' => 'Welcome', 'slug' => 'welcome']]);
+$resp = $client->templates->create(['name' => 'Welcome', 'subject' => 'Hi', 'html' => '<p>Hello {{name}}</p>']);
+expect('templates.create() POST /v1/templates', 
+    $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/templates');
+expect('templates.create() returns template', $resp['template']['id'] === 'tpl_1');
+
+$client = new MockClient();
+$client->queueResponse(['template' => ['id' => 'tpl_1', 'name' => 'Welcome']]);
+$client->templates->get('tpl_1');
+expect('templates.get() GET /v1/templates/{id}', $client->calls[0]['path'] === '/v1/templates/tpl_1');
+
+$client = new MockClient();
+$client->queueResponse(['template' => ['id' => 'tpl_1', 'slug' => 'welcome']]);
+$resp = $client->templates->getBySlug('welcome');
+expect('templates.getBySlug() GET /v1/templates/slug/{slug}',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/templates/slug/welcome');
+expect('templates.getBySlug() returns template', $resp['template']['slug'] === 'welcome');
+
+$client = new MockClient();
+$client->queueResponse(['templates' => [['id' => 'tpl_1'], ['id' => 'tpl_2']], 'pagination' => ['total' => 2]]);
+$resp = $client->templates->list(['limit' => 10]);
+expect('templates.list() GET /v1/templates?...',
+    $client->calls[0]['method'] === 'GET' && str_starts_with($client->calls[0]['path'], '/v1/templates'));
+expect('templates.list() has limit param', str_contains($client->calls[0]['path'], 'limit=10'));
+expect('templates.list() returns templates', count($resp['templates']) === 2);
+
+$client = new MockClient();
+$client->queueResponse(['template' => ['id' => 'tpl_1', 'name' => 'Updated']]);
+$resp = $client->templates->update('tpl_1', ['name' => 'Updated', 'html' => '<p>new</p>']);
+expect('templates.update() PATCH /v1/templates/{id}',
+    $client->calls[0]['method'] === 'PATCH' && $client->calls[0]['path'] === '/v1/templates/tpl_1');
+expect('templates.update() body has name', $client->calls[0]['body']['name'] === 'Updated');
+
+$client = new MockClient();
+$client->queueResponse([]);
+$client->templates->delete('tpl_1');
+expect('templates.delete() DELETE /v1/templates/{id}',
+    $client->calls[0]['method'] === 'DELETE' && $client->calls[0]['path'] === '/v1/templates/tpl_1');
+
+$client = new MockClient();
+$client->queueResponse(['html' => '<p>Hello Alice</p>', 'text' => 'Hello Alice']);
+$resp = $client->templates->render('tpl_1', ['name' => 'Alice']);
+expect('templates.render() POST /v1/templates/{id}/render',
+    $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/templates/tpl_1/render');
+expect('templates.render() body has data', $client->calls[0]['body']['data']['name'] === 'Alice');
+expect('templates.render() returns html', $resp['html'] === '<p>Hello Alice</p>');
+
+$client = new MockClient();
+$client->queueResponse(['valid' => true, 'errors' => []]);
+$resp = $client->templates->validateReactEmail('export default () => <h1>Hi</h1>');
+expect('templates.validateReactEmail() POST .../react-email/validate',
+    $client->calls[0]['method'] === 'POST' && str_contains($client->calls[0]['path'], 'react-email/validate'));
+expect('templates.validateReactEmail() body has source', $client->calls[0]['body']['source'] === 'export default () => <h1>Hi</h1>');
+expect('templates.validateReactEmail() returns valid', $resp['valid'] === true);
+
+$client = new MockClient();
+$client->queueResponse(['source' => 'import { Html } from ...', 'name' => 'MyEmail']);
+$resp = $client->templates->reactEmailStarter('MyEmail');
+expect('templates.reactEmailStarter() GET .../react-email/starter',
+    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], 'react-email/starter'));
+expect('templates.reactEmailStarter() has name param', str_contains($client->calls[0]['path'], 'name=MyEmail'));
+expect('templates.reactEmailStarter() returns source', isset($resp['source']));
+
+// ── Suppression resource tests ────────────────────────────────────────────
+
+echo "\nSuppressions\n";
+
+$client = new MockClient();
+$client->queueResponse([]);
+$client->suppressions->add('bad@example.com', 'bounce');
+expect('suppressions.add() POST /v1/suppressions', 
+    $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/suppressions');
+expect('suppressions.add() sets email in body', $client->calls[0]['body']['emails'][0] === 'bad@example.com');
+expect('suppressions.add() sets reason in body', $client->calls[0]['body']['reason'] === 'bounce');
+
+$client = new MockClient();
+$client->queueResponse([]);
+$client->suppressions->add(['a@b.com', 'c@d.com'], 'manual');
+expect('suppressions.add() bulk sends array', count($client->calls[0]['body']['emails']) === 2);
+
+$client = new MockClient();
+$client->queueResponse(['suppressions' => [['email' => 'bad@example.com']], 'pagination' => ['total' => 1]]);
+$resp = $client->suppressions->list(['reason' => 'bounce', 'limit' => 10]);
+expect('suppressions.list() GET /v1/suppressions?...',
+    $client->calls[0]['method'] === 'GET' && str_starts_with($client->calls[0]['path'], '/v1/suppressions'));
+expect('suppressions.list() has reason param', str_contains($client->calls[0]['path'], 'reason=bounce'));
+
+$client = new MockClient();
+$client->queueResponse(['suppressed' => true, 'reason' => 'bounce']);
+$resp = $client->suppressions->check('bad@example.com');
+expect('suppressions.check() GET /v1/suppressions/check?email=...',
+    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], '/v1/suppressions/check'));
+expect('suppressions.check() returns suppressed', $resp['suppressed'] === true);
+
+$client = new MockClient();
+$client->queueResponse([]);
+$client->suppressions->delete('bad@example.com');
+expect('suppressions.delete() DELETE /v1/suppressions/{email}',
+    $client->calls[0]['method'] === 'DELETE' && str_contains($client->calls[0]['path'], 'bad'));
+
+// ── Events resource tests ─────────────────────────────────────────────────
+
+echo "\nEvents\n";
+
+$client = new MockClient();
+$client->queueResponse(['events' => [], 'pagination' => ['total' => 0]]);
+$client->events->list(['messageId' => 'msg_123']);
+expect('events.list() GET /v1/events', str_starts_with($client->calls[0]['path'], '/v1/events'));
+expect('events.list() includes messageId', str_contains($client->calls[0]['path'], 'messageId=msg_123'));
+
+$client = new MockClient();
+$client->queueResponse(['events' => [['type' => 'email.delivered']]]);
+$resp = $client->events->getByMessage('msg_123');
+expect('events.getByMessage() GET /v1/events?messageId=msg_123',
+    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], 'messageId=msg_123'));
+expect('events.getByMessage() has limit=100', str_contains($client->calls[0]['path'], 'limit=100'));
+expect('events.getByMessage() returns events', count($resp['events']) === 1);
+
+$client = new MockClient();
+$client->queueResponse(['event' => ['id' => 'evt_42', 'type' => 'email.opened']]);
+$resp = $client->events->get('evt_42');
+expect('events.get() GET /v1/events/{id}',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/events/evt_42');
+expect('events.get() returns event', $resp['event']['id'] === 'evt_42');
+
+// ── Exception mapping tests ───────────────────────────────────────────────
+
+echo "\nError handling\n";
+
+$client = new MockClient();
+$client->queueException(new \ApexMail\Exceptions\AuthenticationException('Invalid API key', 401));
+try {
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    assert_fail('401 throws AuthenticationException', 'no exception thrown');
+} catch (\ApexMail\Exceptions\AuthenticationException $e) {
+    expect('401 throws AuthenticationException', true);
+    expect('exception has correct message', str_contains($e->getMessage(), 'Invalid API key'));
+}
+
+$client = new MockClient();
+$client->queueException(new \ApexMail\Exceptions\NotFoundException('Not found', 404));
+try {
+    $client->emails->get('nonexistent');
+    assert_fail('404 throws NotFoundException', 'no exception thrown');
+} catch (\ApexMail\Exceptions\NotFoundException $e) {
+    expect('404 throws NotFoundException', true);
+}
+
+$client = new MockClient();
+$client->queueException(new \ApexMail\Exceptions\RateLimitException('Rate limit exceeded', 429));
+try {
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    assert_fail('429 throws RateLimitException', 'no exception thrown');
+} catch (\ApexMail\Exceptions\RateLimitException $e) {
+    expect('429 throws RateLimitException', true);
+}
+
+$client = new MockClient();
+$client->queueException(new \ApexMail\Exceptions\ValidationException('Invalid params', 422));
+try {
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    assert_fail('422 throws ValidationException', 'no exception thrown');
+} catch (\ApexMail\Exceptions\ValidationException $e) {
+    expect('422 throws ValidationException', true);
+    expect('ValidationException has status code', $e->getStatusCode() === 422);
+}
+
+$client = new MockClient();
+$client->queueException(new \ApexMail\Exceptions\NetworkException('Connection timed out', 0));
+try {
+    $client->emails->send(['from' => 'a@b.c', 'to' => 'x@y.z', 'subject' => 'Hi']);
+    assert_fail('NetworkException on transport failure', 'no exception thrown');
+} catch (\ApexMail\Exceptions\NetworkException $e) {
+    expect('NetworkException raised on transport failure', true);
+    expect('NetworkException message', str_contains($e->getMessage(), 'timed out'));
+}
+
+// ── Summary ───────────────────────────────────────────────────────────────
+
+echo "\n";
+if ($failed === 0) {
+    echo "\033[32mAll {$passed} tests passed.\033[0m\n\n";
+    exit(0);
+} else {
+    echo "\033[31m{$failed} test(s) FAILED, {$passed} passed.\033[0m\n\n";
+    exit(1);
+}

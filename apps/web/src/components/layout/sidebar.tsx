@@ -81,7 +81,7 @@ const mainNav: NavSection[] = [
 ];
 
 const sidebarVariants = cva(
-  'flex flex-col border-r border-surface-200/70 bg-white/90 backdrop-blur-2xl shadow-[0_18px_40px_rgba(15,23,42,0.08)] transition-all duration-300 ease-in-out',
+  'flex flex-col border-r border-surface-200/70 bg-card/90 backdrop-blur-2xl shadow-[0_18px_40px_rgba(15,23,42,0.08)] transition-all duration-300 ease-in-out dark:border-surface-200/80 dark:bg-surface-100/90 dark:shadow-[0_20px_44px_rgba(0,0,0,0.5)]',
   {
     variants: {
       collapsed: {
@@ -160,14 +160,14 @@ export function Sidebar({ className, onClose }: SidebarProps) {
                       className={cn(
                         'relative flex items-center gap-3 rounded-xl px-3 py-3 text-[14px] font-medium transition-all duration-200',
                         isActive
-                          ? 'bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(74,108,196,0.18)] before:absolute before:left-2 before:top-1/2 before:h-2 before:w-2 before:-translate-y-1/2 before:rounded-full before:bg-brand-500'
-                          : 'text-surface-600 hover:bg-white hover:text-surface-900',
+                          ? 'bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(74,108,196,0.18)] before:absolute before:left-2 before:top-1/2 before:h-2 before:w-2 before:-translate-y-1/2 before:rounded-full before:bg-brand-500 dark:bg-brand-900/45 dark:text-brand-200 dark:shadow-[inset_0_0_0_1px_rgba(109,140,212,0.45)] dark:before:bg-brand-300'
+                          : 'text-surface-600 hover:bg-muted/80 hover:text-surface-900 dark:text-surface-500 dark:hover:bg-surface-200/70 dark:hover:text-surface-800',
                         item.disabled && 'cursor-not-allowed opacity-50',
                         collapsed && 'justify-center px-2.5'
                       )}
                       aria-current={isActive ? 'page' : undefined}
                     >
-                      <Icon className={cn('h-[18px] w-[18px]', isActive ? 'text-brand-600' : 'text-surface-400')} />
+                      <Icon className={cn('h-[18px] w-[18px]', isActive ? 'text-brand-600 dark:text-brand-200' : 'text-surface-400 dark:text-surface-500')} />
                       {!collapsed && (
                         <>
                           <span className="flex-1 truncate">{item.title}</span>
@@ -201,7 +201,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
  <div className="mb-4">
  <Link
                 href="/help"
-                className="flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium text-surface-600 hover:bg-white hover:text-surface-900 transition-colors"
+                className="flex items-center gap-3 rounded-md px-3 py-3 text-[14px] font-medium text-surface-600 transition-colors hover:bg-muted/80 hover:text-surface-900 dark:text-surface-500 dark:hover:bg-surface-200/70 dark:hover:text-surface-800"
               >
  <HelpCircle className="h-5 w-5" />
  <span>Help & Support</span>

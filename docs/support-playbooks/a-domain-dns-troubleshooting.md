@@ -9,10 +9,10 @@
 
 | Record | Type | Host / Name | Value | Purpose |
 |--------|------|-------------|-------|---------|
-| SPF | TXT | `@` (root) | `v=spf1 include:spf.apexmail.io ~all` | Authorize ApexMail IPs to send on behalf of domain |
-| DKIM | CNAME | `apexmail._domainkey` | `apexmail._domainkey.apexmail.io` | Delegate DKIM signing to ApexMail |
-| DMARC | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io` | Policy for authentication failures |
-| Return-Path | CNAME | `bounce` | `bounce.apexmail.io` | Bounce processing (VERP) |
+| SPF | TXT | `@` (root) | `v=spf1 include:_spf.apexmail.ee ~all` | Authorize ApexMail IPs to send on behalf of domain |
+| DKIM | TXT | `{selector}._domainkey` | `v=DKIM1; k=rsa; p={public key from dashboard}` | Authenticate outgoing email with per-domain signing key |
+| DMARC | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee` | Policy for authentication failures |
+| Return-Path | CNAME | `bounce` | `bounce.apexmail.ee` | Bounce processing (VERP) |
 | Verification | TXT | `@` (root) | `apexmail-verify=<TOKEN>` | Prove domain ownership |
 
 ---
@@ -44,39 +44,40 @@
 1. Ask: "Which exact domain did you add in the ApexMail dashboard? And where exactly did you add the DNS records?"
 2. If sending from `mail.example.com`, records must be on `mail.example.com`:
    - SPF TXT on `mail.example.com`
-   - DKIM CNAME `apexmail._domainkey.mail.example.com`
+   - DKIM TXT `{selector}._domainkey.mail.example.com`
    - DMARC TXT on `_dmarc.mail.example.com`
 3. If sending from `example.com`, records go on root domain.
-4. Common mistake: adding `apexmail._domainkey.example.com` when the verified domain is `mail.example.com` — the DKIM CNAME should be `apexmail._domainkey.mail.example.com`.
+4. Common mistake: adding `apexmail._domainkey.example.com` when the verified domain is `mail.example.com` — the DKIM TXT record name should be `apexmail._domainkey.mail.example.com`.
 
 ---
 
-## Issue 3 — DKIM CNAME(s) mistyped (one character off)
+## Issue 3 — DKIM TXT record mistyped or missing
 
 **Symptoms:** SPF and verification pass, but DKIM fails. Domain shows partial verification.
 
-**Root cause:** Typo in CNAME host or value. Common typos: `apexmal._domainkey` (missing 'i'), `apexmail._domainke` (missing 'y'), pointing to `apexmail.io` instead of `apexmail._domainkey.apexmail.io`.
+**Root cause:** Typo in the TXT record name or value. Common errors: `apexmal._domainkey` (missing 'i'), `apexmail._domainke` (missing 'y'), wrong public key value.
 
 **Resolution:**
-1. Ask customer to run: `dig CNAME apexmail._domainkey.yourdomain.com`
-2. Expected result: `apexmail._domainkey.apexmail.io.`
-3. If no result or wrong target, customer must fix the CNAME in their DNS provider.
-4. Double-check: the **host** is `apexmail._domainkey` and the **value** is `apexmail._domainkey.apexmail.io`.
+1. Ask customer to run: `dig TXT apexmail._domainkey.yourdomain.com`
+2. Expected result: `"v=DKIM1; k=rsa; p=MIGf..."`
+3. If no result or wrong value, customer must fix/re-add the TXT record in their DNS provider.
+4. Double-check: the **name** is `{selector}._domainkey` (e.g., `apexmail._domainkey`) and the **value** is `v=DKIM1; k=rsa; p={exact public key from dashboard}`.
 5. Some registrars auto-append the domain — entering `apexmail._domainkey.example.com` in the host field creates `apexmail._domainkey.example.com.example.com`. Customer should enter just `apexmail._domainkey`.
 
 ---
 
-## Issue 4 — DKIM added as TXT instead of CNAME
+## Issue 4 — DKIM TXT record has incorrect value format
 
-**Symptoms:** DKIM verification fails. Customer shows a TXT record at `apexmail._domainkey` containing the CNAME target as text.
+**Symptoms:** DKIM verification fails. `dig TXT apexmail._domainkey.yourdomain.com` returns a record but DKIM still fails.
 
-**Root cause:** Customer created a TXT record instead of a CNAME record. Some DNS UIs default to TXT.
+**Root cause:** The TXT record value is not in the correct DKIM format, OR the customer added a CNAME instead of a TXT record, OR they pasted a truncated/corrupted public key.
 
 **Resolution:**
-1. Ask: "What record type did you select — TXT or CNAME?"
-2. Explain: "ApexMail DKIM requires a **CNAME** record, not a TXT record. The CNAME delegates key management to us so we can rotate keys automatically."
-3. Customer must: delete the TXT record at `apexmail._domainkey`, then create a CNAME record with host `apexmail._domainkey` pointing to `apexmail._domainkey.apexmail.io`.
-4. Verify: `dig CNAME apexmail._domainkey.yourdomain.com` should return the CNAME target.
+1. Ask customer to run: `dig TXT apexmail._domainkey.yourdomain.com +short`
+2. Expected format: `"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEB..."`
+3. If a CNAME exists instead of TXT: delete the CNAME and add a TXT record with the exact value from the dashboard.
+4. If the TXT value is truncated (some registrars cut off long values): ensure the full key is copied, including the final `=` padding characters.
+5. Verify the key matches the one shown in Dashboard → Domains → [Domain] → DNS Records.
 
 ---
 
@@ -84,15 +85,15 @@
 
 **Symptoms:** SPF fails. DKIM may pass but DMARC fails due to SPF alignment failure.
 
-**Root cause:** Customer's SPF record doesn't include `include:spf.apexmail.io`.
+**Root cause:** Customer's SPF record doesn't include `include:_spf.apexmail.ee`.
 
 **Resolution:**
 1. Ask customer to check: `dig TXT yourdomain.com | grep spf`
 2. If SPF exists but lacks ApexMail include: merge it. Example:
    - Current: `v=spf1 include:_spf.google.com ~all`
-   - Fixed: `v=spf1 include:_spf.google.com include:spf.apexmail.io ~all`
+   - Fixed: `v=spf1 include:_spf.google.com include:_spf.apexmail.ee ~all`
 3. Do NOT create a second SPF TXT record (see Issue 6).
-4. If no SPF exists: add `v=spf1 include:spf.apexmail.io ~all`.
+4. If no SPF exists: add `v=spf1 include:_spf.apexmail.ee ~all`.
 
 ---
 
@@ -107,8 +108,8 @@
 2. If multiple records found, they must merge into ONE.
 3. Example merge:
    - Record A: `v=spf1 include:_spf.google.com ~all`
-   - Record B: `v=spf1 include:spf.apexmail.io ~all`
-   - Merged: `v=spf1 include:_spf.google.com include:spf.apexmail.io ~all`
+   - Record B: `v=spf1 include:_spf.apexmail.ee ~all`
+   - Merged: `v=spf1 include:_spf.google.com include:_spf.apexmail.ee ~all`
 4. Delete the old individual records after creating the merged one.
 
 ---
@@ -126,7 +127,7 @@
    - Remove unused includes (old providers no longer in use).
    - Use an SPF flattening service.
    - Move some senders to a subdomain with its own SPF record.
-3. ApexMail's `include:spf.apexmail.io` typically costs 2–3 lookups. Ensure total stays ≤ 10.
+3. ApexMail's `include:_spf.apexmail.ee` typically costs 2–3 lookups. Ensure total stays ≤ 10.
 
 ---
 
@@ -169,7 +170,7 @@
 
 **Resolution:**
 1. Check: `dig TXT _dmarc.yourdomain.com`
-2. If missing: add `v=DMARC1; p=none; rua=mailto:dmarc@apexmail.io` as TXT record on `_dmarc.yourdomain.com`.
+2. If missing: add `v=DMARC1; p=none; rua=mailto:dmarc@apexmail.ee` as TXT record on `_dmarc.yourdomain.com`.
 3. Common syntax errors:
    - Missing `v=DMARC1` at the start
    - Using commas instead of semicolons
@@ -188,7 +189,7 @@
 **Resolution:**
 1. Check alignment: the domain in From header must match SPF domain (return-path) or DKIM signing domain.
 2. If alignment fails, temporarily change DMARC to `p=none` and review aggregate reports (`rua`).
-3. Ensure SPF includes ApexMail (`include:spf.apexmail.io`) and DKIM CNAME is correct.
+3. Ensure SPF includes ApexMail (`include:_spf.apexmail.ee`) and DKIM TXT record is correct.
 4. If using a subdomain (e.g., `mail.example.com`), ensure DMARC on `_dmarc.mail.example.com` or that the parent `_dmarc.example.com` uses `aspf=r; adkim=r` (relaxed alignment).
 
 ---
@@ -221,16 +222,18 @@
 
 ---
 
-## Issue 14 — DNS provider silently "flattens" CNAMEs causing DKIM failure
+## Issue 14 — DNS provider filters or truncates TXT records causing DKIM failure
 
-**Symptoms:** DKIM fails. `dig CNAME` returns nothing. Customer swears CNAME is set.
+**Symptoms:** DKIM fails. `dig TXT apexmail._domainkey.yourdomain.com` returns nothing or truncated content.
 
-**Root cause:** Some DNS providers (notably Cloudflare with "CNAME flattening" or "DNS proxy" mode) resolve CNAMEs to A/AAAA records at the DNS level. This breaks DKIM because receivers need the CNAME to resolve to the actual DKIM TXT record.
+**Root cause:** Some DNS providers truncate long TXT records or have restrictions on `_domainkey` subdomain TXT records. DKIM public keys are typically 256+ characters, which can hit registrar limits.
 
 **Resolution:**
-1. If using Cloudflare: set DKIM CNAME record to "DNS Only" (gray cloud ☁️), NOT "Proxied" (orange cloud 🟠).
-2. Other providers with flattening: disable CNAME flattening for `apexmail._domainkey` records.
-3. Verify: `dig CNAME apexmail._domainkey.yourdomain.com` should return `apexmail._domainkey.apexmail.io`, NOT an IP address.
+1. Check if the full public key is present: `dig TXT apexmail._domainkey.yourdomain.com +short`
+2. If truncated: the registrar may have a character limit per TXT record string. The DKIM key must be entered as a single string; if the registrar has a 255-char limit, split into quoted parts within the same TXT record (RFC 7208 style).
+3. Some registrars (e.g., cPanel/WHM-based hosts) split long TXT records automatically.
+4. If no record found at all: confirm the record was saved correctly in the DNS provider's UI.
+5. Recommend migrating DNS to Cloudflare (free) for reliable TXT record support.
 
 ---
 
@@ -252,16 +255,15 @@
 
 ## Issue 16 — DNS proxy (e.g., Cloudflare "orange cloud") interfering with verification
 
-**Symptoms:** Domain verification fails. DKIM fails. SPF may also fail.
+**Symptoms:** Domain verification fails.
 
-**Root cause:** Cloudflare's proxy (orange cloud) intercepts DNS queries and returns Cloudflare IPs instead of actual record values. This breaks CNAME-based records like DKIM.
+**Root cause:** Cloudflare's proxy (orange cloud) intercepts DNS queries and returns Cloudflare IPs instead of actual record values. TXT records are not affected by proxy mode, but the verification TXT record may take longer to propagate.
 
 **Resolution:**
-1. In Cloudflare: find the DKIM CNAME record and click the orange cloud to toggle it to gray (DNS Only).
-2. The verification TXT record should also NOT be proxied (TXT records typically aren't, but check).
-3. SPF TXT records are not affected by proxy mode.
+1. SPF and DKIM TXT records are NOT affected by Cloudflare proxy mode.
+2. The verification TXT record (`apexmail-verify=...`) should NOT be proxied (TXT records typically aren't).
+3. If the bounce CNAME (`bounce.yourdomain.com → bounce.apexmail.ee`) is proxied, toggle it to gray (DNS Only).
 4. After toggling, wait 5 minutes and retry verification.
-5. Same applies to other DNS proxies (Sucuri, Imperva, etc.) — DKIM CNAMEs must bypass the proxy.
 
 ---
 
@@ -293,7 +295,7 @@
 **Resolution:**
 1. Ask: "Did you recently change DNS providers, migrate your domain, or make any DNS changes?"
 2. Check current DNS: `dig TXT yourdomain.com` — look for verification TXT record and SPF.
-3. Check DKIM: `dig CNAME apexmail._domainkey.yourdomain.com`.
+3. Check DKIM: `dig TXT apexmail._domainkey.yourdomain.com`.
 4. If records are missing: customer must re-add all required DNS records.
 5. If domain expired: customer must renew domain with registrar first.
 6. After re-adding records: click "Re-verify" in Dashboard → Domains.
@@ -312,10 +314,10 @@ Domain issue reported
 ├── "Was verified, now unverified"
 │   └── DNS migration or record deletion → Issue 18
 ├── "DKIM fails"
-│   ├── CNAME exists? → Check target (Issue 3)
-│   ├── TXT instead of CNAME? → Issue 4
-│   ├── Cloudflare proxied? → Issue 14/16
-│   └── CNAME correct but fails → DNSSEC (Issue 15)
+│   ├── TXT record present? → Check value format (Issue 3)
+│   ├── Wrong record type (CNAME instead of TXT)? → Issue 4
+│   ├── Truncated key? → Issue 14
+│   └── Record correct but fails → DNSSEC (Issue 15)
 ├── "SPF fails"
 │   ├── Missing include? → Issue 5
 │   ├── Multiple SPF records? → Issue 6

@@ -75,7 +75,7 @@
 
 **Resolution:**
 1. Explain: "The Return-Path is used for bounce handling and is intentionally different from the From address. This is standard practice for all email service providers."
-2. If customer configured the bounce CNAME (`bounce.yourdomain.com → bounce.apexmail.io`): the return-path will be on their subdomain, which should satisfy most security policies.
+2. If customer configured the bounce CNAME (`bounce.yourdomain.com → bounce.apexmail.ee`): the return-path will be on their subdomain, which should satisfy most security policies.
 3. SPF should be checked against the return-path domain — ensure SPF include covers this.
 4. DMARC with relaxed alignment (`aspf=r`) allows subdomain return-paths to align with the parent domain.
 
@@ -99,15 +99,15 @@
 
 ## Issue 42 — Messages appear as "via" or "on behalf of" in email clients
 
-**Symptoms:** Gmail shows "via apexmail.io" or Outlook shows "on behalf of" next to the sender name.
+**Symptoms:** Gmail shows "via apexmail.ee" or Outlook shows "on behalf of" next to the sender name.
 
 **Root cause:** Email client displays "via" when the DKIM signing domain or the return-path domain differs from the From domain. This happens when domain alignment is incomplete.
 
 **Resolution:**
 1. To remove "via" indicator:
-   - Ensure DKIM CNAME is properly set (`apexmail._domainkey.yourdomain.com → apexmail._domainkey.apexmail.io`) — this makes DKIM sign with customer's domain.
-   - Ensure bounce CNAME is set (`bounce.yourdomain.com → bounce.apexmail.io`) — this aligns the return-path.
-   - Ensure SPF includes `spf.apexmail.io`.
+   - Ensure DKIM TXT record is properly set at `apexmail._domainkey.yourdomain.com` with value from dashboard — this makes DKIM sign with customer's domain.
+   - Ensure bounce CNAME is set (`bounce.yourdomain.com → bounce.apexmail.ee`) — this aligns the return-path.
+   - Ensure SPF includes `_spf.apexmail.ee`.
 2. Once full domain authentication is complete (SPF + DKIM + DMARC all passing and aligned), the "via" indicator disappears.
 3. This may take 24–48 hours after DNS changes for cached results to update.
 
@@ -168,7 +168,7 @@
 **Root cause:** Custom envelope-from (return-path) requires the bounce CNAME DNS record to be configured.
 
 **Resolution:**
-1. Customer must add CNAME record: `bounce.yourdomain.com → bounce.apexmail.io`
+1. Customer must add CNAME record: `bounce.yourdomain.com → bounce.apexmail.ee`
 2. Once configured, the return-path in emails will use `bounce.yourdomain.com` instead of ApexMail's domain.
 3. This also helps remove "via" indicators (Issue 42) and improves SPF alignment.
 4. The bounce CNAME is part of the standard domain setup but is sometimes skipped because verification can succeed without it.

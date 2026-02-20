@@ -203,7 +203,7 @@ ApexMail's behavior:
 | Data Type | Hot Retention | Cold Retention | Notes |
 |-----------|--------------|---------------|-------|
 | Email events (opens, clicks, etc.) | 90 days | 2 years (Parquet) | `apps/analytics/src/` CompactionWorker |
-| Message metadata | Plan-dependent (3–90 days) | None | After retention, metadata is purged |
+| Message metadata | Plan-dependent (7–730 days) | None | Free: 7 d, Starter: 30 d, Pro: 60 d, Growth: 90 d, Scale: 365 d, Enterprise: 730 d |
 | Message body content | Temporary (delivery + retries) | None | Purged after successful delivery or final failure |
 | Audit logs | 365 days (default) | Configurable | `apps/compliance/src/audit/hash-chain.ts` |
 | GDPR request records | 3 years | None | Required to prove compliance |

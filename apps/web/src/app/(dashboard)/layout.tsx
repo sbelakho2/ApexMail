@@ -42,12 +42,12 @@ export default function DashboardLayout({
                 />
                 <main
                     className={cn(
-                        'relative flex-1 overflow-y-auto bg-gradient-to-br from-surface-50 via-white to-brand-50/40 p-4 md:p-6 lg:p-8 safe-area-inset-bottom'
+                        'relative flex-1 overflow-y-auto bg-gradient-to-br from-surface-50 via-background to-brand-50/40 p-4 md:p-6 lg:p-8 safe-area-inset-bottom dark:from-surface-50 dark:via-surface-100 dark:to-brand-900/25'
                     )}
                 >
                     <div className="pointer-events-none absolute inset-0">
-                        <div className="absolute -top-24 right-12 h-56 w-56 rounded-full bg-brand-100/60 blur-3xl" />
-                        <div className="absolute bottom-[-120px] left-10 h-64 w-64 rounded-full bg-brand-50/80 blur-3xl" />
+                        <div className="absolute -top-24 right-12 h-56 w-56 rounded-full bg-brand-100/60 blur-3xl dark:bg-brand-900/35" />
+                        <div className="absolute bottom-[-120px] left-10 h-64 w-64 rounded-full bg-brand-50/80 blur-3xl dark:bg-brand-800/25" />
                     </div>
                     <div className="relative">
                         {children}

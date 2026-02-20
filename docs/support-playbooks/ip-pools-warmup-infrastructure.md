@@ -57,7 +57,7 @@ Tenant Account
 **Symptoms:** Customer wants to move from shared IP pool to a dedicated IP for reputation isolation.
 
 **Resolution:**
-1. **Dedicated IPs are available on Scale and Enterprise plans.**
+1. **Dedicated IPs are available on Growth (1 IP), Scale (3 IPs), and Enterprise (10 IPs) plans.**
 2. **Request process:**
    - Dashboard → Settings → Dedicated IP → Request.
    - Or contact `contact@apexmail.ee` with the request.
@@ -288,7 +288,7 @@ dig +short <REVERSED_IP>.b.barracudacentral.org
 3. **If customer is affected:**
    - Check if the issue is IP-related: are bounce messages referencing IP reputation?
    - Escalate to ops team to investigate the shared IP pool.
-4. **Long-term fix:** Upgrade to a dedicated IP on Scale/Enterprise plan.
+4. **Long-term fix:** Upgrade to a dedicated IP (available on Growth, Scale, and Enterprise plans).
 
 ---
 
@@ -450,7 +450,7 @@ dig +short <REVERSED_IP>.b.barracudacentral.org
    b. Configure inbound processing rules (forwarding, webhook, storage).
 3. **MX record:**
    ```
-   yourdomain.com MX 10 mx.apexmail.io.
+   yourdomain.com MX 10 mx.apexmail.ee.
    ```
 4. **Inbound processing:**
    - Authentication: SPF, DKIM, DMARC verification on incoming messages.
@@ -469,7 +469,7 @@ dig +short <REVERSED_IP>.b.barracudacentral.org
 
 ```bash
 dig MX yourdomain.com +short
-# Must point to: mx.apexmail.io.
+# Must point to: mx.apexmail.ee.
 ```
 
 2. **Check inbound domain is configured:** The domain must be registered and verified in ApexMail.
@@ -631,7 +631,7 @@ DKIM signing is per-domain, not per-IP. The same DKIM key is used regardless of 
 
 ### E160 — "SPF record for our dedicated IP"
 
-Customer's SPF record must include the dedicated IP: `v=spf1 ip4:<DEDICATED_IP> include:_spf.apexmail.io ~all`. If they only have `include:_spf.apexmail.io`: this covers shared IPs. Dedicated IPs should be explicitly listed OR covered by the include if we update our SPF record.
+Customer's SPF record must include the dedicated IP: `v=spf1 ip4:<DEDICATED_IP> include:_spf.apexmail.ee ~all`. If they only have `include:_spf.apexmail.ee`: this covers shared IPs. Dedicated IPs should be explicitly listed OR covered by the include if we update our SPF record.
 
 ### E161 — "Can I bring my own IP (BYOIP)?"
 

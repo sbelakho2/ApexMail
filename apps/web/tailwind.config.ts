@@ -105,7 +105,7 @@ const config: Config = {
                 sm: 'var(--radius-sm)',
             },
             fontFamily: {
-                sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+                sans: ['var(--font-display)', 'serif'],
                 display: ['var(--font-display)', 'serif'],
                 mono: ['var(--font-mono)', 'monospace'],
             },

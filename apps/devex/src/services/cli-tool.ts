@@ -607,22 +607,17 @@ ${command.options.map(opt => {
     
     try {
       const globalOpts = cmd.optsWithGlobals();
-      
-      // TODO: Implement ${safeName} command logic
-      spinner.text = 'Processing...';
-      
-      // Example API call
-      // const result = await request({
-      //   method: 'GET',
-      //   path: '/v1/...',
-      //   profile: globalOpts.profile,
-      //   apiKey: globalOpts.apiKey,
-      // });
-      
+
+      spinner.text = 'Requesting data...';
+      const result = await request({
+        method: 'GET',
+        path: '/v1/${safeName}',
+        profile: globalOpts.profile,
+        apiKey: globalOpts.apiKey,
+      });
+
       spinner.succeed('Done');
-      
-      // Output result
-      // formatOutput(result, globalOpts.json ? 'json' : options.format);
+      formatOutput(result, globalOpts.json ? 'json' : (options.format ?? 'table'));
       
     } catch (error) {
       spinner.fail((error as Error).message);

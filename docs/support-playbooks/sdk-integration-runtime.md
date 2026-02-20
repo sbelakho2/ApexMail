@@ -1,17 +1,21 @@
 # SDK Integration, Runtime Issues & Developer Experience Playbook
 
 > **Audience:** ApexMail AI Assistant & Support Engineers
-> **Scope:** Node.js SDK, Python SDK, webhook signature verification, framework integration, TypeScript, ESM/CJS, edge runtime, scheduled sends, template rendering, error handling.
+> **Scope:** Node.js SDK, Python SDK, Go SDK, Ruby SDK, PHP SDK, Java SDK, webhook signature verification, framework integration, TypeScript, ESM/CJS, edge runtime, scheduled sends, template rendering, error handling.
 > **Last Updated:** 2026-02-16
 
 ---
 
 ## Reference: SDK Architecture
 
-| SDK | Package | Source | Size |
-|-----|---------|--------|------|
-| Node.js | `@apexmail/node` | `packages/sdk-node/` | ~1,018 lines |
-| Python | `apexmail` | `packages/sdk-python/` | Sync + Async clients |
+| SDK | Package | Source | Notes |
+|-----|---------|--------|-------|
+| Node.js | `@apexmail/node` | `packages/sdk-node/` | TypeScript, ESM + CJS; auto-retry |
+| Python | `apexmail` | `packages/sdk-python/` | Sync (`ApexMail`) + Async (`AsyncApexMail`) |
+| Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | `packages/sdk-go/` | Requires Go 1.21+; context-aware |
+| Ruby | `apexmail` gem | `packages/sdk-ruby/` | Net::HTTP stdlib; no external deps |
+| PHP | `apexmail/apexmail-php` (Composer) | `packages/sdk-php/` | cURL-based; requires PHP 8.0+ |
+| Java | `ee.apexmail:apexmail-java` (Maven/Gradle) | `packages/sdk-java/` | JDK 17+; no Jackson/Gson dependency |
 
 ### Node.js SDK Features
 
@@ -503,7 +507,7 @@ def apexmail_webhook(request):
    ```python
    import apexmail
    
-   client = apexmail.AsyncClient(api_key="key_...")
+   client = apexmail.AsyncApexMail(api_key="key_...")
    
    @app.post("/send")
    async def send_email():
@@ -521,7 +525,7 @@ def apexmail_webhook(request):
    ```
 3. **In sync context that needs async:** Use the sync client instead:
    ```python
-   client = apexmail.Client(api_key="key_...")  # Sync client
+   client = apexmail.ApexMail(api_key="key_...")  # Sync client
    result = client.emails.send(...)
    ```
 
@@ -547,7 +551,7 @@ def apexmail_webhook(request):
    ```
 4. **Temporary workaround (NOT for production):**
    ```python
-   client = apexmail.Client(api_key="key_...", verify_ssl=False)
+   client = apexmail.ApexMail(api_key="key_...", verify_ssl=False)
    ```
 5. **macOS specific:** Run `Install Certificates.command` from the Python installation.
 
@@ -565,7 +569,7 @@ def apexmail_webhook(request):
      "to": ["recipient@example.com"],
      "subject": "Scheduled Newsletter",
      "html": "<p>This was scheduled</p>",
-     "send_at": "2026-02-20T14:00:00Z"
+     "scheduled_at": "2026-02-20T14:00:00Z"
    }
    ```
 2. **Via Node.js SDK:**
@@ -575,7 +579,7 @@ def apexmail_webhook(request):
      to: ['recipient@example.com'],
      subject: 'Scheduled',
      html: '<p>Hello</p>',
-     sendAt: new Date('2026-02-20T14:00:00Z'),
+     scheduledAt: new Date('2026-02-20T14:00:00Z'),
    });
    ```
 3. **Constraints:**
@@ -893,7 +897,7 @@ await client.emails.send({
    ```
 3. **Python:**
    ```python
-   client = apexmail.Client(
+   client = apexmail.ApexMail(
        api_key="key_...",
        proxies={"https": "http://proxy.corp.com:8080"},
    )
@@ -914,7 +918,7 @@ const client = new ApexMail({
 ```
 
 ```python
-client = apexmail.Client(
+client = apexmail.ApexMail(
     api_key="key_...",
     base_url="https://api-staging.apexmail.ee",
 )
@@ -964,7 +968,7 @@ do {
 
 ### F198 — "Webhook timeout — how quickly must I respond?"
 
-ApexMail expects webhook endpoints to respond within **10 seconds**. If your handler takes longer, return `200 OK` immediately and process the event asynchronously (e.g., push to your own queue).
+ApexMail expects webhook endpoints to respond within **30 seconds**. If your handler takes longer, return `200 OK` immediately and process the event asynchronously (e.g., push to your own queue).
 
 ### F199 — "Multiple webhook endpoints — fan-out"
 
@@ -982,7 +986,7 @@ const client = new ApexMail({
 ```python
 import logging
 logging.basicConfig(level=logging.DEBUG)
-client = apexmail.Client(api_key="key_...", debug=True)
+client = apexmail.ApexMail(api_key="key_...", debug=True)
 ```
 
 ---
@@ -1001,6 +1005,19 @@ SDK / Runtime Issue
 │   ├── Async event loop error → F179
 │   ├── SSL cert error → F180
 │   └── Proxy → F191
+├── Go
+│   ├── Installation → see sdk-go-ruby-php-java.md
+│   ├── Error handling (*apexmail.APIError) → see sdk-go-ruby-php-java.md
+│   └── Context timeout → see sdk-go-ruby-php-java.md
+├── Ruby
+│   ├── Installation → see sdk-go-ruby-php-java.md
+│   └── Error handling (ApexMail::Error) → see sdk-go-ruby-php-java.md
+├── PHP
+│   ├── Installation (Composer) → see sdk-go-ruby-php-java.md
+│   └── Exception handling → see sdk-go-ruby-php-java.md
+├── Java
+│   ├── Installation (Maven/Gradle) → see sdk-go-ruby-php-java.md
+│   └── Exception handling (ApexMailException) → see sdk-go-ruby-php-java.md
 ├── Webhook Verification
 │   ├── General → F171
 │   ├── Next.js App Router → F172
@@ -1046,3 +1063,8 @@ SDK / Runtime Issue
 - [Quota & Rate Limits](quota-rate-limits-billing.md) — rate limiting details
 - Internal: `packages/sdk-node/` — Node.js SDK source
 - Internal: `packages/sdk-python/` — Python SDK source
+- Internal: `packages/sdk-go/` — Go SDK source
+- Internal: `packages/sdk-ruby/` — Ruby SDK source
+- Internal: `packages/sdk-php/` — PHP SDK source
+- Internal: `packages/sdk-java/` — Java SDK source
+- [Go / Ruby / PHP / Java SDK Playbook](sdk-go-ruby-php-java.md) — issues specific to these SDKs

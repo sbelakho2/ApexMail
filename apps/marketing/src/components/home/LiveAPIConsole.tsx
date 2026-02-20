@@ -62,7 +62,7 @@ print(result.id) # "msg_abc123"`,
 import (
   "os"
   "fmt"
-  "github.com/apexmail/apexmail-go"
+  "github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go"
 )
 
 func main() {

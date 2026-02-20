@@ -303,6 +303,33 @@ class DecisionTree {
         if (!this.root) return 0;
         return this.predictNode(x, this.root);
     }
+
+    getFeatureUsage(numFeatures: number): number[] {
+        const usage = new Array(numFeatures).fill(0);
+        if (!this.root) {
+            return usage;
+        }
+
+        this.accumulateFeatureUsage(this.root, usage);
+        return usage;
+    }
+
+    private accumulateFeatureUsage(node: TreeNode, usage: number[]): void {
+        if (node.isLeaf) {
+            return;
+        }
+
+        if (typeof node.featureIdx === 'number' && node.featureIdx >= 0 && node.featureIdx < usage.length) {
+            usage[node.featureIdx] += 1;
+        }
+
+        if (node.left) {
+            this.accumulateFeatureUsage(node.left, usage);
+        }
+        if (node.right) {
+            this.accumulateFeatureUsage(node.right, usage);
+        }
+    }
     
     private predictNode(x: number[], node: TreeNode): number {
         if (node.isLeaf) {
@@ -372,6 +399,11 @@ class GradientBoostingClassifier {
             const tree = new DecisionTree(this.maxDepth, 5);
             tree.fit(X, gradients);
             this.trees.push(tree);
+
+            const treeFeatureUsage = tree.getFeatureUsage(featureNames.length);
+            for (let i = 0; i < treeFeatureUsage.length; i++) {
+                this.featureImportances[i] += treeFeatureUsage[i]!;
+            }
             
             // Update predictions
             for (let i = 0; i < n; i++) {
@@ -448,10 +480,24 @@ class GradientBoostingClassifier {
     
     getFeatureImportances(): Record<string, number> {
         const result: Record<string, number> = {};
-        // Simplified: return equal weights for now
-        for (const name of this.featureNames) {
-            result[name] = 1 / this.featureNames.length;
+        if (this.featureNames.length === 0) {
+            return result;
         }
+
+        const totalImportance = this.featureImportances.reduce((sum, value) => sum + value, 0);
+        if (totalImportance <= 0) {
+            const equalWeight = 1 / this.featureNames.length;
+            for (const name of this.featureNames) {
+                result[name] = equalWeight;
+            }
+            return result;
+        }
+
+        for (let i = 0; i < this.featureNames.length; i++) {
+            const featureName = this.featureNames[i]!;
+            result[featureName] = this.featureImportances[i]! / totalImportance;
+        }
+
         return result;
     }
 }

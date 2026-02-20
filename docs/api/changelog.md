@@ -37,7 +37,7 @@ Link: <https://docs.apexmail.dev/migration/2026-06>; rel="successor-version"
 
 ### SDK Versioning
 
-ApexMail SDKs (Node.js, Python) follow **Semantic Versioning (semver)**:
+ApexMail SDKs (Node.js, Python, Go, Ruby, PHP, Java) follow **Semantic Versioning (semver)**:
 
 - **MAJOR** (`2.0.0`): Breaking changes to the SDK interface.
 - **MINOR** (`1.1.0`): New features, backward-compatible.
@@ -302,6 +302,36 @@ The inaugural stable release of the ApexMail API. All endpoints are production-r
 ## Previous Versions
 
 No previous API versions exist. v1 is the initial release.
+
+---
+
+## v1 Updates
+
+### 2025 — React Email Support + Multi-Language SDKs
+
+#### New: React Email template engine
+
+Templates now support `engine: "react"` — compose emails as JSX components using `@react-email/components`. Templates are transpiled and rendered server-side in a secure VM sandbox.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/templates/react-email/starter` | GET | Get a JSX starter template |
+| `/v1/templates/react-email/validate` | POST | Validate a JSX source string |
+
+New error codes: `INVALID_REACT_EMAIL_SOURCE`, `REACT_EMAIL_TRANSPILE_ERROR`, `REACT_EMAIL_NO_DEFAULT_EXPORT`, `REACT_EMAIL_EXECUTION_ERROR`, `REACT_EMAIL_RENDER_ERROR`.
+
+#### New: Official SDKs for Go, Ruby, PHP, Java
+
+| Language | Package |
+|----------|---------|
+| Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` |
+| Ruby | `apexmail` (RubyGems) |
+| PHP | `apexmail/apexmail-php` (Packagist) |
+| Java | `ee.apexmail:apexmail-java` (Maven Central) |
+
+All SDKs cover: `emails` (send, batch, get, list), `domains` (create, list, get, verify, delete, health), `webhooks` (create, list, get, update, delete), `templates` (create, list, get, update, delete, render, React Email helpers), `suppressions` (add, list, check, delete), and `events` (list, get, getByMessage).
+
+---
 
 ---
 

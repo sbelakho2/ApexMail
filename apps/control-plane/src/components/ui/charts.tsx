@@ -70,7 +70,7 @@ export function StatCard({ label, value, change, changeLabel, icon, trend }: Sta
             <div className="flex items-start justify-between">
                 <div>
                     <p className="text-xs font-medium text-surface-600 uppercase tracking-wide">{label}</p>
-                    <p className="text-2xl font-bold text-surface-900 mt-1">{value}</p>
+                    <p className="text-2xl apex-metric-number mt-1">{value}</p>
                     {change !== undefined && (
                         <p className={`text-xs font-medium mt-2 flex items-center gap-1 ${trendColor}`}>
                             <span>{trendIcon}</span>

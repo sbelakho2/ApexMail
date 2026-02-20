@@ -438,7 +438,7 @@ export class InvoiceService {
             <PostalCode>10141</PostalCode>
             <Country>EE</Country>
           </LegalAddress>
-          <PhoneNumber>+372 5XX XXXX</PhoneNumber>
+          <PhoneNumber>+37256380927</PhoneNumber>
           <E-mailAddress>billing@apexmail.ee</E-mailAddress>
         </ContactData>
         <AccountInfo>

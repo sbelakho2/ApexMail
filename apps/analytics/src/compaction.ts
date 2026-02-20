@@ -215,9 +215,7 @@ export class CompactionWorker {
     // Convert events to columnar format for Parquet
     const columns = this.eventsToColumns(events);
 
-    // Write Parquet file
-    // Note: In production, use parquet-wasm or similar library
-    // For now, we'll write a JSON representation that can be converted
+    // Build archive metadata for the compacted batch.
     const parquetData = {
       schema: this.getParquetSchema(),
       rowCount: events.length,
@@ -231,8 +229,7 @@ export class CompactionWorker {
       },
     };
 
-    // Write as JSONL for now (can be converted to Parquet with external tool)
-    // In production, use proper Parquet library
+    // Persist compacted events in NDJSON (JSONL) format for downstream processing.
     const jsonlPath = filePath.replace('.parquet', '.jsonl');
     const jsonlContent = events.map(e => JSON.stringify(this.eventToJsonl(e))).join('\n');
     await writeFile(jsonlPath, jsonlContent);

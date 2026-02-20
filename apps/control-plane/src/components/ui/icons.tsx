@@ -54,6 +54,7 @@ type Glyph =
   | 'credit-card'
   | 'euro'
   | 'menu'
+  | 'logout'
   | 'more'
   | 'spinner';
 
@@ -104,6 +105,13 @@ const glyphs: Record<Glyph, React.ReactNode> = {
   'credit-card': <path d="M4 7h16v10H4zM4 10h16M7 15h4" />,
   euro: <path d="M16 7a4 4 0 0 0-4-2 4 4 0 0 0 0 8 4 4 0 0 0 4-2M6 10h6M6 14h6" />,
   menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  logout: (
+    <>
+      <path d="M10 5H6v14h4" />
+      <path d="M14 16l4-4-4-4" />
+      <path d="M8 12h10" />
+    </>
+  ),
   more: <path d="M6 12h.01M12 12h.01M18 12h.01" />,
   spinner: <path d="M12 4a8 8 0 1 1-5.6 2.4" />,
 };
@@ -183,5 +191,6 @@ export const HelpCircle = createIcon('help');
 export const CreditCard = createIcon('credit-card');
 export const Euro = createIcon('euro');
 export const Menu = createIcon('menu');
+export const LogOut = createIcon('logout');
 export const MoreHorizontal = createIcon('more');
 export const Loader2 = createIcon('spinner');

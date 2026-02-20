@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
@@ -31,10 +32,17 @@ use mail_proto::generated::{
     AuthenticateRequest, AuthenticateResponse,
     GetQuotaRequest, GetQuotaResponse,
     SubscribeMailboxRequest, MailboxEvent,
+    mailbox_event, MailboxUpdated,
     MessageMeta, Mailbox, MessageFlags, EmailEnvelope, Quota,
 };
+use crate::models::{Mailbox as StoredMailbox, MessageQuery, StoredMessage};
 use crate::storage::MessageStorage;
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2,
+    PasswordHash,
+    PasswordVerifier,
+};
 
 /// Mailstore gRPC service
 pub struct MailstoreServiceImpl {
@@ -44,6 +52,110 @@ pub struct MailstoreServiceImpl {
 impl MailstoreServiceImpl {
     pub fn new(storage: Arc<MessageStorage>) -> Self {
         Self { storage }
+    }
+
+    fn message_uid(message: &StoredMessage) -> u64 {
+        let millis = message.date.timestamp_millis();
+        if millis < 0 {
+            0
+        } else {
+            millis as u64
+        }
+    }
+
+    fn message_to_meta(message: &StoredMessage, mailbox_name: &str) -> MessageMeta {
+        MessageMeta {
+            id: message.id.to_string(),
+            account_id: message.account_id.to_string(),
+            mailbox: mailbox_name.to_string(),
+            uid: Self::message_uid(message),
+            blob_hash: format!("{:x}", md5::compute(message.message_id.as_bytes())),
+            size: message.raw_size.max(0) as u64,
+            envelope: Some(EmailEnvelope {
+                from: message.from_address.clone(),
+                to: message.to_addresses.iter().map(|addr| addr.address.clone()).collect(),
+                cc: message.cc_addresses.iter().map(|addr| addr.address.clone()).collect(),
+                bcc: message.bcc_addresses.iter().map(|addr| addr.address.clone()).collect(),
+                reply_to: String::new(),
+                subject: message.subject.clone(),
+                message_id: message.message_id.clone(),
+                in_reply_to: String::new(),
+                references: vec![],
+                date: message.date.timestamp(),
+            }),
+            flags: Some(MessageFlags {
+                seen: message.is_read,
+                answered: false,
+                flagged: message.is_starred,
+                deleted: message.is_deleted,
+                draft: false,
+                recent: false,
+                custom: vec![],
+            }),
+            internal_date: message.date.timestamp(),
+        }
+    }
+
+    fn mailbox_to_proto(mailbox: &StoredMailbox) -> Mailbox {
+        let (attributes, uidvalidity) = {
+            let mut attrs = Vec::new();
+            match mailbox.mailbox_type {
+                crate::models::MailboxType::Inbox => {}
+                crate::models::MailboxType::Sent => attrs.push("\\Sent".to_string()),
+                crate::models::MailboxType::Drafts => attrs.push("\\Drafts".to_string()),
+                crate::models::MailboxType::Trash => attrs.push("\\Trash".to_string()),
+                crate::models::MailboxType::Spam => attrs.push("\\Junk".to_string()),
+                crate::models::MailboxType::Archive => attrs.push("\\Archive".to_string()),
+                crate::models::MailboxType::Custom => {}
+            }
+            let created = mailbox.created_at.timestamp();
+            let validity = if created < 0 { 1 } else { created as u64 };
+            (attrs, validity)
+        };
+
+        Mailbox {
+            name: mailbox.name.clone(),
+            delimiter: "/".to_string(),
+            attributes,
+            uidvalidity,
+            uidnext: (mailbox.total_messages.max(0) as u64).saturating_add(1),
+            exists: mailbox.total_messages.max(0) as u32,
+            recent: 0,
+            unseen: mailbox.unread_messages.max(0) as u32,
+        }
+    }
+
+    async fn resolve_account_mailbox(
+        &self,
+        account_id_raw: &str,
+        mailbox_name: &str,
+    ) -> Result<(Uuid, StoredMailbox), Status> {
+        let account_id = Uuid::parse_str(account_id_raw.trim())
+            .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+
+        let account = self
+            .storage
+            .get_account(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        if account.is_none() {
+            return Err(Status::not_found("Account not found"));
+        }
+
+        let mailboxes = self
+            .storage
+            .list_mailboxes(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list mailboxes: {}", e)))?;
+
+        let normalized = mailbox_name.trim();
+        let mailbox = mailboxes
+            .into_iter()
+            .find(|m| m.name.eq_ignore_ascii_case(normalized))
+            .ok_or_else(|| Status::not_found("Mailbox not found"))?;
+
+        Ok((account_id, mailbox))
     }
 }
 
@@ -57,19 +169,54 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<StoreMessageRequest>,
     ) -> Result<Response<StoreMessageResponse>, Status> {
         let req = request.into_inner();
-        
-        let account_id = &req.account_id;
-        let mailbox = &req.mailbox;
-        let raw_message = &req.raw_message;
-        
-        // Parse the raw message to extract metadata
-        let blob_hash = format!("{:x}", md5::compute(raw_message));
-        let message_id = Uuid::new_v4().to_string();
-        let uid = chrono::Utc::now().timestamp_millis() as u64;
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
+        let internal_date = chrono::DateTime::<chrono::Utc>::from_timestamp(req.internal_date, 0)
+            .unwrap_or_else(chrono::Utc::now);
+
+        let flags = req.flags.unwrap_or_default();
+        let raw_message_text = String::from_utf8_lossy(&req.raw_message).into_owned();
+        let stored = StoredMessage {
+            id: Uuid::new_v4(),
+            account_id,
+            mailbox_id: mailbox.id,
+            message_id: Uuid::new_v4().to_string(),
+            from_address: String::new(),
+            from_name: None,
+            to_addresses: vec![],
+            cc_addresses: vec![],
+            bcc_addresses: vec![],
+            subject: String::new(),
+            date: internal_date,
+            text_body: Some(raw_message_text),
+            html_body: None,
+            raw_size: req.raw_message.len() as i64,
+            is_read: flags.seen,
+            is_starred: flags.flagged,
+            is_deleted: flags.deleted,
+            is_spam: false,
+            labels: vec![],
+            headers: serde_json::json!({}),
+            attachments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        self.storage
+            .store_message(&stored)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to store message: {}", e)))?;
+
+        let blob_hash = format!("{:x}", md5::compute(&req.raw_message));
+        let message_id = stored.id.to_string();
+        let uid = Self::message_uid(&stored);
         
         info!(
             account_id = %account_id,
-            mailbox = %mailbox,
+            mailbox = %mailbox.name,
             message_id = %message_id,
             "Message stored"
         );
@@ -87,23 +234,38 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<GetMessageRequest>,
     ) -> Result<Response<GetMessageResponse>, Status> {
         let req = request.into_inner();
-        
-        // Return empty response for now - actual implementation would query storage
-        let meta = MessageMeta {
-            id: Uuid::new_v4().to_string(),
-            account_id: req.account_id.clone(),
-            mailbox: req.mailbox.clone(),
-            uid: req.uid,
-            blob_hash: String::new(),
-            size: 0,
-            envelope: Some(EmailEnvelope::default()),
-            flags: Some(MessageFlags::default()),
-            internal_date: chrono::Utc::now().timestamp(),
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
+        let messages = self
+            .storage
+            .list_messages(&MessageQuery {
+                account_id,
+                mailbox_id: Some(mailbox.id),
+                limit: 1000,
+                offset: 0,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list messages: {}", e)))?;
+
+        let message = messages
+            .into_iter()
+            .find(|m| Self::message_uid(m) == req.uid)
+            .ok_or_else(|| Status::not_found("Message not found"))?;
+
+        let meta = Self::message_to_meta(&message, &mailbox.name);
+        let body = if req.include_body {
+            message.text_body.unwrap_or_default().into_bytes()
+        } else {
+            vec![]
         };
         
         Ok(Response::new(GetMessageResponse {
             meta: Some(meta),
-            body: if req.include_body { vec![] } else { vec![] },
+            body,
         }))
     }
     
@@ -113,16 +275,44 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<ListMessagesRequest>,
     ) -> Result<Response<ListMessagesResponse>, Status> {
         let req = request.into_inner();
-        
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
         debug!(
             account_id = %req.account_id,
             mailbox = %req.mailbox,
             "Listing messages"
         );
-        
-        // Return empty list for now
+
+        let limit = if req.limit > 0 { req.limit as i64 } else { 100 };
+        let messages = self
+            .storage
+            .list_messages(&MessageQuery {
+                account_id,
+                mailbox_id: Some(mailbox.id),
+                limit,
+                offset: 0,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list messages: {}", e)))?;
+
+        let metas = messages
+            .into_iter()
+            .filter_map(|message| {
+                let uid = Self::message_uid(&message);
+                if (req.uid_min == 0 || uid >= req.uid_min) && (req.uid_max == 0 || uid <= req.uid_max) {
+                    Some(Self::message_to_meta(&message, &mailbox.name))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         Ok(Response::new(ListMessagesResponse {
-            messages: vec![],
+            messages: metas,
         }))
     }
     
@@ -399,8 +589,30 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<CreateAccountRequest>,
     ) -> Result<Response<CreateAccountResponse>, Status> {
         let req = request.into_inner();
-        
-        let account_id = Uuid::new_v4().to_string();
+
+        if req.email.trim().is_empty() || req.password.is_empty() {
+            return Err(Status::invalid_argument("email and password are required"));
+        }
+
+        let salt = SaltString::generate(&mut OsRng);
+        let password_hash = Argon2::default()
+            .hash_password(req.password.as_bytes(), &salt)
+            .map_err(|e| Status::internal(format!("Failed to hash password: {}", e)))?
+            .to_string();
+
+        let display_name = if req.display_name.trim().is_empty() {
+            None
+        } else {
+            Some(req.display_name.trim())
+        };
+
+        let account = self
+            .storage
+            .create_account(&req.email, &password_hash, display_name)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to create account: {}", e)))?;
+
+        let account_id = account.id.to_string();
         
         info!(
             account_id = %account_id,
@@ -419,14 +631,31 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<GetAccountRequest>,
     ) -> Result<Response<GetAccountResponse>, Status> {
         let req = request.into_inner();
-        
-        // Return placeholder response
+
+        let account = if !req.account_id.trim().is_empty() {
+            let account_id = Uuid::parse_str(req.account_id.trim())
+                .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+            self.storage
+                .get_account(&account_id)
+                .await
+                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+        } else if !req.email.trim().is_empty() {
+            self.storage
+                .get_account_by_email(req.email.trim())
+                .await
+                .map_err(|e| Status::internal(format!("Storage error: {}", e)))?
+        } else {
+            return Err(Status::invalid_argument("account_id or email is required"));
+        };
+
+        let account = account.ok_or_else(|| Status::not_found("Account not found"))?;
+
         Ok(Response::new(GetAccountResponse {
-            account_id: req.account_id.clone(),
-            email: req.email.clone(),
-            display_name: String::new(),
-            created_at: chrono::Utc::now().timestamp(),
-            active: true,
+            account_id: account.id.to_string(),
+            email: account.email,
+            display_name: account.display_name.unwrap_or_default(),
+            created_at: account.created_at.timestamp(),
+            active: account.is_active,
         }))
     }
     
@@ -516,6 +745,10 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<SubscribeMailboxRequest>,
     ) -> Result<Response<Self::SubscribeMailboxStream>, Status> {
         let req = request.into_inner();
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
         
         info!(
             account_id = %req.account_id,
@@ -524,11 +757,56 @@ impl MailstoreService for MailstoreServiceImpl {
         );
         
         let (tx, rx) = mpsc::channel(128);
-        
-        // For now, just keep the channel open - actual implementation would send events
+
+        let storage = Arc::clone(&self.storage);
+        let mailbox_name = mailbox.name.clone();
+        let initial_mailbox = Self::mailbox_to_proto(&mailbox);
+
         tokio::spawn(async move {
-            // Keep channel alive
-            let _ = tx;
+            if tx
+                .send(Ok(MailboxEvent {
+                    event: Some(mailbox_event::Event::MailboxUpdated(MailboxUpdated {
+                        mailbox: Some(initial_mailbox),
+                    })),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+
+            loop {
+                interval.tick().await;
+
+                let current_mailbox = match storage.list_mailboxes(&account_id).await {
+                    Ok(mailboxes) => mailboxes
+                        .into_iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(&mailbox_name)),
+                    Err(err) => {
+                        error!(error = %err, mailbox = %mailbox_name, "Failed to refresh mailbox subscription state");
+                        break;
+                    }
+                };
+
+                let Some(current_mailbox) = current_mailbox else {
+                    let _ = tx
+                        .send(Err(Status::not_found("Mailbox no longer exists")))
+                        .await;
+                    break;
+                };
+
+                let event = MailboxEvent {
+                    event: Some(mailbox_event::Event::MailboxUpdated(MailboxUpdated {
+                        mailbox: Some(Self::mailbox_to_proto(&current_mailbox)),
+                    })),
+                };
+
+                if tx.send(Ok(event)).await.is_err() {
+                    break;
+                }
+            }
         });
         
         let stream = ReceiverStream::new(rx);

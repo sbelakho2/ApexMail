@@ -60,7 +60,7 @@ export const COMPANY_INFO = {
   
   /** Social media links */
   social: {
-    github: 'https://github.com/apexmail',
+    github: 'https://github.com/Bel-Consulting-OU/ApexMail',
     twitter: 'https://twitter.com/apexmail',
     linkedin: 'https://linkedin.com/company/apexmail',
   },

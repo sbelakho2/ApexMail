@@ -13,7 +13,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  apps/ai/src/                                                   │
 │  ├── inference/                                                 │
-│  │   ├── engine.ts        ONNX Runtime, Qwen 2.5-7B-Instruct   │
+│  │   ├── engine.ts        llama.cpp sidecar, Qwen 3-8B (GGUF)  │
 │  │   ├── lifecycle.ts     State machine, circuit breaker, queue │
 │  │   └── embeddings.ts    MiniLM-L6-v2, vector store, chunking │
 │  ├── assistant/                                                 │
@@ -28,8 +28,8 @@
 | Constant | Value | Source |
 |----------|-------|--------|
 | Context length | 8 192 tokens | `engine.ts` |
-| Max output tokens | 4 096 tokens | `engine.ts` |
-| Model | Qwen 2.5-7B-Instruct (ONNX) | `engine.ts` |
+| Max output tokens | 768 tokens | `engine.ts` |
+| Model | Qwen 3-8B (GGUF via llama.cpp sidecar) | `engine.ts` |
 | Embedding model | all-MiniLM-L6-v2 | `embeddings.ts` |
 | Embedding dimensions | 384 | `embeddings.ts` |
 | Max embed input tokens | 512 | `embeddings.ts` |
@@ -50,7 +50,7 @@
 
 **Symptoms:** User submits a long conversation or document and gets a truncation warning or degraded response quality. May see internal error referencing context length.
 
-**Root cause:** Total prompt + history + system instructions exceed 8 192 tokens (Qwen 2.5-7B context length).
+**Root cause:** Total prompt + history + system instructions exceed 8 192 tokens (Qwen 3-8B context length).
 
 **Resolution:**
 
@@ -86,7 +86,7 @@
 
 **Symptoms:** The AI's response ends abruptly mid-sentence. User sees partial answers.
 
-**Root cause:** Generation hit the `maxTokens = 4 096` limit before producing a stop sequence (`<|im_end|>` or `<|endoftext|>`).
+**Root cause:** Generation hit the `maxTokens = 768` limit before producing a stop sequence (`<|im_end|>` or `<|endoftext|>`).
 
 **Resolution:**
 
@@ -272,7 +272,7 @@
 
 2. **When it's a problem:**
    - If the model consistently fails validation for legitimate queries, the real words dictionary may be too restrictive.
-   - Mock mode produces random tokens that will always fail validation — confirm you're running with real ONNX model files.
+   - Mock mode produces random tokens that will always fail validation — confirm you're running with the real GGUF model file.
 
 3. **Diagnostics:**
    - Check log for `⚠️ [AI] MOCK MODE` — if present, no real model is loaded.
@@ -374,8 +374,8 @@
 
 2. **Cold start optimization:**
    - Set `autoLoad = true` in lifecycle config to load model at service startup.
-   - Use the warmup phase (`warmupIterations = 3`) — this primes ONNX Runtime's operator caches.
-   - Consider INT8 quantization (~8 GB) instead of FP16 (~15 GB) for faster load times.
+   - Use the warmup phase (`warmupIterations = 3`) — this primes the llama.cpp sidecar's KV cache.
+   - The default model is Q4_K_M quantized (~5 GB). Higher quantizations (Q8, FP16 ~16 GB) trade RAM for quality.
 
 3. **Queue congestion:**
    - `maxQueueSize = 100`. If at capacity, new requests get `Inference queue full` error.
@@ -388,9 +388,9 @@
 
 4. **CPU vs GPU:**
    - Default: `useGPU = false` (CPU mode, `numThreads = 4`).
-   - CPU inference for 7B model: **2–8 tokens/sec** depending on hardware.
+   - CPU inference for 8B model: **2–8 tokens/sec** depending on hardware.
    - GPU inference (CUDA): **30–100 tokens/sec** depending on GPU.
-   - Enable GPU: set `useGPU = true` and ensure ONNX Runtime CUDA provider is installed.
+   - Enable GPU: set `useGPU = true` and ensure the llama.cpp build includes CUDA support.
 
 5. **Expected TTFT benchmarks:**
 
@@ -410,7 +410,7 @@
 - `MAX_CONCURRENT = 5` parallel inference runs
 - `maxQueueSize = 100` pending requests
 - `timeoutMs = 30 000 ms` per queued request
-- 7B model on CPU: ~3–5 s per generation → max throughput ≈ 1–1.5 req/s
+- 8B model on CPU: ~3–5 s per generation → max throughput ≈ 1–1.5 req/s
 
 **Resolution:**
 

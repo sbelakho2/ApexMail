@@ -46,6 +46,17 @@ export async function auditLayout(page: Page): Promise<LayoutAuditResult> {
             });
         }
 
+        function isInsideScrollContainer(el: Element): boolean {
+            let parent = el.parentElement;
+            while (parent && parent !== document.body) {
+                const ps = window.getComputedStyle(parent);
+                const ox = ps.overflowX;
+                if (ox === 'auto' || ox === 'hidden' || ox === 'scroll') return true;
+                parent = parent.parentElement;
+            }
+            return false;
+        }
+
         const excludedTags = new Set(['html', 'head', 'meta', 'link', 'style', 'script']);
         const elements = Array.from(document.querySelectorAll('body *'));
         for (const el of elements) {
@@ -59,6 +70,12 @@ export async function auditLayout(page: Page): Promise<LayoutAuditResult> {
 
             const rect = el.getBoundingClientRect();
             if (rect.width < 1 || rect.height < 1) continue;
+
+            // Skip elements entirely off-screen (e.g. hidden mobile sidebars via CSS transform)
+            if (rect.right <= 2 || rect.left >= vw - 2) continue;
+
+            // Skip elements inside scroll containers (overflow-x: auto/hidden/scroll)
+            if (isInsideScrollContainer(el)) continue;
 
             if (rect.left < -2 || rect.right > vw + 2) {
                 result.push({

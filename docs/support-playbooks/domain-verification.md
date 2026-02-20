@@ -55,10 +55,10 @@ WHERE d.domain = 'example.com'
 
 | Record | Type | Host/Name | Value |
 |--------|------|-----------|-------|
-| SPF | TXT | `@` (root) | `v=spf1 include:spf.apexmail.io ~all` |
-| DKIM | CNAME | `apexmail._domainkey` | `apexmail._domainkey.apexmail.io` |
-| DMARC | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io` |
-| Return-Path | CNAME | `bounce` | `bounce.apexmail.io` |
+| SPF | TXT | `@` (root) | `v=spf1 include:_spf.apexmail.ee ~all` |
+| DKIM | TXT | `{selector}._domainkey` | `v=DKIM1; k=rsa; p={public key from dashboard}` |
+| DMARC | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee` |
+| Return-Path | CNAME | `bounce` | `bounce.apexmail.ee` |
 | Verification | TXT | `@` (root) | `apexmail-verify=TOKEN_VALUE` |
 
 ### Step 2: Check DNS propagation
@@ -72,12 +72,12 @@ dig TXT example.com +short
 
 # Check SPF record
 dig TXT example.com +short | grep "v=spf1"
-# Expected: "v=spf1 include:spf.apexmail.io ~all"
-# Or if they have existing SPF: "v=spf1 include:spf.apexmail.io include:_spf.google.com ~all"
+# Expected: "v=spf1 include:_spf.apexmail.ee ~all"
+# Or if they have existing SPF: "v=spf1 include:_spf.apexmail.ee include:_spf.google.com ~all"
 
-# Check DKIM CNAME
-dig CNAME apexmail._domainkey.example.com +short
-# Expected: apexmail._domainkey.apexmail.io.
+# Check DKIM TXT record
+dig TXT apexmail._domainkey.example.com +short
+# Expected: "v=DKIM1; k=rsa; p=..."
 
 # Check DMARC
 dig TXT _dmarc.example.com +short
@@ -85,7 +85,7 @@ dig TXT _dmarc.example.com +short
 
 # Check Return-Path CNAME
 dig CNAME bounce.example.com +short
-# Expected: bounce.apexmail.io.
+# Expected: bounce.apexmail.ee.
 ```
 
 **Use multiple DNS resolvers to rule out propagation delays:**
@@ -125,17 +125,16 @@ If the customer just added records, ask when they added them and compare against
 
 ### Step 4: Identify common issues
 
-#### Issue: Trailing dot in record value
+#### Issue: Wrong value format in DKIM TXT record
 
-Some registrars automatically append a trailing dot to CNAME targets. Check if the record resolves correctly:
+The DKIM record must have a specific format. Verify the content is correct:
 
 ```bash
-# Both of these should resolve the same way
-dig CNAME apexmail._domainkey.example.com +short
-# "apexmail._domainkey.apexmail.io."  ← correct (trailing dot is normal in dig output)
+dig TXT apexmail._domainkey.example.com +short
+# Expected: "v=DKIM1; k=rsa; p=MIGf..."
 ```
 
-If the registrar interface shows `apexmail._domainkey.apexmail.io.` with a dot, the customer should enter it **without** the trailing dot — the registrar adds it automatically.
+The value must start with `v=DKIM1; k=rsa; p=` followed by the base64 public key shown in the ApexMail dashboard. Copy the value exactly as displayed — do not add or remove spaces.
 
 #### Issue: Wrong subdomain / host field
 
@@ -155,19 +154,21 @@ Customers often confuse what to put in the "Host" or "Name" field:
 - Missing the underscore: `apexmail.domainkey` instead of `apexmail._domainkey`
 - Adding the record to the wrong domain/zone
 
-#### Issue: CNAME vs TXT confusion for DKIM
+#### How to find the DKIM public key for the customer
 
-Some registrars don't support CNAME records for `_domainkey` subdomains. In that case, provide the full TXT record:
+ApexMail generates a unique DKIM keypair per domain. The customer must add a TXT record with the exact public key shown in the dashboard:
 
 ```bash
-# Get the DKIM public key to provide as TXT record
+# Retrieve the DKIM key for a domain via admin API
 curl -s "http://api.apexmail.internal/admin/domains/example.com/dkim-key" \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.public_key'
 ```
 
-Then the customer adds a TXT record instead:
-- Host: `apexmail._domainkey`
-- Value: `v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEB...`
+The customer adds a TXT record:
+- Host: `{selector}._domainkey` (e.g., `apexmail._domainkey`)
+- Value: `v=DKIM1; k=rsa; p={public key from dashboard}`
+
+Note: Different domains have different DKIM public keys. Never reuse the key from another domain.
 
 #### Issue: SPF record conflicts
 
@@ -181,7 +182,7 @@ dig TXT example.com +short | grep "v=spf1" | wc -l
 
 **Merging SPF records:**
 - ❌ Wrong: Two separate TXT records with `v=spf1`
-- ✅ Correct: `v=spf1 include:spf.apexmail.io include:_spf.google.com ~all`
+- ✅ Correct: `v=spf1 include:_spf.apexmail.ee include:_spf.google.com ~all`
 
 #### Issue: Registrar-specific quirks
 
@@ -189,7 +190,7 @@ dig TXT example.com +short | grep "v=spf1" | wc -l
 |-----------|-------------|------------|
 | GoDaddy | Strips underscores from subdomains | Use "Host" field exactly as shown, contact GoDaddy support if stripped |
 | Wix | Limited DNS record types | Customer must use external DNS (recommend Cloudflare) |
-| Squarespace | No CNAME for `_domainkey` | Provide TXT record with full DKIM key |
+| Squarespace | Limited DNS record types for `_domainkey` | Use external DNS (recommend Cloudflare) |
 | AWS Route 53 | Requires FQDN with trailing dot | Enter `apexmail._domainkey.example.com.` |
 | Hetzner DNS Console | Sometimes caches old records | Wait 10 minutes, clear browser cache |
 
@@ -278,7 +279,7 @@ Then trigger re-verification.
 - [Deliverability Triage](deliverability-triage.md) — DNS issues affect deliverability
 - [Bounce Investigation](bounce-investigation.md) — authentication failures cause bounces
 - [API Errors](api-errors.md) — domain verification API endpoints
-- User-facing domain setup guide: `https://docs.apexmail.io/guides/domain-setup`
+- User-facing domain setup guide: `https://docs.apexmail.ee/guides/domain-setup`
 - Domain verification source: `apps/api/src/routes/domains/`
 - MTA authentication checks: `apps/mta/src/`
 
@@ -290,26 +291,26 @@ Then trigger re-verification.
 
 1. Log in to Cloudflare dashboard → Select domain → DNS
 2. Click "Add record"
-3. For CNAME: Type=CNAME, Name=`apexmail._domainkey`, Target=`apexmail._domainkey.apexmail.io`, Proxy=DNS Only (gray cloud)
-4. For TXT: Type=TXT, Name=`@`, Content=`v=spf1 include:spf.apexmail.io ~all`
-5. **Important:** DKIM CNAME must be "DNS Only" (gray cloud), not proxied
+3. For TXT (DKIM): Type=TXT, Name=`apexmail._domainkey`, Content=`v=DKIM1; k=rsa; p={key from dashboard}`, Proxy=DNS Only (gray cloud)
+4. For TXT (SPF): Type=TXT, Name=`@`, Content=`v=spf1 include:_spf.apexmail.ee ~all`
+5. **Important:** DKIM TXT record must be "DNS Only" (gray cloud), not proxied
 
 ### GoDaddy
 
 1. My Products → Domain → DNS → Manage
 2. Click "Add" under DNS Records
-3. For CNAME: Type=CNAME, Name=`apexmail._domainkey`, Value=`apexmail._domainkey.apexmail.io`, TTL=1 Hour
-4. For TXT: Type=TXT, Name=`@`, Value=`v=spf1 include:spf.apexmail.io ~all`, TTL=1 Hour
+3. For TXT (DKIM): Type=TXT, Name=`apexmail._domainkey`, Value=`v=DKIM1; k=rsa; p={key from dashboard}`, TTL=1 Hour
+4. For TXT (SPF): Type=TXT, Name=`@`, Value=`v=spf1 include:_spf.apexmail.ee ~all`, TTL=1 Hour
 
 ### Namecheap
 
 1. Domain List → Manage → Advanced DNS
 2. Click "Add New Record"
-3. For CNAME: Type=CNAME Record, Host=`apexmail._domainkey`, Value=`apexmail._domainkey.apexmail.io.`, TTL=Automatic
-4. For TXT: Type=TXT Record, Host=`@`, Value=`v=spf1 include:spf.apexmail.io ~all`, TTL=Automatic
+3. For TXT (DKIM): Type=TXT Record, Host=`apexmail._domainkey`, Value=`v=DKIM1; k=rsa; p={key from dashboard}`, TTL=Automatic
+4. For TXT (SPF): Type=TXT Record, Host=`@`, Value=`v=spf1 include:_spf.apexmail.ee ~all`, TTL=Automatic
 
 ### Hetzner DNS Console
 
 1. DNS Console → Select zone → Add record
-2. For CNAME: Type=CNAME, Name=`apexmail._domainkey`, Value=`apexmail._domainkey.apexmail.io.`
-3. For TXT: Type=TXT, Name=`@`, Value=`v=spf1 include:spf.apexmail.io ~all`
+2. For TXT (DKIM): Type=TXT, Name=`apexmail._domainkey`, Value=`v=DKIM1; k=rsa; p={key from dashboard}`
+3. For TXT (SPF): Type=TXT, Name=`@`, Value=`v=spf1 include:_spf.apexmail.ee ~all`

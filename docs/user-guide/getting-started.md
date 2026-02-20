@@ -353,7 +353,7 @@ function verifyWebhook(payload, signature, secret) {
 - **Documentation**: [Full API Reference](../api/authentication.md)
 - **Status Page**: https://status.apexmail.ee
 - **Support**: support@apexmail.ee
-- **Community**: [GitHub Discussions](https://github.com/yourorg/apexmail/discussions)
+- **Community**: [GitHub Discussions](https://github.com/Bel-Consulting-OU/ApexMail/discussions)
 
 ### Troubleshooting
 

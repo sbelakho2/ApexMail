@@ -252,55 +252,32 @@ Syntax-highlighted code display with:
 
 ## Styling
 
-### Tailwind Configuration
+### Design Tokens
 
-Custom Tailwind configuration in `tailwind.config.ts`:
+The marketing app uses tokenized Tailwind color mappings from `tailwind.config.ts`:
 
-```typescript
-const config = {
-  content: ['./src/**/*.{js,ts,jsx,tsx,mdx}'],
-  theme: {
-    extend: {
-      colors: {
-        brand: {
-          50: '#f0f7ff',
-          100: '#e0efff',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-        },
-      },
-      animation: {
-        'gradient': 'gradient 8s ease infinite',
-        'float': 'float 6s ease-in-out infinite',
-      },
-    },
-  },
-  plugins: [],
-};
-```
+- Brand scale via `--brand-50` to `--brand-900`
+- Surface scale via `--surface-50` to `--surface-900`
+- Semantic state tokens (`--success`, `--warning`, `--danger`, `--info`)
+- Shared spacing/radius/typography tokens (`--space-*`, `--radius-*`, `--font-*`)
 
-### Global Styles
+### Premium Styling Standards
 
-Base styles in `globals.css`:
+- Prefer token classes (`bg-brand-*`, `text-surface-*`, `border-*`) over hard-coded color values.
+- Use restrained depth via `shadow-premium` and `shadow-premium-hover`.
+- Keep section/card hierarchy border-led and readable in both light/dark variants.
+- Reuse shared spacing and radius tokens to maintain consistent rhythm and shape language.
 
-```css
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+### Icons
 
-@layer base {
-  html {
-    scroll-behavior: smooth;
-  }
-}
+Marketing UI icons are provided by the local Apex icon module:
 
-@layer components {
-  .btn-primary {
-    @apply bg-brand-600 text-white px-6 py-3 rounded-lg
-           hover:bg-brand-700 transition-colors;
-  }
-}
+- `src/components/ui/icons.tsx`
+
+Use imports from that module instead of external icon libraries.
+
+```tsx
+import { ArrowRight, Shield, Cloud } from '@/components/ui/icons';
 ```
 
 ## Animations
@@ -396,13 +373,15 @@ pnpm build
 
 1. Follow the component structure
 2. Use TypeScript for all new code
-3. Add Tailwind classes for styling
+3. Use token-based Tailwind classes for styling
 4. Include animations with Framer Motion
 5. Test responsive design
-6. Run linting before commits
+6. Use Apex icons from `src/components/ui/icons.tsx` (do not add `lucide-react` imports)
+7. Run linting before commits
 
 ## Related Documentation
 
 - [API Documentation](../api/README.md)
 - [Enterprise Features](./README.md)
 - [Architecture Overview](../architecture/README.md)
+- [Apex Style System (Premium UI + Apex Icons)](../development/style-system.md)

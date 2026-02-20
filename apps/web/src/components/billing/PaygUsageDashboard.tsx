@@ -100,7 +100,7 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
       <CardContent className="space-y-5">
         {/* Total Cost - Primary metric, prominent */}
         <div>
-          <p className="text-3xl font-semibold tabular-nums tracking-tight">
+          <p className="text-3xl font-semibold apex-metric-number tracking-tight">
             {formatCurrency(usage.cost.totalCost)}
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
@@ -115,7 +115,7 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
               <Mail className="w-3.5 h-3.5" />
               <span className="text-xs">Emails</span>
             </div>
-            <p className="text-lg font-semibold tabular-nums">
+            <p className="text-lg font-semibold apex-metric-number">
               {formatNumber(usage.usage.emailsSent)}
             </p>
             <p className="text-xs text-muted-foreground">
@@ -127,7 +127,7 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
               <Code className="w-3.5 h-3.5" />
               <span className="text-xs">API Calls</span>
             </div>
-            <p className="text-lg font-semibold tabular-nums">
+            <p className="text-lg font-semibold apex-metric-number">
               {formatNumber(usage.usage.apiCalls)}
             </p>
             <p className="text-xs text-muted-foreground">

@@ -15,6 +15,8 @@ import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 // G-199: Structured logger for AI service (local — no @apexmail/lib dependency)
 const aiLogger = {
@@ -43,6 +45,41 @@ const actionRouter = new ActionRouter();
 const sto = new STOOptimizer();
 const content = new ContentGenerator();
 const analytics = new PredictiveAnalytics();
+
+const STO_SNAPSHOT_PATH = process.env.STO_SNAPSHOT_PATH || path.resolve(process.cwd(), 'data/sto-engagement.ndjson');
+const STO_SNAPSHOT_INTERVAL_MS = 60_000;
+
+async function restoreStoSnapshot(): Promise<void> {
+    try {
+        const snapshot = await fs.readFile(STO_SNAPSHOT_PATH, 'utf8');
+        const result = sto.importNdjson(snapshot);
+        aiLogger.info('STO snapshot restored', { imported: result.imported, errors: result.errors });
+    } catch {
+        // No snapshot yet — first boot or no persisted data
+    }
+}
+
+async function persistStoSnapshot(): Promise<void> {
+    try {
+        await fs.mkdir(path.dirname(STO_SNAPSHOT_PATH), { recursive: true });
+        const payload = sto.exportNdjson();
+        await fs.writeFile(STO_SNAPSHOT_PATH, payload, 'utf8');
+    } catch (error) {
+        aiLogger.warn('Failed to persist STO snapshot', { error: error instanceof Error ? error.message : String(error) });
+    }
+}
+
+void restoreStoSnapshot();
+const stoSnapshotTimer = setInterval(() => {
+    void persistStoSnapshot();
+}, STO_SNAPSHOT_INTERVAL_MS);
+stoSnapshotTimer.unref();
+
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+        void persistStoSnapshot();
+    });
+}
 
 // Create Hono app
 const app = new Hono();

@@ -139,7 +139,7 @@ export default function LoginPage() {
             <div className="bg-card rounded-3xl shadow-[0_24px_60px_rgba(15,23,42,0.15)] border border-surface-200/70 overflow-hidden">
           <form onSubmit={handleSubmit} className="p-8 space-y-5">
             {error && (
-              <div className="bg-destructive/10 border border-destructive/20 text-destructive text-sm rounded-lg p-3">
+              <div className="bg-destructive/10 border border-destructive/20 text-destructive text-sm rounded-lg p-3" data-state="error">
                 {error}
               </div>
             )}

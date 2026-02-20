@@ -69,37 +69,37 @@
         --space-12: 48px;
     }
     .dark {
-        --background: 18 21 21;
-        --foreground: 250 250 248;
-        --card: 35 39 36;
-        --card-foreground: 250 250 248;
-        --popover: 35 39 36;
-        --popover-foreground: 250 250 248;
-        --primary: 91 120 210;
-        --primary-foreground: 255 255 255;
-        --secondary: 56 60 55;
-        --secondary-foreground: 250 250 248;
-        --muted: 56 60 55;
-        --muted-foreground: 158 161 151;
-        --accent: 56 60 55;
-        --accent-foreground: 250 250 248;
-        --destructive: 185 28 28;
+        --background: 12 14 16;
+        --foreground: 244 246 250;
+        --card: 22 25 28;
+        --card-foreground: 244 246 250;
+        --popover: 22 25 28;
+        --popover-foreground: 244 246 250;
+        --primary: 109 140 212;
+        --primary-foreground: 8 12 20;
+        --secondary: 30 33 36;
+        --secondary-foreground: 232 236 242;
+        --muted: 30 33 36;
+        --muted-foreground: 182 188 196;
+        --accent: 34 38 42;
+        --accent-foreground: 236 240 246;
+        --destructive: 220 38 38;
         --destructive-foreground: 255 255 255;
-        --error: 239 68 68;
-        --border: 56 60 55;
-        --input: 56 60 55;
-        --ring: 91 120 210;
+        --error: 248 113 113;
+        --border: 46 50 56;
+        --input: 46 50 56;
+        --ring: 120 152 224;
 
-        --surface-50: 18 21 21;
-        --surface-100: 35 39 36;
-        --surface-200: 56 60 55;
-        --surface-300: 80 84 78;
-        --surface-400: 111 115 107;
-        --surface-500: 158 161 151;
-        --surface-600: 206 208 199;
-        --surface-700: 230 231 224;
-        --surface-800: 244 244 240;
-        --surface-900: 250 250 248;
+        --surface-50: 12 14 16;
+        --surface-100: 18 20 23;
+        --surface-200: 26 30 34;
+        --surface-300: 46 50 56;
+        --surface-400: 78 84 92;
+        --surface-500: 120 128 138;
+        --surface-600: 170 176 184;
+        --surface-700: 210 214 220;
+        --surface-800: 232 235 240;
+        --surface-900: 244 246 250;
     }
 }
 
@@ -110,7 +110,7 @@
 
     body {
         @apply bg-background text-foreground text-[17px] leading-[1.6];
-        font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-family: var(--font-display), Georgia, Cambria, 'Times New Roman', serif;
         font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
         text-rendering: optimizeLegibility;
     }
@@ -205,11 +205,17 @@
 
     /* Card with standard radius and honest border shift */
     .premium-card {
-        @apply bg-card border border-border rounded-lg transition-premium shadow-premium;
+        @apply bg-card border border-border rounded-lg transition-premium shadow-premium dark:bg-surface-100/95 dark:border-surface-300/60 dark:shadow-[0_12px_32px_rgba(0,0,0,0.45)];
     }
 
     .premium-card:hover {
-        @apply border-primary/30 bg-muted/50 shadow-premium-hover;
+        @apply border-primary/30 bg-muted/50 shadow-premium-hover dark:border-brand-400/50 dark:bg-surface-200/80;
+    }
+
+    .apex-metric-number {
+        @apply font-display font-semibold tabular-nums tracking-[-0.02em] text-foreground;
+        font-variant-numeric: tabular-nums lining-nums;
+        font-feature-settings: 'tnum' 1, 'lnum' 1;
     }
 
     /* Status badge - restrained semantic usage */
@@ -240,7 +246,7 @@
 
     /* Data table - sticky header, tabular numerals */
     .data-table {
-        @apply w-full border-collapse font-sans;
+        @apply w-full border-collapse font-display;
     }
 
     .data-table th {

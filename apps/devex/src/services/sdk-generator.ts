@@ -1090,7 +1090,7 @@ setup(
     description="ApexMail Python SDK",
     author="ApexMail",
     author_email="support@apexmail.ee",
-    url="https://github.com/apexmail/apexmail-python",
+    url="https://github.com/Bel-Consulting-OU/ApexMail",
     packages=find_packages(),
     python_requires=">=3.8",
     install_requires=[
@@ -2216,7 +2216,7 @@ Full documentation: ${config.docsBaseUrl}/sdk/python
     };
   }
 
-  // Stub implementations for other languages
+  // Implementations for additional languages
   private async generateRubySdk(sdkConfig: SdkConfig): Promise<Result<GeneratedSdk>> {
     const files: SdkFile[] = [];
     const gemName = sdkConfig.packageName ?? 'apexmail';
@@ -2230,7 +2230,7 @@ Full documentation: ${config.docsBaseUrl}/sdk/python
   spec.email         = ["support@apexmail.ee"]
   spec.summary       = "ApexMail Ruby SDK"
   spec.description   = "Official Ruby SDK for the ApexMail API"
-  spec.homepage      = "https://github.com/apexmail/apexmail-ruby"
+  spec.homepage      = "https://github.com/Bel-Consulting-OU/ApexMail"
   spec.license       = "MIT"
   spec.required_ruby_version = ">= 2.7.0"
 
@@ -2406,7 +2406,7 @@ puts "Email sent: #{response['id']}"
   }
 
   private async generateGoSdk(sdkConfig: SdkConfig): Promise<Result<GeneratedSdk>> {
-    const moduleName = sdkConfig.packageName ?? 'github.com/apexmail/apexmail-go';
+    const moduleName = sdkConfig.packageName ?? 'github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go';
     const files: SdkFile[] = [];
 
     files.push({

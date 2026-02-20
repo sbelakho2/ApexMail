@@ -363,8 +363,7 @@ impl SubmissionSession {
             "Submitting message"
         );
         
-        // Connect to outbound queue and submit
-        // For now, we'll use a direct database insert
+        // Connect to outbound queue and submit via direct queue insert.
         let message_id = Uuid::new_v4();
         
         // Parse subject from headers

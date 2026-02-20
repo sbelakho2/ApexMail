@@ -10,12 +10,12 @@
 | Category | SMTP Code | Meaning | Action |
 |----------|-----------|---------|--------|
 | Hard bounce | 550 5.1.1 | Mailbox does not exist | Remove permanently; auto-suppressed |
-| Soft bounce | 450 4.2.2 | Mailbox full / temporary issue | Retry (5m, 15m, 30m, 1h, 4h); suppress after 5 consecutive fails |
+| Soft bounce | 450 4.2.2 | Mailbox full / temporary issue | Retry with exponential backoff (default 3 attempts, 30 s base delay, 30 min cap); permanently fail after exhaustion |
 | Block | 550 5.7.1 | IP or domain blocked | Investigate reputation; check blocklists |
 | Undetermined | Various | Cannot classify | Review raw SMTP response |
 
-**Retry schedule:** 5 minutes → 15 minutes → 30 minutes → 1 hour → 4 hours (then give up for soft bounces).
-**Auto-suppression:** Hard bounces immediately suppressed. Soft bounces suppressed after 5 consecutive failures.
+**Retry schedule:** Exponential backoff — 30 s × 2^(attempt−1), capped at 30 min. Default max: 3 attempts (`EMAIL_QUEUE_MAX_RETRIES`). Example: 30 s → 60 s → 2 min.
+**Auto-suppression:** Hard bounces are immediately and permanently suppressed. Soft bounces are **not** auto-suppressed; they are retried and then permanently failed if all retries are exhausted.
 **Healthy thresholds:** Bounce rate < 2%, complaint rate < 0.1%.
 
 ---
@@ -41,9 +41,9 @@
 **Root cause:** Temporary condition — mailbox full, server overloaded, greylisting, or connection limit reached.
 
 **Resolution:**
-1. ApexMail automatically retries soft bounces: 5m → 15m → 30m → 1h → 4h.
+1. ApexMail automatically retries soft bounces using exponential backoff: 30 s → 60 s → 2 min (30 s × 2^(attempt−1), capped at 30 min). Default max: 3 attempts.
 2. After all retries exhausted: the message is permanently failed and marked as bounced.
-3. If the same address soft-bounces 5 consecutive times (across multiple sends): it's auto-suppressed.
+3. Soft bounces are **not** auto-suppressed (unlike hard bounces). Each new send to the same address is treated independently.
 4. Customer should monitor soft bounce rates. Consistently high soft bounces for an address suggest a problem (abandoned mailbox).
 
 ---
@@ -314,7 +314,7 @@
 **Root cause:** Misunderstanding of retry policy. Infinite retries would tie up resources and worsen reputation.
 
 **Resolution:**
-1. Explain: "ApexMail retries soft bounces on an exponential schedule: 5 minutes, 15 minutes, 30 minutes, 1 hour, 4 hours. After all retries are exhausted, the message fails permanently."
+1. Explain: "ApexMail retries soft bounces with exponential backoff: 30 seconds, 60 seconds, 2 minutes (30 s × 2^(attempt−1), capped at 30 min). The default is 3 attempts. After all retries are exhausted, the message fails permanently."
 2. This is industry standard practice. Retrying indefinitely would:
    - Consume retry queue resources
    - Continue hitting a mailbox that may never accept the message

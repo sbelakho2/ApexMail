@@ -63,7 +63,7 @@ SELECT * FROM api_request_logs WHERE request_id = 'req_XXXXX';
 
 ```bash
 # Quick API health check
-curl -s "https://api.apexmail.io/health" | jq .
+curl -s "https://api.apexmail.ee/health" | jq .
 # Expected: {"status":"ok","version":"x.x.x","uptime":...}
 
 # Check API response times (Prometheus)
@@ -169,7 +169,7 @@ FROM tenants WHERE id = 'TENANT_ID';
 - Using v1 endpoint when v2 is required (or vice versa)
 
 **Current API base URLs:**
-- Production: `https://api.apexmail.io/v1/`
+- Production: `https://api.apexmail.ee/v1/`
 - Endpoints served by Hono on Node.js behind nginx reverse proxy
 
 #### 409 Conflict
@@ -324,7 +324,7 @@ WHERE t.id = 'TENANT_ID';
 
 1. Review the customer's request payload against the API schema
 2. Provide corrected payload examples
-3. Point to API documentation: `https://docs.apexmail.io/api/`
+3. Point to API documentation: `https://docs.apexmail.ee/api/`
 4. Common fixes:
    - Add `Content-Type: application/json` header
    - Fix JSON formatting (use a JSON validator)
@@ -391,7 +391,7 @@ LIMIT 20;
 
 Common webhook issues:
 - Customer's endpoint is down or returns non-2xx
-- Customer's endpoint is too slow (we timeout at 10s)
+- Customer's endpoint is too slow (we timeout at 30s)
 - SSL certificate expired on customer's endpoint
 - Customer's firewall blocks our IPs
 
@@ -424,7 +424,7 @@ Common webhook issues:
 - [Deliverability Triage](deliverability-triage.md) — if API issues affect delivery
 - [Domain Verification](domain-verification.md) — domain verification API endpoints
 - [Billing Dispute](billing-dispute.md) — if customer disputes charges due to API issues
-- API documentation: `https://docs.apexmail.io/api/`
+- API documentation: `https://docs.apexmail.ee/api/`
 - API source code: `apps/api/src/`
 - SDK (Node.js): `packages/sdk-node/`
 - SDK (Python): `packages/sdk-python/`
@@ -440,10 +440,10 @@ Common webhook issues:
 
 ```bash
 # Health endpoint
-curl -s "https://api.apexmail.io/health" | jq .
+curl -s "https://api.apexmail.ee/health" | jq .
 
 # Check API latency from outside (through nginx)
-time curl -s -o /dev/null -w "%{http_code} %{time_total}s" "https://api.apexmail.io/health"
+time curl -s -o /dev/null -w "%{http_code} %{time_total}s" "https://api.apexmail.ee/health"
 
 # Check API latency internally (bypass nginx)
 time curl -s -o /dev/null -w "%{http_code} %{time_total}s" "http://api.apexmail.internal:3000/health"

@@ -73,7 +73,7 @@ ApexMail is a monorepo containing multiple services that work together to provid
 
 ```bash
 # Clone the repository
-git clone https://github.com/apexmail/apexmail.git
+git clone https://github.com/sbelakho2/ApexMail.git
 cd apexmail
 
 # Install dependencies

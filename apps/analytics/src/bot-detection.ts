@@ -106,8 +106,12 @@ export class BotDetectionService {
    * C-095: Maximum number of keys in the click velocity cache before eviction.
    * Without a cap, if cleanupVelocityCache is never called (or called too
    * infrequently), the map grows without bound → eventual OOM.
+   * 
+   * Sized for 1000 tenants × ~500 concurrent opens per tenant = 500K entries.
+   * Each entry is ~200 bytes (IP + timestamps array), so 500K ≈ 100MB — well
+   * within budget on a 160GB EX44 machine.
    */
-  private static readonly MAX_VELOCITY_CACHE_SIZE = 50_000;
+  private static readonly MAX_VELOCITY_CACHE_SIZE = 500_000;
 
   /**
    * Analyze a click event for bot characteristics

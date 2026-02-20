@@ -1017,7 +1017,12 @@ export class MessagesRepository {
       subject: row.subject,
       htmlBody: null, // Not selected in list projection
       textBody: null, // Not selected in list projection
-      headers: { 'Message-ID': '', 'X-ApexMail-ID': row.id, 'X-ApexMail-Tenant': row.tenant_id, 'Return-Path': '' }, // Minimal placeholder
+      headers: {
+        'Message-ID': row.message_id || '',
+        'X-ApexMail-ID': row.id,
+        'X-ApexMail-Tenant': row.tenant_id,
+        'Return-Path': row.from_email || '',
+      },
       attachments: [], // Not selected in list projection
       templateId: null, // Not selected in list projection
       templateData: null, // Not selected in list projection

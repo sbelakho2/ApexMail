@@ -606,29 +606,82 @@ export class CalendarService {
 
   /**
    * Generate timezone component
-   * FIX-500-406: Offsets are hardcoded European values (CET/CEST).
-   * Production should use IANA timezone database (e.g. via `@vvo/tzdb` or
-   * fetching VTIMEZONE data from tzurl.org) to generate correct offsets for
-   * any timezone. For non-European zones, these values are incorrect.
    */
   private generateTimezoneComponent(timezone: string): string[] {
-    // TODO: Replace with dynamic VTIMEZONE generation using IANA data
-    // Simplified timezone component - production would need full VTIMEZONE
+    const tzid = this.resolveTimezone(timezone);
+    const standardDate = new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1, 12, 0, 0));
+    const daylightDate = new Date(Date.UTC(new Date().getUTCFullYear(), 6, 1, 12, 0, 0));
+
+    const standardOffset = this.getTimezoneOffsetString(standardDate, tzid);
+    const daylightOffset = this.getTimezoneOffsetString(daylightDate, tzid);
+    const hasDst = standardOffset !== daylightOffset;
+
+    const [offsetFrom, offsetTo] = hasDst
+      ? (Math.abs(parseInt(standardOffset, 10)) > Math.abs(parseInt(daylightOffset, 10))
+          ? [daylightOffset, standardOffset]
+          : [standardOffset, daylightOffset])
+      : [standardOffset, standardOffset];
+
     return [
       'BEGIN:VTIMEZONE',
-      `TZID:${timezone}`,
+      `TZID:${tzid}`,
       'BEGIN:STANDARD',
       'DTSTART:19710101T030000',
-      'TZOFFSETFROM:+0200',
-      'TZOFFSETTO:+0100',
+      `TZOFFSETFROM:${offsetFrom}`,
+      `TZOFFSETTO:${offsetTo}`,
       'END:STANDARD',
-      'BEGIN:DAYLIGHT',
-      'DTSTART:19710101T020000',
-      'TZOFFSETFROM:+0100',
-      'TZOFFSETTO:+0200',
-      'END:DAYLIGHT',
+      ...(hasDst
+        ? [
+            'BEGIN:DAYLIGHT',
+            'DTSTART:19710101T020000',
+            `TZOFFSETFROM:${offsetTo}`,
+            `TZOFFSETTO:${offsetFrom}`,
+            'END:DAYLIGHT',
+          ]
+        : []),
       'END:VTIMEZONE',
     ];
+  }
+
+  private resolveTimezone(timezone: string): string {
+    try {
+      Intl.DateTimeFormat('en-US', { timeZone: timezone });
+      return timezone;
+    } catch {
+      return 'UTC';
+    }
+  }
+
+  private getTimezoneOffsetString(date: Date, timezone: string): string {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+
+    const parts = formatter.formatToParts(date);
+    const byType = new Map(parts.map((part) => [part.type, part.value]));
+
+    const localYear = parseInt(byType.get('year') ?? '0', 10);
+    const localMonth = parseInt(byType.get('month') ?? '1', 10);
+    const localDay = parseInt(byType.get('day') ?? '1', 10);
+    const localHour = parseInt(byType.get('hour') ?? '0', 10);
+    const localMinute = parseInt(byType.get('minute') ?? '0', 10);
+    const localSecond = parseInt(byType.get('second') ?? '0', 10);
+
+    const utcMillis = Date.UTC(localYear, localMonth - 1, localDay, localHour, localMinute, localSecond);
+    const offsetMinutes = Math.round((utcMillis - date.getTime()) / 60000);
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const absolute = Math.abs(offsetMinutes);
+    const hours = Math.floor(absolute / 60).toString().padStart(2, '0');
+    const minutes = Math.floor(absolute % 60).toString().padStart(2, '0');
+
+    return `${sign}${hours}${minutes}`;
   }
 
   /**

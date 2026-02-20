@@ -16,7 +16,7 @@
 | Conditional blocks | `{{#if variable}}...{{/if}}`, `{{#unless variable}}...{{/unless}}` |
 | Loops | `{{#each items}}{{this.name}}{{/each}}` |
 | Max attachments | 25 MB total per message |
-| Max recipients | 100 per API call |
+| Max recipients | 50 `to` + 50 `cc` + 50 `bcc` per message (150 total) |
 | Supported attachment types | PDF, images, ZIP, CSV, common document formats (base64-encoded) |
 
 ---

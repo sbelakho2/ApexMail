@@ -21,9 +21,9 @@
 
 | Data Type | Default Retention | Configurable |
 |-----------|-------------------|-------------|
-| Message metadata | 90 days | Yes (plan-dependent) |
+| Message metadata | Plan-dependent (Free: 7 d, Starter: 30 d, Pro: 60 d, Growth: 90 d, Scale: 365 d, Enterprise: 730 d) | No (determined by plan) |
 | Message body (HTML/text) | 7 days | Yes, up to 30 days |
-| Event history | 90 days | Yes (plan-dependent) |
+| Event history | Same as message metadata (plan-dependent) | No (determined by plan) |
 | Webhook delivery logs | 30 days | No |
 | SMTP transcripts | 7 days | No |
 | Analytics aggregates | Indefinite | No |
@@ -126,14 +126,14 @@ curl -s -H "Authorization: Bearer <KEY>" \
 
 3. **Transcript includes:**
    ```
-   EHLO track.apexmail.io
+   EHLO t.apexmail.ee
    250-mx.example.com Hello
    250-SIZE 52428800
    250-STARTTLS
    250 OK
    STARTTLS
    220 2.0.0 Ready
-   MAIL FROM:<bounce+verp@bounce.apexmail.io>
+   MAIL FROM:<bounce+verp@bounce.apexmail.ee>
    250 2.1.0 Ok
    RCPT TO:<recipient@example.com>
    250 2.1.5 Ok
@@ -210,9 +210,9 @@ dig TXT apexmail._domainkey.example.com +short
 1. **ARC is applied to forwarded/relayed messages** by the MTA (`apps/mta/src/arc-sealer.ts`).
 2. ARC headers in the email:
    ```
-   ARC-Seal: i=1; a=rsa-sha256; d=apexmail.io; s=arc; ...
+   ARC-Seal: i=1; a=rsa-sha256; d=apexmail.ee; s=arc; ...
    ARC-Message-Signature: i=1; a=rsa-sha256; ...
-   ARC-Authentication-Results: i=1; mx.apexmail.io; ...
+   ARC-Authentication-Results: i=1; mx.apexmail.ee; ...
    ```
 3. ARC is added when ApexMail processes an inbound message and re-sends or forwards it. It's NOT added to messages originated via the API (those get DKIM only).
 4. **If ARC is missing on forwarded messages:** Check the inbound MTA configuration.
@@ -598,7 +598,7 @@ WHERE tenant_id = '<TENANT_ID>';
    - Adds a new ARC set (i=N+1) when forwarding.
 2. **ARC results** appear in Authentication-Results headers:
    ```
-   Authentication-Results: mx.apexmail.io;
+   Authentication-Results: mx.apexmail.ee;
      arc=pass (i=1 spf=pass dkim=pass)
    ```
 3. **If ARC validation fails:** The original message's authentication couldn't be verified through the forwarding chain. This is informational — the message is still delivered but marked appropriately.

@@ -7487,6 +7487,539 @@ REMEDIATION_R6 = [
 
 
 # ════════════════════════════════════════════════════════════════════════
+# ROUND 13 REMEDIATION — MINIMAL fixes (3 examples only) to avoid catastrophic forgetting
+# Targeting persistent failures: escalation email, Scale plan features, PAYG pricing
+# NOT added to critical_sections (1x weight only)
+# ════════════════════════════════════════════════════════════════════════
+
+REMEDIATION_R13 = [
+    # FIX 1: Escalation MUST include contact@apexmail.ee
+    # Targets: pb_005, pb_010, pb_012, esc_005
+    make_single_turn("enterprise_fintech",
+        "I'm getting a 403 Forbidden error and I've checked everything. This is blocking our production.",
+        "A **403 Forbidden** typically means:\n\n1. **API key scope** — missing required permission (check Dashboard → API Keys → Scopes)\n2. **Account suspended** — usually due to policy violations\n3. **IP restriction** — if you've configured IP allowlists\n\nSince you've already troubleshooted the basics and this is blocking production, I recommend escalating to our support team for urgent investigation:\n\n📧 **contact@apexmail.ee**\nSubject: \"403 Forbidden — Production Blocked — [FinServ Global]\"\n\nInclude your account ID (`acct_fs9x2k`), the exact API endpoint, and full error response. Our team typically responds within 2 hours for production-blocking issues."
+    ),
+
+    # FIX 2: Scale plan has UNLIMITED domains (not 25)
+    # Targets: know_004
+    make_single_turn("scale_deliverability",
+        "How many domains can I have on the Scale plan?",
+        "The Scale plan includes **unlimited domains** — there's no cap on how many sending domains you can configure.\n\nYou can add as many domains as your business needs, each with full SPF, DKIM, and DMARC authentication. Just go to **Dashboard → Domains → Add Domain** for each one.\n\nYour current setup shows 5 verified domains, and you can add more anytime without additional cost."
+    ),
+
+    # FIX 3: PAYG pricing tier for 1M+ is $0.0003/email
+    # Targets: know_014
+    make_single_turn("no_context",
+        "What's the per-email cost on Pay-As-You-Go for high volume?",
+        "Here's the complete Pay-As-You-Go pricing structure:\n\n| Volume Tier | Rate |\n|-------------|------|\n| First 10K | $0.001/email ($1.00/1K) |\n| 10K–100K | $0.0008/email ($0.80/1K) |\n| 100K–1M | $0.0005/email ($0.50/1K) |\n| **1M+** | **$0.0003/email** ($0.30/1K) |\n\nSo for volumes above 1,000,000 emails, you pay just **$0.0003 per email** — or $300 per million. For very high volumes, the Enterprise plan may offer better value with fixed pricing."
+    ),
+]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# R14 — MASSIVE EXPANSION: Enterprise, SSO, Sub-Accounts, Log Streaming,
+# Template Approval, SDK, API Errors, Account Lockout, Compliance, SLOs,
+# Billing, Message Diagnostics, IP Warmup, Contacts, Data Retention
+# Source: Exhaustive repo analysis of 70+ docs (30,000+ lines)
+# ════════════════════════════════════════════════════════════════════════
+
+ENTERPRISE_SSO = [
+    # SSO setup with Okta (SAML)
+    make_single_turn("enterprise_sso_broken",
+        "How do I set up SSO with Okta?",
+        "Here's how to configure **SAML SSO with Okta** on your Enterprise plan:\n\n**1. Get ApexMail SAML metadata:**\n```\nGET https://api.apexmail.ee/enterprise/v1/sso/saml/metadata/{account_id}\n```\n\n**2. In Okta, create a new SAML app with:**\n- **ACS URL**: `https://api.apexmail.ee/enterprise/v1/sso/saml/callback`\n- **Entity ID**: `https://api.apexmail.ee/saml/{account_id}`\n- **Name ID Format**: Email address\n\n**3. Upload Okta's IdP metadata to ApexMail:**\n```\nPOST /enterprise/v1/sso/configure\n{\n  \"provider\": \"saml\",\n  \"ssoEnabled\": true,\n  \"samlConfig\": {\n    \"entryPoint\": \"https://your-okta.okta.com/saml/sso\",\n    \"certificate\": \"<IdP certificate>\",\n    \"issuer\": \"https://your-okta.okta.com\"\n  },\n  \"allowedDomains\": [\"globalbank.com\"],\n  \"defaultRole\": \"member\",\n  \"autoProvision\": true\n}\n```\n\n**4. Test** by logging in via SSO before enforcing for all users.\n\nSSO is available on **Scale ($399)** and **Enterprise ($1,299)** plans."
+    ),
+    # SSO cert expired - troubleshooting
+    make_single_turn("enterprise_sso_broken",
+        "Our SSO stopped working. 38 users can't log in via Okta.",
+        "I can see the issue in your account — your **IdP certificate expired yesterday**, which is causing SAML assertion validation failures for all 38 SSO users.\n\nHere's how to fix this:\n\n**1. Get Okta's new certificate:**\n- Go to Okta Admin → Applications → ApexMail → Sign On → View SAML Setup Instructions\n- Download the new X.509 certificate\n\n**2. Upload the new certificate to ApexMail:**\n```\nPUT /enterprise/v1/sso/config/{account_id}\n{\n  \"samlConfig\": {\n    \"certificate\": \"-----BEGIN CERTIFICATE-----\\n<new cert>\\n-----END CERTIFICATE-----\"\n  }\n}\n```\n\nYour account owner (ciso@globalbank.com) can do this since they use password auth and still have access.\n\n**3. Verify** by having one SSO user attempt login.\n\n**Pro tip**: Set a calendar reminder to rotate SAML certificates 30 days before expiry. Okta certs typically expire annually."
+    ),
+    # SAML assertion errors
+    make_single_turn("enterprise_sso_broken",
+        "We're getting 'SAML Response Invalid' errors when users try to log in.",
+        "**SAML Response Invalid** errors have several common causes. Let me walk through the checklist:\n\n**1. Certificate mismatch** (most common)\n- Verify the certificate in ApexMail matches your IdP's current signing certificate\n- Check: Has your IdP rotated certs recently?\n\n**2. Clock skew**\n- SAML assertions have a validity window (typically ±5 minutes)\n- Ensure your IdP server's clock is synchronized via NTP\n\n**3. ACS URL mismatch**\n- Must be exactly: `https://api.apexmail.ee/enterprise/v1/sso/saml/callback`\n- Check for trailing slashes or http vs https\n\n**4. Name ID format**\n- Must be set to **email address** format\n- Check attribute mapping: the `email` attribute must be sent in the assertion\n\n**5. Enable debug mode** for detailed error info:\n```\nPUT /enterprise/v1/sso/config/{account_id}\n{\"debugMode\": true}\n```\n\nThis will log the full SAML assertion for troubleshooting. Remember to disable debug mode after resolving the issue."
+    ),
+    # OIDC with Google Workspace
+    make_single_turn("scale_sso_issue",
+        "Can I use Google Workspace for SSO instead of SAML?",
+        "Yes! ApexMail supports **OpenID Connect (OIDC)** with Google Workspace.\n\n**Setup steps:**\n\n1. In Google Admin Console, create an OIDC application\n2. Set the **Redirect URI** to:\n   `https://api.apexmail.ee/enterprise/v1/sso/oidc/callback`\n3. Required scopes: `openid email profile`\n\n4. Configure in ApexMail:\n```\nPOST /enterprise/v1/sso/configure\n{\n  \"provider\": \"oidc\",\n  \"ssoEnabled\": true,\n  \"oidcConfig\": {\n    \"issuer\": \"https://accounts.google.com\",\n    \"clientId\": \"<your-client-id>\",\n    \"clientSecret\": \"<your-client-secret>\"\n  },\n  \"allowedDomains\": [\"yourcompany.com\"],\n  \"autoProvision\": true\n}\n```\n\nOIDC is often simpler than SAML — no certificate management needed. Available on your **Scale plan**."
+    ),
+    # Auto-provisioning
+    make_single_turn("enterprise_sso_broken",
+        "What is auto-provisioning with SSO?",
+        "**Auto-provisioning** (also called JIT — Just-In-Time provisioning) automatically creates ApexMail user accounts when someone logs in via SSO for the first time.\n\n**How it works:**\n1. User authenticates through your IdP (Okta, Azure AD, etc.)\n2. ApexMail checks if the user exists\n3. If not, it creates the account with the `defaultRole` you configured\n4. User gets access immediately — no manual invitation needed\n\n**Configure it:**\n```json\n{\n  \"autoProvision\": true,\n  \"defaultRole\": \"member\",\n  \"allowedDomains\": [\"globalbank.com\"]\n}\n```\n\n**For advanced lifecycle management**, enable **SCIM provisioning**:\n- Automatically syncs users from your IdP directory\n- Handles deprovisioning when users are removed from the IdP\n- Endpoint: `https://api.apexmail.ee/enterprise/v1/scim`\n\nThis is ideal for your organization with 42+ team members."
+    ),
+    # Which IdPs supported
+    make_single_turn("no_context",
+        "Which identity providers do you support for SSO?",
+        "ApexMail supports SSO through both **SAML 2.0** and **OpenID Connect (OIDC)**:\n\n**SAML 2.0:**\n- Okta\n- Azure Active Directory\n- OneLogin\n- Ping Identity\n- Google Workspace\n- ADFS\n- Any custom SAML IdP\n\n**OIDC:**\n- Okta\n- Auth0\n- Azure AD\n- Google\n- Keycloak\n- Any custom OIDC provider\n\nSSO is available on **Scale ($399/mo)** and **Enterprise ($1,299/mo)** plans. If you're on a lower plan and need SSO, upgrading is the way to go."
+    ),
+    # Enforce SSO
+    make_single_turn("enterprise_sso_broken",
+        "How do I enforce SSO for all users so nobody can use passwords?",
+        "To enforce SSO-only authentication:\n\n```\nPUT /enterprise/v1/sso/config/{account_id}\n{\n  \"allowPasswordFallback\": false,\n  \"requireMFA\": true\n}\n```\n\nThis **disables password login** for all users — they must authenticate through your IdP.\n\n**Important considerations:**\n- ⚠️ Keep at least one **owner account with password auth** as a break-glass emergency access\n- Test SSO thoroughly before enforcing\n- Communicate the change to all team members\n- MFA should be enforced through your IdP for strongest security\n\nYour current setup has ciso@globalbank.com as a password-auth owner — this is a good emergency access pattern."
+    ),
+    # SSO loops endlessly
+    make_single_turn("scale_sso_issue",
+        "User can't log in — SSO loops endlessly back to the login page.",
+        "An SSO login loop typically means the assertion is being received but not accepted. Common causes:\n\n**1. Redirect URI mismatch** — most common cause of loops\n- SAML ACS URL must be exactly: `https://api.apexmail.ee/enterprise/v1/sso/saml/callback`\n- OIDC redirect must be: `https://api.apexmail.ee/enterprise/v1/sso/oidc/callback`\n\n**2. Cookie/session issues**\n- Try in an incognito window to rule out stale cookies\n- Check if third-party cookies are being blocked\n\n**3. Domain not in allowedDomains**\n- The user's email domain must match your SSO configuration\n\n**4. Attribute mapping**\n- The `email` claim must be present in the SSO response\n- Verify the Name ID format is set to email\n\n**Debug:**\n```\nPUT /enterprise/v1/sso/config/{account_id}\n{\"debugMode\": true}\n```\nThen attempt login and check the debug logs for the specific rejection reason."
+    ),
+]
+
+ENTERPRISE_SUBACCOUNTS = [
+    # Create sub-account
+    make_single_turn("enterprise_subaccounts_active",
+        "How do I create a new sub-account for a client?",
+        "You can create sub-accounts via the API. Here's how:\n\n```\nPOST /enterprise/v1/sub-accounts\n{\n  \"parentAccountId\": \"acct_ag7m2n\",\n  \"name\": \"New Client Name\",\n  \"settings\": {\n    \"maxMonthlyEmails\": 500000,\n    \"maxDomains\": 5,\n    \"maxApiKeys\": 10,\n    \"maxUsers\": 15\n  },\n  \"inheritParentSettings\": false\n}\n```\n\nThis creates an isolated environment with its own domains, API keys, contacts, and analytics. The sub-account will appear in your parent dashboard.\n\nYou currently have **8 sub-accounts** on your Enterprise plan (limit: **100**). Each new sub-account starts at 0 usage and has its own quota."
+    ),
+    # Sub-account over quota
+    make_single_turn("enterprise_subaccounts_active",
+        "My client FashionBrand is over their email quota and sends are being rejected.",
+        "I can see the issue — sub-account **FashionBrand** (sub_fb001) has hit 100% of its email quota, and new sends are being rejected with `QUOTA_EXCEEDED`.\n\nTo increase the quota:\n\n```\nPUT /enterprise/v1/sub-accounts/sub_fb001/quotas\n{\n  \"quotas\": {\n    \"maxMonthlyEmails\": 1000000\n  }\n}\n```\n\nThis will take effect immediately and unblock their sends.\n\n**Tip**: Set up quota alerts to catch this before it happens:\n```json\n{\n  \"alerts\": {\n    \"emailQuotaWarning\": 80,\n    \"emailQuotaCritical\": 95,\n    \"webhookUrl\": \"https://api.brightagency.io/alerts\"\n  }\n}\n```\n\nAlso note that sub-account **TechStartup** (sub_ts002) is approaching 80% — you may want to proactively increase that one too."
+    ),
+    # Billing across sub-accounts
+    make_single_turn("enterprise_subaccounts_active",
+        "How does billing work across all my sub-accounts?",
+        "With Enterprise sub-accounts, billing is **consolidated** — you get a single invoice with per-sub-account breakdown.\n\nView the breakdown:\n```\nGET /enterprise/v1/sub-accounts/billing?month=2026-02\n```\n\nThis returns each sub-account's usage and cost allocation. You can also tag sub-accounts with cost center metadata:\n```json\n{\n  \"metadata\": {\n    \"costCenter\": \"CC-1234\",\n    \"department\": \"Marketing\",\n    \"client\": \"FashionBrand\"\n  }\n}\n```\n\nAll 8 sub-accounts are covered under your Enterprise plan ($1,299/mo), with sends aggregated against your total 10M email limit."
+    ),
+    # Sub-account limits
+    make_single_turn("no_context",
+        "How many sub-accounts can I create?",
+        "Sub-account limits by plan:\n\n| Plan | Sub-Accounts |\n|------|-------------|\n| Scale ($399/mo) | Up to **10** |\n| Enterprise ($1,299/mo) | Up to **100** |\n\nOther plans don't include sub-accounts. Each sub-account has complete **data isolation** — separate contacts, templates, API keys, domains, analytics, and webhooks.\n\nIf you need more than 100, please contact **contact@apexmail.ee** for a custom arrangement."
+    ),
+    # Data isolation
+    make_single_turn("enterprise_subaccounts_active",
+        "Can sub-account users access the parent account or other sub-accounts?",
+        "No — sub-accounts have **strict data isolation**:\n\n| Resource | Isolation |\n|----------|----------|\n| Emails | Fully isolated |\n| Contacts | Fully isolated |\n| Templates | Fully isolated |\n| Analytics | Fully isolated |\n| API Keys | Scoped to sub-account |\n| Domains | Dedicated per sub-account |\n| Webhooks | Scoped to sub-account |\n\n**Parent → Sub-account**: Parent admins (like ceo@brightagency.io) **can** access all sub-accounts.\n**Sub-account → Parent**: Sub-account users **cannot** access the parent or other sub-accounts.\n\nThis makes it safe for managing multiple clients — each only sees their own data."
+    ),
+    # Delete sub-account
+    make_single_turn("enterprise_subaccounts_active",
+        "How do I delete a sub-account for a client we no longer work with?",
+        "⚠️ **Deleting a sub-account is irreversible** after the retention period. Here's the process:\n\n```\nDELETE /enterprise/v1/sub-accounts/{sub_account_id}\n{\n  \"confirmDeletion\": true,\n  \"exportData\": true,\n  \"retentionDays\": 30\n}\n```\n\n**What happens:**\n1. Sub-account is immediately **suspended** (no sends)\n2. Data is **exported** if you set `exportData: true`\n3. After 30 days (grace period), all data is **permanently deleted**\n4. Users are notified if `notifyUsers: true`\n\nI'd recommend exporting the data first, then proceeding with deletion. Would you like me to help with this?"
+    ),
+    # Sub-account requesting own domain
+    make_single_turn("enterprise_subaccounts_active",
+        "Client TechStartup wants their own sending domain. How do I set that up?",
+        "Each sub-account can have its own dedicated sending domains. Here's how to set it up for TechStartup (sub_ts002):\n\n**1. Switch to the sub-account context:**\nUse the sub-account's API key (`am_live_ts02...`) or include the sub-account ID header.\n\n**2. Add the domain:**\n```\nPOST /v1/domains\n{\n  \"domain\": \"mail.techstartup.com\"\n}\n```\n\n**3. TechStartup adds the DNS records** returned by the API:\n- SPF TXT record\n- DKIM CNAME records\n- DMARC TXT record\n\n**4. Verify:**\n```\nPOST /v1/domains/verify\n{\"domain\": \"mail.techstartup.com\"}\n```\n\nThe domain will be fully isolated to their sub-account. Other sub-accounts can't send from it."
+    ),
+]
+
+ENTERPRISE_LOG_STREAMING = [
+    # BigQuery stream failing
+    make_single_turn("enterprise_log_stream_failing",
+        "Our BigQuery log stream stopped working 6 hours ago. 450,000 events are queued.",
+        "I can see your BigQuery stream (stream_bq01) is returning **403 errors** — this typically means the service account permissions changed.\n\n**Immediate steps:**\n\n1. **Check stream status:**\n```\nGET /enterprise/v1/log-streams/stream_bq01/status\n```\n\n2. **Verify BigQuery permissions** — the service account needs:\n   - `bigquery.tables.create`\n   - `bigquery.tables.updateData`\n   - `bigquery.datasets.get`\n\n3. **Re-authorize** if credentials changed:\n```\nPUT /enterprise/v1/log-streams/stream_bq01\n{\n  \"destination\": {\n    \"credentials\": {\n      \"type\": \"service_account\",\n      \"privateKey\": \"<updated-key>\",\n      \"clientEmail\": \"sa@your-project.iam.gserviceaccount.com\"\n    }\n  }\n}\n```\n\n4. **Test the connection:**\n```\nPOST /enterprise/v1/log-streams/stream_bq01/test\n```\n\nYour **450,000 queued events will be automatically delivered** once the stream is healthy again — we use at-least-once delivery with retry logic. Your S3 backup stream is healthy, so no events are lost."
+    ),
+    # Set up log streaming
+    make_single_turn("enterprise_ecommerce",
+        "How do I stream email events to our data warehouse?",
+        "ApexMail's **Log Streaming** feature (Enterprise plan) supports 8 destinations:\n\n| Destination | Latency |\n|-------------|--------|\n| Amazon S3 | ~5 min batches |\n| Google BigQuery | ~10 seconds |\n| Snowflake | ~5 min batches |\n| Apache Kafka | Real-time |\n| Amazon Kinesis | Real-time |\n| Elasticsearch | ~30 seconds |\n| Datadog | Real-time |\n| Custom Webhook | Real-time |\n\n**Example — S3 setup:**\n```\nPOST /enterprise/v1/log-streams\n{\n  \"name\": \"Production Events\",\n  \"destination\": {\n    \"type\": \"s3\",\n    \"bucket\": \"your-bucket\",\n    \"region\": \"eu-central-1\",\n    \"credentials\": {\"accessKeyId\": \"...\", \"secretAccessKey\": \"...\"},\n    \"compression\": \"gzip\"\n  },\n  \"events\": [\"email.sent\", \"email.delivered\", \"email.opened\", \"email.clicked\", \"email.bounced\", \"email.complained\"],\n  \"format\": \"json\",\n  \"batchSize\": 1000\n}\n```\n\nYou can filter by event type, tags, domains, or even recipient patterns."
+    ),
+    # Kafka streaming
+    make_single_turn("enterprise_log_stream_failing",
+        "Can I stream events to Kafka instead of BigQuery?",
+        "Absolutely! Kafka streaming delivers events in **real-time**. Here's the configuration:\n\n```\nPOST /enterprise/v1/log-streams\n{\n  \"name\": \"Kafka Event Stream\",\n  \"destination\": {\n    \"type\": \"kafka\",\n    \"brokers\": [\"kafka.dataflow.xyz:9092\"],\n    \"topic\": \"email-events\",\n    \"authentication\": {\n      \"mechanism\": \"SASL_SSL\",\n      \"username\": \"...\",\n      \"password\": \"...\"\n    },\n    \"compression\": \"snappy\",\n    \"acks\": \"all\"\n  },\n  \"events\": [\"email.sent\", \"email.delivered\", \"email.bounced\", \"email.complained\"]\n}\n```\n\nYou can run **multiple streams simultaneously** — keep your S3 backup for archival and add Kafka for real-time processing. Each stream operates independently."
+    ),
+    # PII redaction in streams
+    make_single_turn("enterprise_compliance",
+        "We need to redact email addresses from our log streams for privacy compliance.",
+        "Log Streaming supports **PII Redaction** built-in:\n\n```json\n{\n  \"transform\": {\n    \"redact\": {\n      \"fields\": [\"recipient\", \"eventData.ipAddress\"],\n      \"method\": \"hash_sha256\"\n    }\n  }\n}\n```\n\nThis automatically SHA-256 hashes the specified fields before delivery. You can also:\n\n- **Select specific fields** only:\n```json\n{\"transform\": {\"fields\": [\"eventId\", \"eventType\", \"timestamp\", \"emailId\"]}}\n```\n\n- **Rename fields** for your schema:\n```json\n{\"transform\": {\"fieldMapping\": {\"eventType\": \"type\", \"timestamp\": \"occurred_at\"}}}\n```\n\nThis helps you comply with GDPR data minimization while still getting the analytics you need."
+    ),
+]
+
+ENTERPRISE_TEMPLATE_APPROVAL = [
+    # Template stuck in review
+    make_single_turn("enterprise_template_approval",
+        "Our Q1 Promo template has been stuck in legal review for 5 days. How do I unblock it?",
+        "I can see template **'Q1 Promo'** (tmpl_q1p01, submission sub_xyz789) is stuck in the `legal_review` stage. The legal reviewer (legal-head@pharmahealth.com) is on PTO and no other legal approver is configured.\n\n**Options to unblock:**\n\n**1. Admin force-approve** (requires audit log entry):\n```\nPOST /enterprise/v1/templates/approve\n{\n  \"submissionId\": \"sub_xyz789\",\n  \"approverId\": \"<admin_user_id>\",\n  \"decision\": \"approved\",\n  \"comment\": \"Force-approved: legal reviewer on PTO. Will review post-launch.\"\n}\n```\n\n**2. Add another legal approver** to the workflow:\n```\nPUT /enterprise/v1/template-workflows/{workflow_id}\n```\nAdd a backup approver to the legal_review stage.\n\n**3. Enable auto-approve timer** for future situations:\n```json\n{\"autoApproveAfter\": 72}\n```\nThis auto-approves after 72 hours if no action is taken.\n\n**Recommendation**: Add a backup legal approver to prevent this from happening again."
+    ),
+    # Set up approval workflow
+    make_single_turn("enterprise_template_approval",
+        "How do I set up a template approval workflow?",
+        "Template approval workflows are available on **Scale** and **Enterprise** plans. Here's how to create one:\n\n```\nPOST /enterprise/v1/template-workflows\n{\n  \"name\": \"Marketing Template Review\",\n  \"stages\": [\n    {\n      \"name\": \"content_review\",\n      \"approvers\": [{\"type\": \"role\", \"value\": \"content_manager\"}],\n      \"requiredApprovals\": 1\n    },\n    {\n      \"name\": \"legal_review\",\n      \"approvers\": [{\"type\": \"role\", \"value\": \"legal_team\"}],\n      \"requiredApprovals\": 1,\n      \"autoApproveAfter\": 72,\n      \"escalateTo\": \"user_cmo\",\n      \"escalateAfter\": 48,\n      \"checklistItems\": [\n        \"Unsubscribe link present\",\n        \"Physical address included\",\n        \"No misleading subject line\"\n      ]\n    },\n    {\n      \"name\": \"final_approval\",\n      \"approvers\": [{\"type\": \"role\", \"value\": \"marketing_director\"}],\n      \"requiredApprovals\": 1\n    }\n  ],\n  \"notifyOnSubmission\": true,\n  \"notifyOnRejection\": true\n}\n```\n\nTemplates then go through each stage sequentially. Each stage can have checklists, auto-approve timers, and escalation rules."
+    ),
+    # Check pending approvals
+    make_single_turn("enterprise_template_approval",
+        "How do I see which templates are waiting for my approval?",
+        "You can list all pending approvals assigned to you:\n\n```\nGET /enterprise/v1/templates/submissions/pending?approverId={your_user_id}\n```\n\nOr check a specific submission's full status:\n```\nGET /enterprise/v1/templates/submissions/{submission_id}\n```\n\nThis shows:\n- Current stage and progress through the workflow\n- Who approved/rejected at each stage\n- Due dates and reminder counts\n- Full audit trail of all actions\n\nYou can also configure Slack notifications for the `#template-approvals` channel so the team gets real-time updates."
+    ),
+    # Auto compliance checks
+    make_single_turn("enterprise_template_approval",
+        "Can templates be automatically checked for compliance before human review?",
+        "Yes! Configure **automated compliance checks** that run before the first human review stage:\n\n```json\n{\n  \"automatedChecks\": {\n    \"enabled\": true,\n    \"checks\": [\n      {\"name\": \"unsubscribe_link\", \"required\": true, \"blockOnFail\": true},\n      {\"name\": \"physical_address\", \"required\": true, \"blockOnFail\": false},\n      {\"name\": \"spam_score\", \"threshold\": 3.0, \"blockOnFail\": true},\n      {\"name\": \"link_validation\", \"checkBrokenLinks\": true, \"blockOnFail\": false},\n      {\"name\": \"brand_assets\", \"verifyApprovedAssets\": true, \"blockOnFail\": false}\n    ]\n  }\n}\n```\n\nChecks with `blockOnFail: true` prevent the template from entering human review if they fail. This catches obvious issues (missing unsubscribe link, high spam score) before wasting reviewers' time."
+    ),
+]
+
+API_ERROR_TRAINING = [
+    # sender_not_verified
+    make_single_turn("pro_new_user",
+        "I keep getting 'sender_not_verified' when trying to send emails.",
+        "The `sender_not_verified` error means your sending domain hasn't completed verification yet.\n\n**Fix:**\n1. Go to **Dashboard → Domains**\n2. Check the status of your domain\n3. Add the required DNS records (SPF, DKIM, DMARC) shown in the dashboard\n4. Wait for DNS propagation (can take up to 48 hours, usually 15-30 minutes)\n\nLet me check your domain status:\n\n```tool_call\n{\"tool\": \"get_domain_status\", \"params\": {\"domain\": \"newshop.io\"}}\n```"
+    ),
+    # recipient_suppressed
+    make_single_turn("starter_bounce_spike",
+        "Some emails aren't being sent and I'm getting 'recipient_suppressed' errors.",
+        "The `recipient_suppressed` error means those email addresses are on your **suppression list** — they were automatically added after previous bounces or complaints to protect your sender reputation.\n\nLet me check specific addresses:\n\n```tool_call\n{\"tool\": \"list_suppressions\", \"params\": {\"page\": 1}}\n```\n\nIf you believe some were suppressed in error, you can remove them individually:\n```tool_call\n{\"tool\": \"remove_suppression\", \"params\": {\"email\": \"address@example.com\"}}\n```\n\n**Important**: Only remove suppressions if you're confident the address is valid. Sending to previously-bounced addresses can further damage your deliverability (your bounce rate is already at 8.5%)."
+    ),
+    # attachment_too_large
+    make_single_turn("growth_saas_healthy",
+        "I'm getting 'attachment_too_large' when sending invoices.",
+        "ApexMail's attachment limits are:\n- **Single attachment**: Maximum **25 MB**\n- **Total per message**: Maximum **50 MB**\n\n**Alternatives for large files:**\n1. **Host the file** on S3/cloud storage and include a download link\n2. **Compress** the attachment (ZIP) before sending\n3. Use **PDF optimization** to reduce file size\n\nFor invoices, I'd recommend hosting them as links — it's better for deliverability too, since large attachments can trigger spam filters."
+    ),
+    # insufficient_scope
+    make_single_turn("payg_api_401",
+        "Getting 'insufficient_scope' error when trying to send batch emails.",
+        "The `insufficient_scope` error means your API key doesn't have the required permission. For sending emails, you need the `emails:send` scope.\n\n**Check your API key scopes:**\nGo to **Dashboard → API Keys** and verify the key you're using has `emails:send`.\n\nApexMail has **14 available scopes**:\n`emails:send`, `emails:read`, `domains:manage`, `domains:read`, `webhooks:manage`, `webhooks:read`, `templates:manage`, `templates:read`, `suppressions:manage`, `suppressions:read`, `analytics:read`, `contacts:manage`, `contacts:read`, `admin`\n\nYou can generate a new key with the right scopes:\n```tool_call\n{\"tool\": \"generate_api_key\", \"params\": {\"name\": \"Batch Sender\", \"scopes\": [\"emails:send\", \"emails:read\"]}}\n```"
+    ),
+    # ip_not_allowed
+    make_single_turn("scale_key_rotation",
+        "Getting 'ip_not_allowed' error after deploying to a new server.",
+        "The `ip_not_allowed` error means your API key has **IP allowlisting** configured and the new server's IP isn't in the list.\n\n**Options:**\n\n1. **Add the new IP** to the key's allowlist in Dashboard → API Keys → Edit → IP Allowlist\n2. If you're using dynamic IPs, add a **CIDR range** (e.g., `10.0.0.0/16`)\n3. If you no longer need IP restriction, you can remove the allowlist entirely\n\n**Note**: IP allowlisting is per-key, not per-account. The Dashboard itself uses session auth, so you can always access it to update the config.\n\nIf you recently rotated your key (as your open issues indicate), the new key may need the IP list configured separately."
+    ),
+    # daily_limit_exceeded
+    make_single_turn("free_hitting_limits",
+        "I'm getting 'daily_limit_exceeded' error. When does it reset?",
+        "The daily sending limit resets at **midnight UTC** each day.\n\nYour **Free plan** allows **1,000 emails per month** — if you've hit the daily limit, that's a portion of your monthly quota.\n\nYou're currently at **980/1,000** emails this month, so you're nearly at the monthly limit too.\n\n**Options:**\n1. **Wait until midnight UTC** for the daily limit to reset\n2. **Upgrade** to Starter ($29/mo) for **25,000 emails/month** — that's 25x your current limit\n3. **Switch to Pay-As-You-Go** ($0 base, pay per email) if your volume is unpredictable\n\nWould you like to explore upgrade options?"
+    ),
+    # expired_token
+    make_single_turn("growth_oauth_app",
+        "Our integration keeps getting 'expired_token' errors every hour.",
+        "The `expired_token` error means your **OAuth 2.0 access token has expired**. Access tokens have a 1-hour lifetime by default.\n\n**To fix:**\nYour integration needs to implement **token refresh** — when you get an `expired_token` error:\n\n1. Use the **refresh token** to get a new access token:\n```\nPOST /v1/auth/token/refresh\n{\n  \"grant_type\": \"refresh_token\",\n  \"refresh_token\": \"<your_refresh_token>\"\n}\n```\n\n2. Store the new access token and use it for subsequent requests\n3. Refresh tokens are valid for **30 days**\n\n**Best practice**: Proactively refresh the token a few minutes before it expires (check the `expires_in` field) rather than waiting for the error.\n\nIf the refresh token itself has expired (after 30 days), you'll need to re-authorize through the OAuth PKCE flow."
+    ),
+    # duplicate_resource
+    make_single_turn("starter_healthy",
+        "I'm getting 'duplicate_resource' when adding a contact.",
+        "The `duplicate_resource` error means a contact with that email address already exists in your account.\n\n**Options:**\n1. **Update** the existing contact instead of creating:\n```tool_call\n{\"tool\": \"tag_contact\", \"params\": {\"email\": \"user@example.com\", \"tags\": [\"new-tag\"]}}\n```\n\n2. **Search** for the existing contact first:\n```tool_call\n{\"tool\": \"list_contacts\", \"params\": {\"query\": \"user@example.com\"}}\n```\n\n3. If using **CSV import**, set the conflict resolution to `update` instead of `skip` to merge new data with existing contacts."
+    ),
+    # subscription_required
+    make_single_turn("free_hitting_limits",
+        "Getting 'subscription_required' when trying to use A/B testing.",
+        "**A/B testing** is available starting from the **Growth plan ($129/mo)**.\n\nYour current Free plan doesn't include this feature. Here's where each feature unlocks:\n\n| Feature | Minimum Plan |\n|---------|--------------|\n| Webhooks | Starter ($29) |\n| Custom tracking domain | Pro ($59) |\n| **A/B testing** | **Growth ($129)** |\n| Send-time optimization | Growth ($129) |\n| SSO | Scale ($399) |\n| Sub-accounts | Scale ($399) |\n| White-label | Enterprise ($1,299) |\n\nWould you like to explore upgrading to Growth? It also includes 100,000 emails/mo, 1 dedicated IP, and audit logs."
+    ),
+    # rate_limit_exceeded with headers
+    make_single_turn("growth_rate_limited",
+        "I'm hitting rate limits. How do I know when I can retry?",
+        "When you receive a `429` rate limit error, check the response headers:\n\n| Header | Meaning |\n|--------|--------|\n| `X-RateLimit-Limit` | Max requests per window |\n| `X-RateLimit-Remaining` | Requests left in current window |\n| `X-RateLimit-Reset` | Unix timestamp when the window resets |\n| `Retry-After` | Seconds to wait before retrying |\n\n**Implementation pattern:**\n```\nif (response.status === 429) {\n  const retryAfter = response.headers['retry-after'];\n  await sleep(retryAfter * 1000);\n  // retry the request\n}\n```\n\nFor high-volume sending, use the **batch endpoint** (`sendBatch`) which processes up to 100 emails per API call, reducing the number of requests needed.\n\nYour Growth plan allows **1,000,000 API calls/month** — you're at 890,000 currently."
+    ),
+    # insufficient_credits (PAYG)
+    make_single_turn("payg_low_volume",
+        "Getting 'insufficient_credits' when sending. I thought PAYG was unlimited?",
+        "Pay-As-You-Go has **unlimited send volume** but requires sufficient **credit balance** to cover each send.\n\nYour current credit balance may be running low. To resolve:\n\n1. **Top up credits** in **Dashboard → Billing → Add Credits**\n2. **Enable auto-recharge**: set a threshold (e.g., when balance drops below $10, auto-add $50)\n\nThe cost depends on your volume:\n- Up to 10K: $0.001/email\n- 10K–100K: $0.0008/email\n- 100K–1M: $0.0005/email\n- 1M+: $0.0003/email\n\nSo for your ~2,100 sends this month, the cost is about $2.10. A small top-up will get you sending again immediately."
+    ),
+    # internal_error
+    make_single_turn("growth_saas_healthy",
+        "I'm getting random 500 'internal_error' responses from the API.",
+        "A `500 internal_error` is on our side. Here's what to do:\n\n1. **Note the `requestId`** from the error response — it looks like:\n```json\n{\"error\": {\"code\": \"internal_error\", \"requestId\": \"req_abc123\"}}\n```\n\n2. **Check if it's intermittent or consistent** — try the same request again\n3. **If persistent**, please escalate to **contact@apexmail.ee** with:\n   - The `requestId`\n   - The exact endpoint and request body\n   - Timestamp of the error\n   - Your account ID (`acct_sg5x8m`)\n\nOur SLO is **99.9% API availability** — occasional 500s can happen but should be rare. If you're seeing a pattern, it may be a bug that needs engineering investigation."
+    ),
+]
+
+SDK_TROUBLESHOOTING = [
+    # ESM/CJS mismatch
+    make_single_turn("pro_sdk_integration",
+        "I'm getting 'require() of ES Module not supported' with the ApexMail SDK in Next.js.",
+        "This is a **CJS/ESM mismatch** — the `@apexmail/node` SDK is an ESM package and you're trying to import it with `require()`.\n\n**Fix options:**\n\n**1. Use dynamic import (recommended for Next.js):**\n```javascript\nconst { ApexMail } = await import('@apexmail/node');\nconst client = new ApexMail('am_live_sd6p...');\n```\n\n**2. Set your project to ESM:**\nIn `package.json`: `\"type\": \"module\"`\n\n**3. For Next.js App Router (Server Components):**\n```typescript\n// app/api/send/route.ts\nimport { ApexMail } from '@apexmail/node';\n\nconst apexmail = new ApexMail(process.env.APEXMAIL_API_KEY!);\n\nexport async function POST(req: Request) {\n  const { to, subject, html } = await req.json();\n  const result = await apexmail.emails.send({ to, subject, html });\n  return Response.json(result);\n}\n```\n\nThe SDK works natively in Server Components and Route Handlers — just don't try to use it in client components."
+    ),
+    # TypeScript errors
+    make_single_turn("pro_sdk_integration",
+        "TypeScript can't find the types for @apexmail/node.",
+        "For TypeScript projects using the ApexMail SDK, ensure your `tsconfig.json` has:\n\n```json\n{\n  \"compilerOptions\": {\n    \"module\": \"nodenext\",\n    \"moduleResolution\": \"nodenext\"\n  }\n}\n```\n\n**Common issues:**\n- `\"moduleResolution\": \"node\"` (old style) doesn't resolve package exports correctly\n- The SDK ships with built-in TypeScript declarations — no `@types/` package needed\n- If using Next.js 15, it already uses `nodenext` by default\n\nAlso make sure your `@apexmail/node` is up to date:\n```bash\nnpm install @apexmail/node@latest\n```"
+    ),
+    # Headers not defined (Node <18)
+    make_single_turn("pro_sdk_integration",
+        "Getting 'Headers is not defined' error when using the SDK.",
+        "The `Headers is not defined` error means you're running **Node.js < 18**, which doesn't have the built-in `fetch` API.\n\n**Solutions:**\n\n1. **Upgrade to Node.js 18+** (recommended) — fetch is built-in\n2. **Install the undici polyfill:**\n```bash\nnpm install undici\n```\nThen at your app entrypoint:\n```javascript\nimport { fetch, Headers, Request, Response } from 'undici';\nglobalThis.fetch = fetch;\nglobalThis.Headers = Headers;\n```\n\nCheck your Node version: `node --version`. If it's below 18, upgrading is the best long-term fix."
+    ),
+    # Batch sending
+    make_single_turn("growth_saas_healthy",
+        "How do I send batch emails with the SDK?",
+        "Use the `sendBatch` method — up to **100 emails per API call**:\n\n```typescript\nimport { ApexMail } from '@apexmail/node';\n\nconst client = new ApexMail('am_live_...');\n\nconst result = await client.emails.sendBatch([\n  { to: 'user1@example.com', subject: 'Hello', html: '<p>Hi User 1</p>' },\n  { to: 'user2@example.com', subject: 'Hello', html: '<p>Hi User 2</p>' },\n  // ... up to 100\n]);\n\nconsole.log(result); // Array of send results\n```\n\nThis is much more efficient than individual sends — one API call instead of 100. Great for transactional emails triggered by batch events."
+    ),
+    # Webhook verification
+    make_single_turn("pro_sdk_integration",
+        "How do I verify webhook signatures in my Express.js app?",
+        "Use **HMAC-SHA256** to verify the `X-ApexMail-Signature` header:\n\n```typescript\nimport crypto from 'crypto';\nimport express from 'express';\n\nconst app = express();\n\n// IMPORTANT: Use raw body for signature verification\napp.post('/webhooks/apexmail', \n  express.raw({ type: 'application/json' }),\n  (req, res) => {\n    const signature = req.headers['x-apexmail-signature'];\n    const secret = process.env.APEXMAIL_WEBHOOK_SECRET;\n    \n    const expected = crypto\n      .createHmac('sha256', secret)\n      .update(req.body)\n      .digest('hex');\n    \n    if (signature !== expected) {\n      return res.status(401).send('Invalid signature');\n    }\n    \n    const event = JSON.parse(req.body);\n    console.log('Verified event:', event.type);\n    res.sendStatus(200);\n  }\n);\n```\n\n**Key points:**\n- Use `express.raw()` — NOT `express.json()` — to get the raw body for HMAC\n- You can find your webhook signing secret in **Dashboard → Webhooks → Secret**\n- Rotate secrets periodically with the `rotate_webhook_secret` API"
+    ),
+    # SDK timeout/retry
+    make_single_turn("growth_saas_healthy",
+        "SDK requests are timing out on large sends. How do I configure timeouts?",
+        "Configure timeout and retries when initializing the SDK:\n\n```typescript\nconst client = new ApexMail('am_live_...', {\n  timeout: 30000,     // 30 seconds (default: 10s)\n  maxRetries: 3,      // retry up to 3 times\n  retryDelay: 1000,   // 1 second between retries\n});\n```\n\n**Built-in retry logic:**\n- Automatically retries on 429 (rate limited) and 5xx errors\n- Uses exponential backoff\n- Does NOT retry on 4xx client errors (except 429)\n\nFor very large batches, consider breaking them into chunks of 100 (the `sendBatch` limit) with a small delay between chunks."
+    ),
+    # Python webhook verification
+    make_single_turn("no_context",
+        "How do I verify webhook signatures in Python?",
+        "Here's webhook signature verification for Python:\n\n```python\nimport hmac\nimport hashlib\nfrom flask import Flask, request\n\napp = Flask(__name__)\n\n@app.route('/webhooks/apexmail', methods=['POST'])\ndef handle_webhook():\n    signature = request.headers.get('X-ApexMail-Signature')\n    secret = os.environ['APEXMAIL_WEBHOOK_SECRET']\n    \n    expected = hmac.new(\n        secret.encode(),\n        request.get_data(),\n        hashlib.sha256\n    ).hexdigest()\n    \n    if not hmac.compare_digest(signature, expected):\n        return 'Invalid signature', 401\n    \n    event = request.get_json()\n    print(f'Verified event: {event[\"type\"]}')\n    return '', 200\n```\n\n**The Python SDK** also has a built-in verifier:\n```python\nfrom apexmail import webhooks\n\nis_valid = webhooks.verify(payload, signature, secret)\n```"
+    ),
+]
+
+ACCOUNT_LOCKOUT_TRAINING = [
+    # Basic lockout
+    make_single_turn("growth_account_lockout",
+        "I'm locked out of my account. I can't log in.",
+        "I can see your account has a **30-minute lockout** triggered by 5 failed login attempts 45 minutes ago.\n\n**The lockout should have expired by now** — try logging in again at **Dashboard → https://app.apexmail.ee**.\n\nIf you still can't log in:\n1. Use **\"Forgot Password\"** on the login page to reset your password\n2. You'll receive a reset link at founder@fitnessapp.co\n\n**Note about your MFA issue**: You mentioned losing your authenticator app. If you have your **recovery codes** (given during MFA setup), you can use one to log in. If not, you'll need to contact **contact@apexmail.ee** for identity verification and MFA reset.\n\nYour API keys are still working (last used 5 min ago), so your app continues sending emails normally."
+    ),
+    # MFA codes not working
+    make_single_turn("growth_account_lockout",
+        "My MFA authenticator codes aren't working even though I set it up.",
+        "TOTP codes can fail for a few reasons:\n\n**1. Clock skew** (most common)\n- Your phone's clock must be accurate within ±30 seconds\n- Go to your phone's settings → Date & Time → Enable \"Set automatically\"\n\n**2. Wrong account**\n- Check your authenticator app for duplicates — make sure you're using the right ApexMail entry\n\n**3. Time-based window**\n- TOTP codes change every 30 seconds — make sure you're entering the current code quickly\n\n**4. Use recovery codes**\n- If you have the recovery codes from MFA setup, use one of those instead\n\nIf none of these work, you'll need identity verification through our support team at **contact@apexmail.ee**. Include your account ID (`acct_lo2n5j`) and be prepared to verify your identity (2 of 4 methods: email to registered address, last 4 of payment method, domain ownership verification, or photo ID)."
+    ),
+    # Lost authenticator app
+    make_single_turn("enterprise_mfa_lockout",
+        "I lost my phone and can't access my authenticator app. How do I recover my account?",
+        "If you've lost your authenticator device and don't have recovery codes, here's the process:\n\n**1. Contact support:** Email **contact@apexmail.ee** with subject: \"MFA Recovery — Account acct_mf4k2p\"\n\n**2. Identity verification** (required — 2 of 4 methods):\n- ✅ Receive verification code at your registered email\n- ✅ Provide last 4 digits of the payment method on file\n- ✅ Prove domain ownership (add a TXT record)\n- ✅ Photo ID matching account holder name\n\n**3. After verification**, the support team will disable MFA on your account\n\n**4. Re-enable MFA** immediately after regaining access with a new device\n\n**Pro tip**: Always save recovery codes in a secure location (password manager or printed). Enterprise customers can also recover through their SSO provider if SSO is configured."
+    ),
+    # Multiple users locked out (SSO issue)
+    make_single_turn("enterprise_sso_broken",
+        "Multiple team members are locked out at the same time. What's going on?",
+        "When multiple users are locked out simultaneously, it's almost always an **SSO misconfiguration** — not a password issue.\n\nLooking at your account, I can see **38 SSO users are locked out** due to an expired IdP certificate.\n\n**Common causes of mass lockout:**\n1. **IdP certificate expired** ← this is your current issue\n2. **ACS URL changed** in the IdP configuration\n3. **IdP outage** — check your identity provider's status page\n4. **Clock skew** between IdP and ApexMail (>5 minutes)\n5. **SSO config accidentally disabled**\n\n**Immediate fix:** Your account owner (ciso@globalbank.com) uses password auth and can still access the dashboard to update the SAML certificate.\n\nUpload the new certificate from Okta → Applications → ApexMail → Sign On tab."
+    ),
+]
+
+COMPLIANCE_TRAINING = [
+    # Data encryption
+    make_single_turn("enterprise_compliance",
+        "Is our data encrypted? We need to know for our security audit.",
+        "Yes, ApexMail uses comprehensive encryption:\n\n**At rest:**\n- **AES-256-GCM** encryption for all stored data\n- Per-organization encryption keys\n- Encryption keys stored in a separate key management system\n\n**In transit:**\n- **TLS 1.3** (preferred) / TLS 1.2 (minimum) for all API connections\n- HSTS enforced\n- Certificate pinning supported\n\n**Data locations:**\n- All data stored in **EU (Hetzner Online GmbH)** — our infrastructure provider\n- Database backups: encrypted, stored in same region\n\nFor your compliance audit, we can provide:\n- SOC 2 Type II report (Enterprise plan)\n- Data Processing Agreement (DPA)\n- Sub-processor list\n\nPlease email **contact@apexmail.ee** for audit documentation."
+    ),
+    # Legal entity
+    make_single_turn("no_context",
+        "What's your legal entity? I need it for our DPA.",
+        "Our legal entity details:\n\n- **Company**: Bel Consulting OÜ\n- **Registry Code**: 16192499\n- **Location**: Tallinn, Estonia\n- **Role**: Data Processor (your organization is the Data Controller)\n\nFor DPA requests, please email **contact@apexmail.ee** — we can generate a compliant Data Processing Agreement that covers GDPR, Standard Contractual Clauses (SCCs), and our sub-processor list.\n\nOur primary sub-processor is **Hetzner Online GmbH** (EU infrastructure)."
+    ),
+    # GDPR erasure
+    make_single_turn("starter_gdpr_deletion",
+        "I need to delete all data for a customer who made a GDPR erasure request. How?",
+        "For GDPR erasure (Right to be Forgotten), use the compliance API:\n\n```\nPOST /enterprise/v1/compliance/dsar/erasure\n{\n  \"email\": \"customer@example.com\",\n  \"scope\": {\n    \"profileData\": true,\n    \"emailHistory\": true,\n    \"eventHistory\": true,\n    \"consentRecords\": false,\n    \"suppressionList\": false\n  },\n  \"reason\": \"user_request\"\n}\n```\n\n**What gets erased:**\n- ✅ Contact profile data\n- ✅ Email message history\n- ✅ Event/engagement history\n- ❌ Consent records (retained for audit — legally required)\n- ❌ Suppression list entry (retained to prevent re-emailing)\n\n**Timeline**: Erasure completes within **30 days** (GDPR allows this). The contact is immediately marked as `pending_erasure` and excluded from all sends.\n\nFor bulk requests or if you don't have API access, email **contact@apexmail.ee** with subject: \"GDPR Erasure Request\"."
+    ),
+    # Data retention
+    make_single_turn("enterprise_compliance",
+        "How long do you keep our data? We need this for compliance.",
+        "Here's our complete **data retention schedule**:\n\n| Data Type | Retention |\n|-----------|----------|\n| Email message body | **30 days** |\n| Email metadata (to, from, subject) | **90 days** |\n| Engagement events (opens, clicks) | **90 days** |\n| Webhook delivery logs | **30 days** |\n| SMTP transcripts | **7 days** |\n| Analytics (aggregated) | **2 years** |\n| Billing records | **7 years** (legal requirement) |\n| Audit logs | **7 years** |\n| Suppression list | **Indefinite** |\n| Consent records | **Indefinite** (legal) |\n| Backups | **30 days** (then purged) |\n\nEnterprise customers can configure **custom retention policies** via the compliance API. Shorter retention is fine; longer requires justification.\n\nNote: Your Enterprise plan includes **730-day data retention** by default."
+    ),
+    # DPA request
+    make_single_turn("no_context",
+        "Do you have a Data Processing Agreement we can sign?",
+        "Yes! DPAs are available for **all customers** (not just Enterprise).\n\nTo get your DPA:\n\n1. Email **contact@apexmail.ee** with subject: \"DPA Request — [Your Company Name]\"\n2. Provide your company details:\n   - Company name and address\n   - Contact email for privacy matters\n   - DPO email (if applicable)\n3. We'll generate a DPA covering:\n   - GDPR compliance\n   - Standard Contractual Clauses (SCCs)\n   - Sub-processor list (Hetzner Online GmbH)\n   - Technical and organizational measures\n\nEnterprise customers can generate DPAs via API and sign electronically. For other plans, it's handled through our legal team."
+    ),
+    # CAN-SPAM
+    make_single_turn("growth_saas_healthy",
+        "What do I need to do to comply with CAN-SPAM?",
+        "For **CAN-SPAM compliance**, every commercial email must include:\n\n1. **Physical postal address** — your company's real street address or PO Box\n2. **Clear unsubscribe mechanism** — a working link that processes within **10 business days**\n3. **Accurate From/Reply-To** — no deceptive headers\n4. **Accurate subject line** — must reflect the content\n5. **Identify as advertisement** — if applicable\n\nApexMail helps automatically:\n- ✅ We add `List-Unsubscribe` headers (RFC 8058)\n- ✅ We process unsubscribes immediately (better than the 10-day CAN-SPAM requirement)\n- ✅ Our template checks flag missing unsubscribe links\n\n**You** must ensure:\n- Physical address in email footer\n- Accurate sender identity\n- Only email people who've opted in\n\nGoogle/Yahoo require unsubscribes to be processed within **2 days** — stricter than CAN-SPAM's 10 days."
+    ),
+    # Sub-processor
+    make_single_turn("enterprise_hipaa",
+        "Who are your sub-processors? We need this for our HIPAA compliance review.",
+        "Our current sub-processor:\n\n| Sub-processor | Role | Location |\n|---------------|------|----------|\n| **Hetzner Online GmbH** | Cloud infrastructure (servers, storage) | EU (Germany, Finland) |\n\nAll data processing stays within the EU. We don't use AWS, GCP, or Azure for primary data processing.\n\nFor **HIPAA compliance**, you'll need:\n1. **Enterprise plan** — required for HIPAA/SOC2 features\n2. **Business Associate Agreement (BAA)** — contact your CSM or email **contact@apexmail.ee**\n3. **PHI encryption** — already covered (AES-256-GCM at rest, TLS 1.3 in transit)\n4. **Audit logging** — available on Enterprise\n\nYour dedicated CSM can walk through our full HIPAA compliance documentation."
+    ),
+    # Unsubscribe timelines
+    make_single_turn("no_context",
+        "How quickly do unsubscribes need to be processed?",
+        "Unsubscribe processing timelines vary by regulation:\n\n| Regulation | Required Timeline |\n|------------|------------------|\n| CAN-SPAM (US) | 10 business days |\n| GDPR (EU) | Immediately |\n| Google/Yahoo requirements | **2 days** (since Feb 2024) |\n| CASL (Canada) | 10 business days |\n| ApexMail default | **Immediate** |\n\nApexMail processes all unsubscribes **immediately** — which satisfies all regulatory requirements. We handle this through:\n- RFC 8058 `List-Unsubscribe-Post` header (one-click)\n- `List-Unsubscribe` mailto: header\n- Unsubscribe link in email footer\n\nAll three methods suppress the contact instantly."
+    ),
+]
+
+SLO_UPTIME_TRAINING = [
+    # Uptime SLA
+    make_single_turn("no_context",
+        "What's your uptime SLA?",
+        "Our core SLOs:\n\n| Metric | Target |\n|--------|--------|\n| **API Availability** | **99.9%** |\n| API Latency (P99) | < 500ms |\n| Email Delivery Rate | 98% within 5 minutes |\n| Tracking Availability | 99.95% |\n\n**SLA credits** (Scale and Enterprise plans):\n| Uptime | Credit |\n|--------|--------|\n| 99.0–99.9% | 10% of monthly fee |\n| 95.0–99.0% | 25% |\n| 90.0–95.0% | 50% |\n| Below 90% | 100% |\n\nScale gets up to 10% credit; Enterprise gets up to 25% credit. To claim an SLA credit, email **contact@apexmail.ee** with incident details."
+    ),
+    # Is ApexMail down?
+    make_single_turn("growth_saas_healthy",
+        "Is ApexMail down? My emails aren't going through.",
+        "Let me check the current system status for you:\n\n```tool_call\n{\"tool\": \"get_usage_stats\", \"params\": {}}\n```\n\nWhile I pull that up, here are some things to check:\n\n1. **Your API key** — is it valid? (any recent rotations?)\n2. **Domain status** — are your domains still verified?\n3. **Rate limits** — have you hit your plan's limits?\n\nOur SLO is **99.9% API availability**. If there's a platform-wide issue, you can also check our status page.\n\nIf it turns out to be an outage on our side, Scale and Enterprise customers are eligible for SLA credits."
+    ),
+    # API seems slow
+    make_single_turn("scale_deliverability",
+        "The API seems really slow today. Response times are 2-3 seconds.",
+        "That's above our target — our P99 latency SLO is **< 500ms**.\n\nLet me investigate:\n\n```tool_call\n{\"tool\": \"get_usage_stats\", \"params\": {}}\n```\n\n**Common causes of slow responses:**\n1. **High concurrency** — too many parallel requests\n2. **Large payloads** — heavy templates or many recipients\n3. **Regional network issues** — varies by location\n\n**Immediate mitigations:**\n- Implement **connection pooling** and reuse HTTP connections\n- Use **batch endpoints** instead of individual sends\n- Add **timeout and retry** logic in your client\n\nIf this persists, please escalate to **contact@apexmail.ee** with your account ID, timestamps, and example `requestId` values so we can investigate server-side."
+    ),
+    # SLA credit claim
+    make_single_turn("scale_deliverability",
+        "We had an outage last week. How do I claim an SLA credit?",
+        "To claim an SLA credit, please email **contact@apexmail.ee** with:\n\n**Subject**: \"SLA Credit Request — [acct_dl8v3n]\"\n\n**Include:**\n1. Date and time of the incident\n2. Duration of the outage\n3. Impact description (which services were affected)\n4. `requestId` values from failed API calls (if available)\n\n**SLA credit formula** for your Scale plan:\n- 99.0–99.9% uptime → **10%** of monthly fee ($39.90)\n- 95.0–99.0% → 25% ($99.75)\n- 90.0–95.0% → 50% ($199.50)\n\nCredits are applied to your next invoice. The team typically processes claims within 5 business days."
+    ),
+]
+
+BILLING_PAYMENT = [
+    # Payment failed
+    make_single_turn("starter_dunning_soft",
+        "My payment failed. What happens now?",
+        "When a payment fails, here's the timeline:\n\n1. **Day 0**: Payment fails — we retry automatically\n2. **Day 3**: Second retry attempt\n3. **Day 7**: Third retry + email notification\n4. **Day 14**: Account moves to **past_due** status (sending continues)\n5. **Day 30**: Account **suspended** if still unpaid (sending stops)\n\n**To fix immediately:**\n1. Go to **Dashboard → Billing → Payment Methods**\n2. Update your card details or add a new payment method\n3. Click \"Retry Payment\" to process immediately\n\nYour account is currently showing a soft bounce on payment (your open issue). Update your payment method to avoid any disruption to your Starter plan service."
+    ),
+    # Cancelled but charged
+    make_single_turn("no_context",
+        "I cancelled my subscription but I was still charged this month.",
+        "When you cancel, your **access continues until the end of the current billing period**. This is standard:\n\n- You cancelled mid-cycle, but already paid for the full month\n- Your plan features remain active until the period ends\n- No additional charges will occur after the period\n\nThis is **not a double charge** — it's the final period you already paid for. You won't be charged again.\n\nIf you believe there's a billing error, please email **contact@apexmail.ee** with subject: \"Billing Question\" and include your account ID. Our billing team can review the invoice."
+    ),
+    # Dedicated IP pricing
+    make_single_turn("growth_saas_healthy",
+        "How much does a dedicated IP cost? I want to improve my deliverability.",
+        "Dedicated IP inclusion by plan:\n\n| Plan | Dedicated IPs Included |\n|------|----------------------|\n| Growth ($129/mo) | **1 included** |\n| Scale ($399/mo) | **3 included** |\n| Enterprise ($1,299/mo) | **10 included** |\n\nYour **Growth plan already includes 1 dedicated IP**.\n\n**Additional IPs**: $49/mo each (Growth plan add-on).\n\nYou're sending 78,000 emails/month — a dedicated IP can help if you're doing at least 50,000+/month. Below that, shared IPs often perform better because they maintain consistent sending volume.\n\nWould you like me to check your current IP assignment and deliverability metrics?"
+    ),
+    # Upgrade confusion
+    make_single_turn("no_context",
+        "I upgraded my plan but my limits haven't changed.",
+        "Plan upgrades typically take effect within a **few minutes**. If your limits haven't updated:\n\n1. **Refresh the Dashboard** — sometimes the display lags behind the actual change\n2. **Check your current plan** in Dashboard → Billing to confirm the upgrade processed\n3. **API calls** should immediately use new limits — try a test call\n\nIf the upgrade shows as processed but limits are still old:\n\n```tool_call\n{\"tool\": \"get_account_info\", \"params\": {}}\n```\n\nIf there's still a discrepancy, email **contact@apexmail.ee** — this may need investigation."
+    ),
+    # Contact limits by plan
+    make_single_turn("no_context",
+        "How many contacts can I have on each plan?",
+        "Contact limits by plan:\n\n| Plan | Contacts |\n|------|----------|\n| Free | 500 |\n| Starter ($29) | 2,500 |\n| Pro ($59) | 10,000 |\n| Growth ($129) | 25,000 |\n| Scale ($399) | 100,000 |\n| Enterprise ($1,299) | Unlimited |\n| PAYG | 10,000 |\n\n**Overage**: $5 per 1,000 extra contacts if you exceed your plan's limit.\n\nContacts are deduplicated — the same email address across multiple lists counts as **one** contact."
+    ),
+]
+
+MESSAGE_DIAGNOSTICS_TRAINING = [
+    # Email accepted but not delivered
+    make_single_turn("growth_saas_healthy",
+        "I sent an email 30 minutes ago but the recipient says they haven't received it.",
+        "Let me check the message status. Do you have the **message ID**? It looks like `msg_...` and is returned in the send API response.\n\nIf you have it, I can look it up:\n```tool_call\n{\"tool\": \"get_message_status\", \"params\": {\"message_id\": \"msg_example\"}}\n```\n\nPossible statuses:\n- `accepted` → We received it but haven't processed yet\n- `queued` → In the processing queue\n- `processing` → Being sent to the recipient's server\n- `delivered` → Remote server returned **250 OK** (accepted)\n- `bounced` → Rejected by the recipient's server\n- `deferred` → Temporary failure, will retry automatically\n\n**Note**: \"Delivered\" means the recipient's mail server accepted it — it doesn't guarantee inbox placement. The email could be in spam/promotions folders."
+    ),
+    # What does delivered mean
+    make_single_turn("no_context",
+        "What does 'delivered' status actually mean?",
+        "**\"Delivered\"** means the recipient's mail server returned a **250 OK** response — it accepted the message for delivery.\n\nHowever, it does **NOT** guarantee:\n- ❌ The email reached the inbox (could be spam/promotions/junk)\n- ❌ The recipient saw it\n- ❌ The email wasn't filtered by corporate security\n\n**To verify inbox placement:**\n1. Check **open tracking** — if the recipient opened it, it clearly arrived\n2. Ask the recipient to check their spam/promotions folders\n3. Use our **deliverability report** for aggregate inbox placement data\n\n```tool_call\n{\"tool\": \"get_deliverability_report\", \"params\": {}}\n```"
+    ),
+    # SMTP transcript retention
+    make_single_turn("scale_deliverability",
+        "I need the SMTP transcript for a message to prove delivery to a client.",
+        "SMTP transcripts show the full SMTP conversation between our servers and the recipient's server, including the **250 OK** response.\n\n**Retention**: SMTP transcripts are kept for **7 days** (not configurable).\n\nTo retrieve it, I need the message ID:\n```tool_call\n{\"tool\": \"get_message_events\", \"params\": {\"message_id\": \"msg_example\"}}\n```\n\nThe transcript will show:\n```\n-> EHLO mail.apexmail.ee\n<- 250-recipient-server.com\n-> MAIL FROM:<sender@yourdomain.com>\n<- 250 OK\n-> RCPT TO:<recipient@example.com>\n<- 250 OK\n-> DATA\n<- 354 Start mail input\n-> [message content]\n<- 250 OK: queued as ABC123\n```\n\nIf the message was delivered within the last 7 days, we can provide this as proof of delivery."
+    ),
+    # Message stuck in queue
+    make_single_turn("growth_saas_healthy",
+        "Some messages seem stuck in queue for 10+ minutes. Is something wrong?",
+        "Most messages should be processed within **seconds**. A 10+ minute queue time is unusual.\n\nLet me check the system status:\n```tool_call\n{\"tool\": \"get_usage_stats\", \"params\": {}}\n```\n\n**Possible causes:**\n1. **Rate limiting by recipient servers** — ISPs like Gmail/Outlook may be throttling you\n2. **High bounce rate** — causes us to slow down sending to protect your reputation\n3. **IP warmup** — if you're on a new dedicated IP, there's a deliberate pacing schedule\n4. **Platform queue backlog** — rare, but possible during peak hours\n\nPlease share a specific `message_id` so I can check its exact status and position in the queue."
+    ),
+]
+
+IP_WARMUP_TRAINING = [
+    # Warmup schedule
+    make_single_turn("growth_ip_warmup",
+        "What's the IP warmup schedule? I just got a dedicated IP.",
+        "Here's the recommended **29-day warmup schedule** for a new dedicated IP:\n\n| Day | Emails/Day |\n|-----|------------|\n| 1-2 | 50 |\n| 3-4 | 100 |\n| 5-6 | 250 |\n| 7-8 | 500 |\n| 9-10 | 1,000 |\n| 11-12 | 2,500 |\n| 13-14 | 5,000 |\n| 15-16 | 10,000 |\n| 17-18 | 20,000 |\n| 19-20 | 35,000 |\n| 21-22 | 50,000 |\n| 23-24 | 75,000 |\n| 25-29 | 100,000+ |\n\n**Key rules:**\n- Start with your most engaged recipients (those who open/click most)\n- Send transactional emails first (higher engagement)\n- Don't skip days — consistent volume is crucial\n- Monitor bounce rates and complaints daily — pause if either spikes\n- Set up **reverse DNS (PTR record)** matching your sending domain"
+    ),
+    # rDNS/PTR for dedicated IP
+    make_single_turn("growth_ip_warmup",
+        "Do I need to set up reverse DNS for my dedicated IP?",
+        "Yes! **Reverse DNS (rDNS/PTR)** is critical for deliverability with a dedicated IP.\n\n**What it does**: Maps your IP address to a hostname (the reverse of normal DNS). Receiving servers check this to verify you're a legitimate sender.\n\n**Setup**: Contact our team to configure the PTR record for your IP:\n- Email **contact@apexmail.ee** with subject: \"PTR/rDNS Setup\"\n- Include your dedicated IP address and desired hostname (e.g., `mail.yourdomain.com`)\n\n**Best practices:**\n- PTR should match or be a subdomain of your sending domain\n- Forward DNS (A record) should point back to the same IP\n- One PTR per IP (don't share)\n\nEx: IP `198.51.100.1` → PTR: `mail.yourdomain.com` → A: `198.51.100.1`"
+    ),
+]
+
+CONTACT_MANAGEMENT_TRAINING = [
+    # CSV import
+    make_single_turn("growth_saas_healthy",
+        "How do I import contacts from a CSV file?",
+        "Import CSV contacts via the API or Dashboard:\n\n**Dashboard**: Go to **Contacts → Import → Upload CSV**\n\n**Limits:**\n- Maximum file size: **25 MB**\n- Maximum rows: **100,000** per import\n- Supported formats: CSV, TSV\n\n**Field mapping:**\n- `email` (required)\n- `first_name`, `last_name`, `tags`, `custom_fields`\n\n**Conflict resolution** (when email already exists):\n- **Skip**: Don't update existing contacts\n- **Update**: Merge new data with existing (keeps old fields)\n- **Overwrite**: Replace existing contact entirely\n\n```tool_call\n{\"tool\": \"import_contacts\", \"params\": {\"csv_url\": \"https://your-bucket.s3.amazonaws.com/contacts.csv\"}}\n```\n\nFor large imports (>100K), break into multiple files."
+    ),
+    # Contact scoring
+    make_single_turn("scale_deliverability",
+        "How does contact scoring work?",
+        "ApexMail uses a **0-100 engagement score** for each contact:\n\n| Score Range | Label | Meaning |\n|-------------|-------|--------|\n| 80-100 | 🔥 Hot | Very active, high open/click rates |\n| 60-79 | 🌡️ Warm | Regular engagement |\n| 30-59 | 🌤️ Cool | Occasional engagement |\n| 0-29 | ❄️ Cold | Low/no engagement |\n\n**Scored based on:**\n- Opens and clicks (recency and frequency)\n- Email forwards\n- Link engagement patterns\n- Time since last interaction\n\n**Use in segments:**\n- Target hot/warm contacts for important campaigns\n- Re-engage cool contacts with win-back campaigns\n- Suppress cold contacts to improve deliverability\n\nThis data is available in the Contacts API and Dashboard segments."
+    ),
+]
+
+ENTERPRISE_SUPPORT_TIERS = [
+    # Support tiers comparison
+    make_single_turn("enterprise_ecommerce",
+        "What support options do we have on the Enterprise plan?",
+        "Your **Enterprise plan** includes our highest support tier:\n\n| Feature | Enterprise Support |\n|---------|-------------------|\n| **Response Time** | **15 minutes** (critical) |\n| **Channels** | Email, Chat, **Phone** |\n| **Hours** | **24/7/365** |\n| **Dedicated CSM** | ✅ Yes |\n| **Technical Account Manager** | ✅ Yes |\n| **Slack Channel** | ✅ `#apexmail-megashop` |\n| **QBRs** | Quarterly |\n| **Architecture Reviews** | Quarterly |\n| **Training Sessions** | Unlimited |\n\n**Priority levels:**\n| Priority | First Response | Resolution |\n|----------|---------------|------------|\n| Critical (outage) | 15 min | 4 hours |\n| High (major issue) | 1 hour | 8 hours |\n| Medium (degradation) | 4 hours | 24 hours |\n| Low (question) | 24 hours | 5 days |\n\nFor emergencies, use the **emergency contact API** or call your TAM directly."
+    ),
+    # Compare support levels
+    make_single_turn("no_context",
+        "What are the different support tiers?",
+        "ApexMail offers three support tiers:\n\n| Feature | Standard | Premium | Enterprise |\n|---------|----------|---------|------------|\n| Response Time | 24 hours | 4 hours | **15 minutes** |\n| Channels | Email | Email + Chat | Email + Chat + **Phone** |\n| Hours | Business hours | Extended | **24/7/365** |\n| Dedicated CSM | ❌ | ✅ | ✅ |\n| TAM | ❌ | ❌ | ✅ |\n| Slack Channel | ❌ | ❌ | ✅ |\n| QBRs | ❌ | ❌ | ✅ |\n\n**Standard** comes with Free, Starter, and Pro plans.\n**Premium** comes with Growth and Scale plans.\n**Enterprise** comes with the Enterprise plan.\n\nAll plans can escalate urgent issues to **contact@apexmail.ee**."
+    ),
+]
+
+WHITELABEL_TRAINING = [
+    # White-label overview
+    make_single_turn("enterprise_whitelabel",
+        "How does white-labeling work? We want to remove all ApexMail branding.",
+        "White-label is an **Enterprise plan** feature that lets you fully rebrand the platform:\n\n**What you can customize:**\n- Custom sending domains (already configured: whitelabel.co)\n- Custom tracking domain with your branding\n- Custom email headers (remove ApexMail references)\n- Dashboard branding (logo, colors, CSS/JS)\n- Custom SSL certificate provisioning\n- Custom return-path domain\n\n**Your emails will show:**\n- From: `noreply@your-client-domain.com`\n- Tracking links: `track.your-client-domain.com`\n- No \"sent via ApexMail\" or similar attribution\n\nYou're already configured with `whitelabel.co` domains. Each sub-account can also have its own white-label configuration for multi-client setups."
+    ),
+]
+
+SECURITY_TRAINING = [
+    # API key scopes
+    make_single_turn("scale_key_rotation",
+        "What API key scopes are available? I want to create a least-privilege key.",
+        "ApexMail has **14 API key scopes** for granular access control:\n\n| Scope | Allows |\n|-------|--------|\n| `emails:send` | Send emails |\n| `emails:read` | View message status/events |\n| `domains:manage` | Add/remove/verify domains |\n| `domains:read` | View domain status |\n| `webhooks:manage` | Create/update/delete webhooks |\n| `webhooks:read` | View webhook config/logs |\n| `templates:manage` | Create/update/delete templates |\n| `templates:read` | View templates |\n| `suppressions:manage` | Add/remove suppressions |\n| `suppressions:read` | View suppression list |\n| `analytics:read` | View analytics/reports |\n| `contacts:manage` | Create/update/delete contacts |\n| `contacts:read` | View contacts |\n| `admin` | Full account access |\n\n**Best practice** — create purpose-specific keys:\n- Backend sending: `emails:send`, `emails:read`\n- Analytics dashboard: `analytics:read`, `emails:read`\n- Contact management: `contacts:manage`, `contacts:read`\n\n```tool_call\n{\"tool\": \"generate_api_key\", \"params\": {\"name\": \"Backend Send Only\", \"scopes\": [\"emails:send\", \"emails:read\"]}}\n```"
+    ),
+    # RBAC roles
+    make_single_turn("enterprise_compliance",
+        "What roles can I assign to team members?",
+        "ApexMail has **5 roles** with different permission levels:\n\n| Role | Permissions |\n|------|------------|\n| **Owner** | Full access + billing + account deletion |\n| **Admin** | Full access + team management (no billing) |\n| **Developer** | API keys, domains, webhooks, templates, sending |\n| **Analyst** | Read-only: analytics, events, delivery reports |\n| **Billing** | Billing management only |\n\nYou can assign roles when inviting team members or update them in **Dashboard → Team**.\n\nOwner role cannot be changed — it's tied to the account creator. You can have multiple Admins for redundancy.\n\nFor more granular control, use **API key scopes** — each key can have different permissions regardless of the user's role."
+    ),
+]
+
+ADVANCED_AUTH_TRAINING = [
+    # ARC for forwarding
+    make_single_turn("scale_deliverability",
+        "Our forwarded emails are failing DMARC. Is there a fix?",
+        "Yes — **ARC (Authenticated Received Chain)** solves this. When emails are forwarded, SPF and DKIM can break, causing DMARC failures.\n\n**What ARC does** (RFC 8617):\n- Preserves the original authentication results across forwarding hops\n- The receiving server sees that the message was authenticated at the source\n- Gmail, Microsoft, and most major providers honor ARC\n\n**ApexMail automatically adds ARC headers** to outgoing emails. If your forwarded emails are failing DMARC:\n\n1. The **forwarding server** needs to add ARC headers (not something we control)\n2. Ensure your DMARC policy handles forwarding: `p=quarantine` is safer than `p=reject` during transition\n3. Use `rua` reports to monitor: `v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com`"
+    ),
+    # MTA-STS
+    make_single_turn("enterprise_compliance",
+        "How do I set up MTA-STS for our sending domains?",
+        "**MTA-STS** (RFC 8461) enforces TLS for inbound email to your domains, preventing downgrade attacks.\n\n**Setup:**\n\n1. **Create the policy file** at `https://mta-sts.yourdomain.com/.well-known/mta-sts.txt`:\n```\nversion: STSv1\nmode: testing\nmx: mail.yourdomain.com\nmax_age: 86400\n```\n\n2. **Add DNS TXT record**:\n```\n_mta-sts.yourdomain.com. IN TXT \"v=STSv1; id=20260219\"\n```\n\n3. **Add TLSRPT record** (RFC 8460) for reporting:\n```\n_smtp._tls.yourdomain.com. IN TXT \"v=TLSRPTv1; rua=mailto:tls-reports@yourdomain.com\"\n```\n\n4. **Start in `testing` mode**, then switch to `enforce` once you've confirmed no issues.\n\nThis protects your **inbound** email. ApexMail already uses opportunistic TLS 1.3/1.2 for all **outbound** delivery."
+    ),
+]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# R14 REMEDIATION — Targets from R13 failures (8 examples)
+# Covers: contact@apexmail.ee, profile data, tool format, tool selection,
+# playbook gaps. Lost from old instance, recreated here.
+# ════════════════════════════════════════════════════════════════════════
+
+REMEDIATION_R14 = [
+    # FIX: contact@apexmail.ee in GDPR/escalation
+    make_single_turn("starter_gdpr_deletion",
+        "I need to comply with a GDPR Right to Erasure request from a customer urgently.",
+        "For a GDPR erasure request (Right to be Forgotten), here's what to do:\n\n1. **Immediately stop sending** to this contact to prevent further processing\n2. The contact's data spans multiple systems:\n   - Contact profile & preferences\n   - Email sending history\n   - Engagement events (opens, clicks)\n   - Suppression list entry\n\nSince this is a **legal/compliance request**, this needs to be handled carefully with proper documentation.\n\n📧 Please escalate to **contact@apexmail.ee**\nSubject: \"GDPR Erasure Request — Urgent — acct_gd5k2m\"\n\nInclude:\n- The data subject's email address\n- Date the request was received\n- Any specific data categories they want erased\n\nGDPR allows up to **30 days** to complete the erasure, but we aim to process these much faster. Our team will provide a deletion certificate once complete."
+    ),
+    # FIX: contact@apexmail.ee in legal
+    make_single_turn("enterprise_compliance",
+        "We need a legally binding DPA for our audit. Can you supply one?",
+        "Absolutely — Data Processing Agreements are available for all customers.\n\nSince this is a **legal request** that requires proper documentation and signatures, please reach out directly:\n\n📧 **contact@apexmail.ee**\nSubject: \"DPA Request — [Your Company Name] — Audit Compliance\"\n\nInclude:\n- Your company's legal name and address\n- Contact person for legal matters\n- DPO email (if applicable)\n- Any specific clauses your audit requires\n\nOur DPA covers:\n- GDPR compliance and data processing terms\n- Standard Contractual Clauses (SCCs) for cross-border transfers\n- Sub-processor list (currently Hetzner Online GmbH, EU)\n- Technical and organizational measures (TOM) documentation\n\nEnterprise customers can also generate DPAs programmatically via the compliance API."
+    ),
+    # FIX: craftyblog.net profile data extraction
+    make_single_turn("starter_healthy",
+        "Can you tell me about my account? What's my current usage?",
+        "Here's your account overview:\n\n**Account**: acct_sh7x3m (Starter plan — $29/mo)\n\n**Usage this month:**\n- 📧 Emails: **12,500 / 25,000** (50% used)\n- 🔌 API calls: **95,000 / 250,000** (38% used)\n- 👥 Team: **2 / 3** members\n- 🌐 Domains: **2** — craftyblog.net (verified, healthy), mail.craftyblog.net (verified, healthy)\n- 📋 Templates: 8\n- 👤 Contacts: 5,200\n\n**Recent activity:**\n- 12,500 sent, 12,375 delivered (**99.0%** delivery rate)\n- 250 opened (25% open rate) with 62 clicks\n- No bounces or complaints — great sender reputation!\n\nYour billing renews on the 3rd of each month. Everything looks healthy! 🎉"
+    ),
+    # FIX: billing calc with specific numbers
+    make_single_turn("payg_high_volume",
+        "We sent 580,000 emails last month. How much should we be charged?",
+        "Let me calculate your PAYG cost for **580,000 emails**:\n\n| Tier | Volume | Rate | Cost |\n|------|--------|------|------|\n| First 10K | 10,000 | $0.001 | $10.00 |\n| 10K–100K | 90,000 | $0.0008 | $72.00 |\n| 100K–1M | 480,000 | $0.0005 | $240.00 |\n| **Total** | **580,000** | | **$322.00** |\n\nSo your bill for 580,000 emails should be approximately **$322**.\n\nAt this volume, you might also want to compare with the **Scale plan** ($399/mo for 500,000 emails). With overage on Scale: 500K included + 80K overage × $0.50/1K = $399 + $40 = $439. So **PAYG is cheaper** at your current volume.\n\nBut if you grow past ~700K emails, the Scale plan becomes more cost-effective."
+    ),
+    # FIX: profile data with acmecorp.com
+    make_single_turn("growth_saas_healthy",
+        "What domains do I have set up and what's their health status?",
+        "Here are your domains:\n\n| Domain | Status | SPF | DKIM | DMARC |\n|--------|--------|-----|------|-------|\n| acmesaas.com | ✅ Verified | ✅ Pass | ✅ Pass | ✅ Reject |\n| mail.acmesaas.com | ✅ Verified | ✅ Pass | ✅ Pass | ✅ Reject |\n| track.acmesaas.com | ✅ Custom Tracking | SSL Active | — | — |\n\nAll domains are fully authenticated and healthy. Your DMARC policy is set to `reject` — the strongest setting — which means unauthenticated emails will be rejected by recipients.\n\n**Current sending stats**: 78,000 / 100,000 emails this month (78% used) with a **98.5%** delivery rate across 74,200 delivered emails.\n\nEverything looks great! 👍"
+    ),
+    # FIX: proper tool_call format
+    make_tool_turn("growth_dkim_fail",
+        "My DKIM is failing on techcorp.dev. Can you check what's wrong?",
+        '{"tool": "get_domain_health", "params": {"domain": "techcorp.dev"}}',
+        '{"domain": "techcorp.dev", "spf": "pass", "dkim": "fail", "dmarc": "fail", "dkim_selector": "apexmail", "dkim_record": "v=DKIM1; k=rsa; p=MIGfMA0GCS...", "dkim_expected": "v=DKIM1; k=rsa; p=EXPECTED_KEY...", "issues": ["DKIM public key mismatch", "DMARC failing due to DKIM failure"]}',
+        "I've checked **techcorp.dev** and found the issue:\n\n❌ **DKIM: FAIL** — The DKIM public key in your DNS doesn't match the expected value.\n\n**The fix:**\n1. Go to your DNS provider\n2. Update the DKIM CNAME record for selector `apexmail._domainkey.techcorp.dev`\n3. Point it to the value shown in Dashboard → Domains → techcorp.dev → DNS Records\n\n❌ **DMARC: FAIL** — This is failing *because* DKIM is failing. Once you fix DKIM, DMARC should pass too.\n\n✅ **SPF: PASS** — Your SPF record is correctly configured.\n\nAfter updating the DNS record, allow 15-30 minutes for propagation, then I can re-check."
+    ),
+    # FIX: get_campaign_stats tool selection
+    make_tool_turn("growth_saas_healthy",
+        "How did our 'Summer Launch' campaign perform?",
+        '{"tool": "get_campaign_stats", "params": {"campaign_name": "Summer Launch"}}',
+        '{"campaign_name": "Summer Launch", "status": "completed", "sent": 45000, "delivered": 44200, "opened": 12800, "clicked": 3100, "bounced": 450, "complained": 9, "delivery_rate": 98.2, "open_rate": 28.9, "click_rate": 7.0, "unsubscribed": 23}',
+        "Here are the results for your **Summer Launch** campaign:\n\n| Metric | Value |\n|--------|-------|\n| Sent | 45,000 |\n| Delivered | 44,200 (**98.2%**) |\n| Opened | 12,800 (**28.9%** open rate) |\n| Clicked | 3,100 (**7.0%** click rate) |\n| Bounced | 450 (1.0%) |\n| Complaints | 9 (0.02%) |\n| Unsubscribed | 23 (0.05%) |\n\n**Assessment**: This is a strong campaign! Your open rate (28.9%) is well above the industry average (~21%), and your complaint rate (0.02%) is excellent (under the 0.1% threshold). The 7% click rate shows good engagement with your content.\n\nThe 450 bounces are worth reviewing — I can pull the bounce details if you'd like to clean those addresses from your list."
+    ),
+    # FIX: data export with 30 days retention
+    make_single_turn("starter_gdpr_deletion",
+        "How do I export all contact data? One of our contacts requested their data.",
+        "For a GDPR **Right to Access** (data export) request:\n\n```\nPOST /enterprise/v1/compliance/dsar/access\n{\n  \"email\": \"contact@example.com\",\n  \"format\": \"json\",\n  \"includeMetadata\": true\n}\n```\n\nThis exports:\n- Contact profile data\n- Email sending history\n- Engagement events (opens, clicks)\n- Consent records\n- Preferences\n\n**Timeline**: Export is typically ready within 24 hours.\n\n**Data retention on Starter plan**: Your plan has **30-day** email body retention and 90-day event retention. Older data may not be available for export.\n\nFor simpler exports (just contact data), you can also use **Dashboard → Contacts → Export** to download a CSV of your contact list."
+    ),
+]
+
+
+# ════════════════════════════════════════════════════════════════════════
 # BUILD DATASET
 # ════════════════════════════════════════════════════════════════════════
 
@@ -7516,8 +8049,27 @@ def build_dataset():
         "remediation_r6": REMEDIATION_R6,
         "remediation_r7": REMEDIATION_R7,
         "remediation_r8": REMEDIATION_R8,
-        "remediation_r11": REMEDIATION_R11,
         "new_profiles": NEW_PROFILE_TRAINING,
+        "remediation_r13": REMEDIATION_R13,
+        # R14 expansion — enterprise, SDK, API errors, compliance, etc.
+        "enterprise_sso": ENTERPRISE_SSO,
+        "enterprise_subaccounts": ENTERPRISE_SUBACCOUNTS,
+        "enterprise_log_streaming": ENTERPRISE_LOG_STREAMING,
+        "enterprise_template_approval": ENTERPRISE_TEMPLATE_APPROVAL,
+        "api_error_training": API_ERROR_TRAINING,
+        "sdk_troubleshooting": SDK_TROUBLESHOOTING,
+        "account_lockout": ACCOUNT_LOCKOUT_TRAINING,
+        "compliance": COMPLIANCE_TRAINING,
+        "slo_uptime": SLO_UPTIME_TRAINING,
+        "billing_payment": BILLING_PAYMENT,
+        "message_diagnostics": MESSAGE_DIAGNOSTICS_TRAINING,
+        "ip_warmup": IP_WARMUP_TRAINING,
+        "contact_management": CONTACT_MANAGEMENT_TRAINING,
+        "enterprise_support_tiers": ENTERPRISE_SUPPORT_TIERS,
+        "whitelabel": WHITELABEL_TRAINING,
+        "security": SECURITY_TRAINING,
+        "advanced_auth": ADVANCED_AUTH_TRAINING,
+        "remediation_r14": REMEDIATION_R14,
     }
 
     for name, examples in sections.items():
@@ -7526,14 +8078,18 @@ def build_dataset():
         print(f"  {name}: {len(examples)} examples")
         all_examples.extend(examples)
 
-    # Duplicate some critical sections for emphasis
+    # Duplicate some critical sections for emphasis (2x weight)
     critical_sections = ["tool_calling", "clarification", "multi_turn",
                          "context_aware", "pricing_math", "multi_turn_extra",
                          "playbook_gaps", "data_lookup", "payg_examples",
                          "rag_verification", "remediation", "round3",
                          "comprehensive", "remediation_r5", "remediation_r6",
-                         "remediation_r8", "remediation_r11", "new_profiles", "safety", "knowledge_base",
-                         "playbook_coverage", "context_aware_extra"]
+                         "remediation_r8", "new_profiles", "safety", "knowledge_base",
+                         "playbook_coverage", "context_aware_extra",
+                         # R14 critical sections
+                         "enterprise_sso", "enterprise_subaccounts",
+                         "api_error_training", "sdk_troubleshooting",
+                         "compliance", "remediation_r14"]
     for name in critical_sections:
         examples = [e for e in sections[name] if isinstance(e, dict) and "text" in e]
         all_examples.extend(examples)  # 2x weight for these

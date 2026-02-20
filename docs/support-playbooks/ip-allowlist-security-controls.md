@@ -548,7 +548,7 @@ VALUES ('support_agent', '<AGENT_EMAIL>', 'mfa_disabled', 'user', '<USER_ID>',
 
 **Resolution:** See [account-lockout.md](account-lockout.md) for full detailed steps. Quick summary:
 
-1. Default: 5 failed attempts → 30-minute lockout (configurable per tenant).
+1. Default: 5 failed attempts → 15-minute lockout (configurable per tenant).
 2. Auto-unlock after lockout duration. Manual unlock:
 
 ```sql
@@ -792,7 +792,7 @@ node apps/ops/dist/cli.js audit export \
 ```
 
 4. **Audit log integrity:** ApexMail's audit logs use a cryptographic hash chain. Each entry includes the hash of the previous entry, making tampering detectable. This is valuable evidence for SOC2.
-5. **Retention:** Audit logs are retained for 2 years. Older logs are archived to S3.
+5. **Retention:** Audit logs are retained for 365 days by default (up to 2 years on Enterprise plan). Older logs are archived to S3.
 
 **Backend:** `apps/compliance/src/audit/hash-chain.ts` — HMAC-signed hash chain with `hashChainService.verify()` to validate chain integrity.
 

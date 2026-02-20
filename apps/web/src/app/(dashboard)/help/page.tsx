@@ -222,7 +222,7 @@ function ChatbotWidget({ onCreateTicket }: { onCreateTicket: () => void }) {
           </div>
 
           <div className="border-t border-border p-3 space-y-2">
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -326,7 +326,7 @@ function CreateTicketDialog({
 
             <div>
               <label className="block text-sm font-medium mb-1.5">Priority</label>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-2">
                 {PRIORITY_OPTIONS.map(opt => (
                   <button key={opt.value} type="button" onClick={() => setPriority(opt.value)}
                     className={`flex-1 px-3 py-2 border rounded-lg text-sm font-medium transition-all ${priority === opt.value ? 'border-primary bg-primary/5 ring-2 ring-primary/20' : 'border-input hover:border-primary/30 bg-background'} ${opt.color}`}>
@@ -349,7 +349,7 @@ function CreateTicketDialog({
               </div>
             )}
 
-            <div className="flex justify-end gap-3 pt-2">
+            <div className="flex items-center justify-end gap-3 pt-2">
               <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
               <Button type="submit" disabled={submitting}>
                 {submitting ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Creating...</> : <><Plus className="h-4 w-4 mr-2" />Create Ticket</>}

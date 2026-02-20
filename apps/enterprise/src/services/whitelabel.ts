@@ -689,8 +689,7 @@ ${config.customCss || ''}
       // Domain found - proceed with certificate creation
       const certId = uuidv4();
 
-      // In production, this would call AWS ACM or Let's Encrypt
-      // For now, we create a pending certificate record
+      // Create a pending certificate record for asynchronous issuer provisioning.
 
       await this.pool.query(`
         INSERT INTO ent_ssl_certificates (

@@ -17,12 +17,15 @@ import { CampaignAutopilot } from './campaign-autopilot.js';
 // Re-export for external use
 export { SendTimeOptimizer } from './send-time-optimizer.js';
 export { ChurnPredictionEngine } from './churn-prediction.js';
+export type { ChurnPrediction, ChurnSignal, RecipientChurnBatch, TenantHealthMetrics, RiskTier } from './churn-prediction.js';
 export { SubjectLineAnalyzer } from './subject-line-analyzer.js';
 export { CampaignAutopilot } from './campaign-autopilot.js';
 export { QueryEngine } from './query-engine.js';
 
 // New competitive edge features
 export { BotDetectionService, createBotDetectionService } from './bot-detection.js';
+export type { ClickEvent, BotDetectionResult } from './bot-detection.js';
+export { BotType } from './bot-detection.js';
 export { InboxPlacementService } from './inbox-placement.js';
 export { ReplyTrackingService, createReplyTrackingService } from './reply-tracking.js';
 export { EngagementTrustService, createEngagementTrustService } from './engagement-trust.js';

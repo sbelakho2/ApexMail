@@ -99,7 +99,7 @@ export default function TemplatesPage() {
                                         <TableCell className="font-medium">{t.name}</TableCell>
                                         <TableCell className="text-muted-foreground">{t.subject || '—'}</TableCell>
                                         <TableCell><Badge variant={t.status === 'published' ? 'success' : 'secondary'}>{t.status}</Badge></TableCell>
-                                        <TableCell className="tabular-nums">v{t.version}</TableCell>
+                                        <TableCell className="apex-metric-number">v{t.version}</TableCell>
                                         <TableCell className="text-muted-foreground text-sm">{formatRelativeTime(new Date(t.updatedAt))}</TableCell>
                                         <TableCell>
                                             <DropdownMenu>

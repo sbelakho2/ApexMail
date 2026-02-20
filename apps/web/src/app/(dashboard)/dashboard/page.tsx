@@ -186,7 +186,7 @@ export default function DashboardPage() {
             )}
 
             {/* Stats Grid */}
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4" data-testid="metrics-grid">
                 {(stats.length > 0 ? stats : [
                     { title: 'Emails Delivered', value: 0, change: 0, changeType: 'positive' as const, icon: Send, color: 'text-brand-600', bgColor: 'bg-brand-50' },
                     { title: 'Emails Sent', value: 0, change: 0, changeType: 'positive' as const, icon: Mail, color: 'text-brand-600', bgColor: 'bg-brand-50' },
@@ -208,7 +208,7 @@ export default function DashboardPage() {
                             </div>
                             <div className="mt-4 space-y-1 min-w-0">
                                 <p className="text-xs font-bold uppercase tracking-widest text-surface-500 truncate">{stat.title}</p>
-                                <p className="text-3xl font-bold tabular-nums tracking-tight">
+                                <p className="text-3xl font-bold apex-metric-number tracking-tight">
                                     {'isPercent' in stat && stat.isPercent ? formatPercent(stat.value / 100) : formatNumber(stat.value)}
                                 </p>
                             </div>
@@ -218,8 +218,8 @@ export default function DashboardPage() {
             </div>
 
             {/* Charts */}
-            <div className="grid gap-8 lg:grid-cols-2">
-                <Card className="border-none shadow-premium bg-white overflow-hidden">
+            <div className="grid gap-8 lg:grid-cols-2" data-testid="charts-section">
+                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-engagement">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <div className="flex items-center justify-between">
                             <div>
@@ -238,7 +238,7 @@ export default function DashboardPage() {
                         />
                     </CardContent>
                 </Card>
-                <Card className="border-none shadow-premium bg-white overflow-hidden">
+                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-volume">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <div className="flex items-center justify-between">
                             <div>
@@ -260,8 +260,8 @@ export default function DashboardPage() {
 
             {/* Recent Messages & Health */}
             <div className="grid gap-8 lg:grid-cols-3">
-                <Card className="lg:col-span-2 border-none shadow-premium overflow-hidden">
-                    <CardHeader className="flex flex-row items-center justify-between border-b border-surface-50 pb-6">
+                <Card className="lg:col-span-2 border-none shadow-premium overflow-hidden" data-testid="activity-feed">
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 border-b border-surface-50 pb-6">
                         <div>
                             <CardTitle className="text-lg font-bold">Recent Activity</CardTitle>
                             <CardDescription>Latest transactional and marketing deliveries</CardDescription>
@@ -309,9 +309,9 @@ export default function DashboardPage() {
                                                 <TableCell>
                                                     <Badge variant={style.variant} className="font-bold rounded-full px-3">{style.label}</Badge>
                                                 </TableCell>
-                                                <TableCell className="text-right font-medium tabular-nums">{formatNumber(c.sent)}</TableCell>
-                                                <TableCell className="text-right font-bold tabular-nums text-surface-900">{c.openRate > 0 ? `${c.openRate.toFixed(1)}%` : '-'}</TableCell>
-                                                <TableCell className="text-right font-bold tabular-nums text-surface-900">{c.clickRate > 0 ? `${c.clickRate.toFixed(1)}%` : '-'}</TableCell>
+                                                <TableCell className="text-right font-medium apex-metric-number">{formatNumber(c.sent)}</TableCell>
+                                                <TableCell className="text-right font-bold apex-metric-number text-surface-900">{c.openRate > 0 ? `${c.openRate.toFixed(1)}%` : '-'}</TableCell>
+                                                <TableCell className="text-right font-bold apex-metric-number text-surface-900">{c.clickRate > 0 ? `${c.clickRate.toFixed(1)}%` : '-'}</TableCell>
                                                 <TableCell className="pr-6 text-right">
                                                     <DropdownMenu>
                                                         <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-brand-50 hover:text-brand-600"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
@@ -336,7 +336,7 @@ export default function DashboardPage() {
                         {data ? (
                             <>
                                 <div className="p-6 rounded-2xl bg-gradient-to-br from-brand-600 to-brand-800 text-white text-center shadow-lg shadow-brand-500/20">
-                                    <p className="text-5xl font-bold tabular-nums tracking-tighter">{data.health?.score ?? '—'}</p>
+                                    <p className="text-5xl font-bold apex-metric-number tracking-tighter">{data.health?.score ?? '—'}</p>
                                     <p className="text-sm font-bold uppercase tracking-widest text-white/70 mt-2">Health Score ({data.health?.grade ?? '—'})</p>
                                 </div>
                                 <div className="space-y-5">
@@ -344,19 +344,20 @@ export default function DashboardPage() {
                                       { label: 'Open Rate', val: data.engagement.rates.open, variant: 'default' as const },
                                       { label: 'Bounce Rate', val: data.engagement.rates.bounce, variant: 'error' as const }].map(r => (
                                         <div key={r.label} className="space-y-2">
-                                            <div className="flex justify-between text-sm"><span className="font-bold text-surface-500 uppercase tracking-widest text-[11px]">{r.label}</span><span className="font-bold tabular-nums text-surface-900">{r.val}%</span></div>
+                                            <div className="flex justify-between text-sm"><span className="font-bold text-surface-500 uppercase tracking-widest text-[11px]">{r.label}</span><span className="font-bold apex-metric-number text-surface-900">{r.val}%</span></div>
                                             <Progress value={parseFloat(r.val)} size="sm" indicatorVariant={r.variant} />
                                         </div>
                                     ))}
                                 </div>
                                 <div className="pt-6 border-t border-surface-100 grid grid-cols-2 gap-6 text-center">
-                                    <div><p className="text-xl font-bold tabular-nums text-surface-900">{data.domains.verified}</p><p className="text-[11px] font-bold uppercase tracking-wider text-surface-500">Verified Domains</p></div>
-                                    <div><p className="text-xl font-bold tabular-nums text-surface-900">{data.suppressions.total}</p><p className="text-[11px] font-bold uppercase tracking-wider text-surface-500">Suppressions</p></div>
+                                    <div><p className="text-xl font-bold apex-metric-number text-surface-900">{data.domains.verified}</p><p className="text-[11px] font-bold uppercase tracking-wider text-surface-500">Verified Domains</p></div>
+                                    <div><p className="text-xl font-bold apex-metric-number text-surface-900">{data.suppressions.total}</p><p className="text-[11px] font-bold uppercase tracking-wider text-surface-500">Suppressions</p></div>
                                 </div>
                             </>
                         ) : (
                             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                                <Loader2 className="h-8 w-8 mb-4 animate-spin text-brand-600" /><p className="text-sm font-medium">Synchronizing metrics...</p>
+                                <Loader2 className="h-8 w-8 mb-4 animate-spin text-brand-600" data-testid="spinner" />
+                                <p className="text-sm font-medium">Synchronizing metrics...</p>
                             </div>
                         )}
                     </CardContent>

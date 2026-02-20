@@ -14,8 +14,8 @@
 | Content-Type | `application/json` |
 | Rate Limit | Plan-dependent; headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` |
 | Max Attachment Size | 25 MB per attachment; 50 MB total per message |
-| Max Recipients / Message | 100 |
-| SDKs | Node.js (`@apexmail/node`), Python (`apexmail`) |
+| Max Recipients / Message | 50 `to` + 50 `cc` + 50 `bcc` (150 total) |
+| SDKs | Node.js (`@apexmail/node`), Python (`apexmail`), Go (`github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go`), Ruby (`apexmail` gem), PHP (`apexmail/apexmail-php`), Java (`ee.apexmail:apexmail-java`) |
 
 ---
 
@@ -102,7 +102,7 @@
    - Generate a new UUID for each unique message.
    - Only reuse the key for retrying the EXACT same request.
    - Keys expire after 24 hours.
-5. Header: `Idempotency-Key: <uuid>`.
+5. Header: `X-Idempotency-Key: <uuid>`.
 
 ---
 

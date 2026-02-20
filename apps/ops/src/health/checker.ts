@@ -6,6 +6,7 @@
 
 import { ServiceHealth, HealthCheckResult, HealthStatus } from '../types.js';
 import { EventEmitter } from 'events';
+import { Socket } from 'node:net';
 import { createLogger } from '@apexmail/lib';
 
 const logger = createLogger({ name: 'health-checker' });
@@ -390,31 +391,27 @@ export class HealthChecker extends EventEmitter {
         const startTime = Date.now();
 
         return new Promise((resolve) => {
-            // In a real implementation, use net.Socket
-            // For now, emit event to be handled by external code
-            const timeoutId = setTimeout(() => {
-                resolve({
-                    healthy: false,
-                    latency: Date.now() - startTime,
-                    error: 'Connection timeout',
-                });
-            }, this.config.timeout);
+            const socket = new Socket();
+            let settled = false;
 
-            this.emit('tcp:check', { host, port }, (error?: Error) => {
-                clearTimeout(timeoutId);
+            const finalize = (healthy: boolean, error?: string) => {
+                if (settled) return;
+                settled = true;
+                socket.destroy();
                 resolve({
-                    healthy: !error,
+                    healthy,
                     latency: Date.now() - startTime,
-                    error: error?.message,
+                    error,
                 });
-            });
+            };
 
-            // If no handler, assume healthy (for testing)
-            if (this.listenerCount('tcp:check') === 0) {
-                clearTimeout(timeoutId);
-                logger.warn('FIX-500-333: No tcp:check handler registered, assuming healthy', { host, port });
-                resolve({ healthy: true, latency: Date.now() - startTime });
-            }
+            socket.setTimeout(this.config.timeout);
+
+            socket.once('connect', () => finalize(true));
+            socket.once('timeout', () => finalize(false, 'Connection timeout'));
+            socket.once('error', (err) => finalize(false, err.message));
+
+            socket.connect(port, host);
         });
     }
 

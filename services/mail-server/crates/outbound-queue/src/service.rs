@@ -163,18 +163,38 @@ impl OutboundService for OutboundServiceImpl {
         &self,
         request: Request<GetDeliveryStatusRequest>,
     ) -> Result<Response<GetDeliveryStatusResponse>, Status> {
-        let _req = request.into_inner();
-        
-        // TODO: Implement delivery status lookup
+        let req = request.into_inner();
+
+        let email_id = Uuid::parse_str(&req.email_id)
+            .map_err(|e| Status::invalid_argument(format!("Invalid email ID: {}", e)))?;
+
+        let email = self
+            .queue
+            .get_email(&email_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get delivery status: {}", e)))?;
+
+        let email = match email {
+            Some(email) => email,
+            None => return Err(Status::not_found("Email not found")),
+        };
+
+        let status = match email.status {
+            EmailStatus::Pending | EmailStatus::Deferred => DeliveryStatus::Queued,
+            EmailStatus::Processing => DeliveryStatus::Sending,
+            EmailStatus::Sent => DeliveryStatus::Sent,
+            EmailStatus::Failed => DeliveryStatus::Failed,
+        };
+
         Ok(Response::new(GetDeliveryStatusResponse {
-            email_id: _req.email_id,
-            status: DeliveryStatus::Queued as i32,
-            queued_at: 0,
-            sent_at: 0,
+            email_id: req.email_id,
+            status: status as i32,
+            queued_at: email.created_at.timestamp(),
+            sent_at: email.sent_at.map(|ts| ts.timestamp()).unwrap_or(0),
             delivered_at: 0,
             bounced_at: 0,
-            attempts: 0,
-            last_error: String::new(),
+            attempts: email.attempts,
+            last_error: email.last_error.unwrap_or_default(),
             attempts_detail: vec![],
         }))
     }

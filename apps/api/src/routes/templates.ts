@@ -11,6 +11,11 @@ import type { AppEnv, AppContext } from '../app.js';
 import { TemplatesRepository, AuditLogsRepository } from '@apexmail/db';
 import { ApiError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
+import {
+  renderReactEmailTemplate,
+  validateReactEmailSource,
+  getStarterTemplate,
+} from '@apexmail/react-email-renderer';
 
 const createTemplateSchema = z.object({
   name: z.string().min(1).max(100),
@@ -21,7 +26,7 @@ const createTemplateSchema = z.object({
   html: z.string().max(10_000_000).optional(),
   text: z.string().max(1_000_000).optional(),
   preheader: z.string().max(200).optional(),
-  engine: z.enum(['handlebars', 'mjml', 'liquid', 'ejs']).default('handlebars'),
+  engine: z.enum(['handlebars', 'mjml', 'liquid', 'ejs', 'react']).default('handlebars'),
   defaultData: z.record(z.unknown()).optional(),
   metadata: z.record(z.unknown()).optional(),
 });
@@ -53,6 +58,17 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const body = await c.req.json();
     const input = createTemplateSchema.parse(body);
+
+    // React Email: validate JSX source is syntactically correct before persisting
+    if (input.engine === 'react' && input.html) {
+      const validation = await validateReactEmailSource(input.html);
+      if (!validation.valid) {
+        throw ApiError.badRequest(
+          `React Email JSX source is invalid: ${validation.error}`,
+          'INVALID_REACT_EMAIL_SOURCE',
+        );
+      }
+    }
 
     // RACE-001 FIX: Removed pre-check for duplicate slug - rely on database 
     // unique constraint to prevent race conditions (TOCTOU vulnerability).
@@ -659,11 +675,32 @@ export function templatesRoutes(ctx: AppContext): Hono<AppEnv> {
     return c.json({ success: true });
   });
 
+  // GET /react-email/starter — return a starter JSX template for the editor
+  router.get('/react-email/starter', requireScopes('templates:read'), async (c) => {
+    const componentName = c.req.query('name') ?? 'EmailTemplate';
+    // Sanitize component name: PascalCase, alphanumeric only
+    const safeName = componentName
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .replace(/^([a-z])/, (ch) => ch.toUpperCase())
+      || 'EmailTemplate';
+    return c.json({ source: getStarterTemplate(safeName) });
+  });
+
+  // POST /react-email/validate — validate JSX source without saving
+  router.post('/react-email/validate', requireScopes('templates:read'), async (c) => {
+    const body = await c.req.json() as { source?: string };
+    if (!body.source || typeof body.source !== 'string') {
+      throw ApiError.badRequest('Request body must include a "source" string field.');
+    }
+    const result = await validateReactEmailSource(body.source);
+    return c.json(result);
+  });
+
   return router;
 }
 
 interface TemplateData {
-  engine: 'handlebars' | 'mjml' | 'liquid' | 'ejs';
+  engine: 'handlebars' | 'mjml' | 'liquid' | 'ejs' | 'react';
   subject: string;
   htmlContent: string | null;
   textContent: string | null;
@@ -677,6 +714,7 @@ interface RenderedTemplate {
 
 // C-089: Compile variable replacement regex once at module level
 const TEMPLATE_VARIABLE_RE = /\{\{([^}]+)\}\}/g;
+const EJS_VARIABLE_RE = /<%=\s*([^%>]+?)\s*%>/g;
 
 /**
  * F-224: Extract all variable names referenced in template content.
@@ -687,9 +725,12 @@ function extractTemplateVariables(template: TemplateData): string[] {
   const scan = (content: string | null) => {
     if (!content) return;
     let match: RegExpExecArray | null;
-    // Use a fresh regex instance for each scan (stateful with /g)
-    const re = /\{\{([^}]+)\}\}/g;
-    while ((match = re.exec(content)) !== null) {
+    const moustacheRe = /\{\{([^}]+)\}\}/g;
+    while ((match = moustacheRe.exec(content)) !== null) {
+      if (match[1]) variables.add(match[1].trim());
+    }
+    const ejsRe = /<%=\s*([^%>]+?)\s*%>/g;
+    while ((match = ejsRe.exec(content)) !== null) {
       if (match[1]) variables.add(match[1].trim());
     }
   };
@@ -727,6 +768,27 @@ async function renderTemplate(
   template: TemplateData,
   data: Record<string, unknown>
 ): Promise<RenderedTemplate> {
+  // React Email engine: JSX source is compiled + rendered server-side
+  if (template.engine === 'react') {
+    if (!template.htmlContent) {
+      throw new Error('React Email template requires JSX source in the html field.');
+    }
+    const result = await renderReactEmailTemplate(template.htmlContent, {
+      props: data,
+      pretty: false,
+    });
+    // Subject still uses standard variable replacement (it's plain text, not JSX)
+    const subject = replaceSubjectVariables(template.subject, data);
+    return {
+      subject,
+      html: result.html,
+      // Prefer explicitly stored textContent; fall back to auto-generated
+      text: template.textContent
+        ? replaceSubjectVariables(template.textContent, data)
+        : result.text,
+    };
+  }
+
   // F-224: Validate all template variables are present before rendering
   const validation = validateTemplateVariables(template, data);
   if (validation.missing.length > 0) {
@@ -736,23 +798,24 @@ async function renderTemplate(
     );
   }
 
-  // Simple variable replacement for now
-  // FIX-500-470: Warn if template specifies an engine other than the default.
-  // Currently all templates are rendered with {{variable}} substitution regardless of engine.
-  if ((template as any).engine && (template as any).engine !== 'handlebars') {
-    // Log a warning so operators know this template's engine field is being ignored
-    console.warn(
-      `[Templates] FIX-500-470: Template engine '${(template as any).engine}' is not implemented; ` +
-      `falling back to default variable substitution`
-    );
-  }
-  
   const replaceVariables = (content: string): string => {
-    return content.replace(TEMPLATE_VARIABLE_RE, (match, key) => {
+    let rendered = content;
+
+    // handlebars/liquid/mjml-style variables: {{ path.to.value }}
+    rendered = rendered.replace(TEMPLATE_VARIABLE_RE, (match, key) => {
       const trimmedKey = key.trim();
       const value = getNestedValue(data, trimmedKey);
       return value !== undefined ? String(value) : match;
     });
+
+    // ejs-style variables: <%= path.to.value %>
+    rendered = rendered.replace(EJS_VARIABLE_RE, (match, key) => {
+      const trimmedKey = key.trim();
+      const value = getNestedValue(data, trimmedKey);
+      return value !== undefined ? String(value) : match;
+    });
+
+    return rendered;
   };
 
   const subject = replaceVariables(template.subject);
@@ -760,6 +823,25 @@ async function renderTemplate(
   const text = template.textContent ? replaceVariables(template.textContent) : null;
 
   return { subject, html, text };
+}
+
+/**
+ * Subject-line variable replacement (used for React Email templates whose
+ * subject is plain text, not JSX).
+ */
+function replaceSubjectVariables(
+  content: string,
+  data: Record<string, unknown>,
+): string {
+  return content
+    .replace(TEMPLATE_VARIABLE_RE, (match, key) => {
+      const value = getNestedValue(data, (key as string).trim());
+      return value !== undefined ? String(value) : match;
+    })
+    .replace(EJS_VARIABLE_RE, (match, key) => {
+      const value = getNestedValue(data, (key as string).trim());
+      return value !== undefined ? String(value) : match;
+    });
 }
 
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {

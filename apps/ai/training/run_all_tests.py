@@ -346,6 +346,7 @@ def main():
     parser.add_argument("--adapter", type=str, help="Path to LoRA adapter")
     parser.add_argument("--base-model", type=str, default="/workspace/models/Qwen3-8B")
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--auto-device-map", action="store_true", help="Use device_map='auto' for large models")
     parser.add_argument("--suite", type=str, choices=["all", "agent", "stress"], default="all")
     parser.add_argument("--category", type=str, help="Run one category only")
     parser.add_argument("--dry-run", action="store_true")
@@ -363,10 +364,11 @@ def main():
     from peft import PeftModel
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True)
+    dmap = "auto" if args.auto_device_map else args.device
     base_model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=torch.bfloat16,
-        device_map=args.device,
+        device_map=dmap,
         trust_remote_code=True,
     )
     if args.adapter:
@@ -375,6 +377,9 @@ def main():
     else:
         model = base_model
     model.eval()
+    # For auto device map, find the first device to pass to run_inference
+    if args.auto_device_map:
+        args.device = "cuda:0"  # input tensors go to first GPU, model handles routing
 
     # ── Build unified test list ─────────────────────────────────
     test_list = []  # [(category, test_dict, suite)]

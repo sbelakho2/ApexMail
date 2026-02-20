@@ -255,6 +255,51 @@ impl EmailQueue {
         debug!(email_id = %id, "Email marked as sent");
         Ok(())
     }
+
+    /// Get queued email by ID
+    pub async fn get_email(&self, id: &Uuid) -> Result<Option<QueuedEmail>> {
+        let row = sqlx::query(r#"
+            SELECT * FROM email_queue WHERE id = $1
+        "#)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let email = row.map(|row| {
+            let status = match row.get::<String, _>("status").as_str() {
+                "pending" => EmailStatus::Pending,
+                "processing" => EmailStatus::Processing,
+                "sent" => EmailStatus::Sent,
+                "failed" => EmailStatus::Failed,
+                "deferred" => EmailStatus::Deferred,
+                _ => EmailStatus::Pending,
+            };
+
+            QueuedEmail {
+                id: row.get("id"),
+                from_address: row.get("from_address"),
+                to_addresses: row.get("to_addresses"),
+                subject: row.get("subject"),
+                text_body: row.get("text_body"),
+                html_body: row.get("html_body"),
+                headers: row.get("headers"),
+                status,
+                attempts: row.get("attempts"),
+                max_attempts: row.get("max_attempts"),
+                last_error: row.get("last_error"),
+                next_retry_at: row.get("next_retry_at"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                sent_at: row.get("sent_at"),
+                campaign_id: row.get("campaign_id"),
+                sequence_id: row.get("sequence_id"),
+                contact_id: row.get("contact_id"),
+                priority: row.get("priority"),
+            }
+        });
+
+        Ok(email)
+    }
     
     /// Mark email as failed
     pub async fn mark_failed(&self, id: &Uuid, error: &str, defer: bool) -> Result<()> {

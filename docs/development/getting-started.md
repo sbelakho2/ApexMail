@@ -15,8 +15,8 @@ Guide for developers contributing to ApexMail.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourorg/apexmail.git
-cd apexmail
+git clone https://github.com/sbelakho2/ApexMail.git
+cd ApexMail
 
 # Install dependencies
 pnpm install

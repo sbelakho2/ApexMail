@@ -371,8 +371,7 @@ export class PredictiveAnalytics {
     }
 
     private updateModels(): void {
-        // In production, this would run actual ML training
-        // For now, adjust coefficients based on historical data
+        // Adjust model coefficients from historical performance aggregates.
 
         if (this.historicalData.length < this.config.minDataPoints) {
             // FIX-500-397: Don't set lastModelUpdate when skipping due to

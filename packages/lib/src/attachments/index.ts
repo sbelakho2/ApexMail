@@ -49,6 +49,7 @@ export interface AttachmentStorageConfig {
         endpoint?: string; // For R2, MinIO, etc.
         accessKeyId: string;
         secretAccessKey: string;
+        sessionToken?: string;
         forcePathStyle?: boolean; // For MinIO
     };
     /** Max attachment size in bytes (default: 25MB) */
@@ -336,6 +337,10 @@ export class S3AttachmentStorage implements AttachmentStorage {
             const expires = new Date(Date.now() + this.expirationDays * 24 * 60 * 60 * 1000);
             headers['x-amz-meta-expires'] = expires.toISOString();
         }
+
+        if (this.config.sessionToken) {
+            headers['x-amz-security-token'] = this.config.sessionToken;
+        }
         
         // Generate signature (simplified - in production use AWS SDK)
         const signature = this.signRequest('PUT', canonicalUri, headers, hash, dateStamp);
@@ -463,6 +468,10 @@ export class S3AttachmentStorage implements AttachmentStorage {
             'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
             'Host': host,
         };
+
+        if (this.config.sessionToken) {
+            headers['x-amz-security-token'] = this.config.sessionToken;
+        }
         
         const signature = this.signRequest(method, path, headers, 'UNSIGNED-PAYLOAD', dateStamp);
         headers['Authorization'] = signature;
@@ -470,10 +479,9 @@ export class S3AttachmentStorage implements AttachmentStorage {
         return headers;
     }
     
-    // FIX-500-376: TODO: Migrate to @aws-sdk/client-s3 for complete SigV4 support
-    // including session tokens (STS), chunked uploads, query-string signing,
-    // multi-value headers, and edge cases. This simplified implementation works for
-    // basic PUT/GET/DELETE but is not production-complete for all S3 operations.
+    // FIX-500-376: Partial SigV4 implementation. Supports STS session tokens and
+    // basic PUT/GET/DELETE/HEAD signing, but still does not support chunked
+    // uploads, presigned URL query signing, or advanced canonicalization edge-cases.
     private signRequest(
         method: string,
         path: string,

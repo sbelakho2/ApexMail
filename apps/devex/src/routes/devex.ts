@@ -21,6 +21,7 @@ import { SandboxService, SandboxMode } from '../services/sandbox.js';
 import { OpenApiGenerator } from '../services/openapi-generator.js';
 import { CliToolService } from '../services/cli-tool.js';
 import { config } from '../config.js';
+import JSZip from 'jszip';
 
 type Variables = {
   tenantId: string;
@@ -350,14 +351,25 @@ export function createDevExRoutes(db: Pool, redis?: Redis): Hono<{ Variables: Va
       return c.json({ error: result.error.message }, 500);
     }
 
-    // For now, return the files as JSON since createArchive doesn't exist
-    // In production, this would create a zip archive
     const filename = `apexmail-${language}-sdk-${version}.zip`;
-    const archiveContent = JSON.stringify(result.value.files, null, 2);
+
+    const zip = new JSZip();
+    for (const file of result.value.files) {
+      zip.file(file.path, file.content);
+    }
+    zip.file('README.md', result.value.readme);
+    zip.file('INSTALL.md', result.value.installInstructions);
+
+    const archiveContent = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 9 },
+    });
+
     return new Response(archiveContent, {
       headers: {
-        'Content-Type': 'application/json',
-        'Content-Disposition': `attachment; filename="${filename.replace('.zip', '.json')}"`,
+        'Content-Type': 'application/zip',
+        'Content-Disposition': `attachment; filename="${filename}"`,
       },
     });
   });

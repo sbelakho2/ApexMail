@@ -120,7 +120,7 @@ The free tier allows 100 requests/minute. Upgrade your plan or wait for the rate
 - 📚 [Full API Documentation](https://docs.apexmail.ee)
 - 💬 [Discord Community](https://discord.gg/apexmail)
 - 📧 [Email Support](mailto:contact@apexmail.ee)
-- 🐛 [Report a Bug](https://github.com/apexmail/apexmail/issues)
+- 🐛 [Report a Bug](https://github.com/Bel-Consulting-OU/ApexMail/issues)
 
 ---
 

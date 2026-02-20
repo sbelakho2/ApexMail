@@ -343,8 +343,8 @@ export class PersonalizationEngine {
   }
 
   private inferTone(_profiles: SimilarProfile[]): string {
-    // For now, return professional. In production, this would aggregate
-    // the tone that worked best for similar profiles.
+    // Tone labels are not persisted in SimilarProfile records yet, so keep
+    // a stable safe default.
     return 'professional';
   }
 

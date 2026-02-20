@@ -146,19 +146,19 @@ export default function SecretsPage() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                 <div className="bg-card rounded-lg border border-border p-4 shadow-sm">
                     <div className="text-sm text-muted-foreground font-medium">Total Secrets</div>
-                    <div className="text-2xl font-bold text-foreground tabular-nums">{secrets.length}</div>
+                    <div className="text-2xl font-bold text-foreground apex-metric-number">{secrets.length}</div>
                 </div>
                 <div className="bg-card rounded-lg border border-border p-4 shadow-sm">
                     <div className="text-sm text-muted-foreground font-medium">Active</div>
-                    <div className="text-2xl font-bold text-emerald-600 tabular-nums">{activeCount}</div>
+                    <div className="text-2xl font-bold text-emerald-600 apex-metric-number">{activeCount}</div>
                 </div>
                 <div className="bg-card rounded-lg border border-border p-4 shadow-sm">
                     <div className="text-sm text-muted-foreground font-medium">Expiring Soon</div>
-                    <div className="text-2xl font-bold text-amber-600 tabular-nums">{expiringCount}</div>
+                    <div className="text-2xl font-bold text-amber-600 apex-metric-number">{expiringCount}</div>
                 </div>
                 <div className="bg-card rounded-lg border border-border p-4 shadow-sm">
                     <div className="text-sm text-muted-foreground font-medium">Expired/Revoked</div>
-                    <div className="text-2xl font-bold text-destructive tabular-nums">{expiredCount + secrets.filter(s => s.status === 'revoked').length}</div>
+                    <div className="text-2xl font-bold text-destructive apex-metric-number">{expiredCount + secrets.filter(s => s.status === 'revoked').length}</div>
                 </div>
             </div>
 
@@ -242,7 +242,7 @@ export default function SecretsPage() {
                                     <td className="px-4 py-3 text-sm text-muted-foreground">
                                         {secret.expiresAt ? formatDate(secret.expiresAt) : 'Never'}
                                     </td>
-                                    <td className="px-4 py-3 text-sm text-muted-foreground tabular-nums">
+                                    <td className="px-4 py-3 text-sm text-muted-foreground apex-metric-number">
                                         {secret.accessCount.toLocaleString()} accesses
                                     </td>
                                     <td className="px-4 py-3 text-right">
@@ -311,7 +311,7 @@ export default function SecretsPage() {
                             </div>
                             <div className="flex justify-between py-2 border-b border-border">
                                 <span className="text-muted-foreground">Access count</span>
-                                <span className="text-foreground tabular-nums">{selectedSecret.accessCount.toLocaleString()}</span>
+                                <span className="text-foreground apex-metric-number">{selectedSecret.accessCount.toLocaleString()}</span>
                             </div>
                             <div className="flex justify-between py-2">
                                 <span className="text-muted-foreground">Last Accessed</span>

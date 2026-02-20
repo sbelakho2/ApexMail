@@ -786,8 +786,8 @@ export class FailoverService {
               AND usename NOT IN ('replicator', 'postgres')
           `);
           
-          // Set hot_standby = on and restart would be needed in real implementation
-          // For now, abort failback if original is not properly configured as standby
+          // Set hot_standby = on and restart would be needed out-of-band.
+          // Abort failback if original is not properly configured as standby.
           throw new Error(
             'Original primary is not in standby mode. Split-brain risk detected! ' +
             'Manual intervention required: reconfigure original as standby, then retry failback.'

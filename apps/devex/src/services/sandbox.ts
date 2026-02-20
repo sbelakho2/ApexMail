@@ -1061,9 +1061,53 @@ export class SandboxService {
   }
 
   private async forwardEmail(email: CapturedEmail, forwardTo: string): Promise<void> {
-    // In production, this would actually forward the email
-    // For now, we just log it
-    logger.info(`[Sandbox] Forwarding email ${email.id} to ${forwardTo}`);
+    const forwardedCopy: CapturedEmail = {
+      ...email,
+      id: generateUUID(),
+      to: [forwardTo],
+      cc: [],
+      bcc: [],
+      metadata: {
+        ...email.metadata,
+        forwarded: true,
+        forwardedFromEmailId: email.id,
+        forwardedTo: forwardTo,
+      },
+      capturedAt: new Date(),
+    };
+
+    await this.db.query(
+      `INSERT INTO sandbox_captured_emails (
+          id, sandbox_id, from_address, to_addresses, cc_addresses, bcc_addresses,
+          subject, text_content, html_content, headers, attachments, metadata,
+          simulated_events, captured_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      [
+        forwardedCopy.id,
+        forwardedCopy.sandboxId,
+        forwardedCopy.from,
+        forwardedCopy.to,
+        forwardedCopy.cc,
+        forwardedCopy.bcc,
+        forwardedCopy.subject,
+        forwardedCopy.textContent,
+        forwardedCopy.htmlContent,
+        JSON.stringify(forwardedCopy.headers),
+        JSON.stringify(forwardedCopy.attachments),
+        JSON.stringify(forwardedCopy.metadata),
+        JSON.stringify(forwardedCopy.simulatedEvents),
+        forwardedCopy.capturedAt,
+      ]
+    );
+
+    const cached = this.capturedEmails.get(email.sandboxId) ?? [];
+    cached.push(forwardedCopy);
+    if (cached.length > SandboxService.MAX_CAPTURES_PER_SANDBOX) {
+      cached.splice(0, cached.length - SandboxService.MAX_CAPTURES_PER_SANDBOX);
+    }
+    this.capturedEmails.set(email.sandboxId, cached);
+
+    logger.info(`[Sandbox] Forwarded captured email ${email.id} to ${forwardTo} as ${forwardedCopy.id}`);
   }
 
   private async triggerWebhook(url: string, event: string, payload: unknown): Promise<void> {

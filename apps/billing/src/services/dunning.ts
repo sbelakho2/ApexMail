@@ -29,7 +29,7 @@ export interface DunningConfig {
   gracePeriodDays: number;        // Days to retain queued messages after hard suspend
 }
 
-// FIX-500-362: TODO: Move dunning schedule configuration to a database table (e.g., dunning_config)
+// FIX-500-362: Moved dunning schedule configuration to a database table (dunning_config)
 // so it can be updated at runtime per-tenant without redeployment.
 // Current in-memory defaults are used as fallbacks when no DB config exists.
 const DEFAULT_CONFIG: DunningConfig = {
@@ -44,6 +44,7 @@ const DEFAULT_CONFIG: DunningConfig = {
  */
 export class DunningService {
   private readonly config: DunningConfig;
+  private configTableEnsured = false;
 
   constructor(
     private readonly db: DatabasePool,
@@ -62,6 +63,7 @@ export class DunningService {
     invoiceId: string,
     amount: number
   ): Promise<Result<DunningState, Error>> {
+    const tenantConfig = await this.getConfigForTenant(tenantId);
     const now = new Date();
 
     // Get or create dunning record
@@ -85,7 +87,7 @@ export class DunningService {
     const failedCount = isFirstFailure ? 1 : existing.failed_payment_count + 1;
 
     // Calculate next retry date
-    const nextRetryAt = this.calculateNextRetry(firstFailedAt, failedCount);
+    const nextRetryAt = this.calculateNextRetry(firstFailedAt, failedCount, tenantConfig);
 
     // Calculate status based on days since first failure
     const daysSinceFirstFailure = Math.floor(
@@ -96,11 +98,11 @@ export class DunningService {
     let suspendedAt: Date | null = null;
     let gracePeriodEndsAt: Date | null = null;
 
-    if (daysSinceFirstFailure >= this.config.hardSuspendAfterDays) {
+    if (daysSinceFirstFailure >= tenantConfig.hardSuspendAfterDays) {
       newStatus = 'hard_suspended';
       suspendedAt = existing?.status === 'hard_suspended' ? null : now;
-      gracePeriodEndsAt = new Date(now.getTime() + this.config.gracePeriodDays * 24 * 60 * 60 * 1000);
-    } else if (daysSinceFirstFailure >= this.config.softSuspendAfterDays) {
+      gracePeriodEndsAt = new Date(now.getTime() + tenantConfig.gracePeriodDays * 24 * 60 * 60 * 1000);
+    } else if (daysSinceFirstFailure >= tenantConfig.softSuspendAfterDays) {
       newStatus = 'soft_suspended';
       suspendedAt = existing?.status.includes('suspended') ? null : now;
     }
@@ -411,8 +413,8 @@ export class DunningService {
     });
   }
 
-  private calculateNextRetry(firstFailedAt: Date, attemptCount: number): Date | null {
-    const { retryScheduleDays } = this.config;
+  private calculateNextRetry(firstFailedAt: Date, attemptCount: number, config: DunningConfig): Date | null {
+    const { retryScheduleDays } = config;
 
     if (attemptCount > retryScheduleDays.length) {
       return null; // No more retries
@@ -423,6 +425,66 @@ export class DunningService {
       return null;
     }
     return new Date(firstFailedAt.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+  }
+
+  private async ensureConfigTable(): Promise<void> {
+    if (this.configTableEnsured) return;
+
+    const result = await this.db.query(`
+      CREATE TABLE IF NOT EXISTS dunning_config (
+        tenant_id VARCHAR(36) PRIMARY KEY,
+        retry_schedule_days INTEGER[] NOT NULL,
+        soft_suspend_after_days INTEGER NOT NULL,
+        hard_suspend_after_days INTEGER NOT NULL,
+        grace_period_days INTEGER NOT NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    if (!result.ok) {
+      throw result.error;
+    }
+    this.configTableEnsured = true;
+  }
+
+  private async getConfigForTenant(tenantId: string): Promise<DunningConfig> {
+    try {
+      await this.ensureConfigTable();
+
+      const result = await this.db.query<{
+        retry_schedule_days: number[];
+        soft_suspend_after_days: number;
+        hard_suspend_after_days: number;
+        grace_period_days: number;
+      }>(
+        `SELECT retry_schedule_days, soft_suspend_after_days, hard_suspend_after_days, grace_period_days
+         FROM dunning_config
+         WHERE tenant_id = $1`,
+        [tenantId]
+      );
+
+      if (!result.ok) {
+        return this.config;
+      }
+
+      const row = result.value.rows[0];
+      if (!row) {
+        return this.config;
+      }
+
+      const retryScheduleDays = Array.isArray(row.retry_schedule_days)
+        ? row.retry_schedule_days.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
+        : this.config.retryScheduleDays;
+
+      return {
+        retryScheduleDays: retryScheduleDays.length > 0 ? retryScheduleDays : this.config.retryScheduleDays,
+        softSuspendAfterDays: row.soft_suspend_after_days,
+        hardSuspendAfterDays: row.hard_suspend_after_days,
+        gracePeriodDays: row.grace_period_days,
+      };
+    } catch {
+      return this.config;
+    }
   }
 
   private async sendDunningNotification(

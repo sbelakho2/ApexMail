@@ -82,7 +82,7 @@ export default function CompliancePage() {
                         <Card key={s.label}>
                             <CardContent className="p-4 text-center">
                                 <p className="text-sm text-muted-foreground">{s.label}</p>
-                                <p className="text-2xl font-bold mt-1 tabular-nums">{formatNumber(s.value)}</p>
+                                <p className="text-2xl apex-metric-number mt-1">{formatNumber(s.value)}</p>
                             </CardContent>
                         </Card>
                     ))}

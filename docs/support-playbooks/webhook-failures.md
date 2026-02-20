@@ -86,7 +86,7 @@ curl -v -X POST \
 Check for:
 - DNS resolution failures
 - SSL/TLS handshake errors (expired cert, wrong chain, self-signed)
-- Connection timeout (>10s = our timeout threshold)
+- Connection timeout (>30s = our timeout threshold)
 - HTTP response code (anything outside 2xx is treated as failure)
 
 ### Step 4: Check Redis Retry Queue
@@ -138,11 +138,11 @@ echo | openssl s_client -connect <HOST>:443 -servername <HOST> 2>/dev/null | ope
 
 **Resolution:** Notify customer that their SSL certificate has expired. We do not deliver to endpoints with invalid certificates (security policy).
 
-### Endpoint Timeout (>10s)
+### Endpoint Timeout (>30s)
 
 **Frequency:** ~25% of webhook failure tickets
 
-The customer's endpoint takes too long to respond. Our timeout is 10 seconds.
+The customer's endpoint takes too long to respond. Our timeout is 30 seconds.
 
 **Resolution:** Advise customer to:
 1. Return 200 immediately and process the event asynchronously
@@ -204,7 +204,9 @@ node apps/ops/dist/cli.js webhook resend \
 
 ### Re-enable a Disabled Endpoint
 
-Endpoints are auto-disabled after 8 consecutive failures.
+Endpoints are auto-disabled when either:
+- **10+ consecutive failures in the last hour**, OR
+- **50%+ failure rate** with at least 20 delivery attempts
 
 ```sql
 -- Re-enable endpoint after customer fixes their side
@@ -233,18 +235,28 @@ redis-cli -h <REDIS_HOST> DEL webhook:retry:<TENANT_ID>
 
 ## Retry Policy
 
-| Attempt | Delay        | Cumulative Time |
-|---------|-------------|-----------------|
-| 1       | Immediate   | 0               |
-| 2       | 30 seconds  | 30s             |
-| 3       | 2 minutes   | 2m 30s          |
-| 4       | 10 minutes  | 12m 30s         |
-| 5       | 30 minutes  | 42m 30s         |
-| 6       | 2 hours     | 2h 42m          |
-| 7       | 6 hours     | 8h 42m          |
-| 8       | 15 hours    | ~24h            |
+Webhook retries use **configurable exponential backoff** per endpoint:
 
-After 8 failed attempts (spanning ~24 hours), the endpoint is marked as disabled and no further retries are attempted. The tenant receives an email notification about the disabled endpoint.
+| Parameter | Default | Range |
+|-----------|---------|-------|
+| Max retries | 3 | 0–10 |
+| Initial delay | 60 seconds | 1–3,600 seconds |
+| Backoff multiplier | 2× | 1–5× |
+| Max computed delay cap | 300 seconds | — |
+
+**Default retry schedule** (with default settings: 3 retries, 60s delay, 2× backoff):
+
+| Attempt | Delay | Cumulative Time |
+|---------|-------|----------------|
+| 1 | Immediate | 0 |
+| 2 | 60 seconds | 1m |
+| 3 | 120 seconds | 3m |
+| 4 | 240 seconds | 7m |
+
+> **Note:** If the target server returns a `Retry-After` header, that value is used instead of the computed backoff (capped at 1 hour).
+> The system-wide maximum retries cap is 5 (from `WEBHOOK_MAX_RETRIES` env var).
+
+After all retry attempts are exhausted, the delivery is marked as permanently failed. If the endpoint accumulates 10+ consecutive failures within an hour, the endpoint is **auto-disabled** and the tenant receives an email notification.
 
 ---
 

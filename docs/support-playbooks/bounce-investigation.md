@@ -48,7 +48,7 @@ LIMIT 20;
 
 ### Step 2: Classify bounce categories
 
-Check the analytics dashboard at `https://app.apexmail.io/admin/analytics/bounces` or query directly:
+Check the analytics dashboard at `https://app.apexmail.ee/admin/analytics/bounces` or query directly:
 
 ```sql
 -- Break down by bounce category
@@ -181,7 +181,7 @@ ORDER BY day;
    ```bash
    redis-cli -h redis.apexmail.internal LLEN mta:retry:queue
    ```
-2. Check retry backoff is working (default: 5m, 15m, 30m, 1h, 4h)
+2. Check retry backoff is working (default: exponential backoff — 30 s × 2^(attempt−1), capped at 30 min; default max 3 attempts)
 3. No customer action needed unless it persists >24 hours
 
 ### For blocks (IP/domain reputation)

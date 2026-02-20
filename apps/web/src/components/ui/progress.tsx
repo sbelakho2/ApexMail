@@ -78,7 +78,7 @@ const Progress = React.forwardRef<
  />
  </ProgressPrimitive.Root>
  {showValue && (
- <span className="text-sm text-muted-foreground tabular-nums">
+ <span className="text-sm text-muted-foreground apex-metric-number">
  {value}%
  </span>
  )}

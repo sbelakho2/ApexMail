@@ -1,6 +1,15 @@
 # SDK Reference
 
-ApexMail provides official SDKs for **Node.js** and **Python** to simplify integration with the ApexMail API. Both SDKs offer typed interfaces, automatic retries, and consistent error handling.
+ApexMail provides official SDKs for **six languages** to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling.
+
+| Language | Package | Min. version |
+|----------|---------|--------------|
+| Node.js / TypeScript | `@apexmail/sdk` (npm) | Node.js ≥ 18 |
+| Python | `apexmail` (PyPI) | Python ≥ 3.9 |
+| Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | Go 1.21 |
+| Ruby | `apexmail` (RubyGems) | Ruby ≥ 2.7 |
+| PHP | `apexmail/apexmail-php` (Packagist) | PHP ≥ 8.1 |
+| Java | `ee.apexmail:apexmail-java` (Maven Central) | Java 17 |
 
 ---
 
@@ -477,3 +486,324 @@ Signatures use HMAC-SHA256 over the `timestamp.payload` format. The `X-ApexMail-
 | Event stream (SSE) | 5 concurrent connections per API key |
 
 Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`). Both SDKs automatically surface this data through the `RateLimitError` class when limits are exceeded.
+
+---
+
+## Go SDK
+
+**Module:** `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go`
+
+```bash
+go get github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go
+```
+
+**Requirements:** Go 1.21+. No external dependencies — uses only the Go standard library.
+
+### Initialization
+
+```go
+import apexmail "github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go"
+
+client := apexmail.New("am_live_your_api_key")
+
+// With custom options:
+client := apexmail.New("am_live_your_api_key", apexmail.Config{
+    BaseURL: "https://api.apexmail.dev",
+    Timeout: 30 * time.Second,
+})
+```
+
+### Send an email
+
+```go
+ctx := context.Background()
+
+msg, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
+    From:    "Sender <hello@example.com>",
+    To:      []string{"user@example.com"},
+    Subject: "Hello from ApexMail",
+    HTML:    "<p>Hello!</p>",
+})
+if err != nil {
+    var apiErr *apexmail.APIError
+    if errors.As(err, &apiErr) {
+        fmt.Printf("API error %d: %s\n", apiErr.StatusCode, apiErr.Message)
+    }
+}
+fmt.Println(msg.ID)
+```
+
+### Batch send
+
+```go
+result, err := client.Emails.Batch(ctx, &apexmail.BatchSendRequest{
+    Messages: []apexmail.SendEmailRequest{
+        {From: "hello@example.com", To: []string{"a@example.com"}, Subject: "Hi A", HTML: "..."},
+        {From: "hello@example.com", To: []string{"b@example.com"}, Subject: "Hi B", HTML: "..."},
+    },
+})
+```
+
+### Domains
+
+```go
+domain, _ := client.Domains.Create(ctx, "mail.example.com")
+_, _ = client.Domains.Verify(ctx, domain.ID)
+domains, _ := client.Domains.List(ctx)
+```
+
+---
+
+## Ruby SDK
+
+**Gem:** `apexmail`
+
+```bash
+gem install apexmail
+# or add to Gemfile: gem 'apexmail'
+```
+
+**Requirements:** Ruby ≥ 2.7. No gem dependencies.
+
+### Initialization
+
+```ruby
+require 'apexmail'
+
+client = ApexMail::Client.new('am_live_your_api_key')
+
+# With options:
+client = ApexMail::Client.new(
+  'am_live_your_api_key',
+  base_url: 'https://api.apexmail.dev',
+  read_timeout: 30
+)
+```
+
+### Send an email
+
+```ruby
+msg = client.emails.send(
+  from:    'Sender <hello@example.com>',
+  to:      'user@example.com',
+  subject: 'Hello from ApexMail',
+  html:    '<p>Hello!</p>'
+)
+puts msg[:id]
+```
+
+### Batch send
+
+```ruby
+result = client.emails.batch(messages: [
+  { from: 'hello@example.com', to: 'a@example.com', subject: 'Hi A', html: '...' },
+  { from: 'hello@example.com', to: 'b@example.com', subject: 'Hi B', html: '...' },
+])
+```
+
+### Error handling
+
+```ruby
+begin
+  client.emails.send(from: 'hello@example.com', to: 'user@example.com', subject: 'Hi', html: '...')
+rescue ApexMail::RateLimitError => e
+  puts "Rate limited: #{e.message}"
+rescue ApexMail::AuthenticationError => e
+  puts "Auth failed: #{e.message}"
+rescue ApexMail::Error => e
+  puts "API error: #{e.message}"
+end
+```
+
+---
+
+## PHP SDK
+
+**Package:** `apexmail/apexmail-php` (Packagist)
+
+```bash
+composer require apexmail/apexmail-php
+```
+
+**Requirements:** PHP ≥ 8.1, ext-curl, ext-json.
+
+### Initialization
+
+```php
+use ApexMail\Client;
+
+$client = new Client('am_live_your_api_key');
+
+// With options:
+$client = new Client('am_live_your_api_key', [
+    'baseUrl' => 'https://api.apexmail.dev',
+    'timeout' => 30,
+]);
+```
+
+### Send an email
+
+```php
+$msg = $client->emails->send([
+    'from'    => 'Sender <hello@example.com>',
+    'to'      => 'user@example.com',
+    'subject' => 'Hello from ApexMail',
+    'html'    => '<p>Hello!</p>',
+]);
+echo $msg['id'];
+```
+
+### Batch send
+
+```php
+$result = $client->emails->batch([
+    ['from' => 'hello@example.com', 'to' => 'a@example.com', 'subject' => 'Hi A', 'html' => '...'],
+    ['from' => 'hello@example.com', 'to' => 'b@example.com', 'subject' => 'Hi B', 'html' => '...'],
+]);
+```
+
+### Error handling
+
+```php
+use ApexMail\Exceptions\RateLimitException;
+use ApexMail\Exceptions\ApexMailException;
+
+try {
+    $client->emails->send([...]);
+} catch (RateLimitException $e) {
+    echo "Rate limited: " . $e->getMessage();
+} catch (ApexMailException $e) {
+    echo "API error [{$e->getStatusCode()}]: " . $e->getMessage();
+}
+```
+
+---
+
+## Java SDK
+
+**Artifact:** `ee.apexmail:apexmail-java` (Maven Central)
+
+**Maven:**
+```xml
+<dependency>
+  <groupId>ee.apexmail</groupId>
+  <artifactId>apexmail-java</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+**Gradle:**
+```groovy
+implementation 'ee.apexmail:apexmail-java:1.0.0'
+```
+
+**Requirements:** Java 17+. No external dependencies — uses `java.net.http.HttpClient` (JDK 11+).
+
+### Initialization
+
+```java
+import ee.apexmail.ApexMailClient;
+
+ApexMailClient client = new ApexMailClient("am_live_your_api_key");
+
+// With custom base URL:
+ApexMailClient client = new ApexMailClient(
+    "am_live_your_api_key",
+    "https://api.apexmail.dev",
+    Duration.ofSeconds(30)
+);
+```
+
+### Send an email
+
+```java
+import java.util.Map;
+
+Map<String, Object> result = client.emails().send(Map.of(
+    "from",    "Sender <hello@example.com>",
+    "to",      "user@example.com",
+    "subject", "Hello from ApexMail",
+    "html",    "<p>Hello!</p>"
+));
+System.out.println(result.get("id"));
+```
+
+### Batch send
+
+```java
+var messages = List.of(
+    Map.of("from", "hello@example.com", "to", "a@example.com", "subject", "Hi A", "html", "..."),
+    Map.of("from", "hello@example.com", "to", "b@example.com", "subject", "Hi B", "html", "...")
+);
+Map<String, Object> result = client.emails().batch(messages);
+```
+
+### Error handling
+
+```java
+import ee.apexmail.*;
+
+try {
+    client.emails().send(Map.of(...));
+} catch (RateLimitException e) {
+    System.out.println("Rate limited: " + e.getMessage());
+} catch (AuthenticationException e) {
+    System.out.println("Auth failed: " + e.getMessage());
+} catch (ApexMailException e) {
+    System.out.printf("API error [%d]: %s%n", e.getStatusCode(), e.getMessage());
+}
+```
+
+---
+
+## React Email Templates
+
+ApexMail supports composing emails as **React components** using `@react-email/components`. Templates with `engine: "react"` are transpiled and rendered server-side using a secure VM sandbox.
+
+### Create a React Email template
+
+```typescript
+// Node.js SDK
+const template = await apexmail.templates.create({
+  name: 'Welcome Email',
+  subject: 'Welcome, {{name}}!',
+  engine: 'react',
+  html: `
+import { Html, Head, Body, Container, Text, Button } from '@react-email/components';
+import * as React from 'react';
+
+export default function WelcomeEmail({ name, ctaUrl }) {
+  return (
+    <Html>
+      <Head />
+      <Body style={{ fontFamily: 'sans-serif' }}>
+        <Container>
+          <Text>Hello, {name}!</Text>
+          <Button href={ctaUrl}>Get Started</Button>
+        </Container>
+      </Body>
+    </Html>
+  );
+}
+  `,
+});
+```
+
+### Validate JSX before saving
+
+```typescript
+const validation = await apexmail.templates.validateReactEmail(jsxSource);
+// => { valid: true }   or   { valid: false, error: "SyntaxError: ..." }
+```
+
+### Get a starter template
+
+```typescript
+const starter = await fetch('/v1/templates/react-email/starter?name=MyEmail');
+// Returns a full JSX template with all @react-email/components imports included.
+```
+
+**Supported components:** All `@react-email/components` — `Html`, `Head`, `Body`, `Container`, `Section`, `Row`, `Column`, `Text`, `Button`, `Link`, `Image`, `Hr`, `Preview`, `Markdown`, `Font`, `Head`, `Tailwind`, and more.
+
+**Security:** Templates execute inside a Node.js `vm` sandbox with a strict module allowlist. Only `react` and `@react-email/*` packages may be imported. Filesystem access, child processes, and network calls are blocked.
+

@@ -32,7 +32,8 @@ docs/
 │   └── configuration.md            ✅
 ├── development/            # Development Guides
 │   ├── getting-started.md          ✅
-│   └── contributing.md             ✅
+│   ├── contributing.md             ✅
+│   └── style-system.md             ✅ (NEW)
 ├── enterprise/             # Enterprise Features
 │   ├── README.md                   ✅
 │   ├── sso.md                      ✅
@@ -114,6 +115,7 @@ docs/
 
 - [Marketing Website](marketing/README.md)
 - [Contributing Guide](development/contributing.md)
+- [Apex Style System (Premium UI + Apex Icons)](development/style-system.md) (NEW)
 
 ## Version
 

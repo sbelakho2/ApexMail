@@ -8,9 +8,8 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Marketing Site', () => {
     
-    // Use a specific URL if provided, otherwise default to baseURL (which might need to be adjusted during run)
-    // For now we assume the marketing app is running on the baseURL or we can override slightly.
-    // If the marketing app is on a different port in CI, we'd handle it via env vars.
+    // Use a specific URL if provided, otherwise default to baseURL.
+    // If the marketing app runs on a different port in CI, configure MARKETING_URL.
     const MARKETING_URL = process.env.MARKETING_URL || 'http://localhost:3003';
 
     test.beforeEach(async ({ page }) => {
@@ -55,7 +54,7 @@ test.describe('Marketing Site', () => {
         await expect(page.getByText('Monthly Email Volume')).toBeVisible();
         await expect(page.getByText('Estimated Monthly Cost')).toBeVisible();
         
-        // Interact with slider (if possible, simplified check for now)
+        // Interact with slider (simplified presence check)
         const slider = calculator.locator('input[type="range"]');
         await expect(slider).toBeVisible();
     });

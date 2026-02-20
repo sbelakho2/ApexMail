@@ -397,17 +397,17 @@ export default function CampaignsPage() {
                                                           : '-'}
                                                 </span>
                                             </TableCell>
-                                            <TableCell className="text-right tabular-nums">
+                                            <TableCell className="text-right apex-metric-number">
                                                 {campaign.stats.sent > 0
                                                     ? formatNumber(campaign.stats.sent)
                                                     : '-'}
                                             </TableCell>
-                                            <TableCell className="text-right tabular-nums">
+                                            <TableCell className="text-right apex-metric-number">
                                                 {campaign.stats.openRate > 0
                                                     ? formatPercent(campaign.stats.openRate / 100)
                                                     : '-'}
                                             </TableCell>
-                                            <TableCell className="text-right tabular-nums">
+                                            <TableCell className="text-right apex-metric-number">
                                                 {campaign.stats.clickRate > 0
                                                     ? formatPercent(campaign.stats.clickRate / 100)
                                                     : '-'}

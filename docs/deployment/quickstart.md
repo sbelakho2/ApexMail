@@ -12,8 +12,8 @@ Get ApexMail running locally in under 10 minutes.
 ## 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourorg/apexmail.git
-cd apexmail
+git clone https://github.com/sbelakho2/ApexMail.git
+cd ApexMail
 ```
 
 ## 2. Run Bootstrap Script
@@ -297,6 +297,6 @@ pnpm build
 ## Getting Help
 
 - 📖 [Full Documentation](../README.md)
-- 💬 [GitHub Discussions](https://github.com/yourorg/apexmail/discussions)
-- 🐛 [Issue Tracker](https://github.com/yourorg/apexmail/issues)
+- 💬 [GitHub Discussions](https://github.com/Bel-Consulting-OU/ApexMail/discussions)
+- 🐛 [Issue Tracker](https://github.com/Bel-Consulting-OU/ApexMail/issues)
 - 📧 [Email Support](mailto:support@apexmail.ee)

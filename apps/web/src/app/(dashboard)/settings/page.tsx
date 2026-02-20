@@ -535,7 +535,7 @@ export default function SettingsPage() {
                                                     am_prod_****************************
                                                 </p>
                                             </div>
-                                            <div className="flex gap-2">
+                                            <div className="flex items-center gap-2">
                                                 <Button variant="outline" size="sm">
                                                     Copy
                                                 </Button>
@@ -654,7 +654,7 @@ export default function SettingsPage() {
                                                 <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     Emails Sent
                                                 </p>
-                                                <p className="text-xl font-semibold tabular-nums">
+                                                <p className="text-xl font-semibold apex-metric-number">
                                                     32,456 <span className="text-sm text-muted-foreground font-normal">/ {activePlanData?.emailLimit.toLocaleString()}</span>
                                                 </p>
                                                 <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
@@ -665,7 +665,7 @@ export default function SettingsPage() {
                                                 <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     API Calls
                                                 </p>
-                                                <p className="text-xl font-semibold tabular-nums">
+                                                <p className="text-xl font-semibold apex-metric-number">
                                                     234k <span className="text-sm text-muted-foreground font-normal">/ 500k</span>
                                                 </p>
                                                 <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
@@ -676,7 +676,7 @@ export default function SettingsPage() {
                                                 <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     Team Members
                                                 </p>
-                                                <p className="text-xl font-semibold tabular-nums">3 <span className="text-sm text-muted-foreground font-normal">/ 5</span></p>
+                                                <p className="text-xl font-semibold apex-metric-number">3 <span className="text-sm text-muted-foreground font-normal">/ 5</span></p>
                                             </div>
                                         </div>
                                     )}
@@ -716,7 +716,7 @@ export default function SettingsPage() {
                                             >
                                                 <p className="text-sm">{invoice.date}</p>
                                                 <div className="flex items-center gap-4">
-                                                    <p className="font-medium tabular-nums">{invoice.amount}</p>
+                                                    <p className="font-medium apex-metric-number">{invoice.amount}</p>
                                                     <Button variant="ghost" size="sm">
                                                         Download
                                                     </Button>

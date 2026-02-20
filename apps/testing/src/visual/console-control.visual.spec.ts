@@ -198,6 +198,40 @@ async function gotoAndSnap(page: Parameters<typeof test>[0]['page'], url: string
     await expect(page).toHaveScreenshot(name, { fullPage: true });
 }
 
+async function assertApexCardCompliance(
+    page: Parameters<typeof test>[0]['page'],
+    selector: string,
+    minCount = 1,
+) {
+    const cards = page.locator(selector);
+    await expect(cards.first()).toBeVisible({ timeout: 20000 });
+    const totalCards = await cards.count();
+    expect(totalCards).toBeGreaterThanOrEqual(minCount);
+
+    const sampleCount = Math.min(totalCards, 4);
+    for (let index = 0; index < sampleCount; index++) {
+        const card = cards.nth(index);
+        await expect(card).toBeVisible();
+
+        const style = await card.evaluate(element => {
+            const computed = window.getComputedStyle(element as HTMLElement);
+            return {
+                borderRadius: computed.borderRadius,
+                boxShadow: computed.boxShadow,
+                borderColor: computed.borderColor,
+                backgroundColor: computed.backgroundColor,
+                className: (element as HTMLElement).className,
+            };
+        });
+
+        expect(style.className).toMatch(/apex-card|premium-card|bg-card/);
+        expect(parseFloat(style.borderRadius)).toBeGreaterThanOrEqual(10);
+        expect(style.boxShadow).not.toBe('none');
+        expect(style.borderColor).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
+        expect(style.backgroundColor).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
+    }
+}
+
 test.describe('Web Console Visuals', () => {
     test.beforeEach(async ({ page }) => {
         await page.setExtraHTTPHeaders({ 'x-e2e-bypass-key': E2E_BYPASS_KEY });
@@ -220,7 +254,31 @@ test.describe('Web Console Visuals', () => {
 
     test('web campaigns list', async ({ page }) => {
         await page.setViewportSize(viewports.desktop);
-        await gotoAndSnap(page, `${WEB_URL}/campaigns`, 'web-campaigns.png');
+        await page.goto(`${WEB_URL}/campaigns`, { waitUntil: 'domcontentloaded' });
+        await page.waitForLoadState('networkidle');
+        await page.waitForTimeout(400);
+        await page.addStyleTag({ content: '* { caret-color: transparent !important; }' });
+        await page.evaluate(() => {
+            if (document.activeElement instanceof HTMLElement) {
+                document.activeElement.blur();
+            }
+        });
+        await expect(page).toHaveScreenshot('web-campaigns.png', {
+            fullPage: true,
+            mask: [page.locator('tbody tr td:nth-child(5)')],
+        });
+    });
+
+    test('web dashboard apex card compliance', async ({ page }) => {
+        await page.setViewportSize(viewports.desktop);
+        await mockWebDashboardApis(page);
+        await page.goto(`${WEB_URL}/dashboard`, { waitUntil: 'domcontentloaded' });
+        await page.waitForLoadState('networkidle');
+
+        await assertApexCardCompliance(page, '[data-testid="metrics-grid"] > div', 4);
+
+        const metricsGrid = page.locator('[data-testid="metrics-grid"]');
+        await expect(metricsGrid).toHaveScreenshot('web-dashboard-metrics-apex-compliance.png');
     });
 
     test('web settings', async ({ page }) => {
@@ -333,5 +391,18 @@ test.describe('Control Plane Visuals', () => {
     test('control-plane settings', async ({ page }) => {
         await page.setViewportSize(viewports.desktop);
         await gotoAndSnap(page, `${CONTROL_PLANE_URL}/settings`, 'control-settings.png');
+    });
+
+    test('control-plane analytics apex card compliance', async ({ page }) => {
+        await page.setViewportSize(viewports.desktop);
+        await page.goto(`${CONTROL_PLANE_URL}/analytics`, { waitUntil: 'domcontentloaded' });
+        await page.waitForLoadState('networkidle');
+
+        await assertApexCardCompliance(page, '.apex-card, .bg-card.border', 6);
+
+        const cardsRegion = page.locator('main').first();
+        await expect(cardsRegion).toHaveScreenshot('control-analytics-apex-card-compliance.png', {
+            fullPage: false,
+        });
     });
 });

@@ -426,6 +426,242 @@ company_identity_qa = [
      "That's incorrect. ApexMail is built and operated by **Bel Consulting OÜ**, an independent Estonian company founded in 2022 in Tallinn. No affiliation with Resend."),
 ]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── R15e: PLAYBOOK DEEP-KNOWLEDGE (covers all 27 playbooks) ─────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── DNS & DOMAIN TECHNICAL DETAILS ───────────────────────────────────────────
+dns_domain_qa = [
+    ("What SPF record do I add for ApexMail?",
+     "Add `include:_spf.apexmail.ee` to your existing SPF TXT record. If you already have SPF for another provider (e.g., Google), merge them into a single record:\n\n```\nv=spf1 include:_spf.google.com include:_spf.apexmail.ee ~all\n```\n\nKeep it under the 10-lookup limit."),
+    ("What's the bounce CNAME for ApexMail?",
+     "Set a CNAME record pointing to **bounce.apexmail.ee**. This is for the Return-Path (envelope sender) and helps with bounce handling and deliverability."),
+    ("What DKIM selector does ApexMail use?",
+     "The DKIM selector is **apexmail._domainkey**. Add the DKIM TXT record from your dashboard under **Domains** using this selector."),
+    ("How do I set up a custom tracking domain?",
+     "Create a CNAME record pointing your desired tracking subdomain (e.g., `track.yourdomain.com`) to **t.apexmail.ee**. Then verify it in the dashboard under **Domains → Tracking**. SSL is provisioned automatically."),
+    ("My tracking links are using t.apexmail.ee — can I customize that?",
+     "Yes — set up a custom tracking domain by creating a CNAME: `track.yourdomain.com → t.apexmail.ee`. This improves branding and deliverability. Verify it in your dashboard."),
+    ("I need help with DMARC setup.",
+     "Start with a monitoring policy: `v=DMARC1; p=none; rua=mailto:dmarc@yourdomain.com`. Once you've verified all legitimate senders pass SPF/DKIM, tighten to `p=quarantine` and eventually `p=reject`. ApexMail's SPF (`_spf.apexmail.ee`) and DKIM align with DMARC."),
+    ("Does ApexMail support MTA-STS?",
+     "Yes — ApexMail supports **MTA-STS** (Mail Transfer Agent Strict Transport Security) and **DANE** (DNS-based Authentication of Named Entities) for encrypted mail transport."),
+    ("What DNS records do I need for ApexMail?",
+     "You need three DNS records:\n\n1. **SPF** (TXT): Add `include:_spf.apexmail.ee` to your SPF record\n2. **DKIM** (TXT): Add the DKIM key at `apexmail._domainkey.yourdomain.com`\n3. **Return-Path** (CNAME): Point to `bounce.apexmail.ee`\n\nOptionally, set up a **custom tracking domain** CNAME → `t.apexmail.ee` and configure **DMARC**."),
+]
+
+# ── SDK DETAILS (ALL 6) ─────────────────────────────────────────────────────
+sdk_details_qa = [
+    ("What SDKs does ApexMail offer?",
+     "ApexMail has **6 official SDKs**:\n\n1. **Node.js**: `@apexmail/node` (npm)\n2. **Python**: `apexmail` (pip)\n3. **Go**: `apexmail-go` (Go module)\n4. **Ruby**: `apexmail` (gem)\n5. **PHP**: `apexmail/apexmail-php` (Composer)\n6. **Java**: `ee.apexmail:apexmail-java` (Maven/Gradle)\n\nAll SDKs include built-in retry with exponential backoff."),
+    ("What's the Node.js SDK package name?",
+     "The Node.js SDK is **@apexmail/node**. Install with:\n```bash\nnpm install @apexmail/node\n```"),
+    ("What's the Python SDK called?",
+     "The Python SDK is **apexmail**. Install with:\n```bash\npip install apexmail\n```"),
+    ("Is there a Go SDK?",
+     "Yes — the Go SDK is **apexmail-go**. Import it with:\n```go\nimport \"github.com/apexmail/apexmail-go\"\n```"),
+    ("Do you have a Ruby SDK?",
+     "Yes — the Ruby SDK is the **apexmail** gem. Install with:\n```bash\ngem install apexmail\n```"),
+    ("Is there a PHP library?",
+     "Yes — the PHP SDK is **apexmail/apexmail-php**. Install with Composer:\n```bash\ncomposer require apexmail/apexmail-php\n```"),
+    ("Do you support Java?",
+     "Yes — the Java SDK is **ee.apexmail:apexmail-java**. Add it via Maven or Gradle:\n```xml\n<dependency>\n  <groupId>ee.apexmail</groupId>\n  <artifactId>apexmail-java</artifactId>\n</dependency>\n```"),
+    ("Do the SDKs handle retries automatically?",
+     "Yes — all 6 official SDKs include **built-in auto-retry with exponential backoff**. This handles transient errors (429, 5xx) automatically."),
+]
+
+# ── API RATE LIMITS ──────────────────────────────────────────────────────────
+api_rate_limits_qa = [
+    ("What are the API rate limits?",
+     "All plans share the same per-minute rate limit: **1,000 requests/minute** (enforced via a Redis sliding-window counter). Monthly API call limits vary by plan:\n\n- Free: 100 calls/month\n- Starter: 250,000\n- Pro: 500,000\n- Growth: 1,000,000\n- Scale: 5,000,000\n- Enterprise: Unlimited"),
+    ("What's the per-minute API rate limit on Growth?",
+     "The per-minute limit is **1,000 requests/minute** on **all** plans (including Growth). It's enforced with a Redis sliding-window counter."),
+    ("I'm getting 429 errors. What's the rate limit?",
+     "HTTP 429 means you've exceeded the **1,000 requests/minute** limit. This applies to all plans. Back off and retry — our SDKs handle this automatically with exponential backoff. Check the `Retry-After` header."),
+    ("How are API rate limits enforced?",
+     "Rate limits are enforced using a **Redis sliding-window counter** at **1,000 req/min** for all plans. When exceeded, you'll get HTTP 429 with a `Retry-After` header."),
+]
+
+# ── WEBHOOK DETAILS ──────────────────────────────────────────────────────────
+webhook_details_qa = [
+    ("How does ApexMail sign webhooks?",
+     "Webhooks are signed with **HMAC-SHA256**. The signature is in the **X-ApexMail-Signature** header. Verify it by computing HMAC-SHA256 of the raw request body using your webhook signing secret, then compare the hex digest."),
+    ("How many times does ApexMail retry failed webhooks?",
+     "The default is **3 retries** (system maximum is 5). The schedule uses **exponential backoff**: initial delay 60 seconds, 2× multiplier, capped at 300 seconds."),
+    ("When does ApexMail auto-disable a webhook?",
+     "A webhook is auto-disabled when either:\n\n1. **10+ consecutive failures** within the last hour, or\n2. **50%+ failure rate** over the last 20+ attempts\n\nYou'll receive a notification and can re-enable in the dashboard after fixing the issue."),
+    ("How do I rotate my webhook signing secret?",
+     "You can rotate on the dashboard. When you rotate, there's a **24-hour grace period** where both old and new secrets are valid, giving you time to update your endpoint."),
+    ("What events can I receive via webhooks?",
+     "ApexMail supports webhook events for: **delivered**, **bounced** (hard/soft), **opened**, **clicked**, **complained** (spam), **unsubscribed**, and **dropped**. Configure them in your dashboard."),
+    ("My webhook stopped receiving events. What happened?",
+     "Your webhook was likely **auto-disabled** due to consecutive failures. ApexMail disables webhooks after **10+ consecutive failures in the last hour** or a **50%+ failure rate** over 20+ attempts. Fix your endpoint and re-enable in the dashboard."),
+]
+
+# ── BOUNCE HANDLING & RETRY ──────────────────────────────────────────────────
+bounce_retry_qa = [
+    ("What's the soft bounce retry schedule?",
+     "Soft bounces are retried with **exponential backoff**: 30 seconds × 2^(attempt − 1), capped at 30 minutes, with a **maximum of 3 attempts**. So: ~30s, ~60s, ~120s."),
+    ("How does ApexMail handle hard bounces?",
+     "Hard bounces are **permanent** — the address is added to your suppression list immediately. No retries. Keep your hard bounce rate below **10%** (24-hour rolling) or sending may be suspended."),
+    ("What bounce rate gets my account suspended?",
+     "Sending is suspended if your **hard bounce rate exceeds 10%** over 24 hours. Also, **complaint rates above 0.1%** (7-day rolling) or **phishing/malware** detection trigger immediate suspension."),
+    ("What triggers sending suspension?",
+     "Sending is automatically suspended for:\n\n1. **Complaint rate > 0.1%** (7-day rolling average)\n2. **Hard bounce rate > 10%** (24-hour window)\n3. **Phishing or malware** detected (immediate + permanent ban)\n4. **Volume spike > 10×** your daily average\n\nContact **contact@apexmail.ee** for reinstatement review."),
+]
+
+# ── IP WARMUP ────────────────────────────────────────────────────────────────
+ip_warmup_qa = [
+    ("What's the IP warmup schedule?",
+     "ApexMail's recommended warmup schedule for a new dedicated IP:\n\n| Day | Daily Limit |\n|-----|------------|\n| 1 | 50 |\n| 2 | 100 |\n| 3 | 250 |\n| 4 | 500 |\n| 5 | 1,000 |\n| 6 | 2,500 |\n| 7 | 5,000 |\n| 8–14 | 10,000 |\n| 15–21 | 25,000 |\n| 22–28 | 50,000 |\n| 29+ | 100,000+ |\n\nSend to your most engaged contacts first during warmup."),
+    ("How long does IP warmup take?",
+     "Full IP warmup takes about **4 weeks** (28 days). You start at 50 emails/day and gradually increase to 100,000+/day. Always send to your most engaged recipients first."),
+    ("Do I need to warm up a dedicated IP?",
+     "Yes — a new dedicated IP has **no reputation**. Without warmup, ISPs may throttle or reject your emails. Follow the warmup schedule starting at 50/day and increasing over 28 days."),
+    ("Can I skip IP warmup?",
+     "Skipping warmup is strongly discouraged. ISPs flag sudden large volumes from new IPs as spam. Stick to the warmup schedule (50 → 100K+ over 28 days) for best deliverability."),
+]
+
+# ── ACCOUNT SECURITY ─────────────────────────────────────────────────────────
+account_security_qa = [
+    ("I got locked out of my account.",
+     "After **5 failed login attempts**, your account is locked for **15 minutes**. Wait for the lockout to expire, then try again. If you forgot your password, use the **Forgot Password** link. For persistent issues, contact **contact@apexmail.ee**."),
+    ("How many login attempts before lockout?",
+     "**5 failed attempts** trigger a **15-minute lockout**. After the lockout period, you can try again or reset your password."),
+    ("Does ApexMail support two-factor authentication?",
+     "Yes — **2FA/MFA** is available and recommended. Enable it in **Settings → Security**. TOTP authenticator apps are supported."),
+    ("What's the lockout duration after failed logins?",
+     "**15 minutes** after 5 consecutive failed login attempts. The lockout is automatic and cannot be bypassed."),
+]
+
+# ── CONTACTS & DATA RETENTION ────────────────────────────────────────────────
+contacts_retention_qa = [
+    ("How many contacts can I store?",
+     "Contact limits by plan:\n\n- **Free**: 500\n- **Starter**: 5,000\n- **Pro**: 15,000\n- **Growth**: 50,000\n- **Scale**: 200,000\n- **Enterprise**: Unlimited"),
+    ("How long is my data retained?",
+     "Data retention varies by plan:\n\n- **Free**: 7 days\n- **Starter**: 30 days\n- **Pro**: 60 days\n- **Growth**: 90 days\n- **Scale**: 365 days (1 year)\n- **Enterprise**: 730 days (2 years)"),
+    ("I'm on the Growth plan. How long are my analytics kept?",
+     "On the **Growth plan**, data is retained for **90 days**. If you need longer retention, **Scale** offers 365 days and **Enterprise** offers 730 days."),
+    ("Can I import contacts via CSV?",
+     "Yes — go to **Contacts → Import** and upload a CSV file. Duplicates are automatically deduplicated by email address."),
+]
+
+# ── MESSAGE SIZE & RECIPIENTS ────────────────────────────────────────────────
+message_limits_qa = [
+    ("What's the maximum email size?",
+     "Maximum **25 MB per attachment** and **50 MB total** per message (including all attachments and the email body)."),
+    ("How many recipients can I send to at once?",
+     "Per message: **50 To**, **50 CC**, and **50 BCC** recipients. For batch sending via the API, the maximum is **1,000 messages per batch** request."),
+    ("What's the batch send limit?",
+     "The batch API accepts up to **1,000 messages per request**. For larger volumes, make multiple batch calls."),
+    ("Is there an attachment size limit?",
+     "Yes — **25 MB per individual attachment** and **50 MB total** per message (body + all attachments combined)."),
+]
+
+# ── SMTP DETAILS ─────────────────────────────────────────────────────────────
+smtp_details_qa = [
+    ("What SMTP ports does ApexMail support?",
+     "ApexMail supports three SMTP ports:\n\n- **587** — STARTTLS (recommended)\n- **465** — Implicit TLS\n- **25** — Relay only (not recommended for submission)\n\nUse port 587 with STARTTLS for best compatibility."),
+    ("How do I configure SMTP?",
+     "SMTP settings:\n- **Host**: smtp.apexmail.ee\n- **Port**: 587 (STARTTLS, recommended) or 465 (implicit TLS)\n- **Username**: Your API key\n- **Password**: Your API key\n- **Auth**: PLAIN or LOGIN"),
+    ("Can I use port 25?",
+     "Port 25 is available for **relay only**. For email submission, use **port 587 (STARTTLS)** or **port 465 (implicit TLS)**. Many ISPs block port 25."),
+]
+
+# ── IDEMPOTENCY & SCHEDULED SENDS ───────────────────────────────────────────
+idempotency_schedule_qa = [
+    ("How do I prevent duplicate sends?",
+     "Use the **X-Idempotency-Key** header with a unique value (e.g., UUID) in your API request. ApexMail deduplicates requests with the same key for **24 hours**."),
+    ("What's the idempotency key TTL?",
+     "The **X-Idempotency-Key** has a **24-hour TTL**. After 24 hours, the same key can be reused."),
+    ("Can I schedule emails for later?",
+     "Yes — you can schedule emails up to **72 hours ahead** using the `send_at` parameter in the API. Specify an ISO 8601 timestamp."),
+    ("How far in advance can I schedule an email?",
+     "You can schedule up to **72 hours** in advance. Use the `send_at` field with an ISO 8601 timestamp."),
+]
+
+# ── DEDICATED IP ─────────────────────────────────────────────────────────────
+dedicated_ip_qa = [
+    ("How much does a dedicated IP cost?",
+     "Dedicated IPs are a **$49/month add-on**. You should be sending at least **50,000 emails/month** to justify a dedicated IP — otherwise your sending volume won't be enough to build reputation."),
+    ("How long does dedicated IP provisioning take?",
+     "Dedicated IPs are provisioned within **1–3 business days** after purchase."),
+    ("Do I need a dedicated IP?",
+     "A dedicated IP is recommended if you send **50,000+ emails/month** and want full control of your sender reputation. Below that volume, shared IPs are fine and already managed by ApexMail."),
+    ("Growth plan includes a dedicated IP?",
+     "Yes — the **Growth plan ($129/month)** includes **1 dedicated IP**. Scale includes 3. Additional IPs cost **$49/month** each."),
+]
+
+# ── RBAC & API KEY SCOPES ────────────────────────────────────────────────────
+rbac_scopes_qa = [
+    ("What user roles are available?",
+     "ApexMail has 5 RBAC roles:\n\n1. **Owner** — Full access, billing, account deletion\n2. **Admin** — All features except billing and account deletion\n3. **Developer** — API keys, domains, webhooks, sending\n4. **Analyst** — Read-only analytics and reports\n5. **Billing** — Invoices, plan changes, payment methods"),
+    ("What API key scopes can I set?",
+     "Available scopes: `emails:send`, `emails:read`, `domains:manage`, `domains:read`, `webhooks:manage`, `webhooks:read`, `templates:manage`, `templates:read`, `suppressions:manage`, `suppressions:read`, `analytics:read`, `contacts:manage`, `contacts:read`, and `admin`."),
+    ("How do I restrict an API key to only send emails?",
+     "Create a new API key with only the **emails:send** scope. This prevents the key from reading data, managing domains, or any other operations."),
+    ("What can the Analyst role do?",
+     "The **Analyst** role has **read-only** access to analytics and reports. They cannot send emails, manage domains, or change settings."),
+]
+
+# ── INBOUND EMAIL ────────────────────────────────────────────────────────────
+inbound_email_qa = [
+    ("Does ApexMail support receiving emails?",
+     "Yes — **inbound email receiving** is available on the **Scale** and **Enterprise** plans. Configure an MX record and use webhooks to process incoming emails."),
+    ("How do I set up inbound receiving?",
+     "Inbound receiving requires **Scale** or **Enterprise**. Set up an MX record pointing to ApexMail's inbound servers, then configure a webhook to receive parsed inbound emails."),
+]
+
+# ── ENTERPRISE FEATURES ──────────────────────────────────────────────────────
+enterprise_features_qa = [
+    ("Does ApexMail support SAML/SSO?",
+     "Yes — **SAML/SSO** is available on the **Scale** and **Enterprise** plans. Configure it in **Settings → Security → SSO**."),
+    ("Is SCIM provisioning available?",
+     "**SCIM** (System for Cross-domain Identity Management) is available on the **Enterprise** plan only. It enables automated user provisioning and deprovisioning."),
+    ("Do you support HIPAA?",
+     "HIPAA compliance requires the **Enterprise plan** with a BAA (Business Associate Agreement). Contact **contact@apexmail.ee** to set up HIPAA-compliant email."),
+    ("What's included in Enterprise?",
+     "The **Enterprise plan** ($1,299/month) includes:\n\n- **2,000,000 emails/month**\n- Unlimited API calls\n- Unlimited sending domains\n- Unlimited contacts\n- 730-day data retention\n- SSO/SAML, SCIM\n- HIPAA compliance (with BAA)\n- Dedicated account manager\n- 99.99% SLA with credits\n- Custom integrations\n- Unlimited team members"),
+]
+
+# ── GMAIL CLIPPING & WHAT COUNTS AS A SEND ───────────────────────────────────
+gmail_misc_qa = [
+    ("What is Gmail clipping?",
+     "Gmail clips (truncates) emails that exceed **102 KB** of HTML. The recipient sees a 'View entire message' link. Keep your HTML under 102 KB to avoid this — minimize inline CSS, remove unnecessary whitespace, and optimize images."),
+    ("How do I avoid Gmail clipping my emails?",
+     "Keep your email HTML under **102 KB**. Tips: minimize inline CSS, remove comments and whitespace, use hosted images instead of base64, and avoid excessive nested tables."),
+    ("What counts as a 'send' in my plan quota?",
+     "Each **recipient** counts as one send. So an email sent to 10 recipients = 10 sends. Test emails, API sends, and SMTP sends all count equally toward your monthly quota."),
+    ("Do test emails count toward my limit?",
+     "Yes — **test emails count** toward your monthly send quota. Each recipient is one send, regardless of whether it's a test or production email."),
+]
+
+# ── SECURITY & BUG BOUNTY ────────────────────────────────────────────────────
+security_misc_qa = [
+    ("Do you have a bug bounty program?",
+     "Yes — report security vulnerabilities to **security@apexmail.ee**. Our security team will investigate and respond. Responsible disclosure is appreciated."),
+    ("Who do I contact for security issues?",
+     "Report security vulnerabilities to **security@apexmail.ee**. For compliance questions, use **compliance@apexmail.ee**. For DPA/privacy, contact **dpo@belconsulting.ee**."),
+    ("What encryption does ApexMail use?",
+     "ApexMail encrypts data **at rest** and **in transit**. TLS is enforced for all API and SMTP connections. We support **MTA-STS** and **DANE** for transport security."),
+]
+
+# ── DOWNGRADE FLOW ───────────────────────────────────────────────────────────
+downgrade_flow_qa = [
+    ("What happens if I downgrade my plan?",
+     "When you downgrade:\n\n1. Changes take effect at the **end of the current billing cycle**\n2. Features above the new plan's tier become unavailable\n3. If your contacts or usage exceed the new plan's limits, you'll need to reduce them\n4. Data retention shortens to the new plan's retention period\n5. Extra dedicated IPs (if any) are released\n\nYour data is not deleted immediately, but you must align with the new plan's limits."),
+    ("If I downgrade from Scale to Growth, what do I lose?",
+     "Moving from Scale to Growth, you'd lose:\n- SSO/SAML\n- Inbound email receiving\n- 2 dedicated IPs (Scale has 3, Growth has 1)\n- Unlimited domains → 10 domains\n- 200K contacts → 50K contacts\n- 365-day retention → 90-day retention\n\nThe change takes effect at the end of your billing cycle."),
+]
+
+# ── CONTACT EMAILS ───────────────────────────────────────────────────────────
+contact_emails_qa = [
+    ("How do I contact ApexMail support?",
+     "Contact channels:\n- **General support**: contact@apexmail.ee\n- **Compliance**: compliance@apexmail.ee\n- **Security / Bug bounty**: security@apexmail.ee\n- **DPO / Privacy**: dpo@belconsulting.ee\n\nPaid plans also get priority support and phone support (Scale/Enterprise)."),
+    ("What's the email for compliance questions?",
+     "For compliance questions, email **compliance@apexmail.ee**. For DPA/privacy requests, contact **dpo@belconsulting.ee**."),
+]
+
 all_qa_lists = [
     ("Non-English", non_english_qa),
     ("Mixed-intent actions", mixed_intent_qa),
@@ -443,6 +679,25 @@ all_qa_lists = [
     ("Injection resistance (R15c)", injection_resistance_qa),
     ("Pause+report mixed (R15c)", pause_report_qa),
     ("Company identity (R15d)", company_identity_qa),
+    ("DNS & domain details (R15e)", dns_domain_qa),
+    ("SDK details (R15e)", sdk_details_qa),
+    ("API rate limits (R15e)", api_rate_limits_qa),
+    ("Webhook details (R15e)", webhook_details_qa),
+    ("Bounce retry (R15e)", bounce_retry_qa),
+    ("IP warmup (R15e)", ip_warmup_qa),
+    ("Account security (R15e)", account_security_qa),
+    ("Contacts & retention (R15e)", contacts_retention_qa),
+    ("Message limits (R15e)", message_limits_qa),
+    ("SMTP details (R15e)", smtp_details_qa),
+    ("Idempotency & scheduling (R15e)", idempotency_schedule_qa),
+    ("Dedicated IP (R15e)", dedicated_ip_qa),
+    ("RBAC & scopes (R15e)", rbac_scopes_qa),
+    ("Inbound email (R15e)", inbound_email_qa),
+    ("Enterprise features (R15e)", enterprise_features_qa),
+    ("Gmail & misc (R15e)", gmail_misc_qa),
+    ("Security misc (R15e)", security_misc_qa),
+    ("Downgrade flow (R15e)", downgrade_flow_qa),
+    ("Contact emails (R15e)", contact_emails_qa),
 ]
 
 for label, qa_list in all_qa_lists:

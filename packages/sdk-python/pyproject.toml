@@ -52,8 +52,8 @@ dev = [
 [project.urls]
 Homepage = "https://apexmail.ee"
 Documentation = "https://docs.apexmail.ee/sdks/python"
-Repository = "https://github.com/apexmail/apexmail-python"
-Changelog = "https://github.com/apexmail/apexmail-python/blob/main/CHANGELOG.md"
+Repository = "https://github.com/Bel-Consulting-OU/ApexMail"
+Changelog = "https://github.com/Bel-Consulting-OU/ApexMail/blob/main/packages/sdk-python/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/apexmail"]

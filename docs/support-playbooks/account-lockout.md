@@ -68,7 +68,7 @@ Look for:
 
 ### Step 3: Check if Account is Locked
 
-Default lockout policy: **5 failed attempts → 30-minute lockout** (configurable per tenant).
+Default lockout policy: **5 failed attempts → 15-minute lockout** (configurable per tenant).
 
 ```sql
 -- Check lock status

@@ -1592,8 +1592,8 @@ NEW_PROFILE_SCENARIOS = [
         "context": "starter_webhook_dead",
         "question": "My webhook stopped receiving events. What happened?",
         "must_contain": ["wh_bd01"],
-        "must_contain_one_of": ["auto-disabled", "disabled", "500", "8 consecutive", "failures"],
-        "description": "Must identify webhook auto-disabled due to consecutive 500 errors"
+        "must_contain_one_of": ["auto-disabled", "disabled", "500", "10 consecutive", "10+", "failures"],
+        "description": "Must identify webhook auto-disabled due to 10+ consecutive failures"
     },
 
     # ── Over email limit ──

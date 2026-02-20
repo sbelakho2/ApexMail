@@ -74,8 +74,7 @@ const comparisonData = {
       features: [
         { name: 'Analytics Dashboard', apexmail: 'Rich, built-in', competitor: 'CloudWatch metrics', winner: 'apexmail' },
         { name: 'Template Management', apexmail: 'Full WYSIWYG', competitor: 'Basic', winner: 'apexmail' },
-        { name: 'AI Features', apexmail: 'STO, content analysis', competitor: 'None', winner: 'apexmail' },
-        { name: 'Built-in CRM', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'AI Features', apexmail: 'Send-time optimization', competitor: 'None', winner: 'apexmail' },
         { name: 'Inbound Processing', apexmail: 'Native', competitor: 'S3 + Lambda', winner: 'apexmail' },
       ],
     },

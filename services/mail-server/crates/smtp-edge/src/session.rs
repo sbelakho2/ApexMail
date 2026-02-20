@@ -8,6 +8,11 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, info, warn};
 use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
 use mail_parser::MessageParser;
+use mail_proto::generated::{
+    mailstore_service_client::MailstoreServiceClient,
+    MessageFlags,
+    StoreMessageRequest,
+};
 
 pub struct SmtpConfig {
     pub hostname: String,
@@ -544,8 +549,49 @@ async fn process_message(
     final_message.extend_from_slice(message_data);
     
     // ── Store via mailstore gRPC ───────────────────────────────────────
-    // TODO: Forward to mailstore service via gRPC for storage
-    // For now, log the accepted message with full authentication results
+    let mailstore_endpoint = if config.mailstore_addr.starts_with("http://") || config.mailstore_addr.starts_with("https://") {
+        config.mailstore_addr.clone()
+    } else {
+        format!("http://{}", config.mailstore_addr)
+    };
+
+    let mut client = MailstoreServiceClient::connect(mailstore_endpoint.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect to mailstore at {}: {}", mailstore_endpoint, e))?;
+
+    let internal_date = chrono::Utc::now().timestamp();
+    for recipient in &state.rcpt_to {
+        let request = StoreMessageRequest {
+            account_id: recipient.clone(),
+            mailbox: "Inbox".to_string(),
+            raw_message: final_message.clone(),
+            flags: Some(MessageFlags {
+                seen: false,
+                answered: false,
+                flagged: false,
+                deleted: false,
+                draft: false,
+                recent: true,
+                custom: vec![],
+            }),
+            internal_date,
+        };
+
+        let response = client
+            .store_message(request)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to store message for recipient {}: {}", recipient, e))?
+            .into_inner();
+
+        debug!(
+            recipient = %recipient,
+            message_id = %response.message_id,
+            uid = response.uid,
+            blob_hash = %response.blob_hash,
+            "Stored message in mailstore"
+        );
+    }
+
     let parsed_subject = MessageParser::new()
         .parse(&final_message)
         .and_then(|m| m.subject().map(|s| s.to_string()));

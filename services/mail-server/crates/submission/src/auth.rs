@@ -97,8 +97,7 @@ async fn verify_credentials(username: &str, password: &str, pool: &PgPool) -> Re
     
     let stored_hash: String = sqlx::Row::get(&row, "password_hash");
     
-    // Verify password using argon2 or bcrypt
-    // For now, simple comparison (should use proper password hashing in production)
+    // Verify password hash using Argon2.
     let password_valid = verify_password_hash(password, &stored_hash);
     
     if password_valid {

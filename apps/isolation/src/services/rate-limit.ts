@@ -103,12 +103,6 @@ export class RateLimitService {
 
   /**
    * Check rate limit using token bucket algorithm
-   *
-   * FIX-500-421: This implementation uses separate HGETALL → compute → HSET
-   * which is a classic TOCTOU race. Between the read and write, another request
-   * can read stale data and double-count tokens. This should be converted to a
-   * Lua script for atomicity, similar to the sliding-window approach above that
-   * already uses MULTI. TODO: Migrate to atomic Lua script.
    */
   async checkTokenBucket(
     key: string,
@@ -119,47 +113,76 @@ export class RateLimitService {
     const now = Date.now();
 
     try {
-      // Get current bucket state
-      const bucketData = await this.redis.hgetall(fullKey);
+      const script = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local refillRate = tonumber(ARGV[3])
+local refillIntervalMs = tonumber(ARGV[4])
+local tokensRequested = tonumber(ARGV[5])
+local ttlMs = tonumber(ARGV[6])
 
-      let tokens = config.capacity;
-      let lastRefill = now;
+local data = redis.call('HGETALL', key)
+local bucket = {}
+for i = 1, #data, 2 do
+  bucket[data[i]] = data[i + 1]
+end
 
-      if (bucketData.tokens) {
-        tokens = parseFloat(bucketData.tokens);
-        lastRefill = parseInt(bucketData.lastRefill ?? String(now));
+local tokens = capacity
+local lastRefill = now
 
-        // Calculate tokens to add since last refill
-        const timePassed = now - lastRefill;
-        const tokensToAdd = (timePassed / config.refillIntervalMs) * config.refillRate;
-        tokens = Math.min(config.capacity, tokens + tokensToAdd);
+if bucket['tokens'] then
+  tokens = tonumber(bucket['tokens']) or capacity
+  lastRefill = tonumber(bucket['lastRefill']) or now
+  local timePassed = now - lastRefill
+  local tokensToAdd = (timePassed / refillIntervalMs) * refillRate
+  tokens = math.min(capacity, tokens + tokensToAdd)
+end
+
+local allowed = 0
+if tokens >= tokensRequested then
+  allowed = 1
+  tokens = tokens - tokensRequested
+end
+
+redis.call('HSET', key, 'tokens', tostring(tokens), 'lastRefill', tostring(now))
+redis.call('PEXPIRE', key, ttlMs)
+
+local retryAfter = -1
+if allowed == 0 then
+  local tokensNeeded = tokensRequested - tokens
+  retryAfter = math.ceil((tokensNeeded / refillRate) * (refillIntervalMs / 1000))
+end
+
+return { allowed, tostring(tokens), tostring(retryAfter) }
+`;
+
+      const raw = await this.redis.eval(
+        script,
+        1,
+        fullKey,
+        now.toString(),
+        config.capacity.toString(),
+        config.refillRate.toString(),
+        config.refillIntervalMs.toString(),
+        tokensRequested.toString(),
+        (config.refillIntervalMs * 10).toString()
+      ) as [number | string, string, string] | null;
+
+      if (!raw) {
+        return { ok: false, error: new Error('Redis Lua execution failed') };
       }
 
-      const allowed = tokens >= tokensRequested;
-      
-      if (allowed) {
-        tokens -= tokensRequested;
-      }
-
-      // Update bucket
-      await this.redis.hset(fullKey, {
-        tokens: tokens.toString(),
-        lastRefill: now.toString(),
-      });
-      await this.redis.pexpire(fullKey, config.refillIntervalMs * 10);
-
-      // Calculate when tokens will be available
-      let retryAfter: number | undefined;
-      if (!allowed) {
-        const tokensNeeded = tokensRequested - tokens;
-        retryAfter = Math.ceil((tokensNeeded / config.refillRate) * (config.refillIntervalMs / 1000));
-      }
+      const allowed = String(raw[0]) === '1';
+      const remainingTokens = Math.max(0, Math.floor(parseFloat(String(raw[1]))));
+      const retryAfterRaw = parseInt(String(raw[2]), 10);
+      const retryAfter = retryAfterRaw >= 0 ? retryAfterRaw : undefined;
 
       return {
         ok: true,
         value: {
           allowed,
-          remaining: Math.floor(tokens),
+          remaining: remainingTokens,
           resetAt: new Date(now + config.refillIntervalMs),
           retryAfter,
           limit: config.capacity,

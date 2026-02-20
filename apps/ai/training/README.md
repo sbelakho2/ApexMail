@@ -1,6 +1,6 @@
-# ApexMail AI — Qwen 2.5-7B-Instruct Training
+# ApexMail AI — Qwen3.5-8B Training
 
-Fine-tunes [Qwen 2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) with QLoRA for the ApexMail customer support assistant. Designed for training on [vast.ai](https://vast.ai) GPU instances.
+Fine-tunes [Qwen3.5-8B](https://huggingface.co/Qwen/Qwen3.5-8B) with QLoRA for the ApexMail customer support agent. Designed for training on [vast.ai](https://vast.ai) GPU instances.
 
 ## Architecture
 
@@ -8,19 +8,34 @@ Fine-tunes [Qwen 2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruc
 User question
     │
     ▼
-┌──────────────────────┐
-│  Qwen 2.5-7B-Instruct │  ← Fine-tuned with QLoRA (LoRA r=64, α=128)
-│  (ONNX Runtime, CPU)  │  ← Exported & quantised to INT8 for prod
-└──────────────────────┘
+┌──────────────────────────────────────┐
+│  llama-server (llama.cpp)            │  ← Serves Qwen3.5-8B GGUF Q4_K_M
+│  OpenAI-compatible /v1/chat/completions │  ← HTTP sidecar on the VPS
+└──────────────────────────────────────┘
+    ▲                    │
+    │ HTTP (OpenAI API)  │ streamed response
+    │                    ▼
+┌──────────────────────────────────────┐
+│  @apexmail/ai — InferenceEngine      │  ← Thin HTTP client in Node.js
+│  (replaces onnxruntime-node stub)    │
+└──────────────────────────────────────┘
     │
     ▼
 Grounded answer (pricing, API, features, actions)
 ```
 
+### Why llama.cpp server instead of ONNX Runtime
+
+- **3–5× faster** on CPU (SIMD-optimised kernels: AVX2/AVX512/NEON)
+- **Simpler Node.js integration** — plain HTTP client, no native `.node` bindings
+- **Streaming** out of the box via SSE
+- **Model hot-swap** without restarting the Node.js process
+- **Drop-in replacement** for hosted models (point the same client at GPT-4o if needed)
+
 ## Requirements
 
 - **Training**: A100 40GB / A6000 48GB / RTX 4090 24GB (vast.ai)
-- **Inference**: Any VPS with ≥16 GB RAM (ONNX Runtime CPU)
+- **Inference**: Any VPS with ≥8 GB RAM for Q4_K_M (~5 GB model size), ≥10 GB for Q5_K_M
 - **Python**: 3.10+
 
 ## Quick Start
@@ -40,7 +55,7 @@ export VAST_API_KEY=<your-key>
 vastai show instance $(cat vast_instance_id.txt)
 
 # Upload
-rsync -avz --exclude='.venv' --exclude='output' --exclude='onnx_model' \
+rsync -avz --exclude='.venv' --exclude='output' --exclude='gguf_model' \
     ./ vast_instance:/workspace/training/
 ```
 
@@ -55,36 +70,56 @@ cd /workspace/training
 ### 4. Run training
 
 ```bash
-./vastai_train.sh    # generate data → train → eval → export ONNX
+./vastai_train.sh    # generate data → train → eval → export GGUF
 ```
 
-### 5. Download the ONNX model
+### 5. Download the GGUF model
 
 ```bash
-rsync -avz vast_instance:/workspace/training/onnx_model/ ./onnx_model/
+rsync -avz vast_instance:/workspace/training/gguf_model/ ./gguf_model/
 ```
+
+### 6. Run llama-server on the VPS
+
+```bash
+# Install llama.cpp (already built by vastai_setup.sh)
+llama-server \
+  --model ./gguf_model/qwen3.5-8b-q4_k_m.gguf \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --ctx-size 8192 \
+  --n-predict 1024 \
+  --threads $(nproc)
+```
+
+The service exposes an OpenAI-compatible API at `http://<vps>:8080/v1`. Point the
+`LLAMA_SERVER_URL` environment variable in `@apexmail/ai` to this address.
 
 ## File Structure
 
 ```
 training/
 ├── config.yaml           # All hyper-parameters & paths
-├── prompts.py            # System prompt & relevance keywords (shared)
-├── generate_dataset.py   # Seed examples + augmentation → JSONL
+├── prompts_v2.py         # System prompt, customer contexts, tool definitions
+├── build_agent.py        # Training dataset builder (ChatML multi-turn)
+├── train_agent.sh        # 4-GPU DDP training launch script
 ├── train.py              # QLoRA fine-tuning with SFTTrainer
 ├── eval.py               # Golden-set evaluation with A/B/C/D/F grading
-├── export_onnx.py        # Merge adapter → ONNX → optional INT8
+├── export_gguf.py        # Merge adapter → GGUF → Q4_K_M / Q5_K_M / Q8_0
+├── export_onnx.py        # (legacy) Merge adapter → ONNX INT8 — not used in prod
+├── test_agent.py         # Full agent test suite (9 categories, 230 tests)
+├── run_all_tests.py      # Run test suite against a live llama-server
 ├── requirements.txt      # Python dependencies
 ├── vastai_provision.sh   # Find & rent a GPU instance
-├── vastai_setup.sh       # Install deps on the instance
+├── vastai_setup.sh       # Install deps, build llama.cpp, download model
 ├── vastai_train.sh       # Run the full pipeline
 ├── data/                 # Generated JSONL datasets
-│   ├── train.jsonl
+│   ├── train_agent.jsonl # Primary agent training set (~3300 examples)
 │   ├── val.jsonl
 │   └── test.jsonl
-├── output/               # LoRA adapter checkpoints
-├── output-merged/        # Merged full model (temporary)
-├── onnx_model/           # ONNX export for production
+├── output_agent/         # LoRA adapter checkpoints
+├── output-merged/        # Merged full model (temporary, for GGUF export)
+├── gguf_model/           # GGUF exports for production (Q4_K_M primary)
 ├── eval_results/         # Evaluation results JSON
 └── logs/                 # Training & eval logs
 ```
@@ -93,7 +128,7 @@ training/
 
 | Parameter | Value |
 |-----------|-------|
-| Base model | Qwen/Qwen2.5-7B-Instruct |
+| Base model | Qwen/Qwen3.5-8B |
 | Method | QLoRA (4-bit NF4 + LoRA r=64) |
 | Target modules | q/k/v/o/gate/up/down_proj |
 | Effective batch size | 16 (4 × 4 grad accum) |

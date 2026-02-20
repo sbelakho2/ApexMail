@@ -7,8 +7,8 @@ import { ArrowLeft, Mail } from '@/components/ui/icons';
 /**
  * FIX-065: Forgot Password page
  * Provides a form for users to request a password reset email.
- * Currently a placeholder — the API endpoint /api/v1/auth/forgot-password
- * needs to be implemented for full functionality.
+ * Uses /api/v1/auth/forgot-password and always shows a success state
+ * to prevent email enumeration.
  */
 export default function ForgotPasswordPage() {
     const [email, setEmail] = React.useState('');
@@ -20,9 +20,11 @@ export default function ForgotPasswordPage() {
         setIsLoading(true);
 
         try {
-            // TODO: Wire to POST /api/v1/auth/forgot-password
-            // For now, always show success to prevent email enumeration
-            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await fetch('/api/v1/auth/forgot-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email }),
+            });
             setSubmitted(true);
         } finally {
             setIsLoading(false);

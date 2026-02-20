@@ -28,7 +28,7 @@ R34_TESTS = {
                     "must_not_contain": []}},
 
         {"q": "I already have SPF for Google Workspace. How do I add ApexMail without breaking things?",
-         "checks": {"must_contain": ["spf.apexmail.io"],
+         "checks": {"must_contain": ["_spf.apexmail.ee"],
                     "must_contain_any": ["merge", "single", "one", "combine", "include"]}},
 
         {"q": "Can I use a TXT record instead of CNAME for ApexMail DKIM?",
@@ -42,7 +42,7 @@ R34_TESTS = {
 
         {"q": "What's the Return-Path CNAME I need for ApexMail?",
          "checks": {"must_contain": ["bounce"],
-                    "must_contain_any": ["bounce.apexmail.io", "CNAME"]}},
+                    "must_contain_any": ["bounce.apexmail.ee", "CNAME"]}},
     ],
 
     # ── B: DKIM/SPF/DMARC Correctness ───────────────────────────────────
@@ -144,7 +144,7 @@ R34_TESTS = {
          "checks": {"must_contain_any": ["warmup", "warm-up", "no", "cannot", "block", "schedule"]}},
 
         {"q": "What is ApexMail's retry schedule for soft bounces?",
-         "checks": {"must_contain_any": ["1 minute", "5 minute", "30 minute", "2 hour", "6 hour", "retry"]}},
+         "checks": {"must_contain_any": ["30 s", "30s", "exponential", "backoff", "3 attempt", "3 retries", "retry"]}},
 
         {"q": "Emails to Outlook recipients bounce with 550 5.7.1. What do I do?",
          "checks": {"must_contain_any": ["Microsoft", "SNDS", "sender.office.com", "reputation", "delist"]}},
@@ -216,7 +216,7 @@ R34_TESTS = {
          "checks": {"must_contain_any": ["Owner", "Admin", "Developer", "Analyst", "Billing"]}},
 
         {"q": "I'm locked out after entering the wrong password too many times.",
-         "checks": {"must_contain_any": ["5", "locked", "30 minute", "wait", "reset"]}},
+         "checks": {"must_contain_any": ["5", "locked", "15 minute", "15-minute", "wait", "reset"]}},
 
         {"q": "My account says 'sending suspended'. How do I get it reinstated?",
          "checks": {"must_contain_any": ["complaint", "bounce", "contact", "compliance", "review"]}},
@@ -231,7 +231,7 @@ R34_TESTS = {
          "checks": {"must_contain_any": ["tracking", "false", "clicks", "disable"]}},
 
         {"q": "How many times does ApexMail retry failed webhook deliveries?",
-         "checks": {"must_contain_any": ["8", "retry", "retries", "24 hour", "disabled"]}},
+         "checks": {"must_contain_any": ["3", "retry", "retries", "5", "exponential"]}},
 
         {"q": "What are the SLA uptime guarantees for each ApexMail plan?",
          "checks": {"must_contain_any": ["99.5", "99.9", "99.95", "99.99", "uptime"]}},
@@ -246,7 +246,7 @@ R34_TESTS = {
          "checks": {"must_contain_any": ["bot", "User-Agent", "timing", "is_bot"]}},
 
         {"q": "Under what conditions does ApexMail automatically stop sending for an account?",
-         "checks": {"must_contain_any": ["complaint", "bounce", "spike", "phishing", "0.3%"]}},
+         "checks": {"must_contain_any": ["complaint", "bounce", "spike", "phishing", "0.1%", "10%"]}},
 
         {"q": "How much does a dedicated IP add-on cost?",
          "checks": {"must_contain_any": ["$49", "$50", "49", "50", "add-on", "dedicated"]}},
@@ -310,7 +310,7 @@ R34_TESTS = {
     # ── L: Link Tracking & Branding ──────────────────────────────────────
     "link_tracking": [
         {"q": "My custom tracking domain links return 404. What's wrong?",
-         "checks": {"must_contain_any": ["CNAME", "DNS", "SSL", "track.apexmail.io", "verified"]}},
+         "checks": {"must_contain_any": ["CNAME", "DNS", "SSL", "t.apexmail.ee", "verified"]}},
 
         {"q": "How do I implement Gmail's one-click unsubscribe requirement?",
          "checks": {"must_contain_any": ["RFC 8058", "List-Unsubscribe", "one-click", "Post"]}},
@@ -382,7 +382,7 @@ R34_TESTS = {
     # ── Q: API Rate Limits & Payload ─────────────────────────────────────
     "api_rate_limits": [
         {"q": "What's the per-minute API rate limit on the Growth plan?",
-         "checks": {"must_contain_any": ["300", "req/min", "requests per minute"]}},
+         "checks": {"must_contain_any": ["1,000", "1000", "req/min", "requests per minute"]}},
 
         {"q": "What rate limit headers does the ApexMail API return?",
          "checks": {"must_contain_any": ["X-RateLimit", "Retry-After"]}},

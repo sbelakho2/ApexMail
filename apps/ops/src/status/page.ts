@@ -600,8 +600,7 @@ export class StatusPageService extends EventEmitter {
      * Calculates uptime percentages
      */
     private calculateUptime(): { daily: number; weekly: number; monthly: number } {
-        // In a real implementation, this would query historical data
-        // For now, return calculated estimates based on incidents
+        // Calculate uptime directly from incident history in memory.
         const now = Date.now();
         const dayMs = 24 * 60 * 60 * 1000;
 

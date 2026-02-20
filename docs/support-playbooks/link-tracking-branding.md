@@ -21,15 +21,15 @@
 
 | Setup | Link Domain | Recommended |
 |-------|------------|-------------|
-| Default (no custom) | `track.apexmail.io` | ❌ Less trustworthy to ISPs |
-| Custom tracking domain | `track.yourdomain.com` via CNAME → `track.apexmail.io` | ✅ Recommended |
+| Default (no custom) | `t.apexmail.ee` | ❌ Less trustworthy to ISPs |
+| Custom tracking domain | `track.yourdomain.com` via CNAME → `t.apexmail.ee` | ✅ Recommended |
 | Per-brand tracking | `track.brand-a.com`, `links.brand-b.com` | ✅ Enterprise/Scale |
 
 ---
 
 ## Issue C56 — "Link branding marked Default but not being used"
 
-**Symptoms:** Customer configured a custom tracking domain and set it as default, but emails still use `track.apexmail.io`.
+**Symptoms:** Customer configured a custom tracking domain and set it as default, but emails still use `t.apexmail.ee`.
 
 **Root cause:** Link branding requires: (1) DNS CNAME configured, (2) verified in dashboard, (3) SSL provisioned, (4) assigned to the sending domain or set as account default.
 
@@ -39,12 +39,12 @@
 
 ```bash
 dig CNAME track.yourdomain.com +short
-# Expected: track.apexmail.io.
+# Expected: t.apexmail.ee.
 ```
 
 3. If DNS is correct but not verified: trigger re-verification in dashboard.
 4. Check if the sending domain has this tracking domain assigned: Dashboard → Domains → select domain → Tracking Domain.
-5. **Priority order:** Per-domain tracking domain > Account default tracking domain > System default (`track.apexmail.io`).
+5. **Priority order:** Per-domain tracking domain > Account default tracking domain > System default (`t.apexmail.ee`).
 6. If the custom domain has SSL issues (cert not provisioned), the system falls back to the default.
 
 ---
@@ -60,7 +60,7 @@ dig CNAME track.yourdomain.com +short
    - Per-message tracking domain (if specified in API request)
    - Per-sending-domain tracking domain (Dashboard → Domains → Tracking)
    - Account default tracking domain (Dashboard → Settings → Tracking)
-   - System default (`track.apexmail.io`)
+   - System default (`t.apexmail.ee`)
 2. If a specific sending domain has a tracking domain assigned, it overrides the account default.
 3. **Fix:** Set the desired tracking domain on each sending domain, or clear per-domain overrides to use the account default.
 
@@ -71,7 +71,7 @@ dig CNAME track.yourdomain.com +short
 **Symptoms:** Customer wants to disable custom link branding, or disable link rewriting entirely.
 
 **Resolution:**
-1. **Disable custom branding (revert to default):** Dashboard → Settings → Tracking Domain → Remove custom domain. Links will use `track.apexmail.io`.
+1. **Disable custom branding (revert to default):** Dashboard → Settings → Tracking Domain → Remove custom domain. Links will use `t.apexmail.ee`.
 2. **Disable click tracking entirely:** Dashboard → Settings → Tracking → uncheck "Click Tracking".
    - ⚠️ This disables click analytics. No click events, no click webhooks.
    - Open tracking remains independent (separate setting).
@@ -95,7 +95,7 @@ dig CNAME track.yourdomain.com +short
 
 ```bash
 dig CNAME track.yourdomain.com +short
-# Must point to: track.apexmail.io.
+# Must point to: t.apexmail.ee.
 ```
 
 2. **Check SSL:**
@@ -114,7 +114,7 @@ curl -I https://track.yourdomain.com/
 5. **Check tracking service health:**
 
 ```bash
-curl -s https://track.apexmail.io/health | jq .
+curl -s https://t.apexmail.ee/health | jq .
 ```
 
 ---
@@ -133,7 +133,7 @@ curl -s https://track.apexmail.io/health | jq .
 echo | openssl s_client -connect track.yourdomain.com:443 -servername track.yourdomain.com 2>/dev/null | openssl x509 -noout -subject -dates
 ```
 
-3. If cert shows `track.apexmail.io` instead of `track.yourdomain.com`: the cert wasn't provisioned for the custom domain.
+3. If cert shows `t.apexmail.ee` instead of `track.yourdomain.com`: the cert wasn't provisioned for the custom domain.
 4. **Fix:** Ensure CNAME is correct (DNS-only, not proxied), then re-verify the tracking domain in dashboard. Certificate provisioning happens automatically within 30 minutes.
 5. If using Cloudflare: the custom domain MUST be in DNS-only mode (gray cloud). Cloudflare's proxy provides its own cert that covers `*.yourdomain.com` but may interfere with our cert.
 
@@ -279,7 +279,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 **Root cause:** Corporate firewalls, DNS policies, or web proxies block the tracking domain.
 
 **Resolution:**
-1. **Corporate DNS filtering:** Some organizations block known email tracking domains. `track.apexmail.io` may be on blocklists.
+1. **Corporate DNS filtering:** Some organizations block known email tracking domains. `t.apexmail.ee` may be on blocklists.
 2. **Solution:** Use a custom tracking domain (`track.yourdomain.com`). Custom domains are far less likely to be blocked.
 3. **Corporate proxy issues:** Some proxies strip or modify redirect URLs.
 4. **Diagnosis:** Ask the recipient to try the link from outside the corporate network (mobile data). If it works outside: corporate network is blocking.
@@ -306,8 +306,8 @@ curl -s -H "Authorization: Bearer <KEY>" \
 **Resolution:**
 1. **Supported on Scale and Enterprise plans.**
 2. Setup: each brand's sending domain can have its own tracking domain.
-   - `Brand A`: `track.brand-a.com` → `track.apexmail.io`
-   - `Brand B`: `links.brand-b.com` → `track.apexmail.io`
+   - `Brand A`: `track.brand-a.com` → `t.apexmail.ee`
+   - `Brand B`: `links.brand-b.com` → `t.apexmail.ee`
 3. Configure per-domain: Dashboard → Domains → select domain → Tracking Domain.
 4. Each tracking domain needs its own CNAME and SSL verification.
 5. **Plan limits for domains apply.**
@@ -446,7 +446,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 
 **Resolution:**
 1. **Common blockers:**
-   - Corporate web proxy blocks `track.apexmail.io` or customer's tracking domain.
+   - Corporate web proxy blocks `t.apexmail.ee` or customer's tracking domain.
    - Email security gateway (Proofpoint, Mimecast) rewrites the link again, causing double-redirect issues.
    - Browser extension blocks redirect (if link opens in browser).
 2. **Fix:** Use a custom tracking domain (less likely to be blocked).
@@ -463,13 +463,13 @@ curl -s -H "Authorization: Bearer <KEY>" \
 
 ```bash
 dig CNAME track.yourdomain.com +short
-# Should return: track.apexmail.io.
+# Should return: t.apexmail.ee.
 # If empty: CNAME is missing
 ```
 
 2. **Fix:** Re-add the CNAME record at the new DNS provider:
    - Host/Name: `track` (or whatever subdomain was used)
-   - Value/Target: `track.apexmail.io`
+   - Value/Target: `t.apexmail.ee`
    - Proxy: DNS Only (gray cloud if Cloudflare)
 3. After DNS propagation (5-30 min): re-verify in dashboard.
 4. SSL certificate may need re-provisioning if it expired.
@@ -478,7 +478,7 @@ dig CNAME track.yourdomain.com +short
 
 ## Issue C80 — "CNAME flattening breaks tracking subdomain"
 
-**Symptoms:** Tracking domain shows incorrect resolution. CNAME points to an IP instead of `track.apexmail.io`.
+**Symptoms:** Tracking domain shows incorrect resolution. CNAME points to an IP instead of `t.apexmail.ee`.
 
 **Root cause:** DNS provider's CNAME flattening resolves the CNAME to an A record at query time. This breaks if ApexMail changes IPs.
 
@@ -490,7 +490,7 @@ dig CNAME track.yourdomain.com +short
 
 ```bash
 dig CNAME track.yourdomain.com +short
-# Must return: track.apexmail.io. (the CNAME target, not an IP)
+# Must return: t.apexmail.ee. (the CNAME target, not an IP)
 ```
 
 ---
@@ -603,7 +603,7 @@ curl -I http://track.yourdomain.com/.well-known/acme-challenge/test
 **Resolution:**
 1. **Correct format:**
    ```
-   List-Unsubscribe: <https://track.yourdomain.com/u/TOKEN>, <mailto:unsub+TOKEN@bounce.apexmail.io>
+   List-Unsubscribe: <https://track.yourdomain.com/u/TOKEN>, <mailto:unsub+TOKEN@bounce.apexmail.ee>
    List-Unsubscribe-Post: List-Unsubscribe=One-Click
    ```
 2. **Common malformations:**
@@ -739,8 +739,8 @@ WHERE tenant_id = '<TENANT_ID>' AND email = '<EMAIL>';
 **Symptoms:** Customer configured both a return-path domain and tracking domain on the same subdomain, causing DNS conflicts.
 
 **Resolution:**
-1. Return-path uses CNAME: `bounce.yourdomain.com → bounce.apexmail.io`
-2. Tracking uses CNAME: `track.yourdomain.com → track.apexmail.io`
+1. Return-path uses CNAME: `bounce.yourdomain.com → bounce.apexmail.ee`
+2. Tracking uses CNAME: `track.yourdomain.com → t.apexmail.ee`
 3. These MUST be different subdomains. You cannot have two CNAMEs on the same subdomain.
 4. **If customer used the same subdomain:** DNS conflict. One CNAME overwrites the other.
 5. **Fix:** Use different subdomains (e.g., `bounce` for return-path, `track` for tracking).

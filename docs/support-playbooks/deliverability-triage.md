@@ -104,7 +104,7 @@ done
 
 # Check SPF record
 dig TXT example.com +short | grep "v=spf1"
-# Expected: "v=spf1 include:spf.apexmail.io ~all"
+# Expected: "v=spf1 include:_spf.apexmail.ee ~all"
 
 # Check DKIM record
 dig TXT apexmail._domainkey.example.com +short
@@ -123,7 +123,7 @@ curl -s "http://api.apexmail.internal/admin/domains/example.com/auth-check" \
 
 | Issue | Symptom | Fix |
 |-------|---------|-----|
-| Missing SPF | SPF fail in headers | Add `include:spf.apexmail.io` |
+| Missing SPF | SPF fail in headers | Add `include:_spf.apexmail.ee` |
 | SPF too many lookups (>10) | SPF permerror | Flatten SPF or remove unused includes |
 | DKIM key mismatch | DKIM fail | Regenerate and re-publish key |
 | No DMARC | No policy enforcement | Add DMARC TXT record |
@@ -139,10 +139,10 @@ whois 65.108.x.x | grep -i "abuse\|status\|netname"
 
 # Check reverse DNS is set correctly
 dig -x 65.108.x.x +short
-# Expected: mail-01.apexmail.io (or similar)
+# Expected: mail-01.apexmail.ee (or similar)
 
 # Verify rDNS matches forward DNS
-dig A mail-01.apexmail.io +short
+dig A mail-01.apexmail.ee +short
 # Should return the same IP
 ```
 

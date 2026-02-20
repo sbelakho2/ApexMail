@@ -331,7 +331,7 @@ redis-cli KEYS "*<TENANT_ID>*"  # For tenant-level erasure
 - **P0:** DPA enforcement action, or court order for data production → Legal (Bel Consulting OÜ) + CEO immediately
 
 **Escalation contacts:**
-- Compliance Team: `compliance@apexmail.com` / Slack `#compliance`
+- Compliance Team: `compliance@apexmail.ee` / Slack `#compliance`
 - Legal (Bel Consulting OÜ): `legal@belconsulting.ee`
 - DPO (Data Protection Officer): `dpo@belconsulting.ee`
 - Engineering: Slack `#eng-data`

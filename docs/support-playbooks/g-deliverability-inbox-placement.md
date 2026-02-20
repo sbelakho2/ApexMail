@@ -68,19 +68,19 @@
 
 ## Issue 96 — Tracking domain mismatch causing deliverability issues
 
-**Symptoms:** Click-tracked links show a different domain (e.g., `track.apexmail.io`), causing ISP suspicion or recipient distrust.
+**Symptoms:** Click-tracked links show a different domain (e.g., `t.apexmail.ee`), causing ISP suspicion or recipient distrust.
 
 **Root cause:** ApexMail rewrites URLs for click tracking. If the customer hasn't set up a custom tracking domain, the default ApexMail domain is used, which can look suspicious.
 
 **Resolution:**
 1. Set up a custom tracking domain:
-   - Customer adds CNAME: `track.yourdomain.com → track.apexmail.io`
+   - Customer adds CNAME: `track.yourdomain.com → t.apexmail.ee`
    - Configure in Dashboard → Settings → Tracking Domain
 2. Benefits of custom tracking domain:
    - Links match the sender's domain (builds trust)
    - Improves deliverability (ISPs see consistent domains)
    - Looks professional to recipients
-3. Without custom tracking domain: links show `track.apexmail.io` which recipients may not recognize.
+3. Without custom tracking domain: links show `t.apexmail.ee` which recipients may not recognize.
 4. Ensure the tracking domain has valid SSL (auto-provisioned by ApexMail via CNAME).
 
 ---
@@ -324,14 +324,13 @@
 **Root cause:** Large senders sometimes separate transactional and marketing email on different IPs to isolate reputation.
 
 **Resolution:**
-1. IP pools are available on Scale ($399/mo) and Enterprise ($1,299/mo) plans.
+1. Dedicated IPs are available on Growth ($129/mo — 1 IP), Scale ($399/mo — 3 IPs), and Enterprise ($1,299/mo — 10 IPs) plans.
 2. Use cases:
    - Separate transactional (password resets, receipts) from marketing (newsletters, promotions).
    - Isolate high-risk sends (re-engagement campaigns) from core sends.
 3. Setup: contact `contact@apexmail.ee` to request additional IPs and configure pools.
 4. Each IP needs independent warmup.
-5. Starter ($29/mo) and Growth ($129/mo) plans use shared IP pools managed by ApexMail.
-6. Free plan: shared IPs only, no customization.
+5. Free ($0), Starter ($29/mo), and Pro ($59/mo) plans use shared IP pools managed by ApexMail.
 
 ---
 

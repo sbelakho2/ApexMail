@@ -102,7 +102,7 @@ export default function AnalyticsPage() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto" ref={printRef}>
+        <div className="max-w-7xl mx-auto overflow-x-hidden" ref={printRef}>
             {/* Print Header - Only visible when printing */}
             <div className="hidden print:block print-header mb-8">
                 <div className="flex items-center justify-between">
@@ -118,12 +118,12 @@ export default function AnalyticsPage() {
             </div>
 
             {/* Page Header */}
-            <div className="flex items-center justify-between mb-6 no-print">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 no-print">
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Analytics & Insights</h1>
                     <p className="text-muted-foreground mt-1">Deep business intelligence across all operations</p>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 overflow-x-auto">
                     {/* Time Range Selector */}
                     <div className="flex bg-muted rounded-lg p-1">
                         {(['24h', '7d', '30d', '90d', '12m'] as TimeRange[]).map(range => (
@@ -200,12 +200,14 @@ export default function AnalyticsPage() {
                                 <span className="text-sm text-success font-medium">↑ 8.2%</span>
                             </div>
                         </div>
-                        <LineChart data={emailVolumeData} width={800} height={200} showArea showGrid />
+                        <div className="overflow-x-auto -mx-6 px-6">
+                            <LineChart data={emailVolumeData} width={800} height={200} showArea showGrid />
+                        </div>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         {/* Email Engagement Breakdown */}
-                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break overflow-hidden">
                             <h3 className="text-lg font-semibold text-foreground mb-4">Email Engagement</h3>
                             <MultiLineChart
                                 data={multiSeriesData}
@@ -220,7 +222,7 @@ export default function AnalyticsPage() {
                         </div>
 
                         {/* Revenue Distribution */}
-                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                        <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break overflow-hidden">
                             <h3 className="text-lg font-semibold text-foreground mb-4">Revenue by Plan</h3>
                             <DonutChart
                                 data={[
@@ -240,11 +242,13 @@ export default function AnalyticsPage() {
                     <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
                         <h3 className="text-lg font-semibold text-foreground mb-2">API Activity Heatmap</h3>
                         <p className="text-sm text-muted-foreground mb-4">Email sends by day and hour (last 7 days)</p>
-                        <HeatMap data={heatMapData} width={700} height={160} />
+                        <div className="overflow-x-auto -mx-6 px-6">
+                            <HeatMap data={heatMapData} width={700} height={160} />
+                        </div>
                     </div>
 
                     {/* Conversion Funnel */}
-                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
+                    <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break overflow-hidden">
                         <h3 className="text-lg font-semibold text-foreground mb-4">Sales Funnel</h3>
                         <div className="flex flex-col lg:flex-row gap-6 lg:gap-8">
                             <div className="flex-1 min-w-0">
@@ -262,12 +266,12 @@ export default function AnalyticsPage() {
                             <div className="grid grid-cols-2 lg:grid-cols-1 lg:w-64 gap-4">
                                 <div className="bg-success/10 rounded-lg p-4 border border-success/20">
                                     <p className="text-sm text-success font-medium">Overall Conversion</p>
-                                    <p className="text-2xl font-bold text-success">0.54%</p>
+                                    <p className="text-2xl apex-metric-number text-success">0.54%</p>
                                     <p className="text-xs text-success/80">Lead → Customer</p>
                                 </div>
                                 <div className="bg-primary/10 rounded-lg p-4 border border-primary/20">
                                     <p className="text-sm text-primary font-medium">Reply Rate</p>
-                                    <p className="text-2xl font-bold text-primary">22.4%</p>
+                                    <p className="text-2xl apex-metric-number text-primary">22.4%</p>
                                     <p className="text-xs text-primary/80">Above industry avg</p>
                                 </div>
                             </div>
@@ -462,7 +466,9 @@ export default function AnalyticsPage() {
                     {/* Revenue Trend */}
                     <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
                         <h3 className="text-lg font-semibold text-foreground mb-4">Revenue Growth</h3>
-                        <LineChart data={revenueData} width={800} height={200} color={CHART_COLORS.success} showArea showGrid />
+                        <div className="overflow-x-auto -mx-6 px-6">
+                            <LineChart data={revenueData} width={800} height={200} color={CHART_COLORS.success} showArea showGrid />
+                        </div>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

@@ -74,7 +74,7 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  return (
  <header
       className={cn(
-        'sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-white via-white to-brand-50/60 backdrop-blur-2xl px-6 shadow-[0_10px_30px_rgba(15,23,42,0.06)] transition-all duration-200',
+        'sticky top-0 z-40 flex h-16 items-center justify-between border-b border-surface-200/70 bg-gradient-to-r from-background via-background to-brand-50/50 backdrop-blur-2xl px-6 shadow-[0_10px_30px_rgba(15,23,42,0.06)] transition-all duration-200 dark:border-surface-200/80 dark:from-surface-50 dark:via-surface-50 dark:to-brand-900/25 dark:shadow-[0_14px_36px_rgba(0,0,0,0.45)]',
         className
       )}
     >
@@ -97,9 +97,9 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
           <Input
             type="search"
             placeholder="Search campaigns, contacts..."
-            className="w-64 pl-9 lg:w-80 bg-white/90 border-surface-200/70 focus:ring-primary/10 shadow-sm"
+            className="w-64 pl-9 lg:w-80 border-surface-200/70 bg-background/90 shadow-sm focus:ring-primary/10 dark:border-surface-200/80 dark:bg-surface-100/80"
           />
-          <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 bg-surface-50 px-1.5 font-mono text-[13px] font-bold text-surface-400 shadow-[0_1px_1px_0_rgba(0,0,0,0.05)]">
+          <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 bg-surface-50 px-1.5 font-mono text-[13px] font-bold text-surface-400 shadow-[0_1px_1px_0_rgba(0,0,0,0.05)] dark:border-surface-300 dark:bg-surface-100 dark:text-surface-500">
             ⌘K
           </kbd>
         </div>
@@ -201,14 +201,14 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  {/* User menu */}
  <DropdownMenu>
  <DropdownMenuTrigger asChild>
- <Button variant="ghost" className="relative h-11 w-11 rounded-full" aria-label="User menu">
+ <Button variant="ghost" className="relative h-11 w-11 rounded-full" aria-label="User menu" data-testid="user-menu">
  <Avatar size="sm">
  <AvatarImage src="/avatar.png" alt="User" />
  <AvatarFallback>JD</AvatarFallback>
  </Avatar>
  </Button>
  </DropdownMenuTrigger>
- <DropdownMenuContent align="end" className="w-56">
+ <DropdownMenuContent align="end" className="w-56" data-testid="user-dropdown">
  <DropdownMenuLabel className="font-normal">
  <div className="flex flex-col space-y-1">
  <p className="text-sm font-medium leading-none">John Doe</p>

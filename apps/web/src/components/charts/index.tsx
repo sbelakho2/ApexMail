@@ -60,7 +60,7 @@ function CustomTooltip({
         <p key={index} className="text-sm font-medium flex items-center gap-2" style={{ color: entry.color }}>
           <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
           <span>{entry.name}:</span>
-          <span className="font-bold tabular-nums text-foreground">
+          <span className="font-bold apex-metric-number text-foreground">
             {formatter ? formatter(entry.value as number) : entry.value}
           </span>
         </p>

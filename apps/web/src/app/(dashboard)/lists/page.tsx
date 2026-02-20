@@ -65,7 +65,7 @@ export default function ListsPage() {
                             <Users className="h-10 w-10 text-muted-foreground mb-4" />
                             <h3 className="font-semibold text-lg">No contact lists yet</h3>
                             <p className="text-muted-foreground text-sm mt-1 mb-4">Create your first list or import contacts to get started.</p>
-                            <div className="flex gap-3">
+                            <div className="flex items-center gap-3">
                                 <Button variant="outline"><Upload className="mr-2 h-4 w-4" />Import CSV</Button>
                                 <Button><Plus className="mr-2 h-4 w-4" />Create List</Button>
                             </div>
@@ -80,7 +80,7 @@ export default function ListsPage() {
                                 {filtered.map(l => (
                                     <TableRow key={l.id}>
                                         <TableCell><p className="font-medium">{l.name}</p><p className="text-sm text-muted-foreground">{l.description || '—'}</p></TableCell>
-                                        <TableCell className="tabular-nums">{formatNumber(l.subscriberCount)}</TableCell>
+                                        <TableCell className="apex-metric-number">{formatNumber(l.subscriberCount)}</TableCell>
                                         <TableCell><Badge variant={l.status === 'active' ? 'success' : 'secondary'}>{l.status}</Badge></TableCell>
                                         <TableCell className="text-muted-foreground text-sm">{formatRelativeTime(new Date(l.updatedAt))}</TableCell>
                                         <TableCell>

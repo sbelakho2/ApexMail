@@ -1537,4 +1537,351 @@ PROFILES = {
         "templates_summary": "- 'Site Published' (tmpl_sp01)\n- 'Trial Ending' (tmpl_te01)\n- (3 more)",
         "contact_count": "15,000",
     },
+
+    # ── NEW PROFILES (R14) — covering enterprise gaps ───────────────────
+
+    "enterprise_sso_broken": {
+        "account_id": "acct_ss8k3p",
+        "plan_name": "Enterprise",
+        "plan_price": "1299",
+        "emails_sent": "1,450,000",
+        "email_limit": "2,000,000",
+        "api_calls": "12,800,000",
+        "api_call_limit": "20,000,000",
+        "team_count": "42",
+        "team_limit": "Unlimited",
+        "created_at": "2023-09-01",
+        "domain_count": "6",
+        "domain_details": (
+            "- globalbank.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- mail.globalbank.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- transact.globalbank.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- track.globalbank.com: Custom tracking domain — Verified (SSL active)\n"
+            "- globalbank.eu: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- globalbank.co.uk: Verified (SPF: pass, DKIM: pass, DMARC: reject)"
+        ),
+        "recent_events": (
+            "- 1,450,000 sent, 1,420,000 delivered (97.9%), 14,500 bounced (1.0%), 290 complaints (0.02%)\n"
+            "- SSO login failures started 2 hours ago — 38 users unable to log in via Okta SAML"
+        ),
+        "open_issues": (
+            "- SSO SAML assertion errors for all Okta users — IdP certificate expired yesterday\n"
+            "- 38 team members locked out, only owner (password auth) can access"
+        ),
+        "billing_cycle_date": "Annual billing — renews September 1, 2026",
+        "team_members": (
+            "- ciso@globalbank.com (Admin, owner — password auth, can still log in)\n"
+            "- devops-lead@globalbank.com (Admin — SSO locked out)\n"
+            "- email-ops@globalbank.com (Editor — SSO locked out)\n"
+            "- (39 more team members — all SSO locked out)"
+        ),
+        "api_keys": (
+            "- 'Transactional' (am_live_ss8k...) — scopes: send — last used: 1 min ago\n"
+            "- 'Marketing' (am_live_mk2p...) — scopes: send, contacts — last used: 3h ago\n"
+            "- 'Admin' (am_live_ad5r...) — scopes: admin — last used: yesterday"
+        ),
+        "webhooks_summary": "- wh_gb01: https://events.globalbank.com/apexmail — Events: all — Status: active",
+        "template_count": "62",
+        "templates_summary": (
+            "- 'Transaction Alert' (tmpl_ta01)\n"
+            "- 'Statement Ready' (tmpl_sr01)\n"
+            "- 'Fraud Alert' (tmpl_fa01)\n"
+            "- (59 more templates)"
+        ),
+        "contact_count": "3,200,000",
+    },
+
+    "enterprise_subaccounts_active": {
+        "account_id": "acct_ag7m2n",
+        "plan_name": "Enterprise",
+        "plan_price": "1299",
+        "emails_sent": "5,800,000",
+        "email_limit": "10,000,000",
+        "api_calls": "35,000,000",
+        "api_call_limit": "50,000,000",
+        "team_count": "8",
+        "team_limit": "Unlimited",
+        "created_at": "2023-06-15",
+        "domain_count": "3",
+        "domain_details": (
+            "- brightagency.io: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- mail.brightagency.io: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- track.brightagency.io: Custom tracking domain — Verified (SSL active)"
+        ),
+        "recent_events": (
+            "- 5,800,000 sent across 8 sub-accounts, 5,680,000 delivered (97.9%)\n"
+            "- Sub-account 'FashionBrand' hit 100% email quota — sends rejected with QUOTA_EXCEEDED\n"
+            "- Sub-account 'TechStartup' approaching 80% quota warning"
+        ),
+        "open_issues": (
+            "- Sub-account 'FashionBrand' (sub_fb001) over email quota — needs increase\n"
+            "- Client 'TechStartup' (sub_ts002) requesting dedicated sending domain"
+        ),
+        "billing_cycle_date": "Annual billing — renews June 15, 2026",
+        "team_members": (
+            "- ceo@brightagency.io (Admin, owner)\n"
+            "- ops@brightagency.io (Admin)\n"
+            "- (6 more team members)"
+        ),
+        "api_keys": (
+            "- 'Parent Admin' (am_live_ag7m...) — scopes: admin — last used: 30 min ago\n"
+            "- 'FashionBrand' (am_live_fb01...) — scopes: send, read — last used: 5 min ago (sub_fb001)\n"
+            "- 'TechStartup' (am_live_ts02...) — scopes: send, read — last used: 1h ago (sub_ts002)"
+        ),
+        "webhooks_summary": (
+            "- wh_ba01: https://api.brightagency.io/events — Events: all — Status: active\n"
+            "- wh_fb01: https://hooks.fashionbrand.com/email — Events: delivered, bounced — Status: active"
+        ),
+        "template_count": "120",
+        "templates_summary": (
+            "- 'FashionBrand Welcome' (tmpl_fb_w01)\n"
+            "- 'TechStartup Onboard' (tmpl_ts_o01)\n"
+            "- (118 more templates across 8 sub-accounts)"
+        ),
+        "contact_count": "4,500,000",
+    },
+
+    "enterprise_log_stream_failing": {
+        "account_id": "acct_ls3v8q",
+        "plan_name": "Enterprise",
+        "plan_price": "1299",
+        "emails_sent": "2,100,000",
+        "email_limit": "5,000,000",
+        "api_calls": "18,000,000",
+        "api_call_limit": "30,000,000",
+        "team_count": "15",
+        "team_limit": "Unlimited",
+        "created_at": "2024-01-10",
+        "domain_count": "4",
+        "domain_details": (
+            "- dataflow.xyz: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- mail.dataflow.xyz: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- track.dataflow.xyz: Custom tracking domain — Verified (SSL active)\n"
+            "- notifications.dataflow.xyz: Verified (SPF: pass, DKIM: pass, DMARC: reject)"
+        ),
+        "recent_events": (
+            "- 2,100,000 sent, 2,060,000 delivered (98.1%)\n"
+            "- Log stream to BigQuery failing since 6 hours ago — 450,000 events queued\n"
+            "- S3 backup stream healthy"
+        ),
+        "open_issues": (
+            "- BigQuery log stream (stream_bq01) returning 403 errors — service account permissions may have changed\n"
+            "- 450,000 events queued waiting for delivery"
+        ),
+        "billing_cycle_date": "Annual billing — renews January 10, 2027",
+        "team_members": (
+            "- cto@dataflow.xyz (Admin, owner)\n"
+            "- data-eng@dataflow.xyz (Admin)\n"
+            "- (13 more team members)"
+        ),
+        "api_keys": (
+            "- 'Production' (am_live_ls3v...) — scopes: send — last used: 1 min ago\n"
+            "- 'Analytics' (am_live_an9k...) — scopes: read — last used: today"
+        ),
+        "webhooks_summary": "- wh_df01: https://api.dataflow.xyz/hooks — Events: all — Status: active",
+        "template_count": "30",
+        "templates_summary": "- (30 templates across notification types)",
+        "contact_count": "1,800,000",
+    },
+
+    "enterprise_template_approval": {
+        "account_id": "acct_ta5w9r",
+        "plan_name": "Enterprise",
+        "plan_price": "1299",
+        "emails_sent": "3,500,000",
+        "email_limit": "5,000,000",
+        "api_calls": "22,000,000",
+        "api_call_limit": "30,000,000",
+        "team_count": "25",
+        "team_limit": "Unlimited",
+        "created_at": "2023-11-01",
+        "domain_count": "5",
+        "domain_details": (
+            "- pharmahealth.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- mail.pharmahealth.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- alerts.pharmahealth.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- track.pharmahealth.com: Custom tracking domain — Verified (SSL active)\n"
+            "- pharmahealth.eu: Verified (SPF: pass, DKIM: pass, DMARC: reject)"
+        ),
+        "recent_events": (
+            "- 3,500,000 sent, 3,430,000 delivered (98.0%)\n"
+            "- Template 'Q1 Promo' stuck in legal_review stage for 5 days (72h auto-approve timer expired but was disabled)"
+        ),
+        "open_issues": (
+            "- Template 'Q1 Promo' (tmpl_q1p01, submission sub_xyz789) stuck in legal review for 5 days\n"
+            "- Legal team reviewer on PTO — no other legal approver configured"
+        ),
+        "billing_cycle_date": "Annual billing — renews November 1, 2026",
+        "team_members": (
+            "- cmo@pharmahealth.com (Admin, owner)\n"
+            "- legal-head@pharmahealth.com (Legal reviewer — ON PTO)\n"
+            "- marketing-lead@pharmahealth.com (Editor)\n"
+            "- (22 more team members)"
+        ),
+        "api_keys": (
+            "- 'Production' (am_live_ta5w...) — scopes: send — last used: 2 min ago\n"
+            "- 'Marketing' (am_live_mk7q...) — scopes: send, templates — last used: 5h ago"
+        ),
+        "webhooks_summary": "- wh_ph01: https://events.pharmahealth.com/email — Events: all — Status: active",
+        "template_count": "85",
+        "templates_summary": (
+            "- 'Q1 Promo' (tmpl_q1p01) — STATUS: PENDING LEGAL REVIEW (5 days)\n"
+            "- 'Drug Interaction Alert' (tmpl_dia01) — Approved\n"
+            "- 'Clinical Trial Update' (tmpl_ctu01) — Approved\n"
+            "- (82 more templates)"
+        ),
+        "contact_count": "5,200,000",
+    },
+
+    "scale_ab_testing": {
+        "account_id": "acct_ab4x7k",
+        "plan_name": "Scale",
+        "plan_price": "399",
+        "emails_sent": "320,000",
+        "email_limit": "500,000",
+        "api_calls": "2,800,000",
+        "api_call_limit": "5,000,000",
+        "team_count": "12",
+        "team_limit": "25",
+        "created_at": "2024-05-20",
+        "domain_count": "4",
+        "domain_details": (
+            "- retailpro.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- mail.retailpro.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n"
+            "- track.retailpro.com: Custom tracking domain — Verified (SSL active)\n"
+            "- promo.retailpro.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)"
+        ),
+        "recent_events": (
+            "- 320,000 sent, 315,000 delivered (98.4%), 1,600 bounced (0.5%), 32 complaints (0.01%)\n"
+            "- A/B test 'Subject-Line-Feb' running: variant A 22.1% open rate, variant B 28.4% open rate"
+        ),
+        "open_issues": "- None — A/B test in progress, want to analyze results",
+        "billing_cycle_date": "Renews on the 20th of each month",
+        "team_members": (
+            "- cmo@retailpro.com (Admin, owner)\n"
+            "- growth@retailpro.com (Admin)\n"
+            "- email-team@retailpro.com (Editor)\n"
+            "- (9 more team members)"
+        ),
+        "api_keys": (
+            "- 'Marketing' (am_live_ab4x...) — scopes: send, contacts, read — last used: 15 min ago\n"
+            "- 'Analytics' (am_live_rp8a...) — scopes: read — last used: today"
+        ),
+        "webhooks_summary": "- wh_rp01: https://hooks.retailpro.com/email — Events: all — Status: active",
+        "template_count": "35",
+        "templates_summary": (
+            "- 'Subject-Line-Feb Variant A' (tmpl_sl_a)\n"
+            "- 'Subject-Line-Feb Variant B' (tmpl_sl_b)\n"
+            "- (33 more templates)"
+        ),
+        "contact_count": "450,000",
+    },
+
+    "growth_account_lockout": {
+        "account_id": "acct_lo2n5j",
+        "plan_name": "Growth",
+        "plan_price": "129",
+        "emails_sent": "62,000",
+        "email_limit": "100,000",
+        "api_calls": "480,000",
+        "api_call_limit": "1,000,000",
+        "team_count": "6",
+        "team_limit": "10",
+        "created_at": "2024-08-01",
+        "domain_count": "3",
+        "domain_details": (
+            "- fitnessapp.co: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)\n"
+            "- mail.fitnessapp.co: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)\n"
+            "- track.fitnessapp.co: Custom tracking domain — Verified (SSL active)"
+        ),
+        "recent_events": (
+            "- 62,000 sent, 60,800 delivered (98.1%), 620 bounced (1.0%), 12 complaints (0.02%)\n"
+            "- Account owner locked out after 5 failed password attempts 45 minutes ago"
+        ),
+        "open_issues": (
+            "- Account owner locked out — 5 failed login attempts triggered 30-minute lockout\n"
+            "- MFA recovery codes not available — lost authenticator app after phone upgrade"
+        ),
+        "billing_cycle_date": "Renews on the 1st of each month",
+        "team_members": (
+            "- founder@fitnessapp.co (Admin, owner — LOCKED OUT)\n"
+            "- dev@fitnessapp.co (Editor)\n"
+            "- marketing@fitnessapp.co (Editor)\n"
+            "- (3 more team members)"
+        ),
+        "api_keys": (
+            "- 'App Backend' (am_live_lo2n...) — scopes: send — last used: 5 min ago\n"
+            "- 'Marketing' (am_live_ft8k...) — scopes: send, contacts — last used: 2h ago"
+        ),
+        "webhooks_summary": "- wh_fa01: https://api.fitnessapp.co/hooks — Events: delivered, bounced — Status: active",
+        "template_count": "12",
+        "templates_summary": "- 'Workout Reminder' (tmpl_wr01)\n- 'Progress Report' (tmpl_pr01)\n- (10 more)",
+        "contact_count": "85,000",
+    },
+
+    "pro_sdk_integration": {
+        "account_id": "acct_sd6p4w",
+        "plan_name": "Pro",
+        "plan_price": "59",
+        "emails_sent": "18,000",
+        "email_limit": "50,000",
+        "api_calls": "145,000",
+        "api_call_limit": "500,000",
+        "team_count": "3",
+        "team_limit": "5",
+        "created_at": "2025-01-10",
+        "domain_count": "2",
+        "domain_details": (
+            "- devtools.io: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)\n"
+            "- mail.devtools.io: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)"
+        ),
+        "recent_events": (
+            "- 18,000 sent, 17,800 delivered (98.9%), 90 bounced (0.5%), 2 complaints (0.01%)\n"
+            "- SDK errors: 'require() of ES Module not supported' in Next.js 15 App Router"
+        ),
+        "open_issues": (
+            "- Next.js integration broken — getting ESM/CJS mismatch errors with @apexmail/node\n"
+            "- TypeScript errors: 'Cannot find module @apexmail/node or its corresponding type declarations'"
+        ),
+        "billing_cycle_date": "Renews on the 10th of each month",
+        "team_members": "- founder@devtools.io (Admin, owner)\n- backend@devtools.io (Editor)\n- frontend@devtools.io (Viewer)",
+        "api_keys": "- 'Production' (am_live_sd6p...) — scopes: send, read — last used: 20 min ago\n- 'Test' (am_test_sd6p...) — scopes: all — last used: today",
+        "webhooks_summary": "- wh_dt01: https://api.devtools.io/webhooks/email — Events: all — Status: active",
+        "template_count": "8",
+        "templates_summary": "- 'Welcome' (tmpl_w01)\n- 'Password Reset' (tmpl_pr01)\n- (6 more)",
+        "contact_count": "12,000",
+    },
+
+    "growth_oauth_app": {
+        "account_id": "acct_oa9c3t",
+        "plan_name": "Growth",
+        "plan_price": "129",
+        "emails_sent": "72,000",
+        "email_limit": "100,000",
+        "api_calls": "620,000",
+        "api_call_limit": "1,000,000",
+        "team_count": "5",
+        "team_limit": "10",
+        "created_at": "2024-10-15",
+        "domain_count": "2",
+        "domain_details": (
+            "- integratehub.com: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)\n"
+            "- mail.integratehub.com: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)"
+        ),
+        "recent_events": (
+            "- 72,000 sent, 70,500 delivered (97.9%)\n"
+            "- OAuth PKCE token refresh failing — 'expired_token' errors from third-party integration"
+        ),
+        "open_issues": "- OAuth access tokens expiring and refresh not working — third-party app losing access every hour",
+        "billing_cycle_date": "Renews on the 15th of each month",
+        "team_members": "- cto@integratehub.com (Admin, owner)\n- backend@integratehub.com (Editor)\n- (3 more)",
+        "api_keys": (
+            "- 'Main API' (am_live_oa9c...) — scopes: send, contacts, read — last used: 3 min ago\n"
+            "- 'OAuth App' — using OAuth 2.0 PKCE tokens — access token expired 45 min ago"
+        ),
+        "webhooks_summary": "- wh_ih01: https://hooks.integratehub.com/email — Events: all — Status: active",
+        "template_count": "15",
+        "templates_summary": "- (15 integration notification templates)",
+        "contact_count": "55,000",
+    },
 }

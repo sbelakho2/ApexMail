@@ -66,6 +66,9 @@ type BimiModule = {
   validateBIMILogo: (logoUrl: string) => Promise<BimiLogoValidation>;
 };
 
+let domainHealthSchedulerStarted = false;
+const DOMAIN_HEALTH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 let mtaStsModulePromise: Promise<MtaStsModule | null> | null = null;
 let bimiModulePromise: Promise<BimiModule | null> | null = null;
 const mtaStsModulePath = '../../../mta/dist/auth/mta-sts.js';
@@ -232,6 +235,48 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
   const domainsRepo = new DomainsRepository(ctx.db);
   const auditRepo = new AuditLogsRepository(ctx.db);
+
+  if (!domainHealthSchedulerStarted) {
+    domainHealthSchedulerStarted = true;
+    const runHealthSweep = async () => {
+      try {
+        const result = await ctx.db.query<{ id: string; tenant_id: string }>(
+          `SELECT id, tenant_id
+           FROM domains
+           WHERE status = 'verified'
+           ORDER BY updated_at ASC
+           LIMIT 200`
+        );
+
+        if (!result.ok) {
+          ctx.logger.warn('Domain health sweep query failed', { error: result.error.message });
+          return;
+        }
+
+        await Promise.all(result.value.rows.map(async (row) => {
+          const domainResult = await domainsRepo.findById(row.id, row.tenant_id);
+          if (!domainResult.ok || !domainResult.value) {
+            return;
+          }
+
+          const healthStatus = await checkDnsHealth(domainResult.value);
+          await domainsRepo.update(
+            row.id,
+            { healthStatus },
+            row.tenant_id,
+          );
+        }));
+      } catch (error) {
+        ctx.logger.warn('Domain health sweep failed', { error: error instanceof Error ? error.message : String(error) });
+      }
+    };
+
+    void runHealthSweep();
+    const timer = setInterval(() => {
+      void runHealthSweep();
+    }, DOMAIN_HEALTH_INTERVAL_MS);
+    timer.unref();
+  }
 
   // Add a new domain
   router.post('/', requireScopes('domains:write'), async (c) => {
@@ -516,12 +561,7 @@ export function domainsRoutes(ctx: AppContext): Hono<AppEnv> {
 
     const domain = result.value;
 
-    // Perform health check
-    // E-176: Currently domain health (DNS/DKIM/SPF/DMARC) is only checked on-demand
-    // via this endpoint. A scheduled background job should periodically verify all
-    // verified domains (e.g., every 6 hours via cron) to detect DNS misconfigurations
-    // proactively and alert tenants before deliverability is impacted.
-    // TODO: Implement scheduled domain health verification in a background worker.
+    // Perform on-demand health check (in addition to scheduled sweeps)
     const healthCheck = await checkDnsHealth(domain);
 
     // Update health status in database (with tenant scope)

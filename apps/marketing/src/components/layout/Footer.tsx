@@ -44,7 +44,7 @@ const footerLinks = {
 };
 
 const socialLinks = [
-  { name: 'GitHub', href: 'https://github.com/apexmail', icon: Github },
+  { name: 'GitHub', href: 'https://github.com/Bel-Consulting-OU/ApexMail', icon: Github },
   { name: 'Twitter', href: 'https://twitter.com/apexmail', icon: Twitter },
   { name: 'LinkedIn', href: 'https://linkedin.com/company/apexmail', icon: Linkedin },
   { name: 'Email', href: 'mailto:hello@apexmail.ee', icon: Mail },

@@ -6,11 +6,11 @@ import { CompareCTA } from '@/components/compare/CompareCTA';
 export const metadata: Metadata = {
   title: 'ApexMail vs Resend | Feature Comparison',
   description:
-    'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, self-hosting, and built-in CRM.',
+    'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, self-hosting, and compliance automation.',
   openGraph: {
     title: 'ApexMail vs Resend | Feature Comparison',
     description:
-      'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, self-hosting, and built-in CRM.',
+      'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, self-hosting, and compliance automation.',
   },
 };
 
@@ -46,8 +46,9 @@ const comparisonData = {
       name: 'Developer Experience',
       features: [
         { name: 'TypeScript SDK', apexmail: 'Yes', competitor: 'Yes', winner: 'tie' },
-        { name: 'React Email Support', apexmail: 'Coming soon', competitor: 'Yes', winner: 'competitor' },
+        { name: 'React Email Support', apexmail: 'Yes — JSX authoring', competitor: 'Yes', winner: 'tie' },
         { name: 'Python SDK', apexmail: 'Yes', competitor: 'Yes', winner: 'tie' },
+        { name: 'SDK Languages', apexmail: 'Node, Python, Go, Ruby, PHP, Java', competitor: 'Node, Python, Ruby, Go, Elixir', winner: 'apexmail' },
         { name: 'Idempotency Keys', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'Batch Sending', apexmail: '1,000/request', competitor: '100/request', winner: 'apexmail' },
       ],
@@ -55,12 +56,11 @@ const comparisonData = {
     {
       name: 'Enterprise',
       features: [
-        { name: 'SSO/SAML', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
-        { name: 'White-Label', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
-        { name: 'Sub-Accounts', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'SSO/SAML', apexmail: 'Scale & Enterprise', competitor: 'No', winner: 'apexmail' },
+        { name: 'White-Label', apexmail: 'Enterprise', competitor: 'No', winner: 'apexmail' },
+        { name: 'Sub-Accounts', apexmail: 'Scale & Enterprise', competitor: 'No', winner: 'apexmail' },
         { name: 'Self-Hosted Option', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'SLA Guarantees', apexmail: '99.99%', competitor: 'No', winner: 'apexmail' },
-        { name: 'Built-in CRM', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
       ],
     },
     {
@@ -79,9 +79,10 @@ const comparisonData = {
       'Full enterprise features: SSO, white-label, sub-accounts',
       'HIPAA compliance with BAA for healthcare apps',
       'Self-hosted option for complete data sovereignty',
-      'Built-in CRM for sales and marketing alignment',
-      'Advanced AI features running locally, no API costs',
+      'Advanced analytics and send-time optimization',
       'Higher batch limits (1,000 vs 100 per request)',
+      'React Email JSX authoring — compose emails as React components',
+      'Official SDKs for Node.js, Python, Go, Ruby, PHP, and Java',
     ],
   },
 } as const;

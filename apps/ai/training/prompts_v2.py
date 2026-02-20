@@ -30,29 +30,52 @@ actionable advice based on their actual situation.
 - REST API: https://api.apexmail.ee/v1 (Bearer token auth)
 - API keys: am_live_<hex> (production) | am_test_<hex> (sandbox)
 - Dashboard: https://app.apexmail.ee
-- Node.js SDK: @apexmail/node | Python SDK: apexmail (pip install apexmail)
+- SDKs: Node.js (@apexmail/node), Python (apexmail), Go, Ruby (apexmail gem), PHP (apexmail/apexmail-php), Java (ee.apexmail:apexmail-java)
+- All SDKs have full feature parity, built-in auto-retry (3 attempts, exponential backoff on 5xx/429)
 
 ## Pricing (monthly, from plans.ts canonical source)
-| Plan       | Price    | Emails/mo   | API calls/mo | Team | Domains    |
-|------------|----------|-------------|--------------|------|------------|
-| Free       | $0       | 1,000       | 10,000       | 1    | 1          |
-| Starter    | $29      | 25,000      | 250,000      | 3    | 3          |
-| Pro        | $59      | 50,000      | 500,000      | 5    | 5          |
-| Growth     | $129     | 100,000     | 1,000,000    | 10   | 10         |
-| Scale      | $399     | 500,000     | 5,000,000    | 25   | Unlimited  |
-| Enterprise | $1,299   | 2,000,000   | 20,000,000   | Unlimited | Unlimited |
+| Plan       | Price    | Emails/mo   | API calls/mo | Team | Domains    | Contacts    |
+|------------|----------|-------------|--------------|------|------------|-------------|
+| Free       | $0       | 1,000       | 10,000       | 1    | 1          | 100         |
+| Starter    | $29      | 25,000      | 250,000      | 3    | 3          | 5,000       |
+| Pro        | $59      | 50,000      | 500,000      | 5    | 5          | 10,000      |
+| Growth     | $129     | 100,000     | 1,000,000    | 10   | 10         | 25,000      |
+| Scale      | $399     | 500,000     | 5,000,000    | 25   | Unlimited  | 100,000     |
+| Enterprise | $1,299   | 2,000,000   | 20,000,000   | Unlimited | Unlimited | Unlimited |
 
 Pay-as-you-go (PAYG): $0 base. Email tiers: $0.001 (0-10k), $0.0008 \
 (10k-100k), $0.0005 (100k-1M), $0.0003 (1M+). Overages on plans: \
 $0.50 per 1,000 extra emails. API: first 100k free, then $0.10/1,000.
 
 ## Key features by plan
-- **Free**: Basic sending, 1 domain, NO webhooks, 7-day retention.
-- **Starter ($29)**: Webhooks, 3 domains, 3 team members, email support, 30-day retention. NO A/B testing, NO dedicated IP.
-- **Pro ($59)**: Custom tracking domain, 5 domains, 5 team members, email support, 60-day retention. NO A/B testing, NO dedicated IP.
-- **Growth ($129)**: A/B testing, send-time optimization (AI), 1 dedicated IP, 10 domains, 10 team members, audit logs, priority support, 90-day retention.
-- **Scale ($399)**: 3 dedicated IPs, SSO, unlimited domains, 25 team members, phone support, subaccounts, SLA 10% credit, 365-day retention.
-- **Enterprise ($1,299)**: 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, SLA 25% credit, 730-day retention.
+- **Free**: Basic sending, 1 domain, NO webhooks, 7-day retention. 100 contacts.
+- **Starter ($29)**: Webhooks, 3 domains, 3 team members, email support, 30-day retention. NO A/B testing, NO dedicated IP. 5,000 contacts.
+- **Pro ($59)**: Custom tracking domain, 5 domains, 5 team members, email support, 60-day retention. NO A/B testing, NO dedicated IP. 10,000 contacts.
+- **Growth ($129)**: A/B testing, send-time optimization (AI), 1 dedicated IP, 10 domains, 10 team members, audit logs, priority support, 90-day retention. 25,000 contacts.
+- **Scale ($399)**: 3 dedicated IPs, SSO/SAML, unlimited domains, 25 team members, phone support, subaccounts, inbound receiving, SLA 99.9% (10% credit), 365-day retention. 100,000 contacts.
+- **Enterprise ($1,299)**: 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, SLA 99.95% (25% credit), 730-day retention. Unlimited contacts.
+
+## Critical technical facts
+- API rate limit: 1,000 req/min per tenant (all plans, Redis sliding window). Enterprise may negotiate higher.
+- Domain auth: SPF (include:_spf.apexmail.ee), DKIM (selector: apexmail._domainkey), DMARC, ARC, BIMI.
+- Return-Path CNAME: bounce.yourdomain.com → bounce.apexmail.ee.
+- Webhook signing: HMAC-SHA256 with dedicated signing secret (≠ API key). Headers: X-ApexMail-Signature, X-ApexMail-Timestamp. Secret rotation: 24h grace.
+- Webhook retries: default 3 (system cap 5), exponential backoff, initial 60s, 2× multiplier, max 300s cap.
+- Webhook auto-disable: 10+ consecutive failures/hour OR 50%+ failure rate (20+ attempts).
+- Soft bounce retry: exponential backoff 30s × 2^(attempt−1), capped 30 min. Max 3 attempts.
+- Hard bounces: auto-added to suppression list.
+- Max attachment: 25 MB per file, 50 MB total per message. Max recipients: 50 to + 50 cc + 50 bcc. Batch: up to 1,000.
+- Custom tracking domain: CNAME → t.apexmail.ee. Pro plan+.
+- Idempotency: X-Idempotency-Key header, 1-256 chars, 24h TTL. Same key + different body → 409 Conflict.
+- Scheduled sends: up to 72 hours ahead, minimum 1 minute, ISO 8601 format.
+- Account lockout: 5 failed attempts → 15-minute lockout.
+- IP warmup: Day 1: 50, Day 2: 100, Day 3: 250, Day 4: 500, Day 5: 1K, Day 6: 2.5K, Day 7: 5K, Days 8-14: 10K/day, Days 15-21: 25K/day, Days 22-28: 50K/day, Day 29+: 100K+.
+- Dedicated IP add-on: $49/month. Must send >50K emails/month. Provisioning: 1-3 business days.
+- Gmail clips emails >102 KB HTML. Keep under 102 KB.
+- SMTP ports: outbound 25, 465, 587. Inbound 25, 465 (Scale/Enterprise).
+- Tags: max 5 per message. Metadata: max 10 key-value pairs, 255 chars per value.
+- Overage: emails $0.50 per 1,000 extra. API: first 100K free, then $0.10/1,000.
+- Quota resets: daily at 00:00 UTC, monthly on the 1st. Suppressed emails: NOT counted.
 
 ## Tools you can call
 When you need to take an action or look up data, emit a tool call block:

@@ -188,7 +188,7 @@ export default function ContactsPage() {
                 description="Manage your subscriber list and contact information."
                 breadcrumbs={[{ label: 'Contacts' }]}
                 actions={
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
                         <Button variant="outline" onClick={() => setImportOpen(true)}>
                             <Upload className="mr-2 h-4 w-4" />
                             Import

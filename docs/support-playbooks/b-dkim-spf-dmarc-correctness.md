@@ -23,13 +23,13 @@
 
 **Symptoms:** DKIM passes for some recipients but fails for others. Intermittent failures.
 
-**Root cause:** ApexMail rotated the DKIM signing key/selector, but DNS CNAME still points to old selector, or recipient DNS caches stale DKIM public key.
+**Root cause:** ApexMail rotated the DKIM signing key/selector, and the customer's DNS TXT record still contains the old public key.
 
 **Resolution:**
-1. Since ApexMail uses CNAME delegation (`apexmail._domainkey → apexmail._domainkey.apexmail.io`), key rotation is handled automatically on our side.
-2. If customer sees failures: ensure the CNAME still resolves — `dig CNAME apexmail._domainkey.yourdomain.com`
-3. If the CNAME is correct, this is a transient caching issue. Wait for DNS TTL to expire (typically < 1 hour).
-4. If customer manages their own DKIM keys (Enterprise): they must update the DNS TXT record with the new public key after rotation.
+1. ApexMail uses per-domain TXT DKIM records. When a key is rotated, the customer must update their DNS TXT record with the new public key.
+2. Find the new key: Dashboard → Domains → [Domain] → DNS Records → DKIM public key.
+3. Customer must update the TXT record at `{selector}._domainkey.yourdomain.com` with the new value.
+4. If the TXT record is correct, intermittent failures may be recipients with cached stale DKIM public keys. Wait for DNS TTL to expire (typically < 1 hour).
 
 ---
 
@@ -80,15 +80,15 @@
 
 ## Issue 24 — SPF fails because customer's SPF doesn't include return-path domain
 
-**Symptoms:** SPF fails. Customer included `spf.apexmail.io` but return-path uses a different domain.
+**Symptoms:** SPF fails. Customer included `_spf.apexmail.ee` but return-path uses a different domain.
 
 **Root cause:** SPF is checked against the domain in the envelope-from (return-path), NOT the From header. If the return-path is `bounce.yourdomain.com`, SPF must pass for `bounce.yourdomain.com`.
 
 **Resolution:**
 1. ApexMail sets return-path to `bounce.yourdomain.com` when the bounce CNAME is configured.
-2. If customer didn't add the bounce CNAME (`bounce → bounce.apexmail.io`), return-path may use ApexMail's domain directly, and SPF should pass through ApexMail's own SPF.
-3. If customer added bounce CNAME: SPF should be on the root domain — `include:spf.apexmail.io` in root domain's SPF covers subdomains.
-4. Verify: `dig TXT yourdomain.com | grep spf` should show `include:spf.apexmail.io`.
+2. If customer didn't add the bounce CNAME (`bounce → bounce.apexmail.ee`), return-path may use ApexMail's domain directly, and SPF should pass through ApexMail's own SPF.
+3. If customer added bounce CNAME: SPF should be on the root domain — `include:_spf.apexmail.ee` in root domain's SPF covers subdomains.
+4. Verify: `dig TXT yourdomain.com | grep spf` should show `include:_spf.apexmail.ee`.
 
 ---
 
@@ -113,7 +113,7 @@
 **Root cause:** Customer set DMARC policy to `p=reject` before confirming all authentication is working. Any SPF or DKIM failure causes immediate rejection.
 
 **Resolution:**
-1. **Immediately** change DMARC to `p=none` to stop rejections: `v=DMARC1; p=none; rua=mailto:dmarc@apexmail.io`
+1. **Immediately** change DMARC to `p=none` to stop rejections: `v=DMARC1; p=none; rua=mailto:dmarc@apexmail.ee`
 2. Monitor DMARC aggregate reports (`rua`) for 2–4 weeks.
 3. Once reports show >99% pass rate: upgrade to `p=quarantine`.
 4. After another 2 weeks of clean reports: upgrade to `p=reject`.
@@ -129,7 +129,7 @@
 
 **Resolution:**
 1. Check format: `rua=mailto:dmarc-reports@yourdomain.com` (must have `mailto:` prefix).
-2. If reporting to external domain (e.g., `rua=mailto:dmarc@apexmail.io`): the receiving domain should have a DNS TXT record: `yourdomain.com._report._dmarc.apexmail.io TXT "v=DMARC1"`. ApexMail already has this configured for `apexmail.io`.
+2. If reporting to external domain (e.g., `rua=mailto:dmarc@apexmail.ee`): the receiving domain should have a DNS TXT record: `yourdomain.com._report._dmarc.apexmail.ee TXT "v=DMARC1"`. ApexMail already has this configured for `apexmail.ee`.
 3. Multiple addresses: `rua=mailto:addr1@example.com,mailto:addr2@example.com` (comma-separated, each with `mailto:`).
 4. `rua` = aggregate reports (daily XML), `ruf` = forensic/failure reports (per-message, privacy-sensitive).
 
@@ -177,8 +177,8 @@
    ```
    version: STSv1
    mode: enforce
-   mx: mx1.apexmail.io
-   mx: mx2.apexmail.io
+   mx: mx1.apexmail.ee
+   mx: mx2.apexmail.ee
    max_age: 604800
    ```
 4. The id in the DNS record must change whenever the policy file changes.
@@ -223,8 +223,8 @@
 1. Check all three: SPF, DKIM, DMARC.
 2. Get message headers from a test email — look for `Authentication-Results` header.
 3. Common causes:
-   - SPF missing `include:spf.apexmail.io` → Issue 5
-   - DKIM CNAME misconfigured → Issues 3, 4, 14
+   - SPF missing `include:_spf.apexmail.ee` → Issue 5
+   - DKIM TXT record missing/malformed → Issues 3, 4, 14
    - DMARC policy at `p=reject` with alignment failure → Issue 11
 4. Fix authentication, then resend.
 5. Gmail in particular enforces this strictly: `550-5.7.26 This mail is unauthenticated, which poses a security risk`.
@@ -254,7 +254,7 @@
 **Resolution:**
 1. Explain: "Each domain you want to send from needs to be separately verified with its own DNS records."
 2. Add each domain in Dashboard → Domains → Add Domain.
-3. For each domain, add: SPF include, DKIM CNAME, DMARC TXT, verification TXT.
+3. For each domain, add: SPF include, DKIM TXT record, DMARC TXT, verification TXT.
 4. Plan limits apply: Free (1 domain), Starter (3), Pro (5), Growth (10), Scale (25), Enterprise (unlimited).
 5. If customer needs more domains than their plan allows: upgrade plan or contact `contact@apexmail.ee`.
 

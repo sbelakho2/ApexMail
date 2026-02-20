@@ -443,23 +443,30 @@ The testing app is a **multi-layer test infrastructure** covering unit tests, E2
 ## 6. AI App
 
 **Port**: 3012  
-**Dependencies**: `onnxruntime-node`, `@huggingface/transformers`, `@anthropic-ai/sdk`, `natural`, `ml-matrix`, `hono`, `ioredis`, `pg`, `zod`  
+**Dependencies**: `@huggingface/transformers`, `@anthropic-ai/sdk`, `natural`, `ml-matrix`, `hono`, `ioredis`, `pg`, `zod`  
 **Source files**: ~20 TypeScript modules in `src/` (~8,000+ lines, excluding `training/`)
 
 ### 6.1 Architecture Overview
 
-The AI app is an **AI Intelligence Suite** providing local LLM inference (ONNX Runtime), a unified conversational/command assistant, content generation, sentiment analysis, send-time optimization, predictive analytics, multi-armed bandits, and vector similarity search. It runs as a standalone Hono HTTP service with per-tenant rate limiting, request ID tracing, and model lifecycle management.
+The AI app is an **AI Intelligence Suite** providing LLM inference via a **llama.cpp server sidecar** (OpenAI-compatible API), a unified conversational/command assistant, content generation, sentiment analysis, send-time optimization, predictive analytics, multi-armed bandits, and vector similarity search. It runs as a standalone Hono HTTP service with per-tenant rate limiting, request ID tracing, and model lifecycle management.
 
-### 6.2 Inference Engine (`inference/engine.ts` — 529 lines)
+**Inference architecture (Option A — llama-server)**:
+- `llama-server` (llama.cpp) runs as a sidecar on the VPS, serving **Qwen3.5-8B Q4_K_M GGUF**.
+- Exposes an OpenAI-compatible `/v1/chat/completions` endpoint (SSE streaming supported).
+- `InferenceEngine` in Node.js is a thin HTTP client — no native `.node` bindings required.
+- Drop-in compatible with hosted models (GPT-4o, Claude, etc.) by changing `LLAMA_SERVER_URL`.
+- Achieves ~15–30 tok/s on a standard VPS CPU vs ~3–8 tok/s with ONNX Runtime INT8.
 
-- **ONNX Runtime** integration for local, privacy-preserving inference.
-- Default model: **Qwen 2.5-7B-Instruct** (ONNX format).
-- `SimpleTokenizer` with ChatML special tokens (`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`).
+### 6.2 Inference Engine (`inference/engine.ts`)
+
+- **llama-server HTTP client** for local, privacy-preserving inference via OpenAI-compatible API.
+- Default model: **Qwen3.5-8B** (GGUF Q4_K_M, served by llama.cpp).
+- `SimpleTokenizer` retained for token counting / context length estimation (ChatML special tokens).
 - Token encoding fix: FIX-500-447 — sorted special tokens by length descending for correct matching.
 - Operations: `generate()` (text completion), `chat()` (multi-turn), `embed()` (embeddings), `embedBatch()`, `tokenize()`.
 - **Loading lock** (AI-006 FIX): prevents concurrent model loads via promise deduplication.
 - Cosine similarity with division-by-zero guard (FIX-500-383).
-- Currently operates in **mock mode** — warns clearly that inference outputs are synthetic until real ONNX model files are provided.
+- Configured via `LLAMA_SERVER_URL` environment variable (default: `http://localhost:8080`).
 
 ### 6.3 Embeddings Service (`inference/embeddings.ts` — 653 lines)
 

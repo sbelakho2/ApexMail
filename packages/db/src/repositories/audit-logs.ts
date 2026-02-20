@@ -20,6 +20,7 @@ export type AuditAction =
   | 'user.logout'
   | 'user.login_failed'
   | 'user.password_changed'
+  | 'user.password_reset_requested'
   | 'user.mfa_enabled'
   | 'user.mfa_disabled'
   | 'user.token_refreshed'
@@ -707,17 +708,10 @@ export class AuditLogsRepository {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
-    // In production, this would move data to cold storage (S3, GCS, etc.)
-    // For now, we just count what would be archived
-    const countResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM audit_logs 
-       WHERE tenant_id = $1 AND timestamp < $2`,
-      [tenantId, cutoffDate]
-    );
+    const deletedResult = await this.cleanupOld(olderThanDays, { tenantId, batchSize: 1000 });
+    if (!deletedResult.ok) return deletedResult;
 
-    if (!countResult.ok) return countResult;
-
-    const count = parseInt(countResult.value.rows[0]?.count ?? '0', 10);
+    const count = deletedResult.value;
     const archivePath = `audit-logs/${tenantId}/${cutoffDate.toISOString().slice(0, 10)}.parquet`;
 
     return Result.ok({

@@ -67,7 +67,7 @@ export default function ReportsPage() {
                         <Card key={s.label}>
                             <CardContent className="p-6">
                                 <p className="text-sm text-muted-foreground">{s.label}</p>
-                                <p className="text-2xl font-bold tabular-nums">{formatNumber(s.value)}</p>
+                                <p className="text-2xl apex-metric-number">{formatNumber(s.value)}</p>
                                 <p className="text-xs text-muted-foreground mt-1">{s.sub}</p>
                             </CardContent>
                         </Card>

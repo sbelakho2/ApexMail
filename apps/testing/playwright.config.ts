@@ -43,8 +43,8 @@ export default defineConfig({
     // Retry on CI only
     retries: process.env.CI ? 2 : 0,
     
-    // Opt out of parallel tests on CI
-    workers: process.env.CI ? 1 : undefined,
+    // Limit workers to prevent dev server overload under parallel load
+    workers: process.env.CI ? 1 : 2,
     
     // Reporter to use
     reporter: [
@@ -151,6 +151,8 @@ export default defineConfig({
                 ...devices['Desktop Chrome'],
             },
             snapshotDir: './snapshots',
+            // Retry once on transient connection errors from the dev server
+            retries: 1,
         },
         
         // Accessibility project
@@ -184,6 +186,12 @@ export default defineConfig({
         url: 'http://localhost:3000',
         reuseExistingServer: !process.env.CI,
         timeout: 120000,
+        env: {
+            ...process.env,
+            E2E_TEST_MODE: 'true',
+            E2E_BYPASS_KEY: process.env.E2E_BYPASS_KEY || 'apexmail-e2e-bypass-key',
+            SESSION_SECRET: process.env.SESSION_SECRET || 'test-web-session-secret',
+        },
     },
     
     // Global setup/teardown

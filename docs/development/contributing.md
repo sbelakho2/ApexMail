@@ -42,11 +42,11 @@ By participating in this project, you agree to abide by our Code of Conduct:
 # Fork the repository on GitHub
 
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/apexmail.git
-cd apexmail
+git clone https://github.com/YOUR_USERNAME/ApexMail.git
+cd ApexMail
 
 # Add upstream remote
-git remote add upstream https://github.com/yourorg/apexmail.git
+git remote add upstream https://github.com/sbelakho2/ApexMail.git
 ```
 
 #### 2. Create a Branch
@@ -128,8 +128,8 @@ See [Development Guide](./getting-started.md) for full setup instructions.
 Quick start:
 ```bash
 # Clone and install
-git clone https://github.com/yourorg/apexmail.git
-cd apexmail
+git clone https://github.com/sbelakho2/ApexMail.git
+cd ApexMail
 pnpm install
 
 # Start infrastructure
@@ -197,6 +197,7 @@ describe('UserService', () => {
 | Architecture | `docs/architecture/` | System design |
 | User Guide | `docs/user-guide/` | End-user documentation |
 | Development | `docs/development/` | Developer docs |
+| Style System | `docs/development/style-system.md` | Premium UI and Apex icon standards |
 | ADRs | `docs/adr/` | Decision records |
 
 ### Writing Documentation
@@ -264,7 +265,7 @@ We follow [Semantic Versioning](https://semver.org/):
 ## Getting Help
 
 - **Documentation**: Read the docs first
-- **Discussions**: [GitHub Discussions](https://github.com/yourorg/apexmail/discussions)
+- **Discussions**: [GitHub Discussions](https://github.com/Bel-Consulting-OU/ApexMail/discussions)
 - **Discord**: Join our community server
 - **Issues**: For bugs and features
 

@@ -190,6 +190,13 @@ export class LogStreamingService {
     data: Omit<LogStream, 'id' | 'accountId' | 'status' | 'lastStreamedAt' | 'lastError' | 'errorCount' | 'bytesStreamed' | 'eventsStreamed' | 'createdAt' | 'updatedAt'>
   ): Promise<Result<LogStream>> {
     try {
+      if (data.destinationType === StreamDestinationType.AZURE_BLOB) {
+        return {
+          ok: false,
+          error: new Error('Azure Blob destination is not supported by ApexMail'),
+        };
+      }
+
       const id = uuidv4();
 
       // Encrypt sensitive credentials
@@ -352,8 +359,29 @@ export class LogStreamingService {
           break;
         }
 
+        case StreamDestinationType.SUMOLOGIC: {
+          const sumoResult = await this.verifySumoLogic(decryptedConfig as SumoLogicConfig);
+          success = sumoResult.success;
+          message = sumoResult.message;
+          break;
+        }
+
+        case StreamDestinationType.GCS: {
+          const gcsResult = this.verifyGcsConfig(decryptedConfig as GCSDestinationConfig);
+          success = gcsResult.success;
+          message = gcsResult.message;
+          break;
+        }
+
+        case StreamDestinationType.AZURE_BLOB: {
+          const azureResult = this.verifyAzureBlobConfig(decryptedConfig as AzureBlobConfig);
+          success = azureResult.success;
+          message = azureResult.message;
+          break;
+        }
+
         default:
-          message = 'Verification not implemented for this destination type';
+          message = 'Destination adapter unavailable in this build';
       }
 
       // Update stream status
@@ -573,8 +601,27 @@ export class LogStreamingService {
           break;
         }
 
+        case StreamDestinationType.SUMOLOGIC: {
+          const sumoResult = await this.sendToSumoLogic(batch, decryptedConfig as SumoLogicConfig);
+          success = sumoResult.success;
+          errorMessage = sumoResult.error;
+          break;
+        }
+
+        case StreamDestinationType.GCS: {
+          success = false;
+          errorMessage = 'GCS delivery adapter unavailable in this build';
+          break;
+        }
+
+        case StreamDestinationType.AZURE_BLOB: {
+          success = false;
+          errorMessage = 'Azure Blob delivery adapter unavailable in this build';
+          break;
+        }
+
         default:
-          errorMessage = 'Unsupported destination type';
+          errorMessage = 'Destination adapter unavailable in this build';
       }
 
       // Update stream stats
@@ -801,6 +848,88 @@ export class LogStreamingService {
     }
   }
 
+  private async verifySumoLogic(config: SumoLogicConfig): Promise<{ success: boolean; message: string }> {
+    try {
+      const testPayload = {
+        type: 'verification',
+        source: 'apexmail',
+        timestamp: new Date().toISOString(),
+      };
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      if (config.sourceCategory) headers['X-Sumo-Category'] = config.sourceCategory;
+      if (config.sourceName) headers['X-Sumo-Name'] = config.sourceName;
+      if (config.sourceHost) headers['X-Sumo-Host'] = config.sourceHost;
+
+      const response = await fetch(config.httpSourceUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(testPayload),
+      });
+
+      if (response.ok) {
+        return { success: true, message: 'Sumo Logic HTTP source verified successfully' };
+      }
+
+      return { success: false, message: `Sumo Logic returned status ${response.status}` };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Failed to verify Sumo Logic HTTP source',
+      };
+    }
+  }
+
+  private verifyGcsConfig(config: GCSDestinationConfig): { success: boolean; message: string } {
+    if (!config.bucket?.trim()) {
+      return { success: false, message: 'GCS bucket is required' };
+    }
+
+    if (!config.serviceAccountKey?.trim()) {
+      return { success: false, message: 'GCS service account key is required' };
+    }
+
+    try {
+      const parsed = JSON.parse(config.serviceAccountKey) as Record<string, unknown>;
+      if (typeof parsed.client_email !== 'string' || typeof parsed.private_key !== 'string') {
+        return { success: false, message: 'GCS service account key must include client_email and private_key' };
+      }
+
+      return {
+        success: false,
+        message: 'GCS configuration parsed successfully, but delivery adapter is unavailable in this build',
+      };
+    } catch {
+      return { success: false, message: 'Invalid GCS service account key JSON' };
+    }
+  }
+
+  private verifyAzureBlobConfig(config: AzureBlobConfig): { success: boolean; message: string } {
+    if (!config.container?.trim()) {
+      return { success: false, message: 'Azure Blob container is required' };
+    }
+
+    const connection = config.connectionString?.trim();
+    if (!connection) {
+      return { success: false, message: 'Azure Blob connection string is required' };
+    }
+
+    if (!/AccountName=/.test(connection) || !/AccountKey=/.test(connection)) {
+      return {
+        success: false,
+        message: 'Azure Blob connection string must include AccountName and AccountKey',
+      };
+    }
+
+    return {
+      success: false,
+      message: 'Azure Blob configuration parsed successfully, but delivery adapter is unavailable in this build',
+    };
+  }
+
   // Sending methods
   private async sendToS3(batch: StreamBatch, config: S3DestinationConfig, batchConfig: BatchConfig): Promise<{ success: boolean; error?: string }> {
     try {
@@ -957,6 +1086,36 @@ export class LogStreamingService {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Datadog delivery failed',
+      };
+    }
+  }
+
+  private async sendToSumoLogic(batch: StreamBatch, config: SumoLogicConfig): Promise<{ success: boolean; error?: string }> {
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      if (config.sourceCategory) headers['X-Sumo-Category'] = config.sourceCategory;
+      if (config.sourceName) headers['X-Sumo-Name'] = config.sourceName;
+      if (config.sourceHost) headers['X-Sumo-Host'] = config.sourceHost;
+
+      const body = batch.events.map((event) => JSON.stringify(event)).join('\n');
+      const response = await fetch(config.httpSourceUrl, {
+        method: 'POST',
+        headers,
+        body,
+      });
+
+      if (response.ok) {
+        return { success: true };
+      }
+
+      return { success: false, error: `Sumo Logic returned ${response.status}` };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Sumo Logic delivery failed',
       };
     }
   }

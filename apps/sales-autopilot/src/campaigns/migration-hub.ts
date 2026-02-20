@@ -582,12 +582,12 @@ result = client.messages.send(
   {
     framework: 'Go Fiber',
     language: 'go',
-    installCommand: 'go get github.com/apexmail/apexmail-go',
+    installCommand: 'go get github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go',
     description: 'Send email from a Go Fiber API handler.',
     code: `package main
 
 import (
-    "github.com/apexmail/apexmail-go"
+    "github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go"
     "github.com/gofiber/fiber/v2"
     "os"
 )
