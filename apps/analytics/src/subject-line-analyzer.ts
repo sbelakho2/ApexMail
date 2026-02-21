@@ -92,8 +92,9 @@ const CURIOSITY_TOKENS = new Set(['secret', 'discover', 'revealed', 'truth', 'hi
 const SOCIAL_PROOF_TOKENS = new Set(['trending', 'popular', 'millions', 'thousands', 'everyone', 'best', 'top', 'rated', 'loved', 'trusted']);
 const QUESTION_STARTERS = ['are you', 'do you', 'have you', 'what if', 'why', 'how', 'when', 'where', 'who', 'which', 'can you', 'did you', 'would you'];
 
-// Spam trigger words (reduce deliverability)
-const SPAM_TOKENS = new Set(['free', 'winner', 'congratulations', 'urgent', 'act now', 'limited time', 'click here', 'buy now', 'order now', 'no obligation', 'risk free', 'guaranteed', 'cash', 'money', 'dollars', 'cheap', 'lowest price']);
+// Spam trigger words — single-word and multi-word phrases
+const SPAM_SINGLE_TOKENS = new Set(['free', 'winner', 'congratulations', 'urgent', 'guaranteed', 'cash', 'money', 'dollars', 'cheap']);
+const SPAM_BIGRAM_PHRASES = new Set(['act now', 'limited time', 'click here', 'buy now', 'order now', 'no obligation', 'risk free', 'lowest price']);
 
 // Positive sentiment words
 const POSITIVE_TOKENS = new Set(['love', 'amazing', 'awesome', 'great', 'fantastic', 'wonderful', 'excellent', 'best', 'happy', 'excited', 'thrilled', 'perfect', 'beautiful', 'incredible']);
@@ -104,15 +105,14 @@ const NEGATIVE_TOKENS = new Set(['miss', 'lose', 'mistake', 'wrong', 'bad', 'pro
 export class SubjectLineAnalyzer {
     private readonly db: Pool;
     private readonly redis: Redis;
-    // @ts-expect-error Reserved for future logging implementation
-    private readonly _logger: Logger;
+    private readonly logger: Logger;
     private readonly cachePrefix = 'subject:';
     private readonly cacheTTL = 24 * 60 * 60; // 24 hours
 
     constructor(config: SubjectLineAnalyzerConfig) {
         this.db = config.db;
         this.redis = config.redis;
-        this._logger = config.logger;
+        this.logger = config.logger;
     }
 
     /**
@@ -122,13 +122,27 @@ export class SubjectLineAnalyzer {
         subject: string,
         tenantId?: string
     ): Promise<SubjectLineScore> {
+        // Input validation
+        if (!subject || subject.trim().length === 0) {
+            return {
+                subject,
+                predictedOpenRate: 0,
+                scores: { overall: 0, length: 0, urgency: 0, personalization: 0, clarity: 0, spamRisk: 0 },
+                issues: [{ type: 'error', message: 'Subject line is empty.' }],
+                suggestions: ['Provide a meaningful subject line.'],
+                powerTokens: [],
+                riskTokens: [],
+            };
+        }
+        // Truncate extremely long subjects to prevent excessive processing
+        const safeSubject = subject.length > 1000 ? subject.slice(0, 1000) : subject;
         // Get audience insights for context
         let insights: AudienceInsights | null = null;
         if (tenantId) {
             insights = await this.getAudienceInsights(tenantId);
         }
 
-        const tokens = this.tokenize(subject);
+        const tokens = this.tokenize(safeSubject);
         const issues: SubjectLineIssue[] = [];
         const suggestions: string[] = [];
         const powerTokens: string[] = [];
@@ -182,12 +196,20 @@ export class SubjectLineAnalyzer {
             issues.push({ type: 'warning', message: 'Dollar signs may trigger spam filters.' });
         }
 
-        // Spam risk analysis
+        // Spam risk analysis — check single-word tokens and bigram phrases
         let spamRiskScore = 0;
         for (const token of tokens) {
-            if (SPAM_TOKENS.has(token)) {
+            if (SPAM_SINGLE_TOKENS.has(token)) {
                 spamRiskScore += 15;
                 riskTokens.push(token);
+            }
+        }
+        // Check consecutive token pairs against multi-word spam phrases
+        const lowerSubject = safeSubject.toLowerCase();
+        for (const phrase of SPAM_BIGRAM_PHRASES) {
+            if (lowerSubject.includes(phrase)) {
+                spamRiskScore += 15;
+                riskTokens.push(phrase);
             }
         }
         spamRiskScore = Math.min(100, spamRiskScore);
@@ -273,9 +295,14 @@ export class SubjectLineAnalyzer {
      * Get audience-specific insights based on historical data
      */
     async getAudienceInsights(tenantId: string): Promise<AudienceInsights> {
-        // Check cache
+        // Check cache — gracefully degrade if Redis is unavailable
         const cacheKey = `${this.cachePrefix}insights:${tenantId}`;
-        const cached = await this.redis.get(cacheKey);
+        let cached: string | null = null;
+        try {
+            cached = await this.redis.get(cacheKey);
+        } catch {
+            // Redis down — proceed without cache
+        }
         if (cached) {
             try {
                 return JSON.parse(cached);
@@ -428,8 +455,12 @@ export class SubjectLineAnalyzer {
             personalizationEffect,
         };
 
-        // Cache insights
-        await this.redis.setex(cacheKey, this.cacheTTL, JSON.stringify(insights));
+        // Cache insights — don't fail on Redis errors
+        try {
+            await this.redis.setex(cacheKey, this.cacheTTL, JSON.stringify(insights));
+        } catch {
+            // Cache write failure is non-fatal
+        }
 
         return insights;
     }

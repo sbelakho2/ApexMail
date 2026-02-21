@@ -16,6 +16,7 @@
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
+import { createHash } from 'node:crypto';
 
 interface STOConfig {
     db: Pool;
@@ -90,15 +91,14 @@ const MEDIUM_CONFIDENCE_THRESHOLD = 20;
 export class SendTimeOptimizer {
     private readonly db: Pool;
     private readonly redis: Redis;
-    // @ts-expect-error Reserved for future logging implementation
-    private readonly _logger: Logger;
+    private readonly logger: Logger;
     private readonly cachePrefix = 'sto:';
     private readonly cacheTTL = 24 * 60 * 60; // 24 hours
 
     constructor(config: STOConfig) {
         this.db = config.db;
         this.redis = config.redis;
-        this._logger = config.logger;
+        this.logger = config.logger;
     }
 
     /**
@@ -161,7 +161,7 @@ export class SendTimeOptimizer {
         const batchSize = 50;
         for (let i = 0; i < recipients.length; i += batchSize) {
             const batch = recipients.slice(i, i + batchSize);
-            const batchResults = await Promise.all(
+            const batchResults = await Promise.allSettled(
                 batch.map(async (recipient) => {
                     const { suggestedTime, confidence, profile } = await this.getOptimalSendTime(
                         recipient.email,
@@ -181,7 +181,20 @@ export class SendTimeOptimizer {
                     };
                 })
             );
-            results.push(...batchResults);
+            for (let j = 0; j < batchResults.length; j++) {
+                const settled = batchResults[j]!;
+                if (settled.status === 'fulfilled') {
+                    results.push(settled.value);
+                } else {
+                    this.logger.warn('STO failed for recipient', { email: batch[j]?.email, error: settled.reason });
+                    results.push({
+                        recipientEmail: batch[j]?.email || 'unknown',
+                        suggestedSendTime: this.getGlobalOptimalTime(),
+                        confidence: 'low',
+                        reason: 'Fallback: individual optimization failed',
+                    });
+                }
+            }
         }
 
         return results;
@@ -197,50 +210,53 @@ export class SendTimeOptimizer {
         const tenantFilter = tenantId ? 'AND tenant_id = $2' : '';
         const params = tenantId ? [emailHash, tenantId] : [emailHash];
 
-        // Get hourly engagement distribution
-        const hourlyResult = await this.db.query<{
-            hour: string;
-            count: string;
-        }>(`
-            SELECT 
-                EXTRACT(HOUR FROM timestamp AT TIME ZONE COALESCE(
-                    (location->>'timezone')::text, 
-                    'UTC'
-                ))::int as hour,
-                COUNT(*) as count
-            FROM events
-            WHERE recipient_email_hash = $1
-                AND event_type IN ('opened', 'clicked')
-                ${tenantFilter}
-            GROUP BY hour
-            ORDER BY hour
-        `, params);
+        // Run 3 independent queries in parallel for performance
+        const [hourlyResult, dailyResult, tzResult] = await Promise.all([
+            // Get hourly engagement distribution
+            this.db.query<{
+                hour: string;
+                count: string;
+            }>(`
+                SELECT 
+                    EXTRACT(HOUR FROM timestamp AT TIME ZONE COALESCE(
+                        (location->>'timezone')::text, 
+                        'UTC'
+                    ))::int as hour,
+                    COUNT(*) as count
+                FROM events
+                WHERE recipient_email_hash = $1
+                    AND event_type IN ('opened', 'clicked')
+                    ${tenantFilter}
+                GROUP BY hour
+                ORDER BY hour
+            `, params),
 
-        // Get daily engagement distribution
-        const dailyResult = await this.db.query<{
-            day_of_week: string;
-            count: string;
-        }>(`
-            SELECT 
-                EXTRACT(DOW FROM timestamp)::int as day_of_week,
-                COUNT(*) as count
-            FROM events
-            WHERE recipient_email_hash = $1
-                AND event_type IN ('opened', 'clicked')
-                ${tenantFilter}
-            GROUP BY day_of_week
-            ORDER BY day_of_week
-        `, params);
+            // Get daily engagement distribution
+            this.db.query<{
+                day_of_week: string;
+                count: string;
+            }>(`
+                SELECT 
+                    EXTRACT(DOW FROM timestamp)::int as day_of_week,
+                    COUNT(*) as count
+                FROM events
+                WHERE recipient_email_hash = $1
+                    AND event_type IN ('opened', 'clicked')
+                    ${tenantFilter}
+                GROUP BY day_of_week
+                ORDER BY day_of_week
+            `, params),
 
-        // Get timezone if available
-        const tzResult = await this.db.query<{ timezone: string | null }>(`
-            SELECT (location->>'timezone') as timezone
-            FROM events
-            WHERE recipient_email_hash = $1
-                AND location->>'timezone' IS NOT NULL
-            ORDER BY timestamp DESC
-            LIMIT 1
-        `, [emailHash]);
+            // Get timezone if available
+            this.db.query<{ timezone: string | null }>(`
+                SELECT (location->>'timezone') as timezone
+                FROM events
+                WHERE recipient_email_hash = $1
+                    AND location->>'timezone' IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 1
+            `, [emailHash]),
+        ]);
 
         // Calculate total engagements
         const totalEngagements = hourlyResult.rows.reduce(
@@ -458,34 +474,43 @@ export class SendTimeOptimizer {
      * Hash email for privacy
      */
     private hashEmail(email: string): string {
-        const crypto = require('crypto');
-        return crypto.createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
+        return createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
     }
 
     /**
      * Get cached profile
      */
     private async getCachedProfile(emailHash: string): Promise<RecipientProfile | null> {
-        const cached = await this.redis.get(`${this.cachePrefix}${emailHash}`);
-        if (cached) {
-            try {
-                return JSON.parse(cached);
-            } catch {
-                return null;
+        try {
+            const cached = await this.redis.get(`${this.cachePrefix}${emailHash}`);
+            if (cached) {
+                try {
+                    return JSON.parse(cached);
+                } catch {
+                    return null;
+                }
             }
+            return null;
+        } catch {
+            // Redis connection failure — treat as cache miss, don't crash caller
+            return null;
         }
-        return null;
     }
 
     /**
      * Cache profile
      */
     private async cacheProfile(emailHash: string, profile: RecipientProfile): Promise<void> {
-        await this.redis.setex(
-            `${this.cachePrefix}${emailHash}`,
-            this.cacheTTL,
-            JSON.stringify(profile)
-        );
+        try {
+            await this.redis.setex(
+                `${this.cachePrefix}${emailHash}`,
+                this.cacheTTL,
+                JSON.stringify(profile)
+            );
+        } catch (error) {
+            // Cache write failures should never crash the critical path
+            this.logger.warn('Failed to cache STO profile', { emailHash, error });
+        }
     }
 
     /**

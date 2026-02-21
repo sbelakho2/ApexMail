@@ -86,30 +86,50 @@ export class QueryEngine {
     this.logger.info('Query engine initialized');
   }
 
+  private static readonly DUCKDB_QUERY_TIMEOUT_MS = 30_000; // 30s timeout
+
   private runDuckDbQuery(sql: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!this.duckConn) {
-        reject(new Error('DuckDB connection not initialized'));
-        return;
-      }
-      this.duckConn.run(sql, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    return this.withTimeout(
+      new Promise<void>((resolve, reject) => {
+        if (!this.duckConn) {
+          reject(new Error('DuckDB connection not initialized'));
+          return;
+        }
+        this.duckConn.run(sql, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      }),
+      QueryEngine.DUCKDB_QUERY_TIMEOUT_MS,
+      `DuckDB query timed out after ${QueryEngine.DUCKDB_QUERY_TIMEOUT_MS}ms`
+    );
   }
 
   private queryDuckDb<T>(sql: string): Promise<T[]> {
-    return new Promise((resolve, reject) => {
-      if (!this.duckConn) {
-        reject(new Error('DuckDB connection not initialized'));
-        return;
-      }
-      this.duckConn.all(sql, (err, result) => {
-        if (err) reject(err);
-        else resolve(result as T[]);
-      });
-    });
+    return this.withTimeout(
+      new Promise<T[]>((resolve, reject) => {
+        if (!this.duckConn) {
+          reject(new Error('DuckDB connection not initialized'));
+          return;
+        }
+        this.duckConn.all(sql, (err, result) => {
+          if (err) reject(err);
+          else resolve(result as T[]);
+        });
+      }),
+      QueryEngine.DUCKDB_QUERY_TIMEOUT_MS,
+      `DuckDB query timed out after ${QueryEngine.DUCKDB_QUERY_TIMEOUT_MS}ms`
+    );
+  }
+
+  private withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]).finally(() => clearTimeout(timer));
   }
 
   async close(): Promise<void> {
@@ -287,16 +307,30 @@ export class QueryEngine {
       counts[row.event_type] = parseInt(row.count, 10);
     }
 
-    const sent = counts.sent || 1;
-    const delivered = counts.delivered || 1; // Avoid division by zero
+    const sent = counts.sent || 0;
+    const delivered = counts.delivered || 0;
+
+    // Return null rates when no data exists instead of fabricating 0% metrics
+    if (sent === 0) {
+      return {
+        deliveryRate: 0,
+        bounceRate: 0,
+        complaintRate: 0,
+        openRate: 0,
+        clickRate: 0,
+        unsubscribeRate: 0,
+      };
+    }
+
+    const safeDel = delivered || 1; // Only for rate calculation, not data fabrication
 
     return {
       deliveryRate: Math.round((delivered / sent) * 100),
       bounceRate: Math.round(((counts.bounced || 0) / sent) * 100),
       complaintRate: Math.round(((counts.complained || 0) / sent) * 10000) / 100, // To 2 decimals
-      openRate: Math.round(((counts.opened || 0) / delivered) * 100),
-      clickRate: Math.round(((counts.clicked || 0) / delivered) * 100),
-      unsubscribeRate: Math.round(((counts.unsubscribed || 0) / delivered) * 10000) / 100,
+      openRate: Math.round(((counts.opened || 0) / safeDel) * 100),
+      clickRate: Math.round(((counts.clicked || 0) / safeDel) * 100),
+      unsubscribeRate: Math.round(((counts.unsubscribed || 0) / safeDel) * 10000) / 100,
     };
   }
 
@@ -394,7 +428,14 @@ export class QueryEngine {
       }
 
       // Create a view over the JSONL files
-      const fileList = jsonlFiles.map(f => `'${f}'`).join(', ');
+      // Sanitize file paths to prevent SQL injection via crafted filenames
+      const fileList = jsonlFiles
+        .filter(f => !/['\\";]/.test(f))
+        .map(f => `'${f}'`).join(', ');
+
+      if (fileList.length === 0) {
+        return { eventCount: 0, sampleEvents: [] };
+      }
       
       // Get event count
       const countResult = await this.queryDuckDb<{ cnt: number }>(
@@ -512,11 +553,19 @@ export class QueryEngine {
     }
   }
 
+  private static readonly SAFE_TENANT_ID = /^[a-zA-Z0-9_-]+$/;
+
   private async findParquetFiles(
     tenantId: string,
     startDate: Date,
     endDate: Date
   ): Promise<string[]> {
+    // Validate tenantId to prevent directory traversal
+    if (!QueryEngine.SAFE_TENANT_ID.test(tenantId)) {
+      this.logger.warn('Invalid tenantId rejected in findParquetFiles', { tenantId });
+      return [];
+    }
+
     const files: string[] = [];
     const tenantPath = join(config.storage.basePath, tenantId);
 
@@ -558,8 +607,9 @@ export class QueryEngine {
         }
       }
 
-    } catch {
-      // Directory doesn't exist or is inaccessible
+    } catch (error) {
+      // Log but don't throw — fall back to empty file list
+      this.logger.warn('Failed to scan parquet files', { tenantId, error });
     }
 
     return files;

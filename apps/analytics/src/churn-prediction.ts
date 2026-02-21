@@ -97,24 +97,32 @@ const THRESHOLDS = {
 
 export class ChurnPredictionEngine {
     private readonly db: Pool;
-    // @ts-expect-error Reserved for future caching implementation
-    private readonly _redis: Redis;
-    private readonly _logger: Logger;
-    // @ts-expect-error Reserved for future caching
-    private readonly _cachePrefix = 'churn:';
-    // @ts-expect-error Reserved for future caching
-    private readonly _cacheTTL = 6 * 60 * 60; // 6 hours
+    private readonly redis: Redis;
+    private readonly logger: Logger;
+    private readonly cachePrefix = 'churn:';
+    private readonly cacheTTL = 6 * 60 * 60; // 6 hours
 
     constructor(config: ChurnEngineConfig) {
         this.db = config.db;
-        this._redis = config.redis;
-        this._logger = config.logger;
+        this.redis = config.redis;
+        this.logger = config.logger;
     }
 
     /**
      * Predict churn risk for a tenant
      */
     async predictTenantChurn(tenantId: string): Promise<TenantHealthMetrics> {
+        // Check cache first
+        const cacheKey = `${this.cachePrefix}tenant:${tenantId}`;
+        try {
+            const cached = await this.redis.get(cacheKey);
+            if (cached) {
+                try { return JSON.parse(cached); } catch { /* recalculate */ }
+            }
+        } catch {
+            // Redis down — proceed without cache
+        }
+
         // Get tenant info
         const tenantResult = await this.db.query<{ name: string }>(`
             SELECT name FROM tenants WHERE id = $1
@@ -122,18 +130,47 @@ export class ChurnPredictionEngine {
 
         const tenantName = tenantResult.rows[0]?.name || 'Unknown';
 
-        // Get engagement metrics for last 30 days
-        const metricsResult = await this.db.query<{
-            event_type: string;
-            count: string;
-        }>(`
-            SELECT event_type, COUNT(*) as count
-            FROM events
-            WHERE tenant_id = $1
-                AND timestamp >= NOW() - INTERVAL '30 days'
-            GROUP BY event_type
-        `, [tenantId]);
+        // Run 3 independent metric queries in parallel
+        const [metricsResult, velocityResult, lastEmailResult] = await Promise.all([
+            // Get engagement metrics for last 30 days
+            this.db.query<{
+                event_type: string;
+                count: string;
+            }>(`
+                SELECT event_type, COUNT(*) as count
+                FROM events
+                WHERE tenant_id = $1
+                    AND timestamp >= NOW() - INTERVAL '30 days'
+                GROUP BY event_type
+            `, [tenantId]),
 
+            // Get engagement velocity (compare current 30d to previous 30d)
+            this.db.query<{
+                period: string;
+                engagement_count: string;
+            }>(`
+                SELECT 
+                    CASE 
+                        WHEN timestamp >= NOW() - INTERVAL '30 days' THEN 'current'
+                        ELSE 'previous'
+                    END as period,
+                    COUNT(*) as engagement_count
+                FROM events
+                WHERE tenant_id = $1
+                    AND timestamp >= NOW() - INTERVAL '60 days'
+                    AND event_type IN ('opened', 'clicked')
+                GROUP BY period
+            `, [tenantId]),
+
+            // Days since last email
+            this.db.query<{ days: string | null }>(`
+                SELECT EXTRACT(DAY FROM NOW() - MAX(timestamp))::int as days
+                FROM events
+                WHERE tenant_id = $1 AND event_type = 'sent'
+            `, [tenantId]),
+        ]);
+
+        // Extract metrics from query results
         const metrics: Record<string, number> = {};
         for (const row of metricsResult.rows) {
             metrics[row.event_type] = parseInt(row.count, 10);
@@ -155,24 +192,6 @@ export class ChurnPredictionEngine {
         const complaintRate = delivered > 0 ? complained / delivered : 0;
         const unsubscribeRate = delivered > 0 ? unsubscribed / delivered : 0;
 
-        // Get engagement velocity (compare current 30d to previous 30d)
-        const velocityResult = await this.db.query<{
-            period: string;
-            engagement_count: string;
-        }>(`
-            SELECT 
-                CASE 
-                    WHEN timestamp >= NOW() - INTERVAL '30 days' THEN 'current'
-                    ELSE 'previous'
-                END as period,
-                COUNT(*) as engagement_count
-            FROM events
-            WHERE tenant_id = $1
-                AND timestamp >= NOW() - INTERVAL '60 days'
-                AND event_type IN ('opened', 'clicked')
-            GROUP BY period
-        `, [tenantId]);
-
         let currentEngagement = 0;
         let previousEngagement = 0;
         for (const row of velocityResult.rows) {
@@ -187,14 +206,11 @@ export class ChurnPredictionEngine {
             ? (currentEngagement - previousEngagement) / previousEngagement 
             : 0;
 
-        // Days since last email
-        const lastEmailResult = await this.db.query<{ days: string }>(`
-            SELECT EXTRACT(DAY FROM NOW() - MAX(timestamp))::int as days
-            FROM events
-            WHERE tenant_id = $1 AND event_type = 'sent'
-        `, [tenantId]);
-
-        const daysSinceLastEmail = parseInt(lastEmailResult.rows[0]?.days || '999', 10);
+        // Days since last email — distinguish "never sent" from "sent long ago"
+        const rawDays = lastEmailResult.rows[0]?.days;
+        // NULL means the tenant has never sent email; don't penalize as critical inactivity
+        const daysSinceLastEmail = rawDays != null ? parseInt(rawDays, 10) : 0;
+        const hasNeverSent = rawDays == null;
 
         // Build churn prediction
         const churnPrediction = this.computeChurnPrediction({
@@ -207,9 +223,10 @@ export class ChurnPredictionEngine {
             unsubscribeRate,
             engagementVelocity,
             daysSinceLastEngagement: daysSinceLastEmail,
+            hasNeverSent,
         });
 
-        return {
+        const healthMetrics = {
             tenantId,
             tenantName,
             emailsSent30d: sent,
@@ -223,6 +240,15 @@ export class ChurnPredictionEngine {
             daysSinceLastEmail,
             churnPrediction,
         };
+
+        // Cache the result
+        try {
+            await this.redis.setex(cacheKey, this.cacheTTL, JSON.stringify(healthMetrics));
+        } catch {
+            // Non-fatal
+        }
+
+        return healthMetrics;
     }
 
     /**
@@ -349,7 +375,7 @@ export class ChurnPredictionEngine {
                     results.push(metrics);
                 }
             } catch (error) {
-                this._logger.error('Failed to predict churn for tenant', { tenantId: id, error });
+                this.logger.error('Failed to predict churn for tenant', { tenantId: id, error });
             }
         }
 
@@ -372,9 +398,32 @@ export class ChurnPredictionEngine {
         unsubscribeRate: number;
         engagementVelocity: number;
         daysSinceLastEngagement: number;
+        hasNeverSent?: boolean;
     }): ChurnPrediction {
         const signals: ChurnSignal[] = [];
         let riskScore = 0;
+
+        // New account that has never sent email — not a churn risk, just onboarding
+        if (input.hasNeverSent) {
+            return {
+                entityId: input.entityId,
+                entityType: input.entityType,
+                churnProbability: 0.1,
+                riskTier: 'low',
+                riskScore: 5,
+                signals: [{
+                    type: 'new_account',
+                    severity: 'info',
+                    message: 'Tenant has not sent any emails yet. Monitor for onboarding progress.',
+                    value: 0,
+                    threshold: 0,
+                }],
+                recommendation: 'New account detected. Guide through onboarding and first campaign setup.',
+                predictedChurnDate: null,
+                lastEngagement: null,
+                engagementTrend: 'stable',
+            };
+        }
 
         // Complaint rate signal (highest weight)
         if (input.complaintRate >= THRESHOLDS.criticalComplaintRate) {

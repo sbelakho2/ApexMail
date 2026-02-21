@@ -364,13 +364,13 @@ export class InboxPlacementService {
         FROM inbox_placement_tests t,
              jsonb_array_elements(t.results) as r
         WHERE t.tenant_id = $1
-          AND t.completed_at > NOW() - INTERVAL '${days} days'
+          AND t.completed_at > NOW() - ($3::int || ' days')::interval
           AND (r->>'provider') = $2
           AND t.status = 'completed'
         GROUP BY week_num
         ORDER BY week_num DESC
         LIMIT 4
-      `, [tenantId, provider]);
+      `, [tenantId, provider, days]);
 
       if (result.rows.length === 0) {
         analysis[provider] = {
@@ -477,7 +477,7 @@ export class InboxPlacementService {
       fromAddress: row.from_address,
       status: row.status as PlacementTest['status'],
       results: (() => { try { return JSON.parse(row.results); } catch { return {}; } })(),
-      summary: (() => { try { return JSON.parse(row.summary); } catch { return {}; } })(),
+      summary: (() => { try { return JSON.parse(row.summary); } catch { return []; } })(),
       createdAt: row.created_at,
       completedAt: row.completed_at,
     };

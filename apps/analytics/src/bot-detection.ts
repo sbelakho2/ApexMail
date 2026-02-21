@@ -67,17 +67,17 @@ const BOT_USER_AGENT_PATTERNS = [
   /whatsapp/i,
   /discord/i,
   
-  // Generic bot patterns
-  /bot/i,
-  /crawler/i,
-  /spider/i,
-  /scraper/i,
+  // Generic bot patterns (word boundaries prevent false positives on brands like "Cubot")
+  /\bbot\b/i,
+  /\bcrawler\b/i,
+  /\bspider\b/i,
+  /\bscraper\b/i,
   /headless/i,
   /phantom/i,
   /selenium/i,
   /puppeteer/i,
-  /wget/i,
-  /curl/i,
+  /\bwget\b/i,
+  /\bcurl\b/i,
   /python-requests/i,
   /axios/i,
   /node-fetch/i,
@@ -334,9 +334,11 @@ export class BotDetectionService {
    * Uses CSS to make link invisible to humans
    */
   generateHoneypotHtml(honeypotUrl: string): string {
+    // Escape URL to prevent XSS via attribute injection
+    const safeUrl = honeypotUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return `
       <div style="position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;">
-        <a href="${honeypotUrl}" style="color:transparent;font-size:0;line-height:0;" tabindex="-1" aria-hidden="true">&#8203;</a>
+        <a href="${safeUrl}" style="color:transparent;font-size:0;line-height:0;" tabindex="-1" aria-hidden="true">&#8203;</a>
       </div>
     `;
   }
