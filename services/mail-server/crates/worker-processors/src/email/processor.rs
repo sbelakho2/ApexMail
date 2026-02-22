@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use moka::sync::Cache;
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::time::sleep;
@@ -422,7 +422,7 @@ impl EmailProcessor {
         let limits = WarmupLimits::for_day(domain.warmup_day);
 
         // Get and increment current count
-        let mut counters = self.warmup_counters.lock();
+        let mut counters = self.warmup_counters.lock().unwrap();
         let current = counters.entry(job.domain_id.clone()).or_insert(0);
 
         if *current >= limits.daily_limit {
@@ -725,7 +725,7 @@ impl EmailProcessor {
     fn record_outcome(&self, outcome: SendOutcome) {
         let now = Instant::now();
 
-        let mut outcomes = self.recent_outcomes.lock();
+        let mut outcomes = self.recent_outcomes.lock().unwrap();
         outcomes.push((outcome, now));
 
         // Evict old entries (>60s)
@@ -770,7 +770,7 @@ impl EmailProcessor {
         .fetch_all(&self.db)
         .await?;
 
-        let mut dkim_keys = self.dkim_keys.lock();
+        let mut dkim_keys = self.dkim_keys.lock().unwrap();
         dkim_keys.clear();
 
         for (id, domain, selector, key) in keys {

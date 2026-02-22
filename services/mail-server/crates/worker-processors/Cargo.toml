@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "ApexMail worker processors (analytics, email, reply-handler, webhook)"
 
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
 [dependencies]
 # Async runtime
 tokio.workspace = true
@@ -37,6 +41,7 @@ serde_json.workspace = true
 
 # Logging
 tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # Utils
 chrono.workspace = true
@@ -50,6 +55,9 @@ trust-dns-resolver.workspace = true
 
 # IP networking
 ipnetwork.workspace = true
+
+# URL parsing
+url.workspace = true
 
 # Pattern matching (reply classification)
 aho-corasick.workspace = true

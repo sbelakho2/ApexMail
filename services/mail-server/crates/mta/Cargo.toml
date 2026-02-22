@@ -1,0 +1,86 @@
+[package]
+name = "mta"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ApexMail MTA – inbound SMTP, bounce processing, feedback loops, and email authentication"
+
+[[bin]]
+name = "mta-server"
+path = "src/bin/mta.rs"
+
+[dependencies]
+mail-common = { path = "../mail-common" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+async-trait.workspace = true
+futures.workspace = true
+
+# Database
+sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+
+# Redis
+deadpool-redis.workspace = true
+redis.workspace = true
+
+# Crypto & TLS
+rustls.workspace = true
+tokio-rustls.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+rsa.workspace = true
+base64.workspace = true
+rand.workspace = true
+aes-gcm.workspace = true
+
+# Email protocols
+mail-parser.workspace = true
+mail-builder.workspace = true
+mail-auth.workspace = true
+
+# DNS
+trust-dns-resolver.workspace = true
+
+# HTTP
+reqwest.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging & Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# Utils
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+moka.workspace = true
+governor.workspace = true
+nonzero_ext.workspace = true
+regex.workspace = true
+aho-corasick.workspace = true
+url.workspace = true
+hex.workspace = true
+
+# CLI
+clap.workspace = true
+dotenvy.workspace = true
+
+# TLS PEM parsing
+rustls-pemfile = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

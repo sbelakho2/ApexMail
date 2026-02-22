@@ -1,0 +1,48 @@
+[package]
+name = "compliance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "compliance-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+mail-common = { path = "../mail-common" }
+
+tokio      = { workspace = true }
+sqlx       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono     = { workspace = true }
+uuid       = { workspace = true }
+sha2       = { workspace = true }
+hmac       = { workspace = true }
+aes-gcm    = { workspace = true }
+zeroize    = { workspace = true }
+base64     = { workspace = true }
+rand       = { workspace = true }
+regex      = { workspace = true }
+aho-corasick = { workspace = true }
+dashmap    = { workspace = true }
+moka       = { workspace = true }
+deadpool-redis = { workspace = true }
+redis      = { workspace = true }
+axum       = { workspace = true }
+tower      = { workspace = true }
+tower-http = { workspace = true }
+hex        = { workspace = true }
+clap       = { workspace = true }
+dotenvy    = { workspace = true }
+thiserror  = { workspace = true }
+url        = { workspace = true }
+anyhow     = { workspace = true }
+
+lazy_static = "1.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

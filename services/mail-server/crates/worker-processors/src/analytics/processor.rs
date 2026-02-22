@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, TimeZone, Timelike, Utc};
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::time::{interval, sleep};
@@ -207,44 +207,7 @@ impl AnalyticsProcessor {
 
         let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
 
-        let result = async {
-            // Add to event buffer
-            {
-                let mut buffer = self.event_buffer.lock();
-                buffer.extend(events.iter().cloned());
-
-                // Enforce buffer size cap
-                if buffer.len() > MAX_EVENT_BUFFER_SIZE {
-                    let dropped = buffer.len() - MAX_EVENT_BUFFER_SIZE;
-                    buffer.drain(0..dropped);
-                    warn!(
-                        dropped = dropped,
-                        cap = MAX_EVENT_BUFFER_SIZE,
-                        "Event buffer exceeded cap, dropped oldest events"
-                    );
-                }
-            }
-
-            // Update aggregation counters
-            for event in &events {
-                self.update_aggregation(event);
-            }
-
-            // Flush if buffer is full
-            {
-                let buffer = self.event_buffer.lock();
-                if buffer.len() >= self.config.base.batch_size {
-                    drop(buffer); // Release lock before flushing
-                    self.flush_buffers().await?;
-                }
-            }
-
-            // Mark events as processed
-            self.mark_events_processed(&event_ids).await?;
-
-            Ok::<_, ProcessorError>(())
-        }
-        .await;
+        let result = self.process_events_inner(events).await;
 
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
 
@@ -256,6 +219,45 @@ impl AnalyticsProcessor {
         }
 
         result
+    }
+
+    /// Inner processing logic (separated for borrow checker).
+    async fn process_events_inner(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
+        let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+        
+        // Add to event buffer (sync operation)
+        let should_flush = {
+            let mut buffer = self.event_buffer.lock().unwrap();
+            buffer.extend(events.iter().cloned());
+
+            // Enforce buffer size cap
+            if buffer.len() > MAX_EVENT_BUFFER_SIZE {
+                let dropped = buffer.len() - MAX_EVENT_BUFFER_SIZE;
+                buffer.drain(0..dropped);
+                warn!(
+                    dropped = dropped,
+                    cap = MAX_EVENT_BUFFER_SIZE,
+                    "Event buffer exceeded cap, dropped oldest events"
+                );
+            }
+            
+            buffer.len() >= self.config.base.batch_size
+        };
+
+        // Update aggregation counters (sync operation)
+        for event in &events {
+            self.update_aggregation(event);
+        }
+
+        // Flush if buffer is full (async operation, lock already released)
+        if should_flush {
+            self.flush_buffers().await?;
+        }
+
+        // Mark events as processed
+        self.mark_events_processed(&event_ids).await?;
+
+        Ok(())
     }
 
     /// Update aggregation buffer with an event.
@@ -310,7 +312,7 @@ impl AnalyticsProcessor {
             ));
         }
 
-        let mut buffer = self.aggregation_buffer.lock();
+        let mut buffer = self.aggregation_buffer.lock().unwrap();
 
         for (key, domain_id, campaign_id) in keys {
             let stats = buffer.entry(key).or_insert_with(|| {
@@ -380,14 +382,14 @@ impl AnalyticsProcessor {
     async fn flush_buffers_inner(&self) -> ProcessorResult<()> {
         // Take snapshots of buffers
         let (events, event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
-            let buffer = self.event_buffer.lock();
+            let buffer = self.event_buffer.lock().unwrap();
             let events: Vec<_> = buffer.iter().cloned().collect();
             let ids: Vec<_> = buffer.iter().map(|e| e.id.clone()).collect();
             (events, ids)
         };
 
         let aggregations: HashMap<String, AggregatedStats> = {
-            let buffer = self.aggregation_buffer.lock();
+            let buffer = self.aggregation_buffer.lock().unwrap();
             buffer.clone()
         };
 
@@ -409,12 +411,12 @@ impl AnalyticsProcessor {
 
         // Remove flushed items from buffers
         {
-            let mut event_buffer = self.event_buffer.lock();
+            let mut event_buffer = self.event_buffer.lock().unwrap();
             event_buffer.retain(|e| !event_ids.contains(&e.id));
         }
 
         {
-            let mut agg_buffer = self.aggregation_buffer.lock();
+            let mut agg_buffer = self.aggregation_buffer.lock().unwrap();
             for key in aggregations.keys() {
                 agg_buffer.remove(key);
             }

@@ -76,6 +76,22 @@ pub struct EmailConfig {
     pub ip_rate_limiting: IpRateLimitConfig,
 }
 
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            base: ProcessorConfig {
+                name: "email".to_string(),
+                ..Default::default()
+            },
+            smtp: SmtpConfig::default(),
+            dkim: DkimConfig::default(),
+            tracking: TrackingConfig::default(),
+            warmup: WarmupConfig::default(),
+            ip_rate_limiting: IpRateLimitConfig::default(),
+        }
+    }
+}
+
 /// SMTP configuration.
 #[derive(Debug, Clone)]
 pub struct SmtpConfig {

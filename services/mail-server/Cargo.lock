@@ -72,6 +72,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "analytics"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deadpool-redis",
+ "dotenvy",
+ "lazy_static",
+ "mail-common",
+ "moka",
+ "rand 0.8.5",
+ "redis",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -582,6 +610,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "compliance"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "aho-corasick",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deadpool-redis",
+ "dotenvy",
+ "hex",
+ "hmac",
+ "lazy_static",
+ "mail-common",
+ "moka",
+ "rand 0.8.5",
+ "redis",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "compression-codecs"
 version = "0.4.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -805,6 +870,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -927,6 +1006,43 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "edge-cases"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deadpool-redis",
+ "dotenvy",
+ "hex",
+ "hyper",
+ "idna 1.1.0",
+ "mail-common",
+ "mail-parser 0.10.2",
+ "mime_guess",
+ "moka",
+ "redis",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "trust-dns-resolver",
+ "uuid",
+]
 
 [[package]]
 name = "either"
@@ -1254,7 +1370,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68a7f542ee6b35af73b06abc0dad1c1bae89964e4e253bc4b587b91c9637867b"
 dependencies = [
  "cfg-if",
- "dashmap",
+ "dashmap 5.5.3",
  "futures",
  "futures-timer",
  "no-std-compat",
@@ -1284,6 +1400,37 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "ha"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deadpool-redis",
+ "dotenvy",
+ "flate2",
+ "rand 0.8.5",
+ "redis",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1804,6 +1951,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
+name = "isolation"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deadpool-redis",
+ "dotenvy",
+ "hex",
+ "hkdf",
+ "hmac",
+ "rand 0.8.5",
+ "redis",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2264,6 +2444,58 @@ dependencies = [
  "portable-atomic",
  "smallvec",
  "tagptr",
+ "uuid",
+]
+
+[[package]]
+name = "mta"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "aho-corasick",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap",
+ "dashmap 6.1.0",
+ "deadpool-redis",
+ "dotenvy",
+ "futures",
+ "governor",
+ "hex",
+ "hmac",
+ "hyper",
+ "mail-auth 0.5.1",
+ "mail-builder",
+ "mail-common",
+ "mail-parser 0.10.2",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "moka",
+ "nonzero_ext",
+ "rand 0.8.5",
+ "redis",
+ "regex",
+ "reqwest",
+ "rsa",
+ "rustls 0.23.36",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
+ "trust-dns-resolver",
+ "url",
  "uuid",
 ]
 
@@ -3099,6 +3331,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",
@@ -5161,7 +5394,9 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-test",
  "tracing",
+ "tracing-subscriber",
  "trust-dns-resolver",
+ "url",
  "uuid",
  "zeroize",
 ]
