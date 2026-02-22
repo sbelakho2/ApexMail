@@ -122,7 +122,7 @@ Current status:
 Access the SLO dashboard at `/ops/slo` or via API:
 
 ```http
-GET /api/v1/ops/slo/status
+GET /v1/ops/slo/status
 Authorization: Bearer {{admin_token}}
 ```
 

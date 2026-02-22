@@ -11,7 +11,7 @@ ApexMail requires a Mail Transfer Agent (MTA) that:
 - Handles high-volume outbound email (100k+ emails/hour)
 - Supports advanced authentication (DKIM, SPF, DMARC, ARC, BIMI)
 - Enables per-domain rate limiting and IP pooling
-- Runs entirely self-hosted without SaaS dependencies
+- Provides enterprise-grade reliability and full delivery control
 
 ## Decision
 We chose **Postfix** as the MTA with the following configuration:

@@ -24,8 +24,8 @@ Manage sending domains, DNS verification, and advanced email authentication.
 ## Add Domain
 
 ```http
-POST /api/v1/domains
-Authorization: Bearer {{token}}
+POST /v1/domains
+X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
@@ -78,8 +78,8 @@ Content-Type: application/json
 ## Get Domain
 
 ```http
-GET /api/v1/domains/:id
-Authorization: Bearer {{token}}
+GET /v1/domains/:id
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -111,8 +111,8 @@ Authorization: Bearer {{token}}
 Trigger DNS verification for a pending domain.
 
 ```http
-POST /api/v1/domains/:id/verify
-Authorization: Bearer {{token}}
+POST /v1/domains/:id/verify
+X-API-Key: {{api_key}}
 ```
 
 ### Response (Success)
@@ -139,8 +139,8 @@ Authorization: Bearer {{token}}
 ## DNS Health Check
 
 ```http
-GET /api/v1/domains/:id/health
-Authorization: Bearer {{token}}
+GET /v1/domains/:id/health
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -171,8 +171,8 @@ Authorization: Bearer {{token}}
 ### Check MTA-STS Configuration
 
 ```http
-GET /api/v1/domains/:id/mta-sts
-Authorization: Bearer {{token}}
+GET /v1/domains/:id/mta-sts
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -236,8 +236,8 @@ Authorization: Bearer {{token}}
 ### Check BIMI Configuration
 
 ```http
-GET /api/v1/domains/:id/bimi
-Authorization: Bearer {{token}}
+GET /v1/domains/:id/bimi
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -287,8 +287,8 @@ Authorization: Bearer {{token}}
 ### Validate BIMI Logo
 
 ```http
-POST /api/v1/domains/:id/bimi/validate-logo
-Authorization: Bearer {{token}}
+POST /v1/domains/:id/bimi/validate-logo
+X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
@@ -320,8 +320,8 @@ Content-Type: application/json
 ### Check TLS Reporting
 
 ```http
-GET /api/v1/domains/:id/tlsrpt
-Authorization: Bearer {{token}}
+GET /v1/domains/:id/tlsrpt
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -347,8 +347,8 @@ Authorization: Bearer {{token}}
 Get a complete authentication score and grade for a domain.
 
 ```http
-GET /api/v1/domains/:id/auth-status
-Authorization: Bearer {{token}}
+GET /v1/domains/:id/auth-status
+X-API-Key: {{api_key}}
 ```
 
 ### Response

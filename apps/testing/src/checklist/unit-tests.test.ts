@@ -417,38 +417,38 @@ describe('Phase 4: MTA Bounce Server Unit Tests', () => {
 describe('Phase 5: Tracking Processor Unit Tests', () => {
     describe('Event Deduplication', () => {
         it('BUG: Open tracking must dedupe across all opens', () => {
-            const procPath = path.join(ROOT_DIR, 'apps/tracking/src/processor.ts');
+            const procPath = path.join(ROOT_DIR, 'services/mail-server/crates/tracking-service/src/processor.rs');
             const content = fs.readFileSync(procPath, 'utf-8');
             
             // Opens should be fully deduplicated (user opens same email multiple times)
-            expect(content).toContain('isDuplicate');
-            expect(content).toContain('dedupeKey');
-            expect(content).toContain('recordOpen');
+            expect(content).toContain('try_set_dedup');
+            expect(content).toContain('dedup_key');
+            expect(content).toContain('record_open');
         });
 
         it('BUG: Click tracking must have short-window dedupe', () => {
-            const procPath = path.join(ROOT_DIR, 'apps/tracking/src/processor.ts');
+            const procPath = path.join(ROOT_DIR, 'services/mail-server/crates/tracking-service/src/processor.rs');
             const content = fs.readFileSync(procPath, 'utf-8');
             
             // Clicks should dedupe within short window (user double-clicks)
             // But allow same link to be clicked again later
-            expect(content).toContain('recordClick');
+            expect(content).toContain('record_click');
             // Should have TTL for click deduplication
         });
     });
 
     describe('Event Buffering', () => {
         it('BUG: Buffer must flush on interval AND max size', () => {
-            const procPath = path.join(ROOT_DIR, 'apps/tracking/src/processor.ts');
+            const procPath = path.join(ROOT_DIR, 'services/mail-server/crates/tracking-service/src/processor.rs');
             const content = fs.readFileSync(procPath, 'utf-8');
             
             // Must flush on time AND size
-            expect(content).toContain('flushIntervalMs');
-            expect(content).toContain('maxBufferSize');
+            expect(content).toContain('flush_interval_ms');
+            expect(content).toContain('max_buffer_size');
         });
 
         it('BUG: Buffer flush must handle partial failures', () => {
-            const procPath = path.join(ROOT_DIR, 'apps/tracking/src/processor.ts');
+            const procPath = path.join(ROOT_DIR, 'services/mail-server/crates/tracking-service/src/processor.rs');
             const content = fs.readFileSync(procPath, 'utf-8');
             
             // If flush fails, events must not be lost
@@ -627,7 +627,7 @@ describe('Additional Bug Detection', () => {
             const files = [
                 'apps/api/src/middleware/rate-limiter.ts',
                 'apps/api/src/middleware/idempotency.ts',
-                'apps/tracking/src/processor.ts',
+                'services/mail-server/crates/tracking-service/src/processor.rs',
             ];
             
             for (const file of files) {

@@ -93,9 +93,10 @@ const config: Config = {
                 sm: 'var(--radius-sm)',
             },
             fontFamily: {
-                sans: ['var(--font-display)', 'serif'],
-                display: ['var(--font-display)', 'serif'],
+                sans: ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                display: ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
                 mono: ['var(--font-mono)', 'monospace'],
+                apex: ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
             },
             spacing: {
                 '1': 'var(--space-1)',

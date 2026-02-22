@@ -173,7 +173,7 @@ export class MeteringService {
       total_quantity: string;
     }>(
       `SELECT event_type, SUM(quantity)::text as total_quantity
-       FROM usage_events
+       FROM metering_events
        WHERE tenant_id = $1
          AND timestamp >= $2
          AND timestamp < $3
@@ -294,7 +294,7 @@ export class MeteringService {
       }
 
       const result = await this.db.query(
-        `INSERT INTO usage_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+        `INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
          VALUES ${placeholders.join(', ')}
          ON CONFLICT (id) DO NOTHING`,
         values
@@ -367,7 +367,7 @@ export class MeteringService {
 
       const dbResult = await this.db.query<{ total: string }>(
         `SELECT COALESCE(SUM(quantity), 0)::text as total
-         FROM usage_events
+         FROM metering_events
          WHERE tenant_id = $1
            AND event_type = $2
            AND timestamp >= $3

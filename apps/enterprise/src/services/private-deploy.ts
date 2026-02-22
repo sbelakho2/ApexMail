@@ -344,8 +344,8 @@ export class PrivateDeploymentService {
 
       // Get available IP from pool
       const ipResult = await this.pool.query(`
-        SELECT ip FROM ent_ip_pool 
-        WHERE status = 'available' AND deployment_id IS NULL
+        SELECT ip_address AS ip FROM ip_pool_addresses 
+        WHERE status = 'active' AND pool_id IS NOT NULL
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       `);
@@ -365,8 +365,8 @@ export class PrivateDeploymentService {
 
       // Update pool
       await this.pool.query(`
-        UPDATE ent_ip_pool SET status = 'assigned', account_id = $2, deployment_id = $3 WHERE ip = $1
-      `, [ip, accountId, deploymentId]);
+        UPDATE ip_pool_addresses SET status = 'assigned', updated_at = NOW() WHERE ip_address = $1::inet
+      `, [ip]);
 
       // Start warming plan
       await this.startIPWarming(id);
@@ -558,10 +558,10 @@ export class PrivateDeploymentService {
       const verificationToken = randomToken(32);
 
       await this.pool.query(`
-        INSERT INTO ent_byoip_ranges (
-          id, account_id, cidr_block, status, verification_token,
-          allocated_ips, created_at
-        ) VALUES ($1, $2, $3, 'pending_verification', $4, '{}', NOW())
+        INSERT INTO byoip_ranges (
+          id, tenant_id, cidr_block, status, verification_token,
+          created_at
+        ) VALUES ($1, $2, $3, 'pending_verification', $4, NOW())
       `, [id, accountId, cidrBlock, verificationToken]);
 
       return {
@@ -590,7 +590,7 @@ export class PrivateDeploymentService {
   async verifyBYOIP(id: string): Promise<Result<{ verified: boolean; message: string }>> {
     try {
       const result = await this.pool.query(`
-        SELECT * FROM ent_byoip_ranges WHERE id = $1
+        SELECT * FROM byoip_ranges WHERE id = $1
       `, [id]);
 
       if (result.rows.length === 0) {
@@ -610,7 +610,7 @@ export class PrivateDeploymentService {
 
       if (verified) {
         await this.pool.query(`
-          UPDATE ent_byoip_ranges SET
+          UPDATE byoip_ranges SET
             status = 'verified',
             verified_at = NOW()
           WHERE id = $1
@@ -640,7 +640,7 @@ export class PrivateDeploymentService {
   async provisionBYOIP(id: string): Promise<Result<BYOIPRange>> {
     try {
       const result = await this.pool.query(`
-        SELECT * FROM ent_byoip_ranges WHERE id = $1 AND status = 'verified'
+        SELECT * FROM byoip_ranges WHERE id = $1 AND status = 'verified'
       `, [id]);
 
       if (result.rows.length === 0) {
@@ -655,23 +655,25 @@ export class PrivateDeploymentService {
       // Add IPs to pool
       for (const ip of ips) {
         await this.pool.query(`
-          INSERT INTO ent_ip_pool (ip, status, account_id, byoip_range_id, created_at)
-          VALUES ($1, 'available', $2, $3, NOW())
-          ON CONFLICT (ip) DO NOTHING
-        `, [ip, range.account_id, id]);
+          INSERT INTO ip_pool_addresses (id, pool_id, ip_address, status, created_at, updated_at)
+          VALUES (
+            substring(replace(gen_random_uuid()::text, '-', '') from 1 for 26),
+            NULL, $1::inet, 'active', NOW(), NOW()
+          )
+          ON CONFLICT (ip_address) DO NOTHING
+        `, [ip, range.tenant_id, id]);
       }
 
       // Update BYOIP range
       await this.pool.query(`
-        UPDATE ent_byoip_ranges SET
+        UPDATE byoip_ranges SET
           status = 'provisioned',
-          provisioned_at = NOW(),
-          allocated_ips = $2
+          provisioned_at = NOW()
         WHERE id = $1
-      `, [id, ips]);
+      `, [id]);
 
       const updatedResult = await this.pool.query(`
-        SELECT * FROM ent_byoip_ranges WHERE id = $1
+        SELECT * FROM byoip_ranges WHERE id = $1
       `, [id]);
 
       return {
@@ -921,12 +923,12 @@ export class PrivateDeploymentService {
       if (dedicatedIPs[i]) continue;
 
       await this.pool.query(`
-        UPDATE ent_ip_pool SET
-          deployment_id = $1,
-          status = 'assigned'
-        WHERE status = 'available' AND deployment_id IS NULL
+        UPDATE ip_pool_addresses SET
+          status = 'assigned',
+          updated_at = NOW()
+        WHERE status = 'active'
         LIMIT 1
-      `, [deployment.id]);
+      `);
     }
   }
 

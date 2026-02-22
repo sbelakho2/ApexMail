@@ -440,14 +440,18 @@ export default function SystemHealthPage() {
                                             <td className="px-4 py-4 text-right">
                                                 <div className="flex items-center justify-end gap-2">
                                                     <div className="w-16 h-2 bg-muted rounded-full overflow-hidden">
-                                                        <div 
-                                                            className={cn(
-                                                                'h-full rounded-full',
-                                                                worker.cpu > 80 ? 'bg-destructive' :
-                                                                worker.cpu > 60 ? 'bg-warning' : 'bg-success'
-                                                            )}
-                                                            style={{ width: `${worker.cpu}%` }}
-                                                        />
+                                                        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                                                            <rect
+                                                                x="0"
+                                                                y="0"
+                                                                width={Math.max(0, Math.min(100, worker.cpu))}
+                                                                height="8"
+                                                                className={cn(
+                                                                    worker.cpu > 80 ? 'fill-destructive' :
+                                                                    worker.cpu > 60 ? 'fill-warning' : 'fill-success'
+                                                                )}
+                                                            />
+                                                        </svg>
                                                     </div>
                                                     <span className="text-sm text-muted-foreground w-10 text-right">{worker.cpu}%</span>
                                                 </div>
@@ -455,14 +459,18 @@ export default function SystemHealthPage() {
                                             <td className="px-4 py-4 text-right">
                                                 <div className="flex items-center justify-end gap-2">
                                                     <div className="w-16 h-2 bg-muted rounded-full overflow-hidden">
-                                                        <div 
-                                                            className={cn(
-                                                                'h-full rounded-full',
-                                                                worker.memory > 80 ? 'bg-destructive' :
-                                                                worker.memory > 60 ? 'bg-warning' : 'bg-success'
-                                                            )}
-                                                            style={{ width: `${worker.memory}%` }}
-                                                        />
+                                                        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                                                            <rect
+                                                                x="0"
+                                                                y="0"
+                                                                width={Math.max(0, Math.min(100, worker.memory))}
+                                                                height="8"
+                                                                className={cn(
+                                                                    worker.memory > 80 ? 'fill-destructive' :
+                                                                    worker.memory > 60 ? 'fill-warning' : 'fill-success'
+                                                                )}
+                                                            />
+                                                        </svg>
                                                     </div>
                                                     <span className="text-sm text-muted-foreground w-10 text-right">{worker.memory}%</span>
                                                 </div>

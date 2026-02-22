@@ -64,7 +64,7 @@ export class WalletService {
     const result = await this.db.query<{
       tenant_id: string;
       balance: number;
-      reserved_balance: number;
+      reserved: number;
       currency: string;
       updated_at: Date;
     }>(
@@ -81,8 +81,8 @@ export class WalletService {
       balance = {
         tenantId: row.tenant_id,
         balance: row.balance,
-        reservedBalance: row.reserved_balance,
-        availableBalance: row.balance - row.reserved_balance,
+        reservedBalance: row.reserved,
+        availableBalance: row.balance - row.reserved,
         currency: row.currency,
         updatedAt: row.updated_at,
       };
@@ -91,11 +91,11 @@ export class WalletService {
       const createResult = await this.db.query<{
         tenant_id: string;
         balance: number;
-        reserved_balance: number;
+        reserved: number;
         currency: string;
         updated_at: Date;
       }>(
-        `INSERT INTO wallets (tenant_id, balance, reserved_balance, currency, created_at, updated_at)
+        `INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
          VALUES ($1, 0, 0, 'EUR', NOW(), NOW())
          ON CONFLICT (tenant_id) DO NOTHING
          RETURNING *`,
@@ -167,8 +167,8 @@ export class WalletService {
       updated: boolean;
     }>(
       `WITH balance_check AS (
-        SELECT tenant_id, balance, reserved_balance,
-               (balance - reserved_balance) >= $1 AS has_funds
+        SELECT tenant_id, balance, reserved,
+               (balance - reserved) >= $1 AS has_funds
         FROM wallets
         WHERE tenant_id = $2
         FOR UPDATE
@@ -222,7 +222,7 @@ export class WalletService {
       success: boolean;
     }>(
       `WITH locked_wallet AS (
-        SELECT tenant_id, balance, reserved_balance 
+        SELECT tenant_id, balance, reserved 
         FROM wallets 
         WHERE tenant_id = $1 
         FOR UPDATE
@@ -230,7 +230,7 @@ export class WalletService {
       balance_check AS (
         SELECT 
           tenant_id,
-          (balance - reserved_balance) >= $2 AS has_funds
+          (balance - reserved) >= $2 AS has_funds
         FROM locked_wallet
       ),
       new_reservation AS (
@@ -250,7 +250,7 @@ export class WalletService {
       ),
       wallet_update AS (
         UPDATE wallets 
-        SET reserved_balance = reserved_balance + $2, updated_at = NOW() 
+        SET reserved = reserved + $2, updated_at = NOW() 
         WHERE tenant_id = $1 
           AND EXISTS (SELECT 1 FROM new_reservation)
         RETURNING tenant_id
@@ -311,7 +311,7 @@ export class WalletService {
       update_wallet AS (
         UPDATE wallets
         SET balance = balance - (SELECT amount FROM valid_reservation),
-            reserved_balance = reserved_balance - (SELECT amount FROM valid_reservation),
+            reserved = reserved - (SELECT amount FROM valid_reservation),
             updated_at = NOW()
         WHERE tenant_id = (SELECT tenant_id FROM valid_reservation)
           AND EXISTS (SELECT 1 FROM update_reservation)
@@ -380,7 +380,7 @@ export class WalletService {
       ),
       update_wallet AS (
         UPDATE wallets
-        SET reserved_balance = reserved_balance - (SELECT amount FROM valid_reservation),
+        SET reserved = reserved - (SELECT amount FROM valid_reservation),
             updated_at = NOW()
         WHERE tenant_id = (SELECT tenant_id FROM valid_reservation)
           AND EXISTS (SELECT 1 FROM update_reservation)

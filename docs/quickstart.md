@@ -54,8 +54,8 @@ console.log(`Email sent! ID: ${id}`);
 ### Using cURL
 
 ```bash
-curl -X POST https://api.apexmail.ee/v1/emails \
-  -H "Authorization: Bearer am_live_your_api_key" \
+curl -X POST https://api.apexmail.ee/v1/messages \
+  -H "X-API-Key: am_live_your_api_key" \
   -H "Content-Type: application/json" \
   -d '{
     "from": "hello@yourdomain.com",

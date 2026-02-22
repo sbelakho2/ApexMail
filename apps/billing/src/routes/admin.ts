@@ -91,16 +91,21 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       amount: z.number().positive(),
       reason: z.string(),
       expiresAt: z.string().datetime().optional(),
+      idempotencyKey: z.string().optional(),
     });
 
     const parsed = schema.parse(body);
     const adminId = c.get('adminId');
 
+    // Use client-provided idempotency key, or generate deterministic one from request params
+    const idempotencyKey = parsed.idempotencyKey ?? 
+      `admin_credit_${adminId}_${tenantId}_${parsed.amount}_${parsed.reason}`;
+
     const result = await ctx.wallet.credit(
       tenantId,
       parsed.amount,
       `Admin credit: ${parsed.reason}`,
-      `admin_credit_${adminId}_${Date.now()}`
+      idempotencyKey
     );
 
     if (!result.ok) {

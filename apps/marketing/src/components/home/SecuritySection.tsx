@@ -22,13 +22,13 @@ const securityFeatures = [
  },
  {
  icon: Eye,
- title: 'Zero-Retention Mode',
- description: 'Process emails entirely in RAM. No logs, no content storage, no risk. Perfect for PII processing.',
+ title: 'Zero-Retention Mode (Enterprise)',
+ description: 'Process emails in RAM with no content storage for sensitive PII workloads.',
  },
  {
  icon: Server,
- title: 'SOC 2 Type II Certified',
- description: 'Annual third-party audits verify our security controls meet the highest standards.',
+ title: 'SOC 2 Controls (Enterprise)',
+ description: 'Enterprise controls and audit readiness features for regulated teams.',
  },
  {
  icon: Key,
@@ -39,10 +39,10 @@ const securityFeatures = [
 
 const complianceLogos = [
  { name: 'GDPR', description: 'EU Data Protection' },
- { name: 'HIPAA', description: 'Healthcare Ready' },
- { name: 'SOC 2', description: 'Type II Certified' },
+ { name: 'HIPAA', description: 'Enterprise plan' },
+ { name: 'SOC 2', description: 'Enterprise controls' },
  { name: 'CCPA', description: 'California Privacy' },
- { name: 'ISO 27001', description: 'Security Standard' },
+ { name: 'ISO 27001', description: 'In progress' },
 ];
 
 export function SecuritySection() {

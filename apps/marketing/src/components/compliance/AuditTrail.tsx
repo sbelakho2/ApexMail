@@ -101,7 +101,7 @@ export function AuditTrail() {
  </h2>
  <p className="text-lg text-surface-600 mb-8 leading-relaxed">
  Tamper-proof audit logs capture every data operation, consent change, and 
- administrative action. Queryable for years, exportable in seconds.
+ administrative action. Queryable for up to 2 years, exportable in seconds.
  </p>
 
  <div className="space-y-6">
@@ -114,7 +114,7 @@ export function AuditTrail() {
  {
  icon: Clock,
  title: '7-Year Retention',
- description: 'Meets GDPR, HIPAA, and SOX retention requirements',
+ description: 'Up to 2-year retention (Enterprise plan)',
  },
  {
  icon: Search,

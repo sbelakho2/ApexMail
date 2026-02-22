@@ -37,6 +37,9 @@ async function main(): Promise<void> {
     // FIX-500-364: Shutdown metering service (clears its internal flush timer)
     await ctx.metering.shutdown();
 
+    // Stop dedicated IP billing sync
+    ctx.dedicatedIpBilling.stopSync();
+
     // Close Redis connection
     await ctx.redis.quit();
 
@@ -64,6 +67,19 @@ async function main(): Promise<void> {
 
 async function startBackgroundWorkers(ctx: ReturnType<typeof createApp>['ctx']): Promise<void> {
   logger.info('Starting background workers...');
+
+  // Recover any metering events that were pending when the process last stopped.
+  // CRITICAL: must run before the periodic flush to prevent data loss.
+  try {
+    const recovered = await ctx.metering.recoverPendingEvents();
+    if (recovered.ok && recovered.value > 0) {
+      logger.info('Recovered pending metering events from Redis', { count: recovered.value });
+    }
+  } catch (error) {
+    logger.error('Failed to recover pending metering events', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   // Usage alert checker - runs every 5 minutes
   const usageAlertInterval = setInterval(async () => {

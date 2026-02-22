@@ -40,7 +40,9 @@ export function createDevExRoutes(db: Pool, redis?: Redis): Hono<{ Variables: Va
   const cliToolService = new CliToolService(db);
 
   // CORS
-  app.use('/*', cors());
+  app.use('/*', cors({
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+  }));
 
   // Version middleware
   app.use('/*', async (c, next) => {

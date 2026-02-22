@@ -38,14 +38,14 @@ describe('#21 – DKIM per-domain key directory', () => {
 // #22: Tracking tokens already use AES-128-GCM (verified — no change needed)
 // ---------------------------------------------------------------------------
 describe('#22 – Tracking tokens use authenticated encryption', () => {
-    const src = read('apps/tracking/src/codec.ts');
+    const src = read('services/mail-server/crates/tracking-service/src/codec.rs');
 
-    it('uses encryptAES128GCM for encoding', () => {
-        expect(src).toContain('encryptAES128GCM');
+    it('uses aes128gcm_encrypt for encoding', () => {
+        expect(src).toContain('aes128gcm_encrypt');
     });
 
-    it('uses decryptAES128GCM for decoding', () => {
-        expect(src).toContain('decryptAES128GCM');
+    it('uses aes128gcm_decrypt for decoding', () => {
+        expect(src).toContain('aes128gcm_decrypt');
     });
 });
 
@@ -53,24 +53,20 @@ describe('#22 – Tracking tokens use authenticated encryption', () => {
 // #23: Unsubscribe token PII leak — encrypted, not plaintext+HMAC
 // ---------------------------------------------------------------------------
 describe('#23 – Unsubscribe token encrypted (no PII leak)', () => {
-    const src = read('apps/tracking/src/codec.ts');
+    const src = read('services/mail-server/crates/tracking-service/src/codec.rs');
 
-    it('generateUnsubscribeToken uses encryptAES128GCM', () => {
+    it('generate_unsubscribe_token uses aes128gcm_encrypt', () => {
         // Should encrypt the payload, not expose it in plaintext
-        expect(src).toMatch(/generateUnsubscribeToken[\s\S]*?encryptAES128GCM/);
+        expect(src).toMatch(/generate_unsubscribe_token[\s\S]*?aes128gcm_encrypt/);
     });
 
-    it('verifyUnsubscribeToken tries GCM decryption first', () => {
-        expect(src).toMatch(/verifyUnsubscribeToken[\s\S]*?decryptAES128GCM/);
+    it('verify_unsubscribe_token tries GCM decryption first', () => {
+        expect(src).toMatch(/verify_unsubscribe_token[\s\S]*?aes128gcm_decrypt/);
     });
 
     it('has backward-compatible legacy HMAC fallback', () => {
         // Legacy tokens should still be verifiable
         expect(src).toContain('legacy HMAC-signed format');
-    });
-
-    it('has FIX-500-023 annotation', () => {
-        expect(src).toContain('FIX-500-023');
     });
 });
 
@@ -390,7 +386,7 @@ describe('#37 – Promo injection HTML escaping', () => {
 // #38: Proxy SSRF already fixed (verified — no change needed)
 // ---------------------------------------------------------------------------
 describe('#38 – Proxy SSRF protection already in place', () => {
-    const src = read('apps/tracking/src/routes.ts');
+    const src = read('services/mail-server/crates/tracking-service/src/routes/click.rs');
 
     it('has SSRF-prevention URL validation', () => {
         // Already has comprehensive checks

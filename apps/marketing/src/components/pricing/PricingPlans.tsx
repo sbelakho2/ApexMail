@@ -24,7 +24,7 @@ const plans: Plan[] = [
  period: 'forever',
  description: 'Perfect for development and testing.',
  features: [
- '1,000 emails/month',
+ '3,000 emails/month',
  'RESTful API access',
  '1 sending domain',
  '7-day data retention',
@@ -35,15 +35,15 @@ const plans: Plan[] = [
  },
  {
  name: 'Starter',
- price: '$29',
+ price: '$25',
  period: '/month',
  description: 'For growing apps with moderate needs.',
  features: [
- '25,000 emails/month',
+ '50,000 emails/month',
  'Webhooks & advanced analytics',
  'Custom templates',
- '3 sending domains',
- '3 team members',
+ '5 sending domains',
+ '5 team members',
  'Email support',
  ],
  cta: 'Start Trial',
@@ -51,33 +51,32 @@ const plans: Plan[] = [
  },
  {
  name: 'Pro',
- price: '$59',
+ price: '$65',
  period: '/month',
- description: 'For scaling teams needing custom tracking.',
+ description: 'For scaling teams with A/B testing.',
  features: [
- '50,000 emails/month',
+ '150,000 emails/month',
+ 'A/B testing & send-time AI',
  'Custom tracking domain',
- '60-day data retention',
- '5 sending domains',
- '5 team members',
- 'Priority onboarding',
+ '25 sending domains',
+ '10 team members',
+ 'Dedicated IP add-on ($30/mo)',
  ],
  cta: 'Start Trial',
  ctaLink: '/signup?plan=pro',
  },
  {
  name: 'Growth',
- price: '$129',
+ price: '$150',
  period: '/month',
  description: 'For teams serious about deliverability.',
  features: [
- '100,000 emails/month',
- '1 dedicated IP',
- 'A/B testing & time-travel debug',
- '10 sending domains',
- '10 team members',
- 'Audit logs',
- 'Priority support',
+ '500,000 emails/month',
+ '1 dedicated IP included',
+ 'Audit logs & priority support',
+ '100 sending domains',
+ '25 team members',
+ '90-day data retention',
  ],
  cta: 'Start Trial',
  ctaLink: '/signup?plan=growth',
@@ -85,15 +84,15 @@ const plans: Plan[] = [
  },
  {
  name: 'Scale',
- price: '$399',
+ price: '$350',
  period: '/month',
  description: 'For high-volume enterprise senders.',
  features: [
- '500,000 emails/month',
+ '2,000,000 emails/month',
  '3 dedicated IPs',
  'Unlimited domains',
  'SSO/SAML & 10 subaccounts',
- 'SLA guarantee (10% credit)',
+ 'SLA guarantee (99.9%, 10% credit cap)',
  'Phone support & dedicated CSM',
  ],
  cta: 'Contact Sales',
@@ -212,12 +211,12 @@ export function PricingPlans() {
         >
           <div className="p-6 lg:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
             <div className="flex-1">
-              <h3 className="text-lg font-semibold text-white mb-2">Enterprise</h3>
+              <h3 className="text-lg font-semibold text-white mb-2">Enterprise — from $800/mo</h3>
               <p className="text-surface-400 text-sm mb-4 max-w-lg">
-                Private cloud, custom SLA, HIPAA/SOC2 compliance, and dedicated support.
+                5,000,000+ emails/month, custom SLA, HIPAA/SOC 2 compliance, and dedicated support.
               </p>
               <div className="flex flex-wrap gap-x-4 gap-y-1">
-                {['Dedicated infrastructure', 'Custom integrations', 'Priority support'].map((feature) => (
+                {['10 dedicated IPs', 'SSO/SAML & SCIM', 'HIPAA & SOC 2', 'White-label & BYOIP', 'Custom SLA (99.9%, 25% credit cap)', 'Dedicated account manager'].map((feature) => (
                   <span key={feature} className="flex items-center gap-1.5 text-sm text-surface-300">
                     <CheckCircle className="w-4 h-4 text-primary-400" strokeWidth={2} />
                     {feature}

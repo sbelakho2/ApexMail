@@ -642,9 +642,9 @@ export default function SettingsPage() {
                                                     apiCalls: 120500
                                                 },
                                                 cost: {
-                                                    emailCost: 45231 * 0.08, // approx
-                                                    apiCost: 20500 * 0.05, // approx
-                                                    totalCost: (45231 * 0.08) + (20500 * 0.05)
+                                                    emailCost: (10000 * 0.10) + (35231 * 0.08), // tiered: first 10K at $0.10/100, rest at $0.08/100
+                                                    apiCost: Math.ceil(20500 / 1000) * 10, // $0.10/1K calls above 100K free
+                                                    totalCost: (10000 * 0.10) + (35231 * 0.08) + (Math.ceil(20500 / 1000) * 10)
                                                 }
                                             }}
                                         />
@@ -658,7 +658,7 @@ export default function SettingsPage() {
                                                     32,456 <span className="text-sm text-muted-foreground font-normal">/ {activePlanData?.emailLimit.toLocaleString()}</span>
                                                 </p>
                                                 <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
-                                                    <div className="h-full bg-primary rounded-full" style={{ width: '65%' }} />
+                                                    <div className="h-full bg-primary rounded-full w-[65%]" />
                                                 </div>
                                             </div>
                                             <div>
@@ -666,17 +666,17 @@ export default function SettingsPage() {
                                                     API Calls
                                                 </p>
                                                 <p className="text-xl font-semibold apex-metric-number">
-                                                    234k <span className="text-sm text-muted-foreground font-normal">/ 500k</span>
+                                                    234k <span className="text-sm text-muted-foreground font-normal">/ 2M</span>
                                                 </p>
                                                 <div className="h-1.5 w-full bg-secondary mt-3 rounded-full overflow-hidden">
-                                                    <div className="h-full bg-blue-500 rounded-full" style={{ width: '45%' }} />
+                                                    <div className="h-full bg-blue-500 rounded-full w-[45%]" />
                                                 </div>
                                             </div>
                                             <div>
                                                 <p className="text-sm font-medium text-muted-foreground mb-2">
                                                     Team Members
                                                 </p>
-                                                <p className="text-xl font-semibold apex-metric-number">3 <span className="text-sm text-muted-foreground font-normal">/ 5</span></p>
+                                                <p className="text-xl font-semibold apex-metric-number">3 <span className="text-sm text-muted-foreground font-normal">/ 10</span></p>
                                             </div>
                                         </div>
                                     )}
@@ -706,9 +706,9 @@ export default function SettingsPage() {
                                     <h3 className="font-medium">Billing History</h3>
                                     <div className="space-y-2">
                                         {[
-                                            { date: 'Dec 15, 2024', amount: '$59.00' },
-                                            { date: 'Nov 15, 2024', amount: '$59.00' },
-                                            { date: 'Oct 15, 2024', amount: '$59.00' },
+                                            { date: 'Dec 15, 2024', amount: '$65.00' },
+                                            { date: 'Nov 15, 2024', amount: '$65.00' },
+                                            { date: 'Oct 15, 2024', amount: '$65.00' },
                                         ].map((invoice, i) => (
                                             <div
                                                 key={i}

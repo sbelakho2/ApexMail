@@ -57,8 +57,8 @@ ARC-Authentication-Results: i=1; apexmail.ee; spf=pass; dkim=pass; dmarc=pass
 ARC headers are generated automatically by ApexMail when forwarding messages. You can check ARC validation results via the API:
 
 ```http
-GET /api/v1/messages/:id/authentication
-Authorization: Bearer YOUR_API_KEY
+GET /v1/messages/:id/authentication
+X-API-Key: YOUR_API_KEY
 ```
 
 ```json
@@ -114,7 +114,7 @@ max_age: 604800
 
 ```http
 # Check MTA-STS configuration
-GET /api/v1/domains/:id/mta-sts
+GET /v1/domains/:id/mta-sts
 
 # Response
 {
@@ -153,7 +153,7 @@ _smtp._tls.yourdomain.com. IN TXT "v=TLSRPTv1; rua=mailto:tlsrpt@yourdomain.com"
 ### API Endpoint
 
 ```http
-GET /api/v1/domains/:id/tlsrpt
+GET /v1/domains/:id/tlsrpt
 ```
 
 ---
@@ -190,10 +190,10 @@ default._bimi.yourdomain.com. IN TXT "v=BIMI1; l=https://assets.yourdomain.com/l
 
 ```http
 # Check BIMI configuration
-GET /api/v1/domains/:id/bimi
+GET /v1/domains/:id/bimi
 
 # Validate BIMI logo
-POST /api/v1/domains/:id/bimi/validate-logo
+POST /v1/domains/:id/bimi/validate-logo
 Content-Type: application/json
 
 {
@@ -231,7 +231,7 @@ Content-Type: application/json
 Get an overall authentication score (0-100) for any domain:
 
 ```http
-GET /api/v1/domains/:id/auth-status
+GET /v1/domains/:id/auth-status
 
 # Response
 {

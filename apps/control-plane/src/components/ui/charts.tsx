@@ -104,10 +104,9 @@ export function ProgressBar({ value, max = 100, color = CHART_COLORS.primary, sh
     return (
         <div className="w-full">
             <div className={`w-full bg-surface-100 rounded-full overflow-hidden ${height}`}>
-                <div
-                    className="h-full rounded-full transition-all duration-500 ease-out"
-                    style={{ width: `${percent}%`, backgroundColor: color }}
-                />
+                <svg width="100%" height="100%" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">
+                    <rect x="0" y="0" width={Math.max(0, Math.min(100, percent))} height="10" fill={color} rx="999" ry="999" />
+                </svg>
             </div>
             {showLabel && (
                 <div className="flex justify-between mt-1 text-xs text-surface-500">
@@ -168,7 +167,7 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
 
     return (
         <div className="flex items-center gap-6">
-            <div className="relative" style={{ width: size, height: size }}>
+            <div className="relative inline-block">
                 <svg width={size} height={size} className="transform -rotate-0">
                     {segments.map((seg, i) => (
                         <path
@@ -193,7 +192,9 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
                 <div className="space-y-2">
                     {segments.map((seg, i) => (
                         <div key={i} className="flex items-center gap-2 text-sm">
-                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: seg.color }} />
+                            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                                <circle cx="6" cy="6" r="6" fill={seg.color} />
+                            </svg>
                             <span className="text-surface-600">{seg.label}</span>
                             <span className="text-surface-900 font-medium ml-auto">{seg.percent}%</span>
                         </div>
@@ -231,10 +232,9 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                                 {showValues && <span className="text-surface-900 font-medium">{d.value.toLocaleString()}</span>}
                             </div>
                             <div className="h-6 bg-surface-100 rounded-lg overflow-hidden">
-                                <div
-                                    className="h-full rounded-lg transition-all duration-500"
-                                    style={{ width: `${percent}%`, backgroundColor: color }}
-                                />
+                                <svg width="100%" height="100%" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+                                    <rect x="0" y="0" width={Math.max(0, Math.min(100, percent))} height="24" fill={color} rx="6" ry="6" />
+                                </svg>
                             </div>
                         </div>
                     );
@@ -246,7 +246,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
     const barWidth = Math.min(60, (300 / data.length) - 8);
 
     return (
-        <div className="w-full" style={{ height }}>
+        <div className="w-full">
             <svg width="100%" height={height} className="overflow-visible">
                 {data.map((d, i) => {
                     const barHeight = (d.value / maxValue) * (height - 40);
@@ -441,7 +441,9 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
                 <div className="flex gap-4 mt-3 justify-center">
                     {series.map(s => (
                         <div key={s.key} className="flex items-center gap-2 text-sm">
-                            <div className="w-3 h-0.5 rounded" style={{ backgroundColor: s.color }} />
+                            <svg width="12" height="2" viewBox="0 0 12 2" aria-hidden="true">
+                                <line x1="0" y1="1" x2="12" y2="1" stroke={s.color} strokeWidth="2" strokeLinecap="round" />
+                            </svg>
                             <span className="text-surface-600">{s.label}</span>
                         </div>
                     ))}
@@ -544,27 +546,27 @@ interface FunnelChartProps {
 
 export function FunnelChart({ data, height = 200 }: FunnelChartProps) {
     const maxValue = data[0]?.value || 1;
+    const rowHeight = Math.max(40, Math.floor(height / Math.max(data.length, 1)));
 
     return (
-        <div className="space-y-2" style={{ minHeight: height }}>
+        <div className="space-y-2">
             {data.map((d, i) => {
                 const widthPercent = (d.value / maxValue) * 100;
                 const color = d.color || CHART_PALETTE[i % CHART_PALETTE.length];
                 const conversionRate = i > 0 ? ((d.value / data[i - 1].value) * 100).toFixed(1) : null;
+                const width = Math.max(24, Math.min(100, widthPercent));
+                const leftOffset = (100 - width) / 2;
 
                 return (
                     <div key={i} className="relative">
-                        <div
-                            className="h-10 rounded-lg flex items-center justify-between px-4 transition-all duration-300"
-                            style={{
-                                width: `${widthPercent}%`,
-                                minWidth: '120px',
-                                backgroundColor: color,
-                                marginLeft: `${(100 - widthPercent) / 2}%`,
-                            }}
-                        >
-                            <span className="text-white font-medium text-sm truncate">{d.label}</span>
-                            <span className="text-white/90 text-sm">{d.value.toLocaleString()}</span>
+                        <div className="rounded-lg overflow-hidden relative">
+                            <svg width="100%" height={rowHeight} viewBox={`0 0 100 ${rowHeight}`} preserveAspectRatio="none" aria-hidden="true">
+                                <rect x={leftOffset} y="0" width={width} height={rowHeight} rx="8" ry="8" fill={color} />
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-between px-4 pointer-events-none">
+                                <span className="text-white font-medium text-sm truncate">{d.label}</span>
+                                <span className="text-white/90 text-sm">{d.value.toLocaleString()}</span>
+                            </div>
                         </div>
                         {conversionRate && (
                             <div className="absolute -right-16 top-1/2 -translate-y-1/2 text-xs text-surface-500">

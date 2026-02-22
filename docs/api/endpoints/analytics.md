@@ -13,7 +13,7 @@ Analytics responses are cached to ensure fast, consistent performance. Concurren
 Include your API key in the `Authorization` header:
 
 ```
-Authorization: Bearer ak_live_...
+X-API-Key: ak_live_...
 ```
 
 ---
@@ -38,7 +38,7 @@ Maximum date range is **90 days**. Dates are evaluated in the organization's con
 | 401 | `UNAUTHORIZED` | API key is missing or invalid |
 | 403 | `INSUFFICIENT_SCOPE` | API key does not have the `analytics:read` scope |
 | 404 | `NOT_FOUND` | Referenced resource (campaign, domain) does not exist |
-| 429 | `RATE_LIMITED` | Rate limit exceeded; retry after `Retry-After` header value |
+| 429 | `RATE_LIMIT_EXCEEDED` | Rate limit exceeded; retry after `Retry-After` header value |
 | 500 | `INTERNAL_ERROR` | Server-side error; request can be safely retried |
 
 ---
@@ -59,8 +59,8 @@ Returns a high-level dashboard overview including totals for sends, deliveries, 
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/overview?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/overview?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -129,8 +129,8 @@ Returns time-bucketed metric data suitable for charting. Supports multiple inter
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/timeseries?start_date=2026-01-01&end_date=2026-01-07&interval=day&metric=delivered" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/timeseries?start_date=2026-01-01&end_date=2026-01-07&interval=day&metric=delivered" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -186,8 +186,8 @@ Returns per-campaign performance data with sorting and optional filtering to a s
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/campaigns?start_date=2026-01-01&end_date=2026-01-31&sort_by=open_rate" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/campaigns?start_date=2026-01-01&end_date=2026-01-31&sort_by=open_rate" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -250,8 +250,8 @@ Returns performance metrics broken down by sending domain. Useful for monitoring
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/domains?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/domains?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -323,8 +323,8 @@ Returns detailed engagement metrics such as open/click heatmaps, device breakdow
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/engagement?start_date=2026-01-01&end_date=2026-01-31&metric=clicks" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/engagement?start_date=2026-01-01&end_date=2026-01-31&metric=clicks" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -392,8 +392,8 @@ Returns delivery and engagement metrics broken down by receiving ISP / mailbox p
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/providers?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/providers?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -483,8 +483,8 @@ Returns aggregate deliverability statistics including inbox placement estimates,
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/deliverability?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/deliverability?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -545,8 +545,8 @@ Returns a detailed breakdown of bounce events by category, type, ISP, and SMTP r
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/bounce-analysis?start_date=2026-01-01&end_date=2026-01-31" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/bounce-analysis?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response
@@ -612,8 +612,8 @@ Exports analytics data as JSON or CSV. Large exports are processed asynchronousl
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/analytics/export?start_date=2026-01-01&end_date=2026-01-31&format=csv&report_type=campaigns" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/analytics/export?start_date=2026-01-01&end_date=2026-01-31&format=csv&report_type=campaigns" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response (synchronous — small dataset)

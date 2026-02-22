@@ -62,7 +62,10 @@ export interface ProgressProps
 const Progress = React.forwardRef<
  React.ElementRef<typeof ProgressPrimitive.Root>,
  ProgressProps
->(({ className, value, variant, size, indicatorVariant, animated, showValue, ...props }, ref) => (
+>(({ className, value, variant, size, indicatorVariant, animated, showValue, ...props }, ref) => {
+ const clampedValue = Math.max(0, Math.min(100, value ?? 0));
+
+ return (
  <div className="flex items-center gap-2">
  <ProgressPrimitive.Root
  ref={ref}
@@ -70,20 +73,24 @@ const Progress = React.forwardRef<
  {...props}
  >
  <ProgressPrimitive.Indicator
- className={cn(progressIndicatorVariants({ 
- variant: indicatorVariant || variant, 
- animated 
+ className={cn(progressIndicatorVariants({
+ variant: indicatorVariant || variant,
+ animated,
  }))}
- style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
- />
+ >
+ <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+ <rect x="0" y="0" width={clampedValue} height="100" fill="currentColor" rx="999" ry="999" />
+ </svg>
+ </ProgressPrimitive.Indicator>
  </ProgressPrimitive.Root>
  {showValue && (
  <span className="text-sm text-muted-foreground apex-metric-number">
- {value}%
+ {clampedValue}%
  </span>
  )}
  </div>
-));
+ );
+});
 Progress.displayName = ProgressPrimitive.Root.displayName;
 
 export { Progress, progressVariants };

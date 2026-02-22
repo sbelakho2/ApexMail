@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ApexMail Unified Test Runner — runs BOTH test suites:
-  1. test_agent.py  (147 tests, 13 categories)
-  2. stress_test_r34.py (97 tests, 17 categories)
-Total: 244+ tests
+  1. test_agent.py  (189 tests, 14 categories)
+  2. stress_test_r34.py (171 tests, 26 categories)
+Total: 360 tests (340+ single-turn + multi-turn)
 
-Usage on remote (4x B200):
+Usage on remote (8× B200):
   python run_all_tests.py --adapter output/
   python run_all_tests.py --adapter output/ --suite agent      # only test_agent
   python run_all_tests.py --adapter output/ --suite stress     # only stress_test
@@ -342,9 +342,9 @@ def dry_run():
 # Main
 # ──────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="ApexMail Unified Test Runner — 244+ tests")
+    parser = argparse.ArgumentParser(description="ApexMail Unified Test Runner — 360 tests")
     parser.add_argument("--adapter", type=str, help="Path to LoRA adapter")
-    parser.add_argument("--base-model", type=str, default="/workspace/models/Qwen3-8B")
+    parser.add_argument("--base-model", type=str, default="/workspace/models/Qwen3-Next-80B-A3B-Instruct")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--auto-device-map", action="store_true", help="Use device_map='auto' for large models")
     parser.add_argument("--suite", type=str, choices=["all", "agent", "stress"], default="all")

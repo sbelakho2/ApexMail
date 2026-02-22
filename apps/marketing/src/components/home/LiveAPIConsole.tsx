@@ -7,8 +7,8 @@ import { Play, Copy, Check, Terminal, Loader2 } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 import { cn } from '@/lib/utils';
 
-const curlCommand = `curl -X POST https://api.apexmail.ee/v1/send \\
-  -H "Authorization: Bearer demo_key_xxx" \\
+const curlCommand = `curl -X POST https://api.apexmail.ee/v1/messages \\
+  -H "X-API-Key: demo_key_xxx" \\
   -H "Content-Type: application/json" \\
   -d '{
     "from": "demo@apexmail.ee",
@@ -220,7 +220,7 @@ export function LiveAPIConsole() {
               onClick={handleSend}
               disabled={isSending}
               className={cn(
-                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-brand-500 rounded-md hover:bg-brand-600 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm',
+                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-brand-500 rounded-md border border-brand-500 hover:bg-brand-600 transition-colors disabled:opacity-70 disabled:cursor-not-allowed',
               )}
             >
               {isSending ? (

@@ -18,7 +18,7 @@ White-label features include:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -43,7 +43,7 @@ ApexMail automatically provisions and renews SSL certificates for all white-labe
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel/ssl \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -F "certificate=@certificate.pem" \
   -F "privateKey=@private-key.pem" \
   -F "chain=@chain.pem"
@@ -55,7 +55,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel/ssl \
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/branding \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -121,7 +121,7 @@ Customize all system-generated emails:
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/emails \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "welcomeEmail": {
       "subject": "Welcome to {{company_name}}",
@@ -158,7 +158,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/emails \
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-css \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: text/css" \
   -d '
     /* Custom button styles */
@@ -183,7 +183,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-css \
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/whitelabel/custom-js \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/javascript" \
   -d '
     // Custom analytics tracking
@@ -289,7 +289,7 @@ Remove ApexMail branding from API responses:
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/whitelabel/status/{account_id} \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -317,7 +317,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/whitelabel/verify \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{"accountId": "acc_xxx"}'
 ```
 

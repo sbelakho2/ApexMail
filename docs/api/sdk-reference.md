@@ -4,7 +4,7 @@ ApexMail provides official SDKs for **six languages** to simplify integration wi
 
 | Language | Package | Min. version |
 |----------|---------|--------------|
-| Node.js / TypeScript | `@apexmail/sdk` (npm) | Node.js ≥ 18 |
+| Node.js / TypeScript | `@apexmail/node` (npm) | Node.js ≥ 18 |
 | Python | `apexmail` (PyPI) | Python ≥ 3.9 |
 | Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | Go 1.21 |
 | Ruby | `apexmail` (RubyGems) | Ruby ≥ 2.7 |
@@ -30,14 +30,14 @@ Test keys operate against a sandboxed environment. Messages sent with test keys 
 
 ## Node.js SDK
 
-**Package:** `@apexmail/sdk`
+**Package:** `@apexmail/node`
 
 ```bash
-npm install @apexmail/sdk
+npm install @apexmail/node
 # or
-pnpm add @apexmail/sdk
+pnpm add @apexmail/node
 # or
-yarn add @apexmail/sdk
+yarn add @apexmail/node
 ```
 
 **Requirements:** Node.js ≥ 18.0.0
@@ -45,10 +45,10 @@ yarn add @apexmail/sdk
 ### Initialization
 
 ```typescript
-import { ApexMail } from '@apexmail/sdk';
+import { ApexMail } from '@apexmail/node';
 
 const apexmail = new ApexMail('am_live_your_api_key', {
-  baseUrl: 'https://api.apexmail.dev',  // optional, defaults to production
+  baseUrl: 'https://api.apexmail.ee',  // optional, defaults to production
   timeout: 30_000,                       // optional, request timeout in ms (default: 30000)
   retries: 3,                            // optional, max retry attempts (default: 3)
   debug: false,                          // optional, enable request/response logging (default: false)
@@ -60,7 +60,7 @@ const apexmail = new ApexMail('am_live_your_api_key', {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `apiKey` | `string` | — | Required. Your ApexMail API key. |
-| `baseUrl` | `string` | `https://api.apexmail.dev` | API base URL override. |
+| `baseUrl` | `string` | `https://api.apexmail.ee` | API base URL override. |
 | `timeout` | `number` | `30000` | Request timeout in milliseconds. |
 | `retries` | `number` | `3` | Maximum number of retry attempts for transient failures. |
 | `debug` | `boolean` | `false` | When `true`, logs request and response details to stdout. |
@@ -69,64 +69,64 @@ const apexmail = new ApexMail('am_live_your_api_key', {
 
 ### Messages
 
-#### `messages.send(options)`
+#### `emails.send(options)`
 
 Send a single email message.
 
 ```typescript
-const message = await apexmail.messages.send({
+const message = await apexmail.emails.send({
   from: 'hello@yourdomain.com',
   to: ['jane@example.com'],
   subject: 'Welcome to ApexMail',
   html: '<h1>Hello, Jane!</h1><p>Welcome aboard.</p>',
   text: 'Hello, Jane! Welcome aboard.',
-  tags: [{ name: 'onboarding', value: 'welcome' }],
+  tags: ['onboarding', 'welcome'],
   headers: { 'X-Custom-Id': 'onb-001' },
 });
 // => { id: 'msg_x9y8z7w6', status: 'queued' }
 ```
 
-#### `messages.sendBatch(messages)`
+#### `emails.batch(options)`
 
 Send up to 1,000 messages in a single request.
 
 ```typescript
-const result = await apexmail.messages.sendBatch([
-  { from: 'hello@yourdomain.com', to: ['alice@example.com'], subject: 'Hello Alice', html: '...' },
-  { from: 'hello@yourdomain.com', to: ['bob@example.com'], subject: 'Hello Bob', html: '...' },
-]);
-// => { accepted: 2, rejected: 0, messages: [{ id: 'msg_...', status: 'queued' }, ...] }
+const result = await apexmail.emails.batch({
+  emails: [
+    { from: 'hello@yourdomain.com', to: ['alice@example.com'], subject: 'Hello Alice', html: '...' },
+    { from: 'hello@yourdomain.com', to: ['bob@example.com'], subject: 'Hello Bob', html: '...' },
+  ],
+});
+// => { ids: ['msg_...', 'msg_...'], successCount: 2, failureCount: 0 }
 ```
 
-#### `messages.get(id)`
+#### `emails.get(id)`
 
 Retrieve the current status and details of a message.
 
 ```typescript
-const msg = await apexmail.messages.get('msg_x9y8z7w6');
-// => { id: 'msg_x9y8z7w6', status: 'delivered', to: ['jane@example.com'], ... }
+const msg = await apexmail.emails.get('msg_x9y8z7w6');
+// => { id: 'msg_x9y8z7w6', status: 'delivered', to: [...], ... }
 ```
 
-#### `messages.list(filters)`
+#### `emails.list(options)`
 
 List messages with optional filters.
 
 ```typescript
-const list = await apexmail.messages.list({
+const list = await apexmail.emails.list({
   status: 'delivered',
-  to: 'jane@example.com',
-  start_date: '2026-02-01T00:00:00Z',
-  page: 1,
+  limit: 20,
+  cursor: 'cursor_from_previous_response',
 });
 ```
 
-#### `messages.cancel(id)`
+#### `emails.cancel(id)`
 
 Cancel a message that is still in `queued` or `scheduled` status.
 
 ```typescript
-await apexmail.messages.cancel('msg_x9y8z7w6');
-// => { id: 'msg_x9y8z7w6', status: 'cancelled' }
+await apexmail.emails.cancel('msg_x9y8z7w6');
 ```
 
 ---
@@ -148,7 +148,7 @@ Trigger DNS verification for a domain. ApexMail checks SPF, DKIM, DMARC, and opt
 
 ```typescript
 const result = await apexmail.domains.verify('dom_abc123');
-// => { id: 'dom_abc123', status: 'verified', checks: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } }
+// => { id: 'dom_abc123', status: 'verified', dnsRecords: [...] }
 ```
 
 #### `domains.list()`
@@ -160,13 +160,12 @@ const domains = await apexmail.domains.list();
 // => { data: [{ id: 'dom_abc123', domain: 'yourdomain.com', status: 'verified' }] }
 ```
 
-#### `domains.getRecords(id)`
+#### `domains.get(id)`
 
-Retrieve the DNS records that must be configured for a domain.
+Retrieve a domain by ID.
 
 ```typescript
-const records = await apexmail.domains.getRecords('dom_abc123');
-// => { data: [{ type: 'TXT', name: 'apexmail._domainkey', value: 'v=DKIM1; k=rsa; p=...' }, ...] }
+const domain = await apexmail.domains.get('dom_abc123');
 ```
 
 #### `domains.delete(id)`
@@ -223,10 +222,9 @@ Register a webhook endpoint for event notifications.
 ```typescript
 const webhook = await apexmail.webhooks.create({
   url: 'https://yourapp.com/webhooks/apexmail',
-  events: ['delivered', 'bounced', 'complained'],
-  secret: 'whsec_your_signing_secret',
+  events: ['message.delivered', 'message.bounced', 'message.complained'],
 });
-// => { id: 'whk_def456', url: '...', events: [...], active: true }
+// => { id: 'whk_def456', url: '...', events: [...], active: true, secret: '...' }
 ```
 
 #### `webhooks.list()`
@@ -237,29 +235,20 @@ List all registered webhooks.
 const webhooks = await apexmail.webhooks.list();
 ```
 
-#### `webhooks.test(id)`
-
-Send a test event payload to a webhook endpoint to verify connectivity.
-
-```typescript
-const result = await apexmail.webhooks.test('whk_def456');
-// => { success: true, status_code: 200, response_time_ms: 142 }
-```
-
 ---
 
 ### Analytics
 
-#### `analytics.overview(dateRange)`
+#### `analytics.get(options)`
 
-Retrieve an analytics overview for the specified date range.
+Retrieve analytics for the specified date range.
 
 ```typescript
-const overview = await apexmail.analytics.overview({
-  start_date: '2026-02-01T00:00:00Z',
-  end_date: '2026-02-09T00:00:00Z',
+const overview = await apexmail.analytics.get({
+  from: '2026-02-01T00:00:00Z',
+  to: '2026-02-09T00:00:00Z',
 });
-// => { sent: 125000, delivered: 121500, open_rate: 0.397, click_rate: 0.102, ... }
+// => { sent: 125000, delivered: 121500, openRate: 0.397, clickRate: 0.102, ... }
 ```
 
 ---
@@ -273,10 +262,10 @@ Create a new API key with the specified scopes.
 ```typescript
 const key = await apexmail.apiKeys.create({
   name: 'Production Backend',
-  scopes: ['messages:send', 'events:read'],
-  expires_at: '2027-02-09T00:00:00Z',  // optional
+  scopes: ['messages:write', 'events:read'],
+  expiresAt: '2027-02-09T00:00:00Z',  // optional
 });
-// => { id: 'key_ghi789', api_key: 'am_live_...', name: '...', scopes: [...] }
+// => { id: 'key_ghi789', key: 'am_live_...', name: '...', scopes: [...] }
 ```
 
 > **Important:** The full API key value is only returned once, at creation time. Store it securely.
@@ -317,7 +306,7 @@ from apexmail import ApexMail
 
 client = ApexMail(
     api_key="am_live_your_api_key",
-    base_url="https://api.apexmail.dev",  # optional
+    base_url="https://api.apexmail.ee",  # optional
     timeout=30,                            # optional, seconds (default: 30)
     max_retries=3,                         # optional (default: 3)
 )
@@ -328,7 +317,7 @@ client = ApexMail(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `api_key` | `str` | — | Required. Your ApexMail API key. |
-| `base_url` | `str` | `https://api.apexmail.dev` | API base URL override. |
+| `base_url` | `str` | `https://api.apexmail.ee` | API base URL override. |
 | `timeout` | `int` | `30` | Request timeout in seconds. |
 | `max_retries` | `int` | `3` | Maximum retry attempts for transient failures. |
 
@@ -343,7 +332,7 @@ client = AsyncApexMail(
 
 # Usage with async/await
 async def send_welcome():
-    message = await client.messages.send(
+    message = await client.emails.send(
         from_email="hello@yourdomain.com",
         to=["jane@example.com"],
         subject="Welcome to ApexMail",
@@ -358,18 +347,18 @@ The Python SDK mirrors all methods available in the Node.js SDK:
 
 | Resource | Methods |
 |----------|---------|
-| `messages` | `send()`, `send_batch()`, `get()`, `list()`, `cancel()` |
-| `domains` | `create()`, `verify()`, `list()`, `get_records()`, `delete()` |
+| `emails` | `send()`, `send_batch()`, `get()`, `list()`, `cancel()` |
+| `domains` | `create()`, `verify()`, `list()`, `get()`, `delete()` |
 | `templates` | `create()`, `render()`, `list()` |
-| `webhooks` | `create()`, `list()`, `test()` |
-| `analytics` | `overview()` |
+| `webhooks` | `create()`, `list()` |
+| `analytics` | `get()` |
 | `api_keys` | `create()`, `list()`, `revoke()` |
 
 ### Python Examples
 
 ```python
 # Send a single message
-message = client.messages.send(
+message = client.emails.send(
     from_email="hello@yourdomain.com",
     to=["jane@example.com"],
     subject="Welcome",
@@ -377,7 +366,7 @@ message = client.messages.send(
 )
 
 # Send batch
-result = client.messages.send_batch([
+result = client.emails.send_batch([
     {"from_email": "hello@yourdomain.com", "to": ["alice@example.com"], "subject": "Hi", "html": "..."},
     {"from_email": "hello@yourdomain.com", "to": ["bob@example.com"], "subject": "Hi", "html": "..."},
 ])
@@ -417,10 +406,10 @@ Both SDKs raise specific error types that extend a common base class:
 **Node.js error handling:**
 
 ```typescript
-import { ApexMailError, RateLimitError } from '@apexmail/sdk';
+import { ApexMailError, RateLimitError } from '@apexmail/node';
 
 try {
-  await apexmail.messages.send({ /* ... */ });
+  await apexmail.emails.send({ /* ... */ });
 } catch (error) {
   if (error instanceof RateLimitError) {
     console.log(`Rate limited. Retry after ${error.retryAfter}s`);
@@ -436,7 +425,7 @@ try {
 from apexmail.errors import ApexMailError, RateLimitError
 
 try:
-    client.messages.send(...)
+    client.emails.send(...)
 except RateLimitError as e:
     print(f"Rate limited. Retry after {e.retry_after}s")
 except ApexMailError as e:
@@ -450,7 +439,7 @@ Both SDKs include a helper for verifying webhook payload signatures to ensure au
 **Node.js:**
 
 ```typescript
-import { verifyWebhookSignature } from '@apexmail/sdk';
+import { verifyWebhookSignature } from '@apexmail/node';
 
 const isValid = verifyWebhookSignature({
   payload: req.body,                          // raw request body string
@@ -508,7 +497,7 @@ client := apexmail.New("am_live_your_api_key")
 
 // With custom options:
 client := apexmail.New("am_live_your_api_key", apexmail.Config{
-    BaseURL: "https://api.apexmail.dev",
+    BaseURL: "https://api.apexmail.ee",
     Timeout: 30 * time.Second,
 })
 ```
@@ -575,7 +564,7 @@ client = ApexMail::Client.new('am_live_your_api_key')
 # With options:
 client = ApexMail::Client.new(
   'am_live_your_api_key',
-  base_url: 'https://api.apexmail.dev',
+  base_url: 'https://api.apexmail.ee',
   read_timeout: 30
 )
 ```
@@ -636,7 +625,7 @@ $client = new Client('am_live_your_api_key');
 
 // With options:
 $client = new Client('am_live_your_api_key', [
-    'baseUrl' => 'https://api.apexmail.dev',
+    'baseUrl' => 'https://api.apexmail.ee',
     'timeout' => 30,
 ]);
 ```
@@ -709,7 +698,7 @@ ApexMailClient client = new ApexMailClient("am_live_your_api_key");
 // With custom base URL:
 ApexMailClient client = new ApexMailClient(
     "am_live_your_api_key",
-    "https://api.apexmail.dev",
+    "https://api.apexmail.ee",
     Duration.ofSeconds(30)
 );
 ```

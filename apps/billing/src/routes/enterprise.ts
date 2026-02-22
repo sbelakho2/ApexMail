@@ -23,7 +23,9 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
   });
 
   // Get contract by ID
+  // G-301: IDOR protection - verify contract belongs to requesting tenant
   router.get('/contracts/:contractId', async (c) => {
+    const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
 
     const result = await ctx.contracts.getContract(contractId);
@@ -36,11 +38,18 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'Contract not found' }, 404);
     }
 
+    // SECURITY: Verify contract belongs to requesting tenant
+    if (result.value.tenantId !== tenantId) {
+      return c.json({ error: 'Contract not found' }, 404);
+    }
+
     return c.json(result.value);
   });
 
   // Get contract PDF
+  // G-302: IDOR protection - verify contract belongs to requesting tenant
   router.get('/contracts/:contractId/pdf', async (c) => {
+    const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
 
     const result = await ctx.contracts.getContract(contractId);
@@ -50,6 +59,11 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     if (!result.value) {
+      return c.json({ error: 'Contract not found' }, 404);
+    }
+
+    // SECURITY: Verify contract belongs to requesting tenant
+    if (result.value.tenantId !== tenantId) {
       return c.json({ error: 'Contract not found' }, 404);
     }
 

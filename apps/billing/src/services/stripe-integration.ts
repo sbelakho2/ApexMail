@@ -7,6 +7,7 @@ import Stripe from 'stripe';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+import type { DunningService } from './dunning.js';
 import { getStripe } from '../lib/stripe-client.js';
 import { getConfig } from '../config.js';
 
@@ -56,7 +57,10 @@ export type SubscriptionStatus =
 export class StripeService {
   private readonly stripe: Stripe;
 
-  constructor(private readonly db: DatabasePool) {
+  constructor(
+    private readonly db: DatabasePool,
+    private readonly dunning?: DunningService,
+  ) {
     this.stripe = getStripe();
   }
 
@@ -462,7 +466,7 @@ export class StripeService {
     // E-184: Validate status transition before applying
     const newStatus = subscription.status as SubscriptionStatus;
     const currentResult = await this.db.query<{ status: string }>(
-      'SELECT status FROM subscriptions WHERE stripe_subscription_id = $1',
+      'SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = $1',
       [subscription.id]
     );
 
@@ -490,7 +494,7 @@ export class StripeService {
     // CRITICAL: Use atomic CTE to upsert subscription and update tenant plan in one transaction
     await this.db.query(
       `WITH upsert_subscription AS (
-        INSERT INTO subscriptions (
+        INSERT INTO stripe_subscriptions (
           id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
           status, billing_interval, billing_cycle_start, billing_cycle_end,
           cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
@@ -549,7 +553,7 @@ export class StripeService {
     // CRITICAL: Atomically cancel subscription and downgrade tenant
     await this.db.query(
       `WITH cancel_subscription AS (
-        UPDATE subscriptions SET status = 'canceled', updated_at = NOW() 
+        UPDATE stripe_subscriptions SET status = 'canceled', updated_at = NOW() 
         WHERE stripe_subscription_id = $1
         RETURNING tenant_id
       ),
@@ -591,64 +595,43 @@ export class StripeService {
       const tenantId = invoice.subscription_details?.metadata?.tenant_id;
       if (!tenantId) return;
 
-      // E-163: Record failed payment in dunning system for retry scheduling.
-      // The dunning_records table tracks failure count, calculates next retry
-      // date based on an exponential schedule (1, 3, 7, 14 days), and
-      // escalates to soft/hard suspension after thresholds.
-      // DunningService.recordFailedPayment() handles this in a single atomic
-      // CTE (see dunning.ts). We record directly here so webhook processing
-      // has a single code path for payment failures.
-      const dunningResult = await this.db.query(
-        `INSERT INTO dunning_records (
-           id, tenant_id, status, failed_payment_count, first_failed_at,
-           last_failed_at, next_retry_at, created_at, updated_at
-         )
-         VALUES (
-           gen_random_uuid(), $1, 'warning', 1, NOW(),
-           NOW(), NOW() + INTERVAL '1 day', NOW(), NOW()
-         )
-         ON CONFLICT (tenant_id) DO UPDATE SET
-           failed_payment_count = dunning_records.failed_payment_count + 1,
-           last_failed_at = NOW(),
-           next_retry_at = CASE
-             WHEN dunning_records.failed_payment_count + 1 <= 1 THEN NOW() + INTERVAL '1 day'
-             WHEN dunning_records.failed_payment_count + 1 <= 2 THEN NOW() + INTERVAL '3 days'
-             WHEN dunning_records.failed_payment_count + 1 <= 3 THEN NOW() + INTERVAL '7 days'
-             ELSE NOW() + INTERVAL '14 days'
-           END,
-           status = CASE
-             WHEN EXTRACT(DAY FROM NOW() - dunning_records.first_failed_at) >= 21 THEN 'hard_suspended'
-             WHEN EXTRACT(DAY FROM NOW() - dunning_records.first_failed_at) >= 7 THEN 'soft_suspended'
-             ELSE 'warning'
-           END,
-           updated_at = NOW()
-         RETURNING status, failed_payment_count, next_retry_at`,
-        [tenantId]
-      );
+      // Delegate to DunningService for proper retry scheduling, grace periods,
+      // and tenant suspension logic (atomic CTE).
+      if (this.dunning) {
+        const dunningResult = await this.dunning.recordFailedPayment(
+          tenantId,
+          invoice.id,
+          invoice.amount_due,
+        );
 
-      const dunningState = dunningResult.ok ? dunningResult.value.rows[0] : null;
+        const dunningState = dunningResult.ok ? dunningResult.value : null;
 
-      // Queue dunning notification
-      await this.db.query(
-        `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
-         VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())`,
-        [tenantId, JSON.stringify({
+        // Queue dunning notification
+        await this.db.query(
+          `INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+           VALUES (gen_random_uuid(), $1, 'payment_failed', $2, 'pending', NOW())`,
+          [tenantId, JSON.stringify({
+            invoiceId: invoice.id,
+            amount: invoice.amount_due,
+            attemptCount: invoice.attempt_count,
+            dunningStatus: dunningState?.status ?? 'unknown',
+            nextRetryAt: dunningState?.nextRetryAt ?? null,
+          })]
+        );
+
+        logger.warn('Payment failed — dunning updated via DunningService', {
+          tenantId,
           invoiceId: invoice.id,
-          amount: invoice.amount_due,
           attemptCount: invoice.attempt_count,
-          dunningStatus: dunningState?.status ?? 'unknown',
-          nextRetryAt: dunningState?.next_retry_at ?? null,
-        })]
-      );
-
-      logger.warn('Payment failed — dunning updated', {
-        tenantId,
-        invoiceId: invoice.id,
-        attemptCount: invoice.attempt_count,
-        dunningStatus: dunningState?.status,
-        failedPaymentCount: dunningState?.failed_payment_count,
-        nextRetryAt: dunningState?.next_retry_at,
-      });
+          dunningStatus: dunningState?.status,
+        });
+      } else {
+        // Fallback: DunningService not injected (should not happen in production)
+        logger.error('DunningService not available — payment failure not tracked', {
+          tenantId,
+          invoiceId: invoice.id,
+        });
+      }
     } catch (error) {
       logger.error('Failed to handle payment failed event', { error, invoiceId: invoice.id });
       throw error; // Re-throw so webhook handler can retry
@@ -686,11 +669,16 @@ export class StripeService {
     reason?: string
   ): Promise<Result<Stripe.Refund, Error>> {
     try {
-      const refund = await this.stripe.refunds.create({
-        payment_intent: paymentIntentId,
-        amount,
-        reason: reason as Stripe.RefundCreateParams.Reason,
-      });
+      const refund = await this.stripe.refunds.create(
+        {
+          payment_intent: paymentIntentId,
+          amount,
+          reason: reason as Stripe.RefundCreateParams.Reason,
+        },
+        {
+          idempotencyKey: `refund_${paymentIntentId}`,
+        }
+      );
 
       return Result.ok(refund);
     } catch (error) {
@@ -719,7 +707,7 @@ export class StripeService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM subscriptions WHERE tenant_id = $1 AND status != 'canceled' ORDER BY created_at DESC LIMIT 1`,
+      `SELECT * FROM stripe_subscriptions WHERE tenant_id = $1 AND status != 'canceled' ORDER BY created_at DESC LIMIT 1`,
       [tenantId]
     );
 
@@ -807,9 +795,10 @@ export class StripeService {
       return Result.err(new Error(`No Stripe price configured for ${planName} (${billingInterval})`));
     }
 
-    // BILL-002 FIX: Use saga pattern - record intention first, update Stripe, then confirm
-    // This prevents data inconsistency if Stripe succeeds but DB fails
-    const sagaId = `saga_switch_${tenantId}_${Date.now()}`;
+    // Deterministic saga ID so retries of the same switch are idempotent
+    // (ON CONFLICT (id) DO NOTHING prevents duplicate saga rows)
+    const fromPriceId = subscriptionResult.value.stripePriceId;
+    const sagaId = `saga_switch_${tenantId}_${fromPriceId}_${newPriceId}`;
     
     try {
       // Step 1: Record intention in DB (saga start)
@@ -883,7 +872,7 @@ export class StripeService {
       // Step 6: Atomically update local database and complete saga
       const finalizeResult = await this.db.query(
         `WITH update_subscription AS (
-          UPDATE subscriptions 
+          UPDATE stripe_subscriptions 
           SET stripe_price_id = $1, billing_interval = $2, updated_at = NOW()
           WHERE id = $3
           RETURNING id

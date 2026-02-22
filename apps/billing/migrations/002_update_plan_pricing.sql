@@ -1,40 +1,40 @@
 -- Migration: Update plan pricing
 -- Date: 2026-02-04
--- Description: Update pricing for Pro, Growth, Scale, and Enterprise plans
+-- Description: Correct pricing for Pro, Growth, Scale, and Enterprise plans
 -- 
--- Price changes:
--- - Pro: $49 → $59
--- - Growth: $99 → $129  
--- - Scale: $299 → $399
--- - Enterprise: $999 → $1299
+-- Canonical prices (docs/pricing.md):
+-- - Pro: $65/mo
+-- - Growth: $150/mo
+-- - Scale: $350/mo
+-- - Enterprise: $800/mo
 
 BEGIN;
 
--- Update Pro plan pricing (4900 → 5900 cents, 49000 → 59000 yearly)
+-- Update Pro plan pricing to $65/mo (6500 cents, 65000 yearly)
 UPDATE plans SET 
-  price_monthly = 5900,
-  price_yearly = 59000,
+  price_monthly = 6500,
+  price_yearly = 65000,
   updated_at = NOW()
 WHERE name = 'pro';
 
--- Update Growth plan pricing (9900 → 12900 cents, 99000 → 129000 yearly)
+-- Update Growth plan pricing to $150/mo (15000 cents, 150000 yearly)
 UPDATE plans SET 
-  price_monthly = 12900,
-  price_yearly = 129000,
+  price_monthly = 15000,
+  price_yearly = 150000,
   updated_at = NOW()
 WHERE name = 'growth';
 
--- Update Scale plan pricing (29900 → 39900 cents, 299000 → 399000 yearly)
+-- Update Scale plan pricing to $350/mo (35000 cents, 350000 yearly)
 UPDATE plans SET 
-  price_monthly = 39900,
-  price_yearly = 399000,
+  price_monthly = 35000,
+  price_yearly = 350000,
   updated_at = NOW()
 WHERE name = 'scale';
 
--- Update Enterprise plan pricing (99900 → 129900 cents, 999000 → 1299000 yearly)
+-- Update Enterprise plan pricing to $800/mo (80000 cents, 800000 yearly)
 UPDATE plans SET 
-  price_monthly = 129900,
-  price_yearly = 1299000,
+  price_monthly = 80000,
+  price_yearly = 800000,
   updated_at = NOW()
 WHERE name = 'enterprise';
 

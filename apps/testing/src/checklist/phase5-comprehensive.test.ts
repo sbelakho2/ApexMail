@@ -155,36 +155,36 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
             // Evidence Required: Open email -> Pixel logged -> Dashboard shows "Opened"
             
             it('should have tracking service', () => {
-                expect(directoryExists('apps/tracking')).toBe(true);
+                expect(directoryExists('services/mail-server/crates/tracking-service')).toBe(true);
             });
             
             it('should have tracking routes', () => {
-                expect(fileExists('apps/tracking/src/routes.ts')).toBe(true);
+                expect(fileExists('services/mail-server/crates/tracking-service/src/routes/mod.rs')).toBe(true);
             });
             
             it('should have transparent 1x1 GIF pixel', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/mod.rs');
                 expect(content).toContain('TRANSPARENT_GIF');
                 expect(content).toContain('image/gif');
             });
             
             it('should set no-cache headers on pixel', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('Cache-Control');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/pixel.rs');
+                expect(content).toContain('cache-control');
                 expect(content).toContain('no-cache');
             });
             
             it('should have pixel endpoint with proper headers (CORS removed per FIX-067)', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                // FIX-067: CORS removed from pixel path — <img> tags are simple requests.
-                // Pre-computed PIXEL_HEADERS are used instead.
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/pixel.rs');
+                // FIX-067: Rust pixel.rs preserves the TypeScript PIXEL_HEADERS concept.
+                // Pre-computed response headers are used instead of per-request CORS.
                 expect(content).toContain('PIXEL_HEADERS');
                 expect(content).toMatch(/origin.*\*|PIXEL_HEADERS/);
             });
             
             it('should record open events', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('recordOpen');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/pixel.rs');
+                expect(content).toContain('record_open');
             });
         });
         
@@ -192,33 +192,33 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
             // Evidence Required: Click link -> Redirect <50ms -> Click logged
             
             it('should have click tracking endpoint', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/click.rs');
                 expect(content).toContain('click');
-                expect(content).toContain('CLICK TRACKING');
+                expect(content).toContain('Click-tracking');
             });
             
             it('should record click events', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('recordClick');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/click.rs');
+                expect(content).toContain('record_click');
             });
             
             it('should use 302 redirect', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/click.rs');
                 expect(content).toContain('redirect');
-                expect(content).toContain('redirectStatus');
+                expect(content).toContain('redirect_status');
             });
             
             it('should validate redirect URL', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('http:');
-                expect(content).toContain('https:');
-                expect(content).toContain('fallbackUrl');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/click.rs');
+                expect(content).toContain('"http"');
+                expect(content).toContain('"https"');
+                expect(content).toContain('fallback_url');
             });
             
             it('should capture link ID', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('linkId');
-                expect(content).toContain('linkUrl');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/click.rs');
+                expect(content).toContain('link_id');
+                expect(content).toContain('link_url');
             });
         });
         
@@ -226,30 +226,30 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
             // Evidence Required: One-click unsubscribe -> Suppressed within 1 second
             
             it('should have unsubscribe endpoint', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/unsubscribe.rs');
                 expect(content).toContain('unsubscribe');
-                expect(content).toContain('ONE-CLICK UNSUBSCRIBE');
+                expect(content).toContain('One-click unsubscribe');
             });
             
             it('should support RFC 8058 one-click unsubscribe', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/unsubscribe.rs');
                 expect(content).toContain('List-Unsubscribe-Post');
                 expect(content).toContain('List-Unsubscribe=One-Click');
             });
             
             it('should verify unsubscribe token', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
-                expect(content).toContain('verifyUnsubscribeToken');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/unsubscribe.rs');
+                expect(content).toContain('verify_unsubscribe_token');
             });
         });
         
         describe('5.1.1.4 Tracking Codec', () => {
             it('should have tracking codec', () => {
-                expect(fileExists('apps/tracking/src/codec.ts')).toBe(true);
+                expect(fileExists('services/mail-server/crates/tracking-service/src/codec.rs')).toBe(true);
             });
             
             it('should have event processor', () => {
-                expect(fileExists('apps/tracking/src/processor.ts')).toBe(true);
+                expect(fileExists('services/mail-server/crates/tracking-service/src/processor.rs')).toBe(true);
             });
         });
         
@@ -257,8 +257,8 @@ describe('Phase 5: Analytics & Cold Storage (Comprehensive)', () => {
             // Evidence Required: Customer configures track.example.com -> TLS valid
             
             it('should support custom tracking domains in config', () => {
-                const content = readFile('apps/tracking/src/config.ts');
-                expect(content).toMatch(/domain|customDomain|trackingDomain/i);
+                const content = readFile('services/mail-server/crates/tracking-service/src/config.rs');
+                expect(content).toMatch(/domain|base_url|TRACKING_BASE_URL/i);
             });
             
             it('should have whitelabel support for tracking', () => {

@@ -13,7 +13,7 @@ Templates are versioned, immutable-on-send email documents that support multiple
 Include your API key in the `Authorization` header:
 
 ```
-Authorization: Bearer ak_live_...
+X-API-Key: ak_live_...
 ```
 
 ---
@@ -42,7 +42,7 @@ Authorization: Bearer ak_live_...
 | 403 | `INSUFFICIENT_SCOPE` | API key does not have the required `templates:*` scope |
 | 404 | `NOT_FOUND` | Template ID does not exist or belongs to another organization |
 | 409 | `VERSION_CONFLICT` | Concurrent update detected; retry with the latest version |
-| 429 | `RATE_LIMITED` | Rate limit exceeded |
+| 429 | `RATE_LIMIT_EXCEEDED` | Rate limit exceeded |
 | 500 | `INTERNAL_ERROR` | Server-side error |
 
 ---
@@ -74,8 +74,8 @@ Create a new template.
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/templates" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/templates" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Order Confirmation",
@@ -143,8 +143,8 @@ Retrieve a single template by ID.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -195,8 +195,8 @@ Retrieve the version history of a template, ordered newest-first.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/versions" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -263,8 +263,8 @@ List templates with filtering, searching, and sorting.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/templates?category=transactional&active=true&sort=-updated_at" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/templates?category=transactional&active=true&sort=-updated_at" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -328,8 +328,8 @@ All fields from `POST /v1/templates` are accepted, plus:
 #### Example Request
 
 ```bash
-curl -X PATCH "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X PATCH "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "subject": "Order #{{order_id}} — Confirmed ✓",
@@ -379,8 +379,8 @@ Create a copy of a template with a new slug.
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/duplicate" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/duplicate" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Order Confirmation (V2 Test)",
@@ -424,8 +424,8 @@ Returns the rendered HTML preview of a template using its `defaultData`.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/preview" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/preview" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -460,8 +460,8 @@ Returns usage statistics for a template: send counts, performance metrics, and l
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/stats" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/stats" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -509,8 +509,8 @@ Set the active version of a template. Only one version can be active at a time.
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/activate" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/activate" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{ "version": 2 }'
 ```
@@ -552,8 +552,8 @@ Render a template with custom data and return the output without sending an emai
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/render" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/render" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "data": {
@@ -620,8 +620,8 @@ Same fields as `POST /v1/templates` (except `slug` — inherited from parent). A
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4/versions" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "html": "<h1>Thanks, {{first_name}}!</h1><p>Order #{{order_id}} confirmed. <a href=\"{{tracking_url}}\">Track it</a>.</p>",
@@ -661,8 +661,8 @@ Soft-delete a template. The template is deactivated and hidden from list queries
 #### Example Request
 
 ```bash
-curl -X DELETE "https://api.apexmail.dev/v1/templates/tpl_a1b2c3d4" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X DELETE "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -708,8 +708,8 @@ Returns a ready-to-use React Email JSX starter template string that can be used 
 #### Example Request
 
 ```bash
-curl "https://api.apexmail.dev/v1/templates/react-email/starter?name=WelcomeEmail" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl "https://api.apexmail.ee/v1/templates/react-email/starter?name=WelcomeEmail" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -737,8 +737,8 @@ Validates a React Email JSX source string for syntax correctness without saving 
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/templates/react-email/validate" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/templates/react-email/validate" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{ "source": "import * as React from '\''react'\'';\nexport default function Email() { return <p>Hello</p>; }" }'
 ```

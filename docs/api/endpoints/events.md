@@ -120,7 +120,7 @@ Retrieve a single event by its unique identifier.
 
 | Status | Code | Description |
 |--------|------|-------------|
-| `404` | `event_not_found` | No event exists with the given ID. |
+| `404` | `NOT_FOUND` | No event exists with the given ID. |
 
 ---
 
@@ -561,9 +561,9 @@ All error responses follow a consistent format:
 | Status | Code | Description |
 |--------|------|-------------|
 | `400` | `invalid_parameter` | A query parameter is malformed or out of range. |
-| `401` | `authentication_required` | Missing or invalid API key. |
-| `403` | `insufficient_scope` | The API key does not have the required scope. |
-| `404` | `event_not_found` | The requested event does not exist. |
-| `422` | `validation_error` | Request body failed validation (POST endpoints). |
-| `429` | `rate_limit_exceeded` | Too many requests. Retry after the `X-RateLimit-Reset` time. |
-| `500` | `internal_error` | An unexpected server error occurred. |
+| `401` | `AUTH_REQUIRED` | Missing or invalid API key. |
+| `403` | `INSUFFICIENT_SCOPE` | The API key does not have the required scope. |
+| `404` | `NOT_FOUND` | The requested event does not exist. |
+| `422` | `VALIDATION_ERROR` | Request body failed validation (POST endpoints). |
+| `429` | `RATE_LIMIT_EXCEEDED` | Too many requests. Retry after the `X-RateLimit-Reset` time. |
+| `500` | `INTERNAL_ERROR` | An unexpected server error occurred. |

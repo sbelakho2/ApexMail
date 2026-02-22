@@ -73,7 +73,7 @@ export interface SendEmailOptions {
     /** Custom headers */
     headers?: Record<string, string>;
     /** Tags for categorization */
-    tags?: Array<{ name: string; value: string }>;
+    tags?: string[];
     /** Schedule send time (ISO 8601) */
     scheduledAt?: string | Date;
     /** FIX-500-274: Idempotency key to prevent duplicate sends */
@@ -384,14 +384,14 @@ class HttpClient {
         }
 
         try {
-            // FIX-500-274: Include Idempotency-Key header when provided
+            // FIX-500-274: Include X-Idempotency-Key header when provided
             const headers: Record<string, string> = {
-                    'Authorization': `Bearer ${this.apiKey}`,
+                    'X-API-Key': this.apiKey,
                     'Content-Type': 'application/json',
                     'User-Agent': '@apexmail/node/1.0.0',
             };
             if (options?.idempotencyKey) {
-                headers['Idempotency-Key'] = options.idempotencyKey;
+                headers['X-Idempotency-Key'] = options.idempotencyKey;
             }
 
             const response = await this.fetchFn(url, {
@@ -662,7 +662,7 @@ class EmailsApi {
         // F-246: Validate inputs before making the API call
         this.validateSendOptions(options);
         // FIX-500-274: Thread idempotencyKey as a header
-        return this.client.request<SendEmailResponse>('POST', '/v1/emails', this.normalizeEmail(options), 
+        return this.client.request<SendEmailResponse>('POST', '/v1/messages', this.normalizeEmail(options), 
             options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined
         );
     }
@@ -698,8 +698,8 @@ class EmailsApi {
                 throw err;
             }
         }
-        return this.client.post<BatchSendResponse>('/v1/emails/batch', {
-            emails: options.emails.map(e => this.normalizeEmail(e))
+        return this.client.post<BatchSendResponse>('/v1/messages/batch', {
+            messages: options.emails.map(e => this.normalizeEmail(e))
         });
     }
 
@@ -708,7 +708,7 @@ class EmailsApi {
      */
     async get(id: string): Promise<Email> {
         validateId(id, 'email');
-        return this.client.get<Email>(`/v1/emails/${id}`);
+        return this.client.get<Email>(`/v1/messages/${id}`);
     }
 
     /**
@@ -722,7 +722,7 @@ class EmailsApi {
         if (options?.tag) params.set('tag', options.tag);
         
         const query = params.toString();
-        return this.client.get<ListEmailsResponse>(`/v1/emails${query ? `?${query}` : ''}`);
+        return this.client.get<ListEmailsResponse>(`/v1/messages${query ? `?${query}` : ''}`);
     }
 
     /**
@@ -730,7 +730,7 @@ class EmailsApi {
      */
     async cancel(id: string): Promise<void> {
         validateId(id, 'email');
-        await this.client.post(`/v1/emails/${id}/cancel`);
+        await this.client.post(`/v1/messages/${id}/cancel`);
     }
 
     private normalizeEmail(options: SendEmailOptions): Record<string, unknown> {
@@ -742,7 +742,7 @@ class EmailsApi {
         // FIX-500-282: Only include defined fields to avoid sending nulls
         if (options.cc) result.cc = this.normalizeRecipients(options.cc);
         if (options.bcc) result.bcc = this.normalizeRecipients(options.bcc);
-        if (options.replyTo) result.replyTo = this.normalizeRecipient(options.replyTo);
+        if (options.replyTo) result.replyTo = typeof options.replyTo === 'string' ? options.replyTo : options.replyTo.email;
         if (options.html) result.html = options.html;
         if (options.text) result.text = options.text;
         if (options.attachments) {
@@ -835,7 +835,7 @@ class ApiKeysApi {
      * Create a new API key
      */
     async create(options: CreateApiKeyOptions): Promise<CreateApiKeyResponse> {
-        return this.client.post<CreateApiKeyResponse>('/v1/api-keys', {
+        return this.client.post<CreateApiKeyResponse>('/v1/auth/api-keys', {
             ...options,
             expiresAt: options.expiresAt instanceof Date 
                 ? options.expiresAt.toISOString() 
@@ -852,7 +852,7 @@ class ApiKeysApi {
         if (options?.limit) params.set('limit', options.limit.toString());
         if (options?.offset) params.set('offset', options.offset.toString());
         const query = params.toString();
-        return this.client.get<{ data: ApiKey[] }>(`/v1/api-keys${query ? `?${query}` : ''}`);
+        return this.client.get<{ data: ApiKey[] }>(`/v1/auth/api-keys${query ? `?${query}` : ''}`);
     }
 
     /**
@@ -860,7 +860,7 @@ class ApiKeysApi {
      */
     async revoke(id: string): Promise<void> {
         validateId(id, 'API key');
-        await this.client.delete(`/v1/api-keys/${id}`);
+        await this.client.delete(`/v1/auth/api-keys/${id}`);
     }
 }
 

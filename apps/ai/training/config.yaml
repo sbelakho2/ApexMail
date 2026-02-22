@@ -1,22 +1,28 @@
 # =============================================================================
 #  ApexMail AI — Training Configuration
 # =============================================================================
-#  Central config for Qwen3.5-8B QLoRA fine-tuning.
-#  Loaded by train.py, build_agent.py, eval.py, and export_gguf.py.
+#  Config for Qwen3-Next-80B-A3B-Instruct (MoE, 80B total, 3B active params)
+#  QLoRA fine-tuning on 8× NVIDIA B200 (183GB each).
+#
+#  Used by:
+#    - eval.py  (golden-set evaluation — model path, quant, eval settings)
+#
+#  NOTE: train_r15_8gpu.py and train_r15_fsdp_v2.py have their own inline
+#        configs. This file is authoritative only for eval.py settings.
 # =============================================================================
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model:
-  base: "/workspace/models/Qwen3.5-8B"
+  base: "/workspace/models/Qwen3-Next-80B-A3B-Instruct"
   revision: "main"
   torch_dtype: "bfloat16"
-  attn_implementation: "sdpa"
+  attn_implementation: "eager"   # MoE model — eager attention for compatibility
   trust_remote_code: true
 
 # ── LoRA ─────────────────────────────────────────────────────────────────────
 lora:
-  r: 64
-  alpha: 128
+  r: 128
+  alpha: 256
   dropout: 0.05
   bias: "none"
   task_type: "CAUSAL_LM"
@@ -25,9 +31,12 @@ lora:
     - k_proj
     - v_proj
     - o_proj
-    - gate_proj
-    - up_proj
-    - down_proj
+    - in_proj_qkvz       # MoE gating
+    - in_proj_ba          # MoE routing
+    - out_proj            # MoE output
+    - shared_expert.gate_proj
+    - shared_expert.up_proj
+    - shared_expert.down_proj
 
 # ── Quantisation (QLoRA) ────────────────────────────────────────────────────
 quantisation:
@@ -36,18 +45,20 @@ quantisation:
   bnb_4bit_compute_dtype: "bfloat16"
   bnb_4bit_use_double_quant: true
 
-# ── Training hyper-parameters ────────────────────────────────────────────────
+# ── Training hyper-parameters (reference — actual values in train scripts) ────
+# NOTE: train_r15_8gpu.py uses: batch=4, grad_accum=1, 3 epochs, lr=2e-4
+#       train_r15_fsdp_v2.py uses: batch=4, grad_accum=2, 5 epochs, lr=1.5e-4
 training:
-  num_train_epochs: 4
-  per_device_train_batch_size: 7
-  per_device_eval_batch_size: 7
-  gradient_accumulation_steps: 1          # effective batch = 7*4 = 28 (4 GPUs)
-  learning_rate: 2.0e-4
+  num_train_epochs: 3                     # train_r15_8gpu.py default
+  per_device_train_batch_size: 4          # both scripts
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1          # 8gpu script; fsdp_v2 uses 2
+  learning_rate: 2.0e-4                   # 8gpu script; fsdp_v2 uses 1.5e-4
   lr_scheduler_type: "cosine"
-  warmup_ratio: 0.05
+  warmup_ratio: 0.03                      # 8gpu script; fsdp_v2 uses 0.05
   weight_decay: 0.01
   max_seq_length: 4096
-  packing: false                          # disabled — SDPA lacks document masking for packing
+  packing: false
   gradient_checkpointing: true
   gradient_checkpointing_kwargs:
     use_reentrant: false
@@ -55,39 +66,34 @@ training:
   bf16: true
   tf32: true
   logging_steps: 5
-  eval_strategy: "steps"
-  eval_steps: 50
-  save_strategy: "steps"
-  save_steps: 100
+  eval_strategy: "no"                     # no eval dataset in current setup
+  save_strategy: "no"                     # 8gpu script; fsdp_v2 uses "epoch"
   save_total_limit: 3
-  load_best_model_at_end: true
-  metric_for_best_model: "eval_loss"
-  greater_is_better: false
-  report_to: "tensorboard"
+  report_to: "none"                       # tensorboard disabled for speed
   seed: 42
   dataloader_num_workers: 8
   dataloader_pin_memory: true
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 paths:
-  data_dir: "data"
-  output_dir: "output"
+  data_dir: "/workspace"
+  output_dir: "/workspace/output_agent_r15"
+  output_dir_v2: "/workspace/output_agent_r15_v2"
   merged_dir: "output-merged"
-  onnx_dir: "onnx_model"
   gguf_dir: "gguf_model"
   logs_dir: "logs"
   eval_results: "eval_results"
 
 # ── Dataset ──────────────────────────────────────────────────────────────────
 dataset:
-  train_file: "data/train.jsonl"
-  val_file: "data/val.jsonl"
-  test_file: "data/test.jsonl"
-  val_split: 0.08
-  test_split: 0.04
+  train_file: "/workspace/train_agent_r15.jsonl"
+  val_file: null                          # no eval split in current setup
+  test_file: null
+  val_split: 0.0
+  test_split: 0.0
 
 # ── Export ────────────────────────────────────────────────────────────────────
-# Primary: GGUF for llama.cpp CPU inference (much faster than ONNX for 7B)
+# Primary: GGUF for llama.cpp CPU inference (much faster than ONNX for 80B-A3B)
 # Fallback: ONNX INT8 for onnxruntime
 export:
   format: "gguf"                  # "gguf" or "onnx"

@@ -172,12 +172,23 @@ export function InteractiveCalculator() {
                     </div>
                     <div className="h-2.5 bg-surface-50 rounded-full overflow-hidden flex items-center">
                       <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: maxPrice > 0 ? `${(provider.price / maxPrice) * 100}%` : '0%' }}
+                        initial={{ scaleX: 0 }}
+                        animate={{ scaleX: 1 }}
                         transition={{ duration: 0.5, ease: "easeOut" }}
-                        className={cn("h-full rounded-full transition-colors", provider.color)}
-                        style={{ minWidth: provider.price > 0 ? '4px' : '0%' }}
-                      />
+                        className="h-full w-full origin-left"
+                      >
+                        <svg width="100%" height="100%" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">
+                          <rect
+                            x="0"
+                            y="0"
+                            width={provider.price > 0 ? Math.max(1, Math.min(100, (provider.price / Math.max(maxPrice, 1)) * 100)) : 0}
+                            height="10"
+                            className={cn(provider.color.replace('bg-', 'fill-'))}
+                            rx="999"
+                            ry="999"
+                          />
+                        </svg>
+                      </motion.div>
                     </div>
                   </div>
                 ))}

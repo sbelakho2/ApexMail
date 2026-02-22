@@ -40,7 +40,7 @@ Hetzner infrastructure (EU).
 
 | Data Category | Default Retention | Enterprise Retention | Notes |
 |---------------|-------------------|---------------------|-------|
-| **Event logs** (sends, deliveries, bounces, opens, clicks) | 90 days | 365 days | Contains recipient identifiers (hashed after aggregation). |
+| **Event logs** (sends, deliveries, bounces, opens, clicks) | 90 days | 730 days | Contains recipient identifiers (hashed after aggregation). |
 | **Analytics aggregates** (campaign stats, trends) | 2 years | 2 years | Anonymised/aggregated. No PII. |
 | **Webhook delivery logs** | 30 days | 90 days | Contains endpoint URLs and response codes. |
 | **API request logs** | 30 days | 90 days | Contains API keys (masked) and request metadata. |

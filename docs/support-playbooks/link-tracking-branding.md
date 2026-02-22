@@ -10,11 +10,11 @@
 
 | Component | Implementation | Code |
 |-----------|---------------|------|
-| Click tracking | URL rewrite to encrypted token → redirect via tracking service | `apps/tracking/src/routes.ts` |
-| Open tracking | 1x1 GIF pixel injected into HTML body | `apps/tracking/src/routes.ts` |
-| Unsubscribe | RFC 8058 one-click + landing page + List-Unsubscribe headers | `apps/tracking/src/routes.ts` |
-| URL encoding | AES-128-GCM encrypted tokens, HMAC signatures, URL-safe base64 | `apps/tracking/src/codec.ts` |
-| Event buffering | Redis WAL (Write-Ahead Log) with atomic LRANGE+LTRIM via Lua script | `apps/tracking/src/processor.ts` |
+| Click tracking | URL rewrite to encrypted token → redirect via tracking service | `services/mail-server/crates/tracking-service/src/routes/click.rs` |
+| Open tracking | 1x1 GIF pixel injected into HTML body | `services/mail-server/crates/tracking-service/src/routes/pixel.rs` |
+| Unsubscribe | RFC 8058 one-click + landing page + List-Unsubscribe headers | `services/mail-server/crates/tracking-service/src/routes/unsubscribe.rs` |
+| URL encoding | AES-128-GCM encrypted tokens, HMAC signatures, URL-safe base64 | `services/mail-server/crates/tracking-service/src/codec.rs` |
+| Event buffering | Redis WAL (Write-Ahead Log) with atomic LRANGE+LTRIM via Lua script | `services/mail-server/crates/tracking-service/src/processor.rs` |
 | Bot detection | UA pattern, IP reputation, timing analysis, honeypot links | `apps/analytics/src/bot-detection.ts` |
 
 ### Tracking Domain Configuration
@@ -217,7 +217,7 @@ curl -A "Mozilla/5.0 (Windows NT 10.0)" -Lv "https://track.yourdomain.com/<TRACK
 
 ```bash
 # Check if the tracking pixel is in the email HTML
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>" | \
   jq -r '.html_body' | grep -o 'track.*\.gif\|track.*\/o\/'
 ```
@@ -394,7 +394,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 **Root cause:** Gmail's image proxy caches and re-fetches tracking pixels, generating multiple open events.
 
 **Resolution:**
-1. ApexMail's tracking processor includes **deduplication** (`apps/tracking/src/processor.ts`):
+1. ApexMail's tracking processor includes **deduplication** (`services/mail-server/crates/tracking-service/src/processor.rs`):
    - Opens are deduplicated by `message_id + recipient` combination.
    - A Redis SETNX with TTL prevents counting the same open twice.
 2. If customer sees duplicates in webhooks: the `message.opened` webhooks should have a `first_open: true/false` field.
@@ -592,7 +592,7 @@ curl -I http://track.yourdomain.com/.well-known/acme-challenge/test
    - New senders (< 5,000 emails/day) may not see the button immediately.
 5. **Verify headers:** Send a test email to Gmail, "Show Original" → search for `List-Unsubscribe`.
 
-**Backend:** `apps/tracking/src/routes.ts` — implements RFC 8058 one-click unsubscribe with POST handler.
+**Backend:** `services/mail-server/crates/tracking-service/src/routes/unsubscribe.rs` — implements RFC 8058 one-click unsubscribe with POST handler.
 
 ---
 
@@ -762,7 +762,7 @@ WHERE tenant_id = '<TENANT_ID>' AND email = '<EMAIL>';
 
 ## Issue C95 — "Domain verified, but some endpoints still say 'not verified' (cache/replication delay)"
 
-**Symptoms:** Customer verified the domain (dashboard shows ✅), but API calls return `sender_not_verified`.
+**Symptoms:** Customer verified the domain (dashboard shows ✅), but API calls return `DOMAIN_NOT_VERIFIED`.
 
 **Root cause:** Domain verification status is cached in Redis (60s TTL). After verification, there may be a brief delay before all components see the new status.
 
@@ -820,7 +820,7 @@ Link/Tracking/Unsubscribe issue
 │   ├── Cert stuck → C82
 │   ├── HSTS conflicts → C83
 │   ├── HTTP+HTTPS → C84
-│   └── Self-hosted tracking → C85
+│   └── Customer-hosted tracking → C85
 ├── Link Wrapping
 │   ├── Breaks signed URLs → C66
 │   ├── Breaks unsubscribe → C67
@@ -850,6 +850,6 @@ Link/Tracking/Unsubscribe issue
 - [E) Webhooks & Events](e-webhooks-events-troubleshooting.md) — open/click events
 - [F) Bounces & Suppressions](f-bounces-complaints-suppressions.md) — suppression management
 - [G) Deliverability](g-deliverability-inbox-placement.md) — inbox placement, List-Unsubscribe requirements
-- Internal: `apps/tracking/src/` — tracking service implementation
+- Internal: `services/mail-server/crates/tracking-service/src/` — tracking service implementation (Rust)
 - Internal: `apps/analytics/src/bot-detection.ts` — bot filtering
-- Internal: `apps/tracking/src/codec.ts` — URL encryption
+- Internal: `services/mail-server/crates/tracking-service/src/codec.rs` — URL encryption

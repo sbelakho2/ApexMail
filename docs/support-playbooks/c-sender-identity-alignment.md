@@ -125,7 +125,7 @@
    - `notifications.brand-b.com` for Brand B
    - `marketing.company.com` for marketing vs `transactional.company.com` for transactional
 2. Each subdomain needs separate DNS setup (SPF, DKIM, DMARC, verification).
-3. Plan domain limits: Growth allows 10 domains, Scale allows 25 — sufficient for most multi-brand setups.
+3. Plan domain limits: Growth allows 100 domains, Scale allows unlimited — sufficient for all multi-brand setups.
 4. For dedicated IP isolation: each brand can use its own dedicated IP (Scale plan includes 3).
 5. Also separate transactional from marketing email to protect transactional deliverability.
 
@@ -138,9 +138,9 @@
 **Root cause:** Customer's code or SDK configuration hardcodes the Reply-To field.
 
 **Resolution:**
-1. ApexMail API supports per-message Reply-To: include `reply_to` in the `POST /v1/emails` body.
-2. Node.js SDK: `apexmail.emails.send({ from: {...}, to: [...], reply_to: { email: 'support@example.com', name: 'Support' }, ... })`
-3. Python SDK: `apexmail.emails.send(from_=..., to=[...], reply_to={"email": "support@example.com"}, ...)`
+1. ApexMail API supports per-message Reply-To: include `replyTo` in the `POST /v1/messages` body.
+2. Node.js SDK: `apexmail.emails.send({ from: {...}, to: [...], replyTo: 'support@example.com', ... })`
+3. Python SDK: `apexmail.emails.send(from_=..., to=[...], reply_to='support@example.com', ...)`
 4. If using templates with SMTP: set the `Reply-To` header in the email headers.
 5. Reply-To does NOT need to be a verified domain (but using verified domains improves trust).
 

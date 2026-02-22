@@ -48,11 +48,11 @@ Exercises the Hono API server under sustained load.
 
 **Endpoints under test:**
 
-- `POST /api/v1/contacts` — contact creation
-- `POST /api/v1/campaigns/:id/send` — campaign trigger
-- `GET  /api/v1/campaigns` — list with pagination
-- `GET  /api/v1/analytics/overview` — analytics aggregation
-- `POST /api/v1/webhooks/inbound` — inbound webhook ingestion
+- `POST /v1/contacts` — contact creation
+- `POST /v1/campaigns/:id/send` — campaign trigger
+- `GET  /v1/campaigns` — list with pagination
+- `GET  /v1/analytics/overview` — analytics aggregation
+- `POST /v1/webhooks/inbound` — inbound webhook ingestion
 
 ### 2. Email Sending Pipeline
 

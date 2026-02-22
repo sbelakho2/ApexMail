@@ -9,14 +9,13 @@ All API errors follow a consistent structure:
 ```json
 {
   "error": {
-    "code": "error_code",
+    "code": "ERROR_CODE",
     "message": "Human-readable error message",
     "details": {
       "field": "Additional context"
-    },
-    "requestId": "req_abc123xyz",
-    "documentation": "https://docs.apexmail.ee/errors/error_code"
-  }
+    }
+  },
+  "requestId": "req_abc123xyz"
 }
 ```
 
@@ -44,7 +43,7 @@ All API errors follow a consistent structure:
 
 ## Authentication Errors (401, 403)
 
-### `invalid_api_key`
+### `INVALID_API_KEY`
 **HTTP Status**: 401
 
 The API key provided is invalid, expired, or doesn't exist.
@@ -52,7 +51,7 @@ The API key provided is invalid, expired, or doesn't exist.
 ```json
 {
   "error": {
-    "code": "invalid_api_key",
+    "code": "INVALID_API_KEY",
     "message": "The API key provided is invalid or has been revoked"
   }
 }
@@ -65,38 +64,35 @@ The API key provided is invalid, expired, or doesn't exist.
 
 ---
 
-### `expired_token`
+### `INVALID_TOKEN`
 **HTTP Status**: 401
 
-The JWT access token has expired.
+The JWT access token has expired or is invalid.
 
 ```json
 {
   "error": {
-    "code": "expired_token",
-    "message": "The access token has expired",
-    "details": {
-      "expiredAt": "2024-01-15T10:30:00Z"
-    }
+    "code": "INVALID_TOKEN",
+    "message": "The access token has expired"
   }
 }
 ```
 
 **Resolution**:
-1. Use the refresh token to obtain a new access token
+1. Re-authenticate to obtain a new token via `POST /v1/auth/refresh`
 2. Implement automatic token refresh in your application
 
 ---
 
-### `token_revoked`
+### `TOKEN_REVOKED`
 **HTTP Status**: 401
 
-The token has been explicitly revoked.
+The token has been explicitly revoked (logged out).
 
 ```json
 {
   "error": {
-    "code": "token_revoked",
+    "code": "TOKEN_REVOKED",
     "message": "This token has been revoked"
   }
 }
@@ -108,18 +104,18 @@ The token has been explicitly revoked.
 
 ---
 
-### `insufficient_scope`
+### `INSUFFICIENT_SCOPE`
 **HTTP Status**: 403
 
-The token doesn't have the required scope for this operation.
+The API key doesn't have the required scope for this operation.
 
 ```json
 {
   "error": {
-    "code": "insufficient_scope",
-    "message": "Token does not have required scope",
+    "code": "INSUFFICIENT_SCOPE",
+    "message": "API key does not have required scope",
     "details": {
-      "required": ["messages:send"],
+      "required": ["messages:write"],
       "provided": ["messages:read"]
     }
   }
@@ -130,58 +126,10 @@ The token doesn't have the required scope for this operation.
 1. Request the correct scopes during authentication
 2. Generate an API key with appropriate scopes
 
----
-
-### `ip_not_allowed`
-**HTTP Status**: 403
-
-Request originated from an IP not in the whitelist.
-
-```json
-{
-  "error": {
-    "code": "ip_not_allowed",
-    "message": "Request IP is not in the allowed list",
-    "details": {
-      "clientIp": "203.0.113.50",
-      "allowedRanges": ["10.0.0.0/8", "192.168.0.0/16"]
-    }
-  }
-}
-```
-
-**Resolution**:
-1. Add the IP to the API key's whitelist
-2. Use a different API key without IP restrictions
-
----
 
 ## Validation Errors (400)
 
-### `invalid_email`
-**HTTP Status**: 400
-
-Email address format is invalid.
-
-```json
-{
-  "error": {
-    "code": "invalid_email",
-    "message": "Invalid email address format",
-    "details": {
-      "field": "to",
-      "value": "not-an-email"
-    }
-  }
-}
-```
-
-**Resolution**:
-Ensure the email address follows RFC 5322 format.
-
----
-
-### `sender_not_verified`
+### `DOMAIN_NOT_VERIFIED`
 **HTTP Status**: 400
 
 The sender domain hasn't been verified.
@@ -189,11 +137,10 @@ The sender domain hasn't been verified.
 ```json
 {
   "error": {
-    "code": "sender_not_verified",
+    "code": "DOMAIN_NOT_VERIFIED",
     "message": "Sender domain is not verified",
     "details": {
-      "domain": "unverified.com",
-      "verificationUrl": "https://app.apexmail.ee/domains"
+      "domain": "unverified.com"
     }
   }
 }
@@ -206,81 +153,35 @@ The sender domain hasn't been verified.
 
 ---
 
-### `missing_required_field`
+### `VALIDATION_ERROR`
 **HTTP Status**: 400
 
-A required field is missing from the request.
+A required field is missing or a field value is invalid.
 
 ```json
 {
   "error": {
-    "code": "missing_required_field",
-    "message": "Required field is missing",
-    "details": {
-      "field": "subject",
-      "location": "body"
-    }
+    "code": "VALIDATION_ERROR",
+    "message": "Validation failed",
+    "details": [
+      { "path": "subject", "message": "Required", "code": "too_small" }
+    ]
   }
 }
 ```
 
 ---
 
-### `invalid_field_type`
-**HTTP Status**: 400
+### `PAYLOAD_TOO_LARGE`
+**HTTP Status**: 413
 
-Field has incorrect data type.
-
-```json
-{
-  "error": {
-    "code": "invalid_field_type",
-    "message": "Field has incorrect type",
-    "details": {
-      "field": "trackOpens",
-      "expected": "boolean",
-      "received": "string"
-    }
-  }
-}
-```
-
----
-
-### `field_too_long`
-**HTTP Status**: 400
-
-Field value exceeds maximum length.
+Request body or attachment exceeds the size limit.
 
 ```json
 {
   "error": {
-    "code": "field_too_long",
-    "message": "Field value exceeds maximum length",
-    "details": {
-      "field": "subject",
-      "maxLength": 998,
-      "actualLength": 1250
-    }
-  }
-}
-```
-
----
-
-### `invalid_json`
-**HTTP Status**: 400
-
-Request body is not valid JSON.
-
-```json
-{
-  "error": {
-    "code": "invalid_json",
-    "message": "Request body is not valid JSON",
-    "details": {
-      "parseError": "Unexpected token } at position 45"
-    }
+    "code": "PAYLOAD_TOO_LARGE",
+    "message": "Request body exceeds the maximum allowed size of 10MB"
   }
 }
 ```
@@ -289,7 +190,7 @@ Request body is not valid JSON.
 
 ## Resource Errors (404, 409)
 
-### `resource_not_found`
+### `NOT_FOUND`
 **HTTP Status**: 404
 
 The requested resource doesn't exist.
@@ -297,8 +198,8 @@ The requested resource doesn't exist.
 ```json
 {
   "error": {
-    "code": "resource_not_found",
-    "message": "Resource not found",
+    "code": "NOT_FOUND",
+    "message": "Message not found",
     "details": {
       "resourceType": "message",
       "resourceId": "msg_nonexistent"
@@ -309,45 +210,7 @@ The requested resource doesn't exist.
 
 ---
 
-### `template_not_found`
-**HTTP Status**: 404
-
-Referenced template doesn't exist.
-
-```json
-{
-  "error": {
-    "code": "template_not_found",
-    "message": "Template not found",
-    "details": {
-      "templateId": "tmpl_nonexistent"
-    }
-  }
-}
-```
-
----
-
-### `list_not_found`
-**HTTP Status**: 404
-
-Referenced contact list doesn't exist.
-
-```json
-{
-  "error": {
-    "code": "list_not_found",
-    "message": "Contact list not found",
-    "details": {
-      "listId": "list_nonexistent"
-    }
-  }
-}
-```
-
----
-
-### `duplicate_resource`
+### `CONFLICT`
 **HTTP Status**: 409
 
 Resource already exists.
@@ -355,13 +218,8 @@ Resource already exists.
 ```json
 {
   "error": {
-    "code": "duplicate_resource",
-    "message": "Resource already exists",
-    "details": {
-      "resourceType": "contact",
-      "conflictField": "email",
-      "existingId": "con_abc123"
-    }
+    "code": "CONFLICT",
+    "message": "Resource already exists"
   }
 }
 ```
@@ -370,20 +228,18 @@ Resource already exists.
 
 ## Business Logic Errors (400, 422)
 
-### `recipient_suppressed`
+### `ALL_RECIPIENTS_SUPPRESSED`
 **HTTP Status**: 400
 
-Recipient is on the suppression list.
+Recipient(s) are on the suppression list.
 
 ```json
 {
   "error": {
-    "code": "recipient_suppressed",
-    "message": "Recipient is on suppression list",
+    "code": "ALL_RECIPIENTS_SUPPRESSED",
+    "message": "All recipients are suppressed",
     "details": {
-      "email": "user@example.com",
-      "reason": "hard_bounce",
-      "suppressedAt": "2024-01-10T15:30:00Z"
+      "suppressedEmails": ["user@example.com"]
     }
   }
 }
@@ -395,114 +251,66 @@ Recipient is on the suppression list.
 
 ---
 
-### `missing_template_variables`
+### `INVALID_STATE`
 **HTTP Status**: 400
 
-Required template variables not provided.
+Requested action is not allowed for the resource's current state.
 
 ```json
 {
   "error": {
-    "code": "missing_template_variables",
-    "message": "Required template variables are missing",
-    "details": {
-      "templateId": "tmpl_welcome",
-      "missingVariables": ["firstName", "accountUrl"]
-    }
-  }
-}
-```
-
----
-
-### `attachment_too_large`
-**HTTP Status**: 400
-
-Attachment exceeds size limit.
-
-```json
-{
-  "error": {
-    "code": "attachment_too_large",
-    "message": "Attachment exceeds maximum size",
-    "details": {
-      "maxSize": 26214400,
-      "actualSize": 52428800,
-      "filename": "large-file.pdf"
-    }
+    "code": "INVALID_STATE",
+    "message": "Campaign \"My Campaign\" is completed, not paused"
   }
 }
 ```
 
 **Resolution**:
-Maximum attachment size is 25MB. Use a file hosting service for larger files.
+Check the current resource status before performing state-transition operations (e.g., resume, stop, pause).
 
 ---
 
-### `message_already_sent`
+### `INVALID_STATUS`
 **HTTP Status**: 400
 
-Cannot modify a message that has already been sent.
+Cannot perform the operation on a resource in its current status.
 
 ```json
 {
   "error": {
-    "code": "message_already_sent",
-    "message": "Cannot cancel message that has already been sent",
-    "details": {
-      "messageId": "msg_abc123",
-      "sentAt": "2024-01-15T10:30:00Z"
-    }
+    "code": "INVALID_STATUS",
+    "message": "Cannot cancel message with status 'sent'"
   }
 }
 ```
 
+**Resolution**:
+Only pending (scheduled) messages can be cancelled. Check `status` before attempting cancellation.
+
 ---
 
-### `campaign_invalid_status`
+### `INVALID_ID`
 **HTTP Status**: 400
 
-Campaign action not allowed in current status.
+The provided resource identifier is malformed or not in the expected format.
 
 ```json
 {
   "error": {
-    "code": "campaign_invalid_status",
-    "message": "Action not allowed for campaign status",
-    "details": {
-      "campaignId": "camp_abc123",
-      "currentStatus": "completed",
-      "allowedStatuses": ["draft", "scheduled"]
-    }
+    "code": "INVALID_ID",
+    "message": "Invalid message ID format"
   }
 }
 ```
 
----
-
-### `no_recipients`
-**HTTP Status**: 400
-
-Campaign has no recipients matching criteria.
-
-```json
-{
-  "error": {
-    "code": "no_recipients",
-    "message": "No recipients match the campaign criteria",
-    "details": {
-      "listCount": 0,
-      "segmentFilters": {"status": "active", "tag": "premium"}
-    }
-  }
-}
-```
+**Resolution**:
+Ensure you are passing a valid resource ID in the correct format.
 
 ---
 
 ## Rate Limiting Errors (429)
 
-### `rate_limit_exceeded`
+### `RATE_LIMIT_EXCEEDED`
 **HTTP Status**: 429
 
 Too many requests in the time window.
@@ -510,13 +318,8 @@ Too many requests in the time window.
 ```json
 {
   "error": {
-    "code": "rate_limit_exceeded",
-    "message": "Rate limit exceeded",
-    "details": {
-      "limit": 100,
-      "window": "60s",
-      "retryAfter": 45
-    }
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Rate limit exceeded"
   }
 }
 ```
@@ -536,73 +339,9 @@ Retry-After: 45
 
 ---
 
-### `daily_limit_exceeded`
-**HTTP Status**: 429
-
-Daily sending limit reached.
-
-```json
-{
-  "error": {
-    "code": "daily_limit_exceeded",
-    "message": "Daily sending limit exceeded",
-    "details": {
-      "dailyLimit": 10000,
-      "sent": 10000,
-      "resetsAt": "2024-01-16T00:00:00Z"
-    }
-  }
-}
-```
-
----
-
-## Payment Errors (402)
-
-### `insufficient_credits`
-**HTTP Status**: 402
-
-Account doesn't have enough sending credits.
-
-```json
-{
-  "error": {
-    "code": "insufficient_credits",
-    "message": "Insufficient sending credits",
-    "details": {
-      "required": 5000,
-      "available": 250,
-      "topUpUrl": "https://app.apexmail.ee/billing"
-    }
-  }
-}
-```
-
----
-
-### `subscription_required`
-**HTTP Status**: 402
-
-Feature requires active subscription.
-
-```json
-{
-  "error": {
-    "code": "subscription_required",
-    "message": "Active subscription required for this feature",
-    "details": {
-      "feature": "send_time_optimization",
-      "requiredPlan": "growth"
-    }
-  }
-}
-```
-
----
-
 ## Server Errors (500, 502, 503)
 
-### `internal_error`
+### `INTERNAL_ERROR`
 **HTTP Status**: 500
 
 Unexpected server error.
@@ -610,10 +349,10 @@ Unexpected server error.
 ```json
 {
   "error": {
-    "code": "internal_error",
-    "message": "An unexpected error occurred",
-    "requestId": "req_abc123xyz"
-  }
+    "code": "INTERNAL_ERROR",
+    "message": "An unexpected error occurred"
+  },
+  "requestId": "req_abc123xyz"
 }
 ```
 
@@ -622,7 +361,7 @@ Contact support with the `requestId` for investigation.
 
 ---
 
-### `service_unavailable`
+### `SERVICE_UNAVAILABLE`
 **HTTP Status**: 503
 
 Service temporarily unavailable.
@@ -630,12 +369,8 @@ Service temporarily unavailable.
 ```json
 {
   "error": {
-    "code": "service_unavailable",
-    "message": "Service temporarily unavailable",
-    "details": {
-      "reason": "maintenance",
-      "estimatedRecovery": "2024-01-15T12:00:00Z"
-    }
+    "code": "SERVICE_UNAVAILABLE",
+    "message": "Service temporarily unavailable"
   }
 }
 ```
@@ -669,9 +404,9 @@ async function apiRequestWithRetry<T>(
 
 function isRetryable(error: ApiError): boolean {
   const retryableCodes = [
-    'rate_limit_exceeded',
-    'service_unavailable',
-    'internal_error',
+    'RATE_LIMIT_EXCEEDED',
+    'SERVICE_UNAVAILABLE',
+    'INTERNAL_ERROR',
   ];
   return retryableCodes.includes(error.code);
 }
@@ -695,10 +430,9 @@ function logApiError(error: ApiError): void {
 
 ```typescript
 const userMessages: Record<string, string> = {
-  'invalid_email': 'Please enter a valid email address.',
-  'sender_not_verified': 'Please verify your sending domain first.',
-  'rate_limit_exceeded': 'Too many requests. Please try again in a moment.',
-  'insufficient_credits': 'You need more credits to send this campaign.',
+  'VALIDATION_ERROR': 'Please check your request parameters.',
+  'DOMAIN_NOT_VERIFIED': 'Please verify your sending domain first.',
+  'RATE_LIMIT_EXCEEDED': 'Too many requests. Please try again in a moment.',
 };
 
 function getUserMessage(code: string): string {

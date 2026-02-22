@@ -277,8 +277,8 @@ The current sub-processor list is published at `https://apexmail.ee/legal/subpro
 | Sub-processor | Purpose | Location |
 |--------------|---------|----------|
 | Hetzner Cloud | Infrastructure hosting | Germany (EU) / Finland (EU) |
-| PostgreSQL (self-hosted) | Primary database | Same region as tenant |
-| Redis (self-hosted) | Caching, queues | Same region as tenant |
+| PostgreSQL (purpose-built infrastructure) | Primary database | Same region as tenant |
+| Redis (purpose-built infrastructure) | Caching, queues | Same region as tenant |
 | Cloudflare | CDN, DDoS protection, DNS | Global (US HQ, EU data processing) |
 | Stripe | Payment processing | US (SCCs in place) |
 | Let's Encrypt | TLS certificate issuance | US (no PII processed) |

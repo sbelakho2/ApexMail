@@ -32,7 +32,7 @@ QBRs deliver:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/schedule \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -255,14 +255,14 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/schedule \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/qbr/reports/{qbr_id} \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 ### Download QBR Presentation
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/qbr/reports/{qbr_id}/download \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "format=pdf"
 ```
 
@@ -270,7 +270,7 @@ curl https://api.apexmail.ee/enterprise/v1/qbr/reports/{qbr_id}/download \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/qbr/reports \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -340,7 +340,7 @@ Response:
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/qbr/actions/{action_id} \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "status": "completed",
     "completionNotes": "Implemented segmentation using engagement scores. Initial results show 7% improvement.",
@@ -354,7 +354,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/qbr/actions/{action_id} \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/custom-analysis \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "qbrId": "qbr_2024q1_abc",
     "analysisType": "competitor_benchmark",
@@ -383,7 +383,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/custom-analysis \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/survey \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "qbrId": "qbr_2024q1_abc",
     "responses": {
@@ -406,7 +406,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/survey \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/goals \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "quarter": "2024-Q2",
@@ -437,7 +437,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/goals \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/qbr/goals/progress \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "quarter=2024-Q2"
 ```
 

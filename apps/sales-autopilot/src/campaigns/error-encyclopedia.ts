@@ -73,12 +73,12 @@ export const ERROR_ENTRIES: ErrorEntry[] = [
     commonCauses: [
       'Using a test key in production or vice versa',
       'The API key was recently rotated and the old key is still in use',
-      'Missing or malformed Authorization header',
+      'Missing or malformed X-API-Key header',
       'Extra whitespace in the API key environment variable',
     ],
     fix: [
       { step: 1, title: 'Check your API key', description: 'Go to Dashboard → API Keys and copy your active key.', code: null },
-      { step: 2, title: 'Verify the header format', description: 'Ensure you\'re using: Authorization: Bearer <your-key>', code: 'curl -H "Authorization: Bearer am_live_..." https://api.apexmail.ee/v1/messages' },
+      { step: 2, title: 'Verify the header format', description: 'Ensure you\'re using: X-API-Key: <your-key>', code: 'curl -H "X-API-Key: am_live_..." https://api.apexmail.ee/v1/messages' },
       { step: 3, title: 'Check for whitespace', description: 'Trim your environment variable. Leading/trailing spaces cause auth failures.', code: 'echo "\'$APEXMAIL_API_KEY\'"  # Check for spaces' },
     ],
     prevention: [

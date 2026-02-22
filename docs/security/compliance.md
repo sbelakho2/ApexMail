@@ -30,7 +30,7 @@ ApexMail supports GDPR requirements:
 ##### Right to Access (Article 15)
 
 ```http
-POST /api/v1/gdpr/export
+POST /v1/gdpr/export
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -54,7 +54,7 @@ Response:
 ##### Right to Erasure (Article 17)
 
 ```http
-POST /api/v1/gdpr/delete
+POST /v1/gdpr/delete
 Authorization: Bearer {{token}}
 Content-Type: application/json
 

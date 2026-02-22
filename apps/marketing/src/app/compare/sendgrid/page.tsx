@@ -6,11 +6,11 @@ import { CompareCTA } from '@/components/compare/CompareCTA';
 export const metadata: Metadata = {
   title: 'ApexMail vs SendGrid | Feature Comparison',
   description:
-    'Compare ApexMail to SendGrid. See why developers choose ApexMail for better deliverability, compliance, and self-hosting options.',
+    'Compare ApexMail to SendGrid. See why developers choose ApexMail for better deliverability, compliance, and deployment options.',
   openGraph: {
     title: 'ApexMail vs SendGrid | Feature Comparison',
     description:
-      'Compare ApexMail to SendGrid. See why developers choose ApexMail for better deliverability, compliance, and self-hosting options.',
+      'Compare ApexMail to SendGrid. See why developers choose ApexMail for better deliverability, compliance, and deployment options.',
   },
 };
 
@@ -25,7 +25,7 @@ const comparisonData = {
       name: 'Deliverability',
       features: [
         { name: 'Delivery Rate', apexmail: '99.9%', competitor: '97%', winner: 'apexmail' },
-        { name: 'Dedicated IP', apexmail: 'From Growth ($29/mo)', competitor: 'Pro+ ($89.95/mo)', winner: 'apexmail' },
+        { name: 'Dedicated IP', apexmail: 'From Pro ($30/mo add-on)', competitor: 'Pro+ ($89.95/mo)', winner: 'apexmail' },
         { name: 'IP Warming', apexmail: 'Automatic', competitor: 'Manual', winner: 'apexmail' },
         { name: 'DKIM Rotation', apexmail: 'Weekly automatic', competitor: 'Manual', winner: 'apexmail' },
         { name: 'Reputation Circuit Breaker', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
@@ -36,9 +36,9 @@ const comparisonData = {
       name: 'Compliance',
       features: [
         { name: 'GDPR Tools', apexmail: 'Full automation', competitor: 'Basic', winner: 'apexmail' },
-        { name: 'HIPAA BAA', apexmail: 'Growth+ plans', competitor: 'Enterprise only', winner: 'apexmail' },
+        { name: 'HIPAA BAA', apexmail: 'Enterprise plan', competitor: 'Enterprise only', winner: 'tie' },
         { name: 'Data Encryption', apexmail: 'AES-256 at rest', competitor: 'Yes', winner: 'tie' },
-        { name: 'Audit Logs', apexmail: 'Complete', competitor: 'Limited', winner: 'apexmail' },
+        { name: 'Audit Logs', apexmail: 'Growth plan & above', competitor: 'Limited', winner: 'apexmail' },
         { name: 'EU Data Residency', apexmail: 'Yes', competitor: 'Enterprise only', winner: 'apexmail' },
       ],
     },
@@ -55,16 +55,16 @@ const comparisonData = {
     {
       name: 'Pricing',
       features: [
-        { name: 'Free Tier', apexmail: '1,000 emails/mo', competitor: '100 emails/day', winner: 'apexmail' },
-        { name: '100K emails/mo', apexmail: '$129', competitor: '$89.95', winner: 'apexmail' },
+        { name: 'Free Tier', apexmail: '3,000 emails/mo', competitor: '100 emails/day', winner: 'apexmail' },
+        { name: '100K emails/mo', apexmail: '$65 (Pro: 150K)', competitor: '$89.95', winner: 'apexmail' },
         { name: 'SSO Included', apexmail: 'Scale & Enterprise plans', competitor: '$500/mo add-on', winner: 'apexmail' },
-        { name: 'Self-Hosted Option', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'Private Deployment', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
       ],
     },
     {
       name: 'AI & Intelligence',
       features: [
-        { name: 'Send-Time Optimization', apexmail: 'ML-based', competitor: 'Basic', winner: 'apexmail' },
+        { name: 'Send-Time Optimization', apexmail: 'ML-based (Pro+ plans)', competitor: 'Basic', winner: 'apexmail' },
         { name: 'Local AI (No API costs)', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'Subject Line Generator', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'Content Analysis', apexmail: 'Yes', competitor: 'Limited', winner: 'apexmail' },
@@ -77,7 +77,7 @@ const comparisonData = {
       'Better deliverability with automatic IP warming and reputation protection',
       'True GDPR compliance automation, not just checkboxes',
       'Local AI features without per-request API costs',
-      'Self-hosted option for complete data control',
+      'Private deployment option for complete data control',
       'SSO on Scale & Enterprise — still far cheaper than SendGrid\'s $500/mo add-on',
     ],
   },

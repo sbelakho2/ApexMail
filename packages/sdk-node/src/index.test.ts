@@ -68,7 +68,7 @@ describe('ApexMail SDK', () => {
             expect(result.id).toBe('email_123');
             expect(result.status).toBe('queued');
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://api.apexmail.ee/v1/emails',
+                'https://api.apexmail.ee/v1/messages',
                 expect.objectContaining({
                     method: 'POST',
                     headers: expect.objectContaining({
@@ -196,7 +196,7 @@ describe('ApexMail SDK', () => {
             await client.emails.cancel('email_123');
 
             expect(mockFetch).toHaveBeenCalledWith(
-                'https://api.apexmail.ee/v1/emails/email_123/cancel',
+                'https://api.apexmail.ee/v1/messages/email_123/cancel',
                 expect.objectContaining({ method: 'POST' })
             );
         });

@@ -20,6 +20,7 @@ import {
  ChevronRight,
  LogOut,
  X,
+ Server,
  type ApexIconComponent,
 } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
@@ -74,6 +75,7 @@ const mainNav: NavSection[] = [
  title: 'Settings',
  items: [
  { title: 'Account', href: '/settings', icon: Settings },
+ { title: 'Dedicated IPs', href: '/settings/dedicated-ips', icon: Server },
  { title: 'Compliance', href: '/compliance', icon: Shield },
  { title: 'Billing', href: '/billing', icon: CreditCard },
  ],

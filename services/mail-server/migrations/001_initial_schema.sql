@@ -1,5 +1,5 @@
 -- ApexMail Mail Server Schema
--- Creates tables for the self-hosted mail server (email queue, accounts, messages)
+-- Creates tables for the mail server (email queue, accounts, messages)
 
 -- =============================================================================
 -- Email Queue Table (for outbound delivery)
@@ -264,7 +264,7 @@ $$;
 -- Comments
 -- =============================================================================
 
-COMMENT ON TABLE email_queue IS 'Queue for outbound email delivery (self-hosted, no third-party services)';
+COMMENT ON TABLE email_queue IS 'Queue for outbound email delivery via purpose-built mail infrastructure';
 COMMENT ON TABLE mail_accounts IS 'Email accounts for receiving mail';
 COMMENT ON TABLE mail_mailboxes IS 'Mailbox folders for organizing received mail';
 COMMENT ON TABLE mail_messages IS 'Stored email messages';

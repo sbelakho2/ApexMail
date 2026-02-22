@@ -22,30 +22,31 @@ marketing platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).
 ## Pricing (monthly)
 | Plan       | Price    | Emails/mo   | API calls/mo | Team | Domains    | Contacts    |
 |------------|----------|-------------|--------------|------|------------|-------------|
-| Free       | $0       | 1,000       | 10,000       | 1    | 1          | 100         |
-| Starter    | $29      | 25,000      | 250,000      | 3    | 3          | 5,000       |
-| Pro        | $59      | 50,000      | 500,000      | 5    | 5          | 10,000      |
-| Growth     | $129     | 100,000     | 1,000,000    | 10   | 10         | 25,000      |
-| Scale      | $399     | 500,000     | 5,000,000    | 25   | Unlimited  | 100,000     |
-| Enterprise | $1,299   | 2,000,000   | 20,000,000   | Unlimited | Unlimited | Unlimited |
+| Free       | $0       | 3,000       | 50,000       | 1    | 1          | 500         |
+| Starter    | $25      | 50,000      | 500,000      | 5    | 5          | 10,000      |
+| Pro        | $65      | 150,000     | 2,000,000    | 10   | 25         | 50,000      |
+| Growth     | $150     | 500,000     | 5,000,000    | 25   | 100        | 200,000     |
+| Scale      | $350     | 2,000,000   | 20,000,000   | 50   | Unlimited  | 500,000     |
+| Enterprise | $800     | 5,000,000   | Unlimited    | Unlimited | Unlimited | Unlimited |
 
 Pay-as-you-go (PAYG): $0.001/email (first 10k), $0.0008 (10k–100k), \
-$0.0005 (100k–1M), $0.0003 (1M+). Email overages: $0.50/1 000 extra. \
-API overages: first 100k free, then $0.10 per 1 000 calls.
+$0.0005 (100k–1M), $0.0003 (1M+). Email overages: $0.40/1,000 extra. \
+API overages: first 100k free, then $0.10 per 1,000 calls. \
+Annual billing: 2 months free (Starter $250/yr, Pro $650/yr, Growth $1,500/yr, Scale $3,500/yr, Enterprise $8,000/yr).
 
 ## Plan features
-- **Free:** Basic sending, 1 domain, email support, 7-day retention. NO webhooks, NO custom tracking domain.
-- **Starter ($29):** Webhooks, 3 domains, 3 team members, email support, 30-day retention. NO A/B testing. NO dedicated IP.
-- **Pro ($59):** Custom tracking domain, 5 domains, 5 team members, email support, 60-day retention. NO A/B testing. NO dedicated IP.
-- **Growth ($129):** A/B testing, send-time optimisation (AI), 1 dedicated IP, 10 domains, 10 team members, audit logs, priority support, 90-day retention.
-- **Scale ($399):** 3 dedicated IPs, SSO/SAML, unlimited domains, 25 team members, phone support, subaccounts, inbound receiving, SLA 99.9%, 365-day retention.
-- **Enterprise ($1,299):** 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, 730-day retention.
+- **Free:** Basic sending, 1 domain, community support, 7-day retention. NO webhooks, NO custom tracking domain. 500 contacts.
+- **Starter ($25):** Webhooks (5), 5 domains, 5 team members, email support, 30-day retention. NO A/B testing. NO dedicated IP. 10,000 contacts.
+- **Pro ($65):** A/B testing, send-time optimisation (AI), custom tracking domain, 25 domains, 10 team members, email support, 60-day retention. Dedicated IP available as add-on ($30/mo). 50,000 contacts.
+- **Growth ($150):** 1 dedicated IP included, 100 domains, 25 team members, audit logs, priority support, 90-day retention. 200,000 contacts.
+- **Scale ($350):** 3 dedicated IPs, SSO/SAML, unlimited domains, 50 team members, phone support, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention. 500,000 contacts.
+- **Enterprise ($800):** 10 dedicated IPs, BYOIP, HIPAA/SOC2, white-label, unlimited team, dedicated CSM, SLA 99.9% (25% credit), 730-day retention. Unlimited contacts.
 
-Note: A/B testing is available ONLY from Growth ($129) and above. NOT on Free, Starter, or Pro.
-Note: Send-time optimisation is available ONLY from Growth ($129) and above.
-Note: SSO is available from Scale ($399) and above.
-Note: Dedicated IPs: Growth 1 included, Scale 3 included, Enterprise 10 included. Add-on: $49/month.
-Note: Priority support: available from Growth ($129) and above. Starter and Pro have standard email support only.
+Note: A/B testing is available from Pro ($65) and above. NOT on Free or Starter.
+Note: Send-time optimisation is available from Pro ($65) and above.
+Note: SSO is available from Scale ($350) and above.
+Note: Dedicated IPs: Pro add-on ($30/mo), Growth 1 included, Scale 3 included, Enterprise 10 included.
+Note: Priority support: available from Growth ($150) and above. Starter and Pro have standard email support only.
 Note: Inbound email receiving: available on Scale and Enterprise only.
 Note: SLA credits: Scale 10%, Enterprise 25%.
 
@@ -60,10 +61,10 @@ Note: SLA credits: Scale 10%, Enterprise 25%.
 - Suppression lists (auto + manual), bounce/complaint handling
 - Analytics: opens, clicks, heatmaps, deliverability score
 - SDKs: Node.js (@apexmail/node), Python (apexmail), Go, Ruby (apexmail gem), PHP (apexmail/apexmail-php), Java (ee.apexmail:apexmail-java)
-- Send-time optimisation (AI-powered per-subscriber, Growth plan and above)
-- A/B testing (Growth plan and above)
+- Send-time optimisation (AI-powered per-subscriber, Pro plan and above)
+- A/B testing (Pro plan and above)
 - Custom tracking domain: CNAME → t.apexmail.ee (default). Pro plan and above.
-- API rate limit: 1,000 req/min per tenant (all plans, Redis sliding window). Enterprise may negotiate higher.
+- API rate limit: 1,000 req/min per tenant (all plans, sliding window). Enterprise may negotiate higher.
 - Idempotency: X-Idempotency-Key header, 1-256 chars, 24h TTL. Same key + different body → 409 Conflict.
 - Scheduled sends: up to 72 hours ahead, minimum 1 minute, ISO 8601 format.
 - Account lockout: 5 failed login attempts → 15-minute lockout.
@@ -77,6 +78,39 @@ Note: SLA credits: Scale 10%, Enterprise 25%.
 - SCIM 2.0 (RFC 7644) for user provisioning: Scale and Enterprise.
 - SSO: SAML 2.0 / OIDC. Scale and Enterprise only.
 - Gmail clipping: HTML > 102 KB is clipped. Keep emails under 102 KB.
+
+## Provider migration support
+ApexMail provides migration paths from 5 major providers:
+
+| Provider    | Time Est. | Difficulty | Key Gotcha |
+|-------------|-----------|------------|------------|
+| SendGrid    | 30 min    | Easy       | Import suppression list FIRST. Template syntax ({{variable}}) is compatible. |
+| Resend      | 15 min    | Easy       | Near-identical API. Webhook event naming differs. |
+| Amazon SES  | 45 min    | Moderate   | SES sending limits don't transfer — must re-warm. Replace SNS→SQS→Lambda chain with direct webhooks. |
+| Postmark    | 20 min    | Easy       | PascalCase → camelCase field names. Message streams → X-ApexMail-Traffic-Type header. |
+| Mailgun     | 30 min    | Easy       | No domain scoping in URL (domain inferred from From address). EU vs US region config. |
+
+### Migration checklist (all providers)
+1. **Set up DNS records** — SPF (include:_spf.apexmail.ee), DKIM (apexmail._domainkey), Return-Path CNAME (bounce.apexmail.ee), optional tracking CNAME (t.apexmail.ee)
+2. **Import suppression lists** — Export bounces + unsubscribes from old provider, import via ApexMail CLI or API
+3. **Warm up dedicated IP** — Follow warmup schedule (Day 1: 50 → Day 29+: 100K+). Send to most engaged contacts first.
+4. **Migrate webhooks** — Set up ApexMail webhooks for delivery events. Old provider's webhooks use different naming.
+5. **Switch SDK/API calls** — Replace import and initialization. Payload structure is similar across all providers.
+6. **Remove old provider's SPF include** — Avoid exceeding the 10-DNS-lookup SPF limit.
+7. **Run both providers in parallel** during DNS propagation (up to 48h).
+8. **Monitor** via Google Postmaster Tools and Microsoft SNDS.
+
+### SDK mapping (all providers → ApexMail)
+- SendGrid: `sgMail.send()` → `apexmail.messages.send()` | `@sendgrid/mail` → `@apexmail/node`
+- Resend: `resend.emails.send()` → `apexmail.messages.send()` | `resend` → `@apexmail/node`
+- SES: `ses.send(new SendEmailCommand())` → `apexmail.messages.send()` | `@aws-sdk/client-ses` → `@apexmail/node`
+- Postmark: `client.sendEmail()` → `apexmail.messages.send()` | `postmark` → `@apexmail/node`
+- Mailgun: `mg.messages.create()` → `apexmail.messages.send()` | `mailgun.js` → `@apexmail/node`
+
+### Env variable mapping
+- SENDGRID_API_KEY / RESEND_API_KEY / POSTMARK_SERVER_TOKEN / MAILGUN_API_KEY / AWS_ACCESS_KEY_ID → APEXMAIL_API_KEY
+- Mailgun: MAILGUN_DOMAIN not needed (auto-detected from From address)
+- SES: AWS_SECRET_ACCESS_KEY not needed (single API key model)
 
 ## Industry benchmarks
 - Average email open rate: 21.5 % (varies by industry)
@@ -132,8 +166,8 @@ You must NEVER attempt these — always escalate to contact@apexmail.ee:
 When escalating, ALWAYS provide the email: contact@apexmail.ee.
 """
 
-# ── Chat template (Qwen 2.5 ChatML format) ─────────────────────────────────
-# Qwen 2.5 uses ChatML natively.  We don't need a custom Jinja —
+# ── Chat template (Qwen 3 ChatML format) ──────────────────────────────────
+# Qwen 3 uses ChatML natively.  We don't need a custom Jinja —
 # the tokenizer ships with it.  These constants are for reference.
 
 CHAT_ROLE_MAP = {
@@ -204,6 +238,10 @@ RELEVANCE_KEYWORDS: list[str] = [
     # Competitors (to deflect, not promote)
     "sendgrid", "mailgun", "ses", "postmark", "mailchimp",
     "brevo", "sendinblue", "resend", "mailjet",
+    # Migration
+    "migrate", "migration", "migrating", "switch", "switching",
+    "move from", "moving from", "transfer", "transitioning",
+    "import", "export", "suppression list",
     # Support
     "help", "support", "issue", "error", "problem", "troubleshoot",
     "how to", "how do i", "can i", "is it possible",

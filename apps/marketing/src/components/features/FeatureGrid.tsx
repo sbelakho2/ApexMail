@@ -1,5 +1,4 @@
 'use client';
-
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import {
@@ -56,7 +55,7 @@ const featureCategories = [
       },
       {
         name: 'Inbound Processing',
-        description: 'Receive and parse incoming emails via webhooks',
+        description: 'Receive and parse incoming emails via webhooks (Scale+ plans)',
         icon: Webhook,
       },
     ],
@@ -111,8 +110,8 @@ const featureCategories = [
         icon: Lock,
       },
       {
-        name: 'HIPAA Ready',
-        description: 'BAA available with encrypted PHI handling',
+        name: 'HIPAA Compliance',
+        description: 'BAA available with encrypted PHI handling (Enterprise plan)',
         icon: Shield,
       },
       {
@@ -126,8 +125,8 @@ const featureCategories = [
         icon: Lock,
       },
       {
-        name: 'SOC 2 Type II',
-        description: 'Enterprise-grade security compliance',
+        name: 'SOC 2 Controls',
+        description: 'Enterprise plan controls and audit readiness',
         icon: CheckCircle,
       },
       {
@@ -221,7 +220,7 @@ const featureCategories = [
     features: [
       {
         name: 'SSO/SAML/OIDC',
-        description: 'Enterprise identity provider integration',
+        description: 'Enterprise identity provider integration (Scale+ plans)',
         icon: Key,
       },
       {
@@ -241,7 +240,7 @@ const featureCategories = [
       },
       {
         name: 'SLA Guarantees',
-        description: '99.99% uptime with error budget tracking',
+        description: '99.9% uptime (Scale+ plans) with error budget tracking',
         icon: CheckCircle,
       },
       {

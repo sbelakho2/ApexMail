@@ -95,12 +95,15 @@ export class IPRateLimiter {
   private readonly ispSchedules: Record<string, number[]>;
   private readonly globalHourlyLimit: number;
   private readonly ispAwareLimiting: boolean;
+  private readonly burstLimit: number;
   
   // In-memory cache for IP warmup status (refreshed from DB periodically)
   private readonly warmupCache = new Map<string, { status: IPWarmupStatus; expiresAt: number }>();
   private readonly cacheTtlMs = 60000; // 1 minute cache
   
-  // MEM-005 FIX: MX lookup cache with LRU eviction to prevent unbounded growth
+  // MEM-005 FIX: MX lookup cache with O(1) LRU eviction (Map insertion-order trick).
+  // On every get the entry is deleted + re-inserted (promoting it to the tail).
+  // On every set we evict from the head (oldest/LRU entry) when over limit.
   private readonly mxCache = new Map<string, { isp: string; expiresAt: number }>();
   private readonly mxCacheTtlMs = 3600000; // 1 hour cache
   private static readonly MAX_MX_CACHE_SIZE = 10000;
@@ -108,6 +111,39 @@ export class IPRateLimiter {
   
   // Cleanup interval handle
   private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Redis Lua token bucket for per-second burst control.
+   * KEYS[1]: bucket hash key
+   * ARGV[1]: capacity (max tokens), ARGV[2]: refill rate (tokens/sec),
+   * ARGV[3]: current epoch ms, ARGV[4]: tokens requested
+   * Returns 1 if allowed, 0 if denied.
+   */
+  private static readonly TOKEN_BUCKET_SCRIPT = `
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local rate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local requested = tonumber(ARGV[4])
+local h = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(h[1])
+local ts = tonumber(h[2])
+if tokens == nil then
+  tokens = capacity
+  ts = now
+end
+local elapsed = (now - ts) / 1000
+tokens = math.min(capacity, tokens + elapsed * rate)
+if tokens >= requested then
+  redis.call('HMSET', key, 'tokens', tokens - requested, 'ts', now)
+  redis.call('PEXPIRE', key, math.ceil((capacity / rate) * 1000 + 5000))
+  return 1
+else
+  redis.call('HMSET', key, 'tokens', tokens, 'ts', now)
+  redis.call('PEXPIRE', key, math.ceil((capacity / rate) * 1000 + 5000))
+  return 0
+end
+`.trim();
 
   constructor(config: IPRateLimiterConfig) {
     this.redis = config.redis;
@@ -117,6 +153,7 @@ export class IPRateLimiter {
     this.ispSchedules = { ...DEFAULT_ISP_WARMUP_SCHEDULES, ...config.ispSchedules };
     this.globalHourlyLimit = config.globalHourlyLimit ?? 2500;
     this.ispAwareLimiting = config.ispAwareLimiting ?? true;
+    this.burstLimit = config.burstLimit ?? 50;
     
     // MEM-005 FIX: Start periodic cache cleanup to prevent memory leaks
     this.startCacheCleanup();
@@ -210,7 +247,17 @@ export class IPRateLimiter {
     recipientDomain: string
   ): Promise<RateLimitResult> {
     try {
-      // 1. Check per-IP hourly limit (burst protection)
+      // 0. Per-second token bucket (burst protection) — checked first, cheapest path.
+      const bucketAllowed = await this.checkTokenBucket(ipAddress);
+      if (!bucketAllowed) {
+        return {
+          allowed: false,
+          reason: `IP ${ipAddress} exceeded per-second burst limit`,
+          retryAfter: 1,
+        };
+      }
+
+      // 1. Check per-IP hourly limit
       const hourlyResult = await this.checkHourlyLimit(ipAddress);
       if (!hourlyResult.allowed) {
         return hourlyResult;
@@ -298,8 +345,8 @@ export class IPRateLimiter {
    * Get warmup status for an IP address
    */
   async getWarmupStatus(ipAddress: string): Promise<IPWarmupStatus> {
-    // Check cache first
-    const cached = this.warmupCache.get(ipAddress);
+    // Check cache first (O(1) LRU)
+    const cached = this.warmupCacheGet(ipAddress);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.status;
     }
@@ -355,8 +402,8 @@ export class IPRateLimiter {
         };
       }
 
-      // Cache the result
-      this.warmupCache.set(ipAddress, {
+      // Cache the result (O(1) LRU)
+      this.warmupCacheSet(ipAddress, {
         status,
         expiresAt: Date.now() + this.cacheTtlMs,
       });
@@ -507,6 +554,88 @@ export class IPRateLimiter {
 
   // === Private Methods ===
 
+  /**
+   * O(1) LRU get for MX cache.
+   * Promotes (delete + re-insert) the entry to the tail so the head always
+   * holds the least recently used key, which is what we evict on overflow.
+   */
+  private mxCacheGet(key: string): { isp: string; expiresAt: number } | undefined {
+    const value = this.mxCache.get(key);
+    if (value !== undefined) {
+      // Promote to tail (most recently used)
+      this.mxCache.delete(key);
+      this.mxCache.set(key, value);
+    }
+    return value;
+  }
+
+  /**
+   * O(1) LRU set for MX cache.  Evicts head (LRU) entry when over capacity.
+   */
+  private mxCacheSet(key: string, value: { isp: string; expiresAt: number }): void {
+    this.mxCache.delete(key); // remove existing position before re-inserting
+    if (this.mxCache.size >= IPRateLimiter.MAX_MX_CACHE_SIZE) {
+      const lruKey = this.mxCache.keys().next();
+      if (!lruKey.done && lruKey.value !== undefined) {
+        this.mxCache.delete(lruKey.value);
+      }
+    }
+    this.mxCache.set(key, value);
+  }
+
+  /**
+   * O(1) LRU get for warmup cache.
+   */
+  private warmupCacheGet(key: string): { status: IPWarmupStatus; expiresAt: number } | undefined {
+    const value = this.warmupCache.get(key);
+    if (value !== undefined) {
+      this.warmupCache.delete(key);
+      this.warmupCache.set(key, value);
+    }
+    return value;
+  }
+
+  /**
+   * O(1) LRU set for warmup cache.  Evicts head (LRU) entry when over capacity.
+   */
+  private warmupCacheSet(key: string, value: { status: IPWarmupStatus; expiresAt: number }): void {
+    this.warmupCache.delete(key);
+    if (this.warmupCache.size >= IPRateLimiter.MAX_WARMUP_CACHE_SIZE) {
+      const lruKey = this.warmupCache.keys().next();
+      if (!lruKey.done && lruKey.value !== undefined) {
+        this.warmupCache.delete(lruKey.value);
+      }
+    }
+    this.warmupCache.set(key, value);
+  }
+
+  /**
+   * Redis Lua token bucket — per-second burst control.
+   * Capacity = burstLimit tokens, refill rate = burstLimit / 10 tokens/sec
+   * (full refill in 10 seconds).  Fails open on Redis error.
+   */
+  private async checkTokenBucket(ipAddress: string): Promise<boolean> {
+    const key = `${this.keyPrefix}tb:${ipAddress}`;
+    const capacity = this.burstLimit;
+    const rate = capacity / 10; // tokens per second
+    const now = Date.now();
+    try {
+      const result = await this.redis.eval(
+        IPRateLimiter.TOKEN_BUCKET_SCRIPT,
+        1,
+        key,
+        String(capacity),
+        String(rate),
+        String(now),
+        '1',
+      );
+      return result === 1;
+    } catch {
+      // Fail open: Redis unavailable should not block email sending
+      return true;
+    }
+ }
+
   private async checkHourlyLimit(ipAddress: string): Promise<RateLimitResult> {
     const hour = this.getHourKey();
     const key = `${this.keyPrefix}hourly:${ipAddress}:${hour}`;
@@ -563,8 +692,8 @@ export class IPRateLimiter {
    * MX results are cached for 1 hour (mxCacheTtlMs) with LRU eviction.
    */
   private async detectISP(domain: string): Promise<string> {
-    // Check cache
-    const cached = this.mxCache.get(domain);
+    // Check cache (O(1) LRU get promotes entry to tail)
+    const cached = this.mxCacheGet(domain);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.isp;
     }
@@ -572,7 +701,7 @@ export class IPRateLimiter {
     // For common consumer domains, use direct mapping (fast path, no DNS)
     const directMapping = this.getDirectISPMapping(domain);
     if (directMapping) {
-      this.mxCache.set(domain, { isp: directMapping, expiresAt: Date.now() + this.mxCacheTtlMs });
+      this.mxCacheSet(domain, { isp: directMapping, expiresAt: Date.now() + this.mxCacheTtlMs });
       return directMapping;
     }
 
@@ -590,7 +719,7 @@ export class IPRateLimiter {
 
         const ispFromMx = this.detectISPFromMX(primaryMx);
         if (ispFromMx) {
-          this.mxCache.set(domain, { isp: ispFromMx, expiresAt: Date.now() + this.mxCacheTtlMs });
+          this.mxCacheSet(domain, { isp: ispFromMx, expiresAt: Date.now() + this.mxCacheTtlMs });
           this.logger.debug('ISP detected via MX lookup', { domain, mx: primaryMx, isp: ispFromMx });
           return ispFromMx;
         }
@@ -602,7 +731,7 @@ export class IPRateLimiter {
 
     // Fallback: unknown ISP
     const isp = 'default';
-    this.mxCache.set(domain, { isp, expiresAt: Date.now() + this.mxCacheTtlMs });
+    this.mxCacheSet(domain, { isp, expiresAt: Date.now() + this.mxCacheTtlMs });
     return isp;
   }
 

@@ -6,10 +6,10 @@ info:
     
     ## Authentication
     
-    All API requests require authentication using an API key. Include your API key in the `Authorization` header:
+    All API requests require authentication using an API key. Include your API key in the `X-API-Key` header:
     
     ```
-    Authorization: Bearer am_live_xxxxxxxxxxxxx
+    X-API-Key: am_live_xxxxxxxxxxxxx
     ```
     
     ## Rate Limits
@@ -61,7 +61,7 @@ tags:
     description: Email delivery and engagement analytics
 
 security:
-  - BearerAuth: []
+  - ApiKeyAuth: []
 
 paths:
   /emails:
@@ -627,12 +627,13 @@ paths:
 
 components:
   securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
       description: |
-        API key authentication. Include your API key in the Authorization header:
-        `Authorization: Bearer am_live_xxxxxxxxxxxxx`
+        API key authentication. Include your API key in the X-API-Key header:
+        `X-API-Key: am_live_xxxxxxxxxxxxx`
 
   parameters:
     emailId:
@@ -1040,12 +1041,25 @@ components:
           items:
             type: string
             enum:
-              - emails:send
-              - emails:read
-              - domains:manage
-              - webhooks:manage
+              - messages:send
+              - messages:read
+              - messages:write
+              - domains:read
+              - domains:write
+              - suppressions:read
+              - suppressions:write
+              - events:read
+              - events:write
+              - templates:read
+              - templates:write
               - analytics:read
-              - api-keys:manage
+              - webhooks:read
+              - webhooks:write
+              - dedicated-ips:read
+              - dedicated-ips:write
+              - contacts:read
+              - contacts:write
+              - admin
           description: Permission scopes (empty for full access)
 
     ApiKeyCreated:

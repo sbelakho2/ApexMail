@@ -34,7 +34,7 @@ Before sending emails, you need to verify your domain:
 2. Click **Create API Key**
 3. Give it a descriptive name (e.g., "Production Server")
 4. Select the required scopes:
-   - `messages:send` - Send emails
+   - `messages:write` - Send and manage emails
    - `templates:read` - Use templates
 5. Optionally add IP restrictions
 6. Copy and securely store the generated key
@@ -50,8 +50,8 @@ Before sending emails, you need to verify your domain:
 #### Basic Email
 
 ```bash
-curl -X POST https://api.apexmail.ee/api/v1/messages \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST https://api.apexmail.ee/v1/messages \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "customer@example.com",
@@ -65,8 +65,8 @@ curl -X POST https://api.apexmail.ee/api/v1/messages \
 #### With Template
 
 ```bash
-curl -X POST https://api.apexmail.ee/api/v1/messages \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST https://api.apexmail.ee/v1/messages \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "customer@example.com",

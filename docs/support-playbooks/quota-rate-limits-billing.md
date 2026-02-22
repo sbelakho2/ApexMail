@@ -21,12 +21,12 @@
 
 | Plan | Emails/Month | API Rate (req/min) | Daily Max (approx) | Contacts |
 |------|-------------|-------------------|---------------------|----------|
-| Free | 1,000 | 1,000 | ~35 | 100 |
-| Starter | 25,000 | 1,000 | ~835 | 5,000 |
-| Pro | 50,000 | 1,000 | ~1,667 | 10,000 |
-| Growth | 100,000 | 1,000 | ~3,333 | 25,000 |
-| Scale | 500,000 | 1,000 | ~16,667 | 100,000 |
-| Enterprise | 2,000,000 | 1,000 | ~66,667 | Unlimited |
+| Free | 3,000 | 1,000 | ~100 | 500 |
+| Starter | 50,000 | 1,000 | ~1,667 | 10,000 |
+| Pro | 150,000 | 1,000 | ~5,000 | 50,000 |
+| Growth | 500,000 | 1,000 | ~16,667 | 200,000 |
+| Scale | 2,000,000 | 1,000 | ~66,667 | 500,000 |
+| Enterprise | 5,000,000 | 1,000 | ~166,667 | Unlimited |
 
 > **Note:** The API rate limit (1,000 req/min) is a global default enforced per-tenant/API-key via Redis sliding window. Enterprise customers may negotiate higher limits. Daily max is approximate (monthly quota ÷ 30).
 
@@ -56,7 +56,7 @@
 **Symptoms:** API returns `429` with `"error": "daily_quota_exceeded"`. Customer confused about why.
 
 **Resolution:**
-1. Daily quota = monthly quota ÷ days-in-month (approximately), with a safety buffer. Example: Pro plan (50,000/month) → ~5,000/day max.
+1. Daily quota = monthly quota ÷ days-in-month (approximately), with a safety buffer. Example: Pro plan (150,000/month) → ~5,000/day max.
 2. **Reset time:** 00:00 UTC daily.
 3. Check current usage:
 
@@ -132,7 +132,7 @@ redis-cli -h redis.apexmail.internal SET "quota:monthly:<TENANT_ID>:<YYYY-MM>" "
      5. After 5 consecutive 429s: pause for 5 minutes
    ```
 2. **Batch optimization:**
-   - Use `POST /v1/emails/batch` instead of individual sends — one API call for up to 100 recipients.
+   - Use `POST /v1/messages/batch` instead of individual sends — one API call for up to 1000 messages.
    - Spread sends over time instead of bursting.
    - Pro tip: send in waves of plan's burst limit (e.g., 40 for Pro) with 10s gaps.
 3. **SDK auto-retry:** Both Node.js and Python SDKs have built-in retry with exponential backoff and jitter.
@@ -202,7 +202,7 @@ GROUP BY 1 ORDER BY 1;
 
 **Resolution:**
 1. **Each recipient counts as one send.** An API call with 10 recipients in the `to` array counts as 10 sends.
-2. **Batch endpoint:** `POST /v1/emails/batch` with 100 recipients = 100 sends.
+2. **Batch endpoint:** `POST /v1/messages/batch` with 1000 messages = 1000 sends.
 3. **CC/BCC:** Each CC and BCC recipient also counts as one send (each receives a separate email).
 4. This is industry standard — email service providers universally count per-recipient.
 
@@ -352,7 +352,7 @@ redis-cli -h redis.apexmail.internal SET "ratelimit:override:<TENANT_ID>" "<HIGH
 2. **Production test sends (`am_live_*` key):** These DO count because they actually send real emails.
 3. **Best practice:** Use `am_test_*` keys for all testing. They validate the full payload but don't deliver.
 4. **Dashboard "Send Test Email":** Uses the live API and counts as a send. This is intentional — it sends a real email to verify inbox placement.
-5. If customer is on Free plan testing: recommend upgrading to Starter ($29/mo) for more headroom.
+5. If customer is on Free plan testing: recommend upgrading to Starter ($25/mo) for more headroom.
 
 ---
 
@@ -417,11 +417,11 @@ ssh apexmail-worker "systemctl status apexmail-worker"
 |---------|---------|-----|--------|-------|-------|
 | Webhooks | ✅ | ✅ | ✅ | ✅ | Free plan: ❌ |
 | Custom tracking domain | ❌ | ✅ | ✅ | ✅ | Reverts to default |
-| Dedicated IP | ❌ | ❌ | 1 included | 3 included | IP released on downgrade |
-| A/B testing | ❌ | ❌ | ✅ | ✅ | |
+| Dedicated IP | ❌ | Add-on ($30/mo) | 1 included | 3 included | IP released on downgrade |
+| A/B testing | ❌ | ✅ | ✅ | ✅ | |
 | SSO | ❌ | ❌ | ❌ | ✅ | |
-| Team members | 3 | 5 | 10 | 25 | Extra users deactivated |
-| Domains | 3 | 5 | 10 | Unlimited | Extra domains de-verified but DNS records remain |
+| Team members | 5 | 10 | 25 | 50 | Extra users deactivated |
+| Domains | 5 | 25 | 100 | Unlimited | Extra domains de-verified but DNS records remain |
 | Audit logs | ❌ | ❌ | ✅ | ✅ | Older logs become inaccessible |
 
 2. **What does NOT break on downgrade:**
@@ -481,7 +481,7 @@ GROUP BY 1;
 3. **Overage calculation:**
    ```
    Overage emails = billable_sends - plan_limit
-   Overage charge = overage_emails / 1000 × $0.50
+   Overage charge = overage_emails / 1000 × $0.40
    ```
 4. **Generate reconciliation report:**
 
@@ -518,7 +518,7 @@ node apps/ops/dist/cli.js billing reconcile \
 5. **Export before expiry:**
 
 ```bash
-curl -H "Authorization: Bearer <KEY>" \
+curl -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/events?start=2025-01-01&end=2026-01-01&format=csv" \
   -o events-export.csv
 ```

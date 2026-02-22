@@ -147,10 +147,19 @@ export default function RevenuePage() {
                     <div className="flex items-end gap-2 h-48">
                         {monthlyData.map((month) => (
                             <div key={month.month} className="flex-1 flex flex-col items-center group">
-                                <div
-                                    className="w-full bg-primary rounded-t group-hover:bg-primary/90 transition-colors"
-                                    style={{ height: `${(month.mrr / maxMrr) * 160}px` }}
-                                />
+                                <div className="w-full h-40 rounded-t overflow-hidden">
+                                    <svg width="100%" height="100%" viewBox="0 0 100 160" preserveAspectRatio="none" aria-hidden="true">
+                                        <rect
+                                            x="0"
+                                            y={160 - Math.max(0, Math.min(160, (month.mrr / Math.max(maxMrr, 1)) * 160))}
+                                            width="100"
+                                            height={Math.max(0, Math.min(160, (month.mrr / Math.max(maxMrr, 1)) * 160))}
+                                            className="fill-primary transition-all duration-300 group-hover:fill-primary/90"
+                                            rx="6"
+                                            ry="6"
+                                        />
+                                    </svg>
+                                </div>
                                 <div className="text-xs text-muted-foreground mt-2 font-medium">{month.month}</div>
                                 <div className="text-xs font-medium text-foreground mt-1 opacity-0 group-hover:opacity-100 transition-opacity absolute bottom-8 bg-card shadow-md p-1 rounded border border-border pointer-events-none transform -translate-y-full">{formatCurrency(month.mrr)}</div>
                             </div>
@@ -231,10 +240,17 @@ export default function RevenuePage() {
                                     <td className="py-4 text-muted-foreground">{(plan.percentage * 100).toFixed(1)}%</td>
                                     <td className="py-4">
                                         <div className="w-32 bg-muted rounded-full h-2 overflow-hidden">
-                                            <div
-                                                className="h-full bg-primary rounded-full"
-                                                style={{ width: `${plan.percentage * 100}%` }}
-                                            />
+                                            <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                                                <rect
+                                                    x="0"
+                                                    y="0"
+                                                    width={Math.max(0, Math.min(100, plan.percentage * 100))}
+                                                    height="8"
+                                                    className="fill-primary"
+                                                    rx="999"
+                                                    ry="999"
+                                                />
+                                            </svg>
                                         </div>
                                     </td>
                                 </tr>

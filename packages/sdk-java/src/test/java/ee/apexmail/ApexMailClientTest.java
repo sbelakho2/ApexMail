@@ -1,8 +1,6 @@
 package ee.apexmail;
 
 import com.sun.net.httpserver.HttpServer;
-import com.sun.net.httpserver.HttpHandler;
-import com.sun.net.httpserver.HttpExchange;
 import org.junit.jupiter.api.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -48,7 +46,6 @@ class ApexMailClientTest {
         return new Object[]{ client, recorded, server };
     }
 
-    @SuppressWarnings("unchecked")
     static ApexMailClient client(Object[] arr) { return (ApexMailClient) arr[0]; }
     @SuppressWarnings("unchecked")
     static AtomicReference<Recorded> recorded(Object[] arr) { return (AtomicReference<Recorded>) arr[1]; }
@@ -95,7 +92,6 @@ class ApexMailClientTest {
                 ));
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/messages/batch", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
                 var results = (List<?>) resp.get("results");
                 assertEquals(1, results.size());
             } finally { stop(arr); }
@@ -221,7 +217,6 @@ class ApexMailClientTest {
                 var resp = client(arr).webhooks().list();
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/webhooks", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
                 var whs = (List<?>) resp.get("webhooks");
                 assertEquals(2, whs.size());
             } finally { stop(arr); }
@@ -464,7 +459,6 @@ class ApexMailClientTest {
                 assertEquals("GET", recorded(arr).get().method());
                 assertTrue(recorded(arr).get().path().contains("messageId=msg_123"));
                 assertTrue(recorded(arr).get().path().contains("limit=100"));
-                @SuppressWarnings("unchecked")
                 var events = (List<?>) resp.get("events");
                 assertEquals(1, events.size());
             } finally { stop(arr); }

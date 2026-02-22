@@ -1,6 +1,6 @@
 # ApexMail Mail Server - Docker Compose
 #
-# Self-hosted email infrastructure with NO third-party services.
+# Enterprise-grade email infrastructure with direct SMTP delivery.
 # All emails are sent directly via SMTP with DKIM signing.
 
 version: '3.8'

@@ -318,37 +318,37 @@ describe('Phase 4: MTA Stack', () => {
 describe('Phase 5: Analytics & Tracking', () => {
     describe('5.1 Tracking Application', () => {
         it('should have tracking application', () => {
-            expect(dirExists('apps/tracking')).toBe(true);
-            expect(fileExists('apps/tracking/src/index.ts')).toBe(true);
+            expect(dirExists('services/mail-server/crates/tracking-service')).toBe(true);
+            expect(fileExists('services/mail-server/crates/tracking-service/src/main.rs')).toBe(true);
         });
     });
 
     describe('5.2 Event Processing', () => {
         it('should have event processor', () => {
-            expect(fileExists('apps/tracking/src/processor.ts')).toBe(true);
-            const content = readFile('apps/tracking/src/processor.ts');
+            expect(fileExists('services/mail-server/crates/tracking-service/src/processor.rs')).toBe(true);
+            const content = readFile('services/mail-server/crates/tracking-service/src/processor.rs');
             expect(content).toContain('EventProcessor');
         });
 
         it('should buffer events for batch writing', () => {
-            const content = readFile('apps/tracking/src/processor.ts');
+            const content = readFile('services/mail-server/crates/tracking-service/src/processor.rs');
             expect(content).toContain('buffer');
-            expect(content).toContain('flushIntervalMs');
-            expect(content).toContain('maxBufferSize');
+            expect(content).toContain('flush_interval_ms');
+            expect(content).toContain('max_buffer_size');
         });
 
         it('should implement open tracking with deduplication', () => {
-            const content = readFile('apps/tracking/src/processor.ts');
-            expect(content).toContain('recordOpen');
-            expect(content).toContain('isDuplicate');
-            expect(content).toContain('dedupeKey');
+            const content = readFile('services/mail-server/crates/tracking-service/src/processor.rs');
+            expect(content).toContain('record_open');
+            expect(content).toContain('try_set_dedup');
+            expect(content).toContain('dedup_key');
         });
 
         it('should implement click tracking', () => {
-            const content = readFile('apps/tracking/src/processor.ts');
-            expect(content).toContain('recordClick');
-            expect(content).toContain('linkId');
-            expect(content).toContain('linkUrl');
+            const content = readFile('services/mail-server/crates/tracking-service/src/processor.rs');
+            expect(content).toContain('record_click');
+            expect(content).toContain('link_id');
+            expect(content).toContain('link_url');
         });
     });
 

@@ -6,11 +6,11 @@ import { CompareCTA } from '@/components/compare/CompareCTA';
 export const metadata: Metadata = {
   title: 'ApexMail vs Resend | Feature Comparison',
   description:
-    'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, self-hosting, and compliance automation.',
+    'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, flexible deployment, and compliance automation.',
   openGraph: {
     title: 'ApexMail vs Resend | Feature Comparison',
     description:
-      'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, self-hosting, and compliance automation.',
+      'Compare ApexMail to Resend. See why teams choose ApexMail for enterprise features, flexible deployment, and compliance automation.',
   },
 };
 
@@ -25,7 +25,7 @@ const comparisonData = {
       name: 'Deliverability',
       features: [
         { name: 'Delivery Rate', apexmail: '99.9%', competitor: '99%', winner: 'apexmail' },
-        { name: 'Dedicated IP', apexmail: 'From $50/mo', competitor: 'From $50/mo', winner: 'tie' },
+        { name: 'Dedicated IP', apexmail: 'From $30/mo', competitor: 'From $50/mo', winner: 'apexmail' },
         { name: 'IP Warming', apexmail: 'Automatic geometric', competitor: 'Basic', winner: 'apexmail' },
         { name: 'BIMI Support', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'ARC Signing', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
@@ -36,9 +36,9 @@ const comparisonData = {
       name: 'Compliance',
       features: [
         { name: 'GDPR Automation', apexmail: 'Full DSR handling', competitor: 'Basic', winner: 'apexmail' },
-        { name: 'HIPAA BAA', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'HIPAA BAA', apexmail: 'Enterprise plan', competitor: 'No', winner: 'apexmail' },
         { name: 'Consent Management', apexmail: 'Built-in', competitor: 'No', winner: 'apexmail' },
-        { name: 'Audit Logs', apexmail: 'Complete', competitor: 'Basic', winner: 'apexmail' },
+        { name: 'Audit Logs', apexmail: 'Growth plan & above', competitor: 'Basic', winner: 'apexmail' },
         { name: 'Data Residency Options', apexmail: 'EU/US/Custom', competitor: 'US only', winner: 'apexmail' },
       ],
     },
@@ -59,14 +59,14 @@ const comparisonData = {
         { name: 'SSO/SAML', apexmail: 'Scale & Enterprise', competitor: 'No', winner: 'apexmail' },
         { name: 'White-Label', apexmail: 'Enterprise', competitor: 'No', winner: 'apexmail' },
         { name: 'Sub-Accounts', apexmail: 'Scale & Enterprise', competitor: 'No', winner: 'apexmail' },
-        { name: 'Self-Hosted Option', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
-        { name: 'SLA Guarantees', apexmail: '99.99%', competitor: 'No', winner: 'apexmail' },
+        { name: 'Private Deployment', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
+        { name: 'SLA Guarantees', apexmail: 'Scale (99.9%, 10% credit) & Enterprise (99.9%, 25% credit)', competitor: 'No', winner: 'apexmail' },
       ],
     },
     {
       name: 'AI & Analytics',
       features: [
-        { name: 'Send-Time Optimization', apexmail: 'ML-based', competitor: 'No', winner: 'apexmail' },
+        { name: 'Send-Time Optimization', apexmail: 'ML-based (Pro+ plans)', competitor: 'No', winner: 'apexmail' },
         { name: 'Local AI Inference', apexmail: 'Yes', competitor: 'No', winner: 'apexmail' },
         { name: 'Advanced Analytics', apexmail: 'DuckDB-powered', competitor: 'Basic', winner: 'apexmail' },
         { name: 'Webhooks', apexmail: 'Yes', competitor: 'Yes', winner: 'tie' },
@@ -77,9 +77,9 @@ const comparisonData = {
     title: 'Why Choose ApexMail Over Resend?',
     points: [
       'Full enterprise features: SSO, white-label, sub-accounts',
-      'HIPAA compliance with BAA for healthcare apps',
-      'Self-hosted option for complete data sovereignty',
-      'Advanced analytics and send-time optimization',
+      'HIPAA compliance with BAA for healthcare apps (Enterprise plan)',
+      'Private deployment option for complete data sovereignty',
+      'Advanced analytics and send-time optimization (Pro+)',
       'Higher batch limits (1,000 vs 100 per request)',
       'React Email JSX authoring — compose emails as React components',
       'Official SDKs for Node.js, Python, Go, Ruby, PHP, and Java',

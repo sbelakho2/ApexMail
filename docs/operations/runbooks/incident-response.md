@@ -127,7 +127,7 @@ docker compose -f docker-compose.prod.yml exec mta \
   postqueue -p | tail -1
 
 # Check recent bounces
-curl -s "http://api:3001/api/v1/analytics/bounces?window=1h" | jq
+curl -s "http://api:3001/v1/analytics/bounces?window=1h" | jq
 
 # Check IP reputation
 curl -s "https://api.senderscore.org/v2/score?ip=YOUR_IP"
@@ -157,7 +157,7 @@ EOF
 docker compose -f docker-compose.prod.yml exec mta postfix reload
 
 # Switch to backup IP pool
-curl -X POST http://api:3001/api/v1/admin/ip-pool/switch \
+curl -X POST http://api:3001/v1/admin/ip-pool/switch \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"pool": "backup"}'
 ```
@@ -306,11 +306,11 @@ docker compose -f docker-compose.prod.yml up -d --scale worker=6
 curl -X POST http://ops:9090/api/queues/email/retry-stuck
 
 # Pause incoming (if needed)
-curl -X POST http://api:3001/api/v1/admin/queue/pause \
+curl -X POST http://api:3001/v1/admin/queue/pause \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 
 # Process backlog, then resume
-curl -X POST http://api:3001/api/v1/admin/queue/resume \
+curl -X POST http://api:3001/v1/admin/queue/resume \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
@@ -333,7 +333,7 @@ docker compose -f docker-compose.prod.yml stop api
 iptables -A INPUT -s SUSPICIOUS_IP -j DROP
 
 # 3. Revoke compromised credentials
-curl -X POST http://api:3001/api/v1/admin/revoke-all-tokens \
+curl -X POST http://api:3001/v1/admin/revoke-all-tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 
 # 4. Enable enhanced logging
@@ -349,13 +349,13 @@ pg_dump -U apexmail apexmail > db_backup_$(date +%Y%m%d_%H%M%S).sql
 
 ```bash
 # Check audit logs
-curl -s "http://api:3001/api/v1/admin/audit-logs?window=24h" | jq
+curl -s "http://api:3001/v1/admin/audit-logs?window=24h" | jq
 
 # Check access patterns
 curl -s "http://ops:9090/api/metrics/requests?groupBy=ip" | jq
 
 # Review API key usage
-curl -s "http://api:3001/api/v1/admin/api-keys/audit" | jq
+curl -s "http://api:3001/v1/admin/api-keys/audit" | jq
 ```
 
 ---

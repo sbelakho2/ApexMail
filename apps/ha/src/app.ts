@@ -75,7 +75,7 @@ app.use('*', cors({
   origin: config.corsOrigins,
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-API-Key'],
-  exposeHeaders: ['X-Request-ID', 'X-RateLimit-Remaining'],
+  exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
   maxAge: 86400,
   credentials: true,
 }));

@@ -371,14 +371,18 @@ export default function IPWarmerPage() {
                         {overallUtilization}%
                     </div>
                     <div className="w-full h-2 bg-muted rounded-full mt-2 overflow-hidden">
-                        <div 
-                            className={cn(
-                                'h-full rounded-full transition-all',
-                                overallUtilization >= 80 ? 'bg-emerald-500' : 
-                                overallUtilization >= 50 ? 'bg-amber-500' : 'bg-muted-foreground'
-                            )}
-                            style={{ width: `${Math.min(overallUtilization, 100)}%` }}
-                        />
+                        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                            <rect
+                                x="0"
+                                y="0"
+                                width={Math.max(0, Math.min(overallUtilization, 100))}
+                                height="8"
+                                className={cn(
+                                    overallUtilization >= 80 ? 'fill-emerald-500' :
+                                    overallUtilization >= 50 ? 'fill-amber-500' : 'fill-muted-foreground'
+                                )}
+                            />
+                        </svg>
                     </div>
                 </div>
             </div>
@@ -439,13 +443,17 @@ export default function IPWarmerPage() {
                                     </span>
                                 </div>
                                 <div className="w-full h-1.5 bg-muted rounded-full mt-2 overflow-hidden">
-                                    <div 
-                                        className={cn(
-                                            'h-full rounded-full transition-all',
-                                            pool.utilizationPercent >= 70 ? 'bg-emerald-500' : 'bg-primary'
-                                        )}
-                                        style={{ width: `${Math.min(pool.utilizationPercent, 100)}%` }}
-                                    />
+                                    <svg width="100%" height="100%" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+                                        <rect
+                                            x="0"
+                                            y="0"
+                                            width={Math.max(0, Math.min(pool.utilizationPercent, 100))}
+                                            height="6"
+                                            className={cn(
+                                                pool.utilizationPercent >= 70 ? 'fill-emerald-500' : 'fill-primary'
+                                            )}
+                                        />
+                                    </svg>
                                 </div>
                             </button>
                         ))}
@@ -506,13 +514,17 @@ export default function IPWarmerPage() {
                                                                 <span className="text-xs text-muted-foreground">/ {maxDay}</span>
                                                             </div>
                                                             <div className="w-24 h-1.5 bg-muted rounded-full mt-1 overflow-hidden">
-                                                                <div 
-                                                                    className={cn(
-                                                                        'h-full rounded-full',
-                                                                        ip.isFullyWarmed ? 'bg-emerald-500' : 'bg-primary'
-                                                                    )}
-                                                                    style={{ width: `${progressPercent}%` }}
-                                                                />
+                                                                <svg width="100%" height="100%" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+                                                                    <rect
+                                                                        x="0"
+                                                                        y="0"
+                                                                        width={Math.max(0, Math.min(progressPercent, 100))}
+                                                                        height="6"
+                                                                        className={cn(
+                                                                            ip.isFullyWarmed ? 'fill-emerald-500' : 'fill-primary'
+                                                                        )}
+                                                                    />
+                                                                </svg>
                                                             </div>
                                                         </td>
                                                         <td className="px-4 py-3">

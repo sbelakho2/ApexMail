@@ -34,7 +34,9 @@ export function createOpsRoutes(services: OpsServices): Hono {
     const app = new Hono();
 
     // Middleware
-    app.use('*', cors());
+    app.use('*', cors({
+        exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+    }));
     app.use('*', honoLogger());
     app.use('*', timing());
 

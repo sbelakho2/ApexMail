@@ -37,18 +37,18 @@ CONTEXT_AWARENESS = [
         "name": "starter_email_count",
         "context": "starter_healthy",
         "question": "How many emails do I have left this month?",
-        "must_contain": ["18,240", "25,000", "6,760"],
+        "must_contain": ["18,240", "50,000", "31,760"],
         "must_not_contain": ["don't have access", "I can't see"],
-        "description": "Must calculate remaining emails from context (25000 - 18240 = 6760)"
+        "description": "Must calculate remaining emails from context (50000 - 18240 = 31760)"
     },
     {
         "id": "ctx_002",
         "name": "starter_team_count",
         "context": "starter_healthy",
         "question": "Can I add another team member?",
-        "must_contain": ["3", "2"],
+        "must_contain": ["5", "2"],
         "must_contain_one_of": ["yes", "Yes", "you can"],
-        "description": "Must know Starter = 3 max, customer has 2, so 1 more allowed"
+        "description": "Must know Starter = 5 max, customer has 2, so 3 more allowed"
     },
     {
         "id": "ctx_003",
@@ -65,9 +65,9 @@ CONTEXT_AWARENESS = [
         "name": "free_near_limit",
         "context": "free_hitting_limits",
         "question": "Am I going to run out of emails?",
-        "must_contain": ["980", "1,000"],
-        "must_contain_one_of": ["20", "almost", "98%", "close"],
-        "description": "Must see 980/1000 in context and warn user they have ~20 left"
+        "must_contain": ["980", "3,000"],
+        "must_contain_one_of": ["2,020", "2020", "plenty", "remaining"],
+        "description": "Must see 980/3000 in context and note ~2020 remaining"
     },
     {
         "id": "ctx_005",
@@ -83,7 +83,7 @@ CONTEXT_AWARENESS = [
         "name": "enterprise_plan_reference",
         "context": "enterprise_compliance",
         "question": "What features does my plan include?",
-        "must_contain": ["Enterprise", "2,000,000"],
+        "must_contain": ["Enterprise", "5,000,000"],
         "must_contain_one_of": ["HIPAA", "SOC2", "SOC 2", "compliance"],
         "description": "Must reference Enterprise plan specifics from context"
     },
@@ -376,8 +376,8 @@ PRICING_MATH = [
         "name": "growth_overage_142k",
         "context": "no_context",
         "question": "I'm on the Growth plan and sent 142,000 emails this month. What's my bill?",
-        "must_contain": ["$21", "$150"],
-        "description": "Growth $129 + (142K-100K)*0.50/1000 = $129+$21 = $150"
+        "must_contain": ["$150"],
+        "description": "Growth $150 includes 500K emails. 142K is within limit, bill = $150"
     },
     {
         "id": "math_002",
@@ -393,9 +393,9 @@ PRICING_MATH = [
         "name": "starter_vs_pro_30k",
         "context": "no_context",
         "question": "We send 30,000 emails/month. What's cheaper, Starter or Pro?",
-        "must_contain": ["$31.50", "$59"],
-        "must_contain_one_of": ["$2.50", "Starter"],
-        "description": "Starter $29 + 5K overage * $0.50/1K = $31.50. Pro = $59. Starter is cheaper."
+        "must_contain": ["$25", "$65"],
+        "must_contain_one_of": ["Starter", "cheaper"],
+        "description": "Starter $25 includes 50K emails, 30K within limit. Pro = $65. Starter is cheaper."
     },
     {
         "id": "math_004",
@@ -418,18 +418,18 @@ PRICING_MATH = [
         "name": "starter_overage_35k",
         "context": "no_context",
         "question": "I'm on Starter and sent 35,000 emails. What's the total bill?",
-        "must_contain": ["$34"],
-        "must_contain_one_of": ["$5", "10,000"],
-        "description": "Starter $29 + (35K-25K) * $0.50/1K = $29 + $5 = $34"
+        "must_contain": ["$25"],
+        "must_contain_one_of": ["no overage", "included", "within", "50,000"],
+        "description": "Starter $25 includes 50K emails, 35K is within limit"
     },
     {
         "id": "math_007",
         "name": "scale_no_overage",
         "context": "no_context",
         "question": "I'm on the Scale plan and sent 480,000 emails. Any overages?",
-        "must_contain_one_of": ["no overage", "no extra", "$399", "within", "under", "included"],
-        "must_not_contain": ["$0.50"],
-        "description": "Scale includes 500K — 480K is within limit, no overages"
+        "must_contain_one_of": ["no overage", "no extra", "$350", "within", "under", "included"],
+        "must_not_contain": ["$0.40"],
+        "description": "Scale includes 2M — 480K is within limit, no overages"
     },
     {
         "id": "math_008",
@@ -445,9 +445,10 @@ PRICING_MATH = [
         "name": "enterprise_annual",
         "context": "no_context",
         "question": "How much would the Enterprise plan cost annually?",
-        "must_contain": ["$1,299"],
-        "must_contain_one_of": ["$15,588", "$12,990", "annual"],
-        "description": "Enterprise is $1,299/month. Annual = $15,588 or $12,990 (with discount)."
+        "must_contain": ["$800"],
+        "must_contain_one_of": ["$8,000", "8,000", "annual"],
+        "must_not_contain": ["$9,600"],
+        "description": "Enterprise is $800/month. Annual billing = $8,000/yr."
     },
 ]
 
@@ -550,8 +551,8 @@ KNOWLEDGE = [
         "name": "starter_plan_details",
         "context": "no_context",
         "question": "What does the Starter plan include?",
-        "must_contain": ["$29", "25,000"],
-        "must_contain_one_of": ["3 domain", "3 team"],
+        "must_contain": ["$25", "50,000"],
+        "must_contain_one_of": ["5 domain", "5 team"],
         "description": "Must state correct Starter pricing and limits"
     },
     {
@@ -559,9 +560,9 @@ KNOWLEDGE = [
         "name": "growth_plan_api_limit",
         "context": "no_context",
         "question": "What's the API call limit on the Growth plan?",
-        "must_contain": ["1,000,000"],
-        "must_not_contain": ["2,000,000"],
-        "description": "Must state 1M (not the old incorrect 2M)"
+        "must_contain": ["5,000,000"],
+        "must_not_contain": ["1,000,000"],
+        "description": "Must state 5M (not the old incorrect 1M)"
     },
     {
         "id": "know_004",
@@ -577,36 +578,36 @@ KNOWLEDGE = [
         "name": "scale_api_limit",
         "context": "no_context",
         "question": "What's the API limit on the Scale plan?",
-        "must_contain": ["5,000,000"],
-        "must_not_contain": ["10,000,000"],
-        "description": "Must state 5M (not the old incorrect 10M)"
+        "must_contain": ["20,000,000"],
+        "must_not_contain": ["5,000,000"],
+        "description": "Must state 20M (not the old incorrect 5M)"
     },
     {
         "id": "know_006",
         "name": "starter_team_limit",
         "context": "no_context",
         "question": "How many team members on the Starter plan?",
-        "must_contain": ["3"],
-        "must_not_contain": ["5 team"],
-        "description": "Must state 3 (not the old incorrect 5)"
+        "must_contain": ["5"],
+        "must_not_contain": ["3 team"],
+        "description": "Must state 5 (not the old incorrect 3)"
     },
     {
         "id": "know_007",
         "name": "enterprise_price",
         "context": "no_context",
         "question": "How much is the Enterprise plan?",
-        "must_contain": ["$1,299"],
-        "must_contain_one_of": ["2,000,000", "2M"],
-        "description": "Must state $1,299 and 2M emails"
+        "must_contain": ["$800"],
+        "must_contain_one_of": ["5,000,000", "5M"],
+        "description": "Must state $800 and 5M emails"
     },
     {
         "id": "know_008",
         "name": "overage_rate",
         "context": "no_context",
         "question": "How much do overages cost?",
-        "must_contain": ["$0.50"],
+        "must_contain": ["$0.40"],
         "must_contain_one_of": ["1,000", "per 1K", "per thousand"],
-        "description": "Overage rate is $0.50 per 1,000 emails"
+        "description": "Overage rate is $0.40 per 1,000 emails"
     },
 
     # ── Domain/DNS knowledge ──
@@ -675,16 +676,16 @@ KNOWLEDGE = [
         "name": "ab_testing_plan",
         "context": "no_context",
         "question": "Which plan includes A/B testing?",
-        "must_contain_one_of": ["Growth", "$129"],
-        "description": "A/B testing starts at Growth plan"
+        "must_contain_one_of": ["Pro", "$65"],
+        "description": "A/B testing starts at Pro plan"
     },
     {
         "id": "know_016",
         "name": "dedicated_ip_plan",
         "context": "no_context",
         "question": "Which plans include a dedicated IP?",
-        "must_contain_one_of": ["Growth", "Scale", "Enterprise"],
-        "description": "Dedicated IPs start at Growth plan"
+        "must_contain_one_of": ["Pro", "Growth", "Scale", "Enterprise"],
+        "description": "Dedicated IP add-on available from Pro plan ($30/mo)"
     },
     {
         "id": "know_017",
@@ -969,7 +970,7 @@ DATA_LOOKUP = [
         "context": "growth_dkim_fail",
         "question": "When does my plan renew?",
         "must_contain": ["20th"],
-        "must_contain_one_of": ["Growth", "$129", "renew"],
+        "must_contain_one_of": ["Growth", "$150", "renew"],
         "description": "Must state billing cycle date from context"
     },
     {
@@ -1273,7 +1274,7 @@ RAG_VERIFICATION = [
         "name": "context_sufficient_plan_info",
         "context": "enterprise_compliance",
         "question": "What plan are we on and when did we sign up?",
-        "must_contain": ["Enterprise", "$1,299"],
+        "must_contain": ["Enterprise", "$800"],
         "must_contain_one_of": ["2023", "September"],
         "must_not_contain": ["let me check", "let me look", "let me pull"],
         "description": "Plan and signup date are in context — no tool call needed"
@@ -1283,10 +1284,10 @@ RAG_VERIFICATION = [
         "name": "context_sufficient_team_math",
         "context": "growth_dkim_fail",
         "question": "How many more team members can I add?",
-        "must_contain": ["4"],
-        "must_contain_one_of": ["10", "6", "Growth"],
+        "must_contain": ["19"],
+        "must_contain_one_of": ["25", "6", "Growth"],
         "must_not_contain": ["let me check", "let me look"],
-        "description": "Team count is in context (6/10 = 4 remaining) — no tool call needed"
+        "description": "Team count is in context (6/25 = 19 remaining) — no tool call needed"
     },
 ]
 
@@ -1423,9 +1424,9 @@ PERSONALIZED_VARIATIONS = [
         "name": "growth_email_headroom",
         "context": "growth_dkim_fail",
         "question": "How much email capacity do I have left this month?",
-        "must_contain": ["67,500", "100,000"],
-        "must_contain_one_of": ["32,500", "32.5K", "67.5%"],
-        "description": "Must calculate 100K - 67.5K = 32.5K remaining"
+        "must_contain": ["67,500", "500,000"],
+        "must_contain_one_of": ["432,500", "432.5K", "13.5%"],
+        "description": "Must calculate 500K - 67.5K = 432.5K remaining"
     },
     {
         "id": "pv_015",
@@ -1470,8 +1471,8 @@ PERSONALIZED_VARIATIONS = [
         "context": "free_hitting_limits",
         "question": "What can't I do on the Free plan?",
         "must_contain_one_of": ["webhooks", "webhook", "1 domain"],
-        "must_contain_one_of_2": ["1,000", "limited", "upgrade"],
-        "description": "Must explain Free plan limitations: no webhooks, 1 domain, 1K emails"
+        "must_contain_one_of_2": ["3,000", "limited", "upgrade"],
+        "description": "Must explain Free plan limitations: no webhooks, 1 domain, 3K emails"
     },
 
     # ── Pro deep ──
@@ -1508,27 +1509,27 @@ PERSONALIZED_VARIATIONS = [
         "name": "cross_profile_emails_left_starter",
         "context": "starter_healthy",
         "question": "How many emails can I still send?",
-        "must_contain": ["6,760"],
-        "must_contain_one_of": ["25,000", "18,240", "Starter"],
-        "description": "Starter: 25K - 18,240 = 6,760 remaining"
+        "must_contain": ["31,760"],
+        "must_contain_one_of": ["50,000", "18,240", "Starter"],
+        "description": "Starter: 50K - 18,240 = 31,760 remaining"
     },
     {
         "id": "pv_024",
         "name": "cross_profile_emails_left_enterprise",
         "context": "enterprise_compliance",
         "question": "How many emails can we still send this month?",
-        "must_contain": ["550,000"],
-        "must_contain_one_of": ["2,000,000", "1,450,000", "Enterprise"],
-        "description": "Enterprise: 2M - 1.45M = 550K remaining"
+        "must_contain": ["3,550,000"],
+        "must_contain_one_of": ["5,000,000", "1,450,000", "Enterprise"],
+        "description": "Enterprise: 5M - 1.45M = 3.55M remaining"
     },
     {
         "id": "pv_025",
         "name": "cross_profile_emails_left_free",
         "context": "free_hitting_limits",
         "question": "How many emails do I have left?",
-        "must_contain": ["20"],
-        "must_contain_one_of": ["1,000", "980", "Free"],
-        "description": "Free: 1000 - 980 = 20 remaining"
+        "must_contain": ["2,020"],
+        "must_contain_one_of": ["3,000", "980", "Free"],
+        "description": "Free: 3000 - 980 = 2020 remaining"
     },
 
     # ── Context-aware advice ──
@@ -1602,9 +1603,9 @@ NEW_PROFILE_SCENARIOS = [
         "name": "starter_overage_cost",
         "context": "starter_over_limit",
         "question": "Am I over my email limit? How much will it cost?",
-        "must_contain": ["27,800", "25,000"],
-        "must_contain_one_of": ["2,800", "$1.40", "overage", "$0.50"],
-        "description": "Must calculate 2800 overage at $0.50/1K = $1.40"
+        "must_contain": ["27,800", "50,000"],
+        "must_contain_one_of": ["within", "no overage", "22,200", "under"],
+        "description": "Starter includes 50K emails, 27,800 is within limit — no overage"
     },
 
     # ── Nonprofit bounce spike ──
@@ -1701,9 +1702,9 @@ NEW_PROFILE_SCENARIOS = [
         "name": "gaming_near_limits",
         "context": "growth_gaming",
         "question": "We're running out of emails and API calls this month. What are our options?",
-        "must_contain_one_of": ["92,300", "92.3%", "100,000"],
-        "must_contain_one_of_2": ["upgrade", "Scale", "overage"],
-        "description": "Must recommend Scale plan or discuss overage"
+        "must_contain_one_of": ["92,300", "500,000", "18.5%"],
+        "must_contain_one_of_2": ["within", "room", "plenty", "comfortable"],
+        "description": "Must note plenty of email headroom with Growth's 500K limit"
     },
 
     # ── Complaint template issue ──
@@ -1734,7 +1735,7 @@ NEW_PROFILE_SCENARIOS = [
         "name": "media_limits_approaching",
         "context": "scale_media",
         "question": "Are we going to hit our sending limits before the month ends?",
-        "must_contain_one_of": ["470,000", "500,000", "94%"],
+        "must_contain_one_of": ["470,000", "2,000,000", "23.5%"],
         "must_contain_one_of_2": ["upgrade", "Enterprise", "overage", "8 days"],
         "description": "Must warn about imminent limit hit and suggest upgrade"
     },
@@ -1746,7 +1747,7 @@ NEW_PROFILE_SCENARIOS = [
         "context": "scale_healthcare",
         "question": "We need HIPAA compliance for our patient communications. Is that available?",
         "must_contain_one_of": ["Enterprise", "upgrade"],
-        "must_contain_one_of_2": ["HIPAA", "$1,299", "BAA"],
+        "must_contain_one_of_2": ["HIPAA", "$800", "BAA"],
         "description": "Must identify HIPAA requires Enterprise plan upgrade"
     },
 
@@ -1778,9 +1779,9 @@ NEW_PROFILE_SCENARIOS = [
         "name": "enterprise_volume_spike",
         "context": "enterprise_ecommerce",
         "question": "Our spring sale starts in 5 days and we'll need more emails. What are our options?",
-        "must_contain_one_of": ["1,820,000", "2,000,000", "91%"],
-        "must_contain_one_of_2": ["overage", "contact", "account manager", "CSM"],
-        "description": "Must discuss volume increase options for Enterprise"
+        "must_contain_one_of": ["1,820,000", "5,000,000", "36.4%"],
+        "must_contain_one_of_2": ["within", "room", "headroom", "comfortable"],
+        "description": "Must discuss volume ahead with Enterprise's 5M limit"
     },
 
     # ── GDPR data deletion ──
@@ -1823,7 +1824,7 @@ NEW_PROFILE_SCENARIOS = [
         "context": "starter_dunning_soft",
         "question": "Our payment failed. When will our emails stop?",
         "must_contain_one_of": ["grace", "Feb 17", "tomorrow"],
-        "must_contain_one_of_2": ["payment", "update", "billing", "$29"],
+        "must_contain_one_of_2": ["payment", "update", "billing", "$25"],
         "description": "Must warn grace period ends tomorrow"
     },
 
@@ -1833,9 +1834,9 @@ NEW_PROFILE_SCENARIOS = [
         "name": "rate_limit_429_errors",
         "context": "growth_rate_limited",
         "question": "We're getting tons of 429 errors from the API. What's happening?",
-        "must_contain_one_of": ["rate limit", "429", "300"],
+        "must_contain_one_of": ["rate limit", "429", "1,000", "1000"],
         "must_contain_one_of_2": ["req/min", "requests", "batch", "throttl"],
-        "description": "Must identify 300 req/min Growth limit and suggest solutions"
+        "description": "Must identify 1,000 req/min rate limit and suggest solutions"
     },
 
     # ── Outlook rendering ──
@@ -2043,7 +2044,7 @@ NEW_PROFILE_SCENARIOS = [
         "context": "growth_travel",
         "question": "How much of our email quota have we used?",
         "must_contain": ["55,400"],
-        "must_contain_one_of": ["100,000", "55.4%", "44,600"],
+        "must_contain_one_of": ["500,000", "11.1%", "444,600"],
         "description": "Must calculate email capacity from travel profile context"
     },
 ]

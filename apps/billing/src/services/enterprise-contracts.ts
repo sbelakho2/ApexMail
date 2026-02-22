@@ -238,7 +238,7 @@ export class EnterpriseContractService {
     // Calculate usage overage
     const usageResult = await this.db.query<{ total: string }>(
       `SELECT COALESCE(SUM(quantity), 0)::text as total
-       FROM usage_events
+       FROM metering_events
        WHERE tenant_id = $1
          AND event_type = 'emails_sent'
          AND timestamp >= $2
@@ -718,7 +718,7 @@ export class EnterpriseContractService {
     // Query actual usage from usage_events table
     const usageResult = await this.db.query<{ total: string }>(
       `SELECT COALESCE(SUM(quantity), 0)::text as total
-       FROM usage_events
+       FROM metering_events
        WHERE tenant_id = $1
          AND event_type = 'emails_sent'
          AND timestamp >= $2

@@ -7,7 +7,7 @@ import { ArrowRight, Zap, Clock, Shield, Headphones } from '@/components/ui/icon
 
 const ctaFeatures = [
  { icon: Zap, text: 'Send your first email in < 60 seconds' },
- { icon: Clock, text: '1,000 free emails every month, forever' },
+ { icon: Clock, text: '3,000 free emails every month, forever' },
  { icon: Shield, text: 'No credit card required to start' },
  { icon: Headphones, text: 'Free migration assistance available' },
 ];
@@ -63,7 +63,7 @@ export function CTASection() {
  >
    <Link
      href="https://app.apexmail.ee/signup"
-     className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-brand-500 rounded-md hover:bg-brand-600 transition-colors w-full sm:w-auto shadow-lg shadow-brand-500/20"
+     className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-white bg-brand-500 rounded-md border border-brand-500 hover:bg-brand-600 transition-colors w-full sm:w-auto"
    >
      Deploy to Production
      <ArrowRight className="w-4 h-4 ml-2" />
@@ -85,11 +85,11 @@ export function CTASection() {
     >
       <span className="flex items-center gap-2">
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></span>
-        99.99% Uptime SLA
+        99.9% Uptime SLA (Scale+)
       </span>
       <span className="flex items-center gap-2">
         <span className="w-1.5 h-1.5 rounded-full bg-brand-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
-        SOC 2 Certified
+        SOC 2 Controls (Enterprise)
       </span>
       <span className="flex items-center gap-2">
         <span className="w-1.5 h-1.5 rounded-full bg-brand-500 shadow-[0_0_8px_rgba(37,99,235,0.4)]"></span>
@@ -97,7 +97,7 @@ export function CTASection() {
       </span>
       <span className="flex items-center gap-2">
         <span className="w-1.5 h-1.5 rounded-full bg-surface-400"></span>
-        24/7 Support
+        Priority Support (Growth+)
       </span>
     </motion.div>
  </motion.div>

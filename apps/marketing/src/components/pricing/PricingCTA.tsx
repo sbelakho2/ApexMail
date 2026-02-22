@@ -26,7 +26,7 @@ export function PricingCTA() {
  <div className="flex flex-col sm:flex-row gap-4 justify-center">
  <Link
  href="/signup"
- className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors shadow-sm"
+ className="inline-flex items-center justify-center px-6 py-3 text-base font-semibold text-white bg-primary-600 rounded-md border border-primary-600 hover:bg-primary-700 transition-colors"
  >
  Start Free
  <ArrowRight className="w-4 h-4 ml-2" />

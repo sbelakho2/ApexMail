@@ -64,13 +64,13 @@ export class UsageAlertsService {
         metric_type: UsageThreshold['metricType'];
         threshold_percent: number;
         notification_channel: UsageThreshold['notificationChannel'];
-        is_enabled: boolean;
+        enabled: boolean;
         last_triggered_at: Date | null;
       }>(
-        `INSERT INTO usage_thresholds (id, tenant_id, metric_type, threshold_percent, notification_channel, is_enabled)
+        `INSERT INTO usage_alert_configs (id, tenant_id, metric_type, threshold_percent, notification_channel, enabled)
          VALUES (gen_random_uuid(), $1, $2, $3, $4, true)
          ON CONFLICT (tenant_id, metric_type, threshold_percent)
-         DO UPDATE SET notification_channel = $4, is_enabled = true, updated_at = NOW()
+         DO UPDATE SET notification_channel = $4, enabled = true, updated_at = NOW()
          RETURNING *`,
         [tenantId, threshold.metricType, threshold.thresholdPercent, threshold.notificationChannel]
       );
@@ -85,7 +85,7 @@ export class UsageAlertsService {
           metricType: row.metric_type,
           thresholdPercent: row.threshold_percent,
           notificationChannel: row.notification_channel,
-          isEnabled: row.is_enabled,
+          isEnabled: row.enabled,
           lastTriggeredAt: row.last_triggered_at,
         });
       }
@@ -122,8 +122,8 @@ export class UsageAlertsService {
       notification_channel: UsageThreshold['notificationChannel'];
       last_triggered_at: Date | null;
     }>(
-      `SELECT * FROM usage_thresholds
-       WHERE tenant_id = $1 AND is_enabled = true
+      `SELECT * FROM usage_alert_configs
+       WHERE tenant_id = $1 AND enabled = true
        ORDER BY threshold_percent ASC`,
       [tenantId]
     );
@@ -175,7 +175,7 @@ export class UsageAlertsService {
 
         // Update last triggered
         await this.db.query(
-          `UPDATE usage_thresholds SET last_triggered_at = NOW() WHERE id = $1`,
+          `UPDATE usage_alert_configs SET last_triggered_at = NOW() WHERE id = $1`,
           [threshold.id]
         );
 
@@ -296,8 +296,8 @@ export class UsageAlertsService {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const tenantsResult = await this.db.query<{ id: string }>(
-        `SELECT DISTINCT tenant_id as id FROM usage_thresholds 
-         WHERE is_enabled = true 
+        `SELECT DISTINCT tenant_id as id FROM usage_alert_configs 
+         WHERE enabled = true 
          ORDER BY tenant_id 
          LIMIT $1 OFFSET $2`,
         [BATCH_SIZE, offset]

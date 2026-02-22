@@ -4,24 +4,24 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center whitespace-nowrap rounded-lg text-[14px] font-display font-semibold tracking-[0.01em] ring-offset-background transition-all duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98]',
+  'inline-flex items-center justify-center whitespace-nowrap rounded-lg text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
   {
     variants: {
       variant: {
-        apex: 'font-display bg-gradient-to-b from-brand-500 to-brand-700 text-white border border-brand-500/60 shadow-[0_12px_34px_rgba(52,78,165,0.38),inset_0_1px_0_rgba(255,255,255,0.25)] hover:from-brand-500 hover:to-brand-600 hover:shadow-[0_16px_40px_rgba(52,78,165,0.45)] dark:from-brand-400 dark:to-brand-600 dark:border-brand-300/60 dark:text-surface-900 dark:shadow-[0_14px_36px_rgba(91,120,210,0.48),inset_0_1px_0_rgba(255,255,255,0.18)] dark:hover:from-brand-400 dark:hover:to-brand-500',
-        default: 'font-display bg-gradient-to-b from-brand-500 to-brand-700 text-white border border-brand-500/60 shadow-[0_12px_34px_rgba(52,78,165,0.38),inset_0_1px_0_rgba(255,255,255,0.25)] hover:from-brand-500 hover:to-brand-600 hover:shadow-[0_16px_40px_rgba(52,78,165,0.45)] dark:from-brand-400 dark:to-brand-600 dark:border-brand-300/60 dark:text-surface-900 dark:shadow-[0_14px_36px_rgba(91,120,210,0.48),inset_0_1px_0_rgba(255,255,255,0.18)] dark:hover:from-brand-400 dark:hover:to-brand-500',
+        apex: 'font-display bg-brand-600 text-white border border-brand-600 hover:bg-brand-700 dark:bg-brand-400 dark:border-brand-400 dark:text-surface-900 dark:hover:bg-brand-500',
+        default: 'font-display bg-brand-600 text-white border border-brand-600 hover:bg-brand-700 dark:bg-brand-400 dark:border-brand-400 dark:text-surface-900 dark:hover:bg-brand-500',
         destructive:
-          'bg-destructive text-destructive-foreground hover:bg-destructive/90 shadow-sm',
+          'bg-destructive text-destructive-foreground hover:bg-destructive/90',
         outline:
-          'border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground hover:shadow-md dark:border-surface-300/70 dark:bg-surface-100/90 dark:hover:bg-surface-200/80',
+          'border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground dark:border-surface-300/70 dark:bg-surface-100/90 dark:hover:bg-surface-200/80',
         secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/80 shadow-sm',
+          'bg-secondary text-secondary-foreground hover:bg-secondary/80',
         ghost: 'hover:bg-accent hover:text-accent-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
-        premium: 'premium-card hover:bg-muted text-foreground',
-        success: 'bg-success text-success-foreground hover:bg-success/90 shadow-sm',
-        warning: 'bg-warning text-warning-foreground hover:bg-warning/90 shadow-sm',
-        glass: 'backdrop-blur-md bg-white/10 border border-white/20 text-foreground hover:bg-white/20 shadow-lg',
+        premium: 'bg-card border border-border text-foreground hover:bg-muted',
+        success: 'bg-success text-success-foreground hover:bg-success/90',
+        warning: 'bg-warning text-warning-foreground hover:bg-warning/90',
+        glass: 'bg-white/10 border border-white/20 text-foreground hover:bg-white/20',
       },
       size: {
         default: 'h-11 px-4 py-2',

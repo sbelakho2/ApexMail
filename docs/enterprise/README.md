@@ -39,7 +39,7 @@ All enterprise features are accessible via the Enterprise API:
 https://api.apexmail.ee/enterprise/v1
 
 # Authentication
-Authorization: Bearer <enterprise_api_key>
+X-API-Key: <enterprise_api_key>
 ```
 
 See the [Enterprise API Reference](../api/enterprise/README.md) for complete documentation.

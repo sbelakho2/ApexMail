@@ -30,10 +30,10 @@ if command -v send-email &> /dev/null; then
         --from "$FROM_EMAIL" \
         --to "$TO_EMAIL" \
         --subject "ApexMail Test Email" \
-        --text "This is a test email from ApexMail's self-hosted mail server.
+        --text "This is a test email from ApexMail's purpose-built mail infrastructure.
 
 Features:
-- Direct SMTP delivery (no third-party services)
+- Direct SMTP delivery with enterprise-grade infrastructure
 - DKIM signing enabled
 - Full delivery tracking
 

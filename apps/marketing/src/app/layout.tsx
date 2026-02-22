@@ -1,25 +1,24 @@
 import type { Metadata, Viewport } from 'next';
-import { Fraunces, IBM_Plex_Mono, Manrope } from 'next/font/google';
+import localFont from 'next/font/local';
 import { Analytics } from '@vercel/analytics/react';
 import './globals.css';
 import { Header } from '@/components/layout/Header';
 import { Footer } from '@/components/layout/Footer';
 
-const manrope = Manrope({
-  subsets: ['latin'],
-  variable: '--font-sans',
+const apex = localFont({
+  src: [
+    { path: '../../public/fonts/InterVariable.woff2', weight: '100 900', style: 'normal' },
+    { path: '../../public/fonts/InterVariable-Italic.woff2', weight: '100 900', style: 'italic' },
+  ],
+  variable: '--font-apex',
   display: 'swap',
 });
 
-const fraunces = Fraunces({
-  subsets: ['latin'],
-  variable: '--font-display',
-  display: 'swap',
-});
-
-const plexMono = IBM_Plex_Mono({
-  subsets: ['latin'],
-  weight: ['400', '500'],
+const plexMono = localFont({
+  src: [
+    { path: '../../public/fonts/JetBrainsMono-Variable.ttf', weight: '100 800', style: 'normal' },
+    { path: '../../public/fonts/JetBrainsMono-Italic-Variable.ttf', weight: '100 800', style: 'italic' },
+  ],
   variable: '--font-mono',
   display: 'swap',
 });
@@ -30,13 +29,13 @@ export const metadata: Metadata = {
     default: 'ApexMail - Enterprise Email API for Developers',
     template: '%s | ApexMail',
   },
-  description: 'The email API that keeps you out of court. EU-compliant, cryptographically verified delivery, private cloud options, and developer-first experience.',
+  description: 'The email API that keeps you out of court. EU-compliant, cryptographically verified delivery, enterprise private cloud options, and developer-first experience.',
   keywords: [
     'email API',
     'transactional email',
     'email infrastructure',
     'GDPR compliant email',
-    'HIPAA email',
+    'HIPAA-ready enterprise email',
     'email deliverability',
     'enterprise email',
     'developer email API',
@@ -50,7 +49,7 @@ export const metadata: Metadata = {
     url: 'https://apexmail.ee',
     siteName: 'ApexMail',
     title: 'ApexMail - Enterprise Email API for Developers',
-    description: 'The email API that keeps you out of court. EU-compliant, cryptographically verified delivery, and private cloud options.',
+    description: 'The email API that keeps you out of court. EU-compliant, cryptographically verified delivery, and enterprise private cloud options.',
     images: [
       {
         url: '/og-image.png',
@@ -96,14 +95,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${manrope.variable} ${fraunces.variable} ${plexMono.variable}`}>
+    <html lang="en" className={`${apex.variable} ${plexMono.variable}`}>
       <head>
         <link rel="icon" href="/favicon.ico" sizes="any" />
         <link rel="icon" href="/icon.svg" type="image/svg+xml" />
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <link rel="manifest" href="/manifest.json" />
       </head>
-      <body className="font-sans antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom">
+      <body className="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom">
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />

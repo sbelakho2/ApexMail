@@ -275,7 +275,7 @@ export class RiskScoringEngine {
             `SELECT
                 (SELECT COUNT(*) FROM abuse_reports WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days') as abuse_count,
                 (SELECT COUNT(*) FROM content_violations WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days') as violation_count,
-                (SELECT COUNT(*) FROM scan_results WHERE tenant_id = $1 AND phishing_detected = true AND created_at > NOW() - INTERVAL '30 days') as phishing_count`,
+                (SELECT COUNT(*) FROM scan_results WHERE tenant_id = $1 AND phishing_detected = true AND scanned_at > NOW() - INTERVAL '30 days') as phishing_count`,
             [tenantId]
         );
 

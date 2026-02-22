@@ -158,7 +158,7 @@ console.log(analytics);
 // Create API key
 const { key } = await apexmail.apiKeys.create({
   name: 'Production Key',
-  scopes: ['emails:send', 'emails:read']
+  scopes: ['messages:write', 'messages:read']
 });
 
 // List API keys

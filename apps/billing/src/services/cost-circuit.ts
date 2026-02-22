@@ -57,7 +57,7 @@ const COST_RATES = {
   storagePerGbMonth: 2.3,      // $0.023/GB/month
   bandwidthPerGb: 9,           // $0.09/GB
   computePerHour: 0.5,         // $0.005/hour per email processed
-  dedicatedIpPerMonth: 2000,   // $20/IP/month
+  dedicatedIpPerMonth: 2495,   // $24.95/IP/month (AWS SES dedicated IP)
 };
 
 /**
@@ -134,7 +134,8 @@ export class CostCircuitService {
       `SELECT COUNT(*)::text as count
        FROM dedicated_ips
        WHERE tenant_id = $1
-         AND allocated_at <= $2`,
+         AND status IN ('active', 'warming')
+         AND created_at <= $2`,
       [tenantId, periodEnd]
     );
 

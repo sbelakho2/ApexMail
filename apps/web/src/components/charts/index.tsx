@@ -44,6 +44,24 @@ const COLOR_ARRAY = [
   '#8b5cf6', // violet
 ];
 
+function getTooltipColorClass(color?: string): { text: string; dot: string } {
+  if (!color) return { text: 'text-foreground', dot: 'bg-muted-foreground/60' };
+  const token = color.toLowerCase();
+  if (token.includes('2563eb') || token.includes('brand') || token.includes('primary')) {
+    return { text: 'text-primary', dot: 'bg-primary' };
+  }
+  if (token.includes('16a34a') || token.includes('success')) {
+    return { text: 'text-success', dot: 'bg-success' };
+  }
+  if (token.includes('d97706') || token.includes('warning')) {
+    return { text: 'text-warning', dot: 'bg-warning' };
+  }
+  if (token.includes('dc2626') || token.includes('error') || token.includes('danger')) {
+    return { text: 'text-destructive', dot: 'bg-destructive' };
+  }
+  return { text: 'text-foreground', dot: 'bg-muted-foreground/60' };
+}
+
 // Custom Tooltip component
 function CustomTooltip({
   active,
@@ -56,15 +74,18 @@ function CustomTooltip({
   return (
     <div className="rounded-lg border border-border bg-card/95 backdrop-blur-xl p-4 shadow-xl">
       <p className="mb-2 text-[13px] font-bold text-foreground uppercase tracking-tight">{label}</p>
-      {payload.map((entry, index) => (
-        <p key={index} className="text-sm font-medium flex items-center gap-2" style={{ color: entry.color }}>
-          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
+      {payload.map((entry, index) => {
+        const tone = getTooltipColorClass(String(entry.color ?? ''));
+        return (
+        <p key={index} className={cn('text-sm font-medium flex items-center gap-2', tone.text)}>
+          <span className={cn('w-2 h-2 rounded-full', tone.dot)} />
           <span>{entry.name}:</span>
           <span className="font-bold apex-metric-number text-foreground">
             {formatter ? formatter(entry.value as number) : entry.value}
           </span>
         </p>
-      ))}
+      );
+      })}
     </div>
   );
 }

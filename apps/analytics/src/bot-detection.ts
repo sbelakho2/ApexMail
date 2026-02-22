@@ -40,7 +40,7 @@ export enum BotType {
   UNKNOWN = 'unknown',
 }
 
-// Known bot user-agent patterns
+// Known bot user-agent patterns — kept for categorisation in categorizeUserAgentBot()
 const BOT_USER_AGENT_PATTERNS = [
   // Security/email scanning services
   /barracuda/i,
@@ -83,6 +83,16 @@ const BOT_USER_AGENT_PATTERNS = [
   /node-fetch/i,
 ];
 
+/**
+ * Pre-compiled single combined alternation — O(1) per UA string instead of O(n).
+ * Compiled once at module load time; JS regex engines build a DFA/NFA once.
+ * The individual patterns above are retained for categorisation only.
+ */
+const BOT_UA_COMBINED: RegExp = new RegExp(
+  BOT_USER_AGENT_PATTERNS.map((r) => `(?:${r.source})`).join('|'),
+  'i'
+);
+
 // Known security gateway IP ranges (sample - should be regularly updated)
 const KNOWN_BOT_IP_PATTERNS = [
   // Barracuda Networks
@@ -112,6 +122,37 @@ export class BotDetectionService {
    * within budget on a 160GB EX44 machine.
    */
   private static readonly MAX_VELOCITY_CACHE_SIZE = 500_000;
+
+  /**
+   * Periodic cleanup interval handle (started in constructor, stopped in destroy()).
+   * Without this, expired velocity entries only get pruned on-access — pathological
+   * cases where a message is never accessed again leak indefinitely.
+   */
+  private readonly cleanupIntervalId: ReturnType<typeof setInterval>;
+
+  /** Auto-cleanup interval period (10 minutes). */
+  private static readonly CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+
+  constructor() {
+    // Auto-cleanup: expire stale velocity-cache entries every 10 minutes.
+    // Using unref() so the timer does not prevent process exit.
+    this.cleanupIntervalId = setInterval(
+      () => this.cleanupVelocityCache(),
+      BotDetectionService.CLEANUP_INTERVAL_MS,
+    );
+    if (typeof this.cleanupIntervalId.unref === 'function') {
+      this.cleanupIntervalId.unref();
+    }
+  }
+
+  /**
+   * Stop the background cleanup timer.  Call on service shutdown to avoid
+   * keeping the Node.js event loop alive unnecessarily.
+   */
+  destroy(): void {
+    clearInterval(this.cleanupIntervalId);
+    this.clickVelocityCache.clear();
+  }
 
   /**
    * Analyze a click event for bot characteristics
@@ -179,25 +220,28 @@ export class BotDetectionService {
   }
 
   /**
-   * Analyze user-agent string for bot patterns
+   * Analyze user-agent string for bot patterns.
+   *
+   * Uses a single pre-compiled combined regex (BOT_UA_COMBINED) for the hot-path
+   * existence check — O(1) instead of O(n) sequential pattern tests.  Only falls
+   * back to individual patterns for detailed categorisation after a match.
    */
-  private analyzeUserAgent(userAgent: string | null): { 
-    isBot: boolean; 
-    pattern?: string; 
-    botType?: BotType 
+  private analyzeUserAgent(userAgent: string | null): {
+    isBot: boolean;
+    pattern?: string;
+    botType?: BotType;
   } {
     if (!userAgent) {
       return { isBot: false };
     }
 
-    for (const pattern of BOT_USER_AGENT_PATTERNS) {
-      if (pattern.test(userAgent)) {
-        const botType = this.categorizeUserAgentBot(userAgent);
-        return { isBot: true, pattern: pattern.source, botType };
-      }
+    // Single combined test — compiled once at module load, not per call.
+    if (BOT_UA_COMBINED.test(userAgent)) {
+      const botType = this.categorizeUserAgentBot(userAgent);
+      return { isBot: true, pattern: String(botType), botType };
     }
 
-    // Check for missing or generic user-agents
+    // Check for missing or generic user-agents (not caught by pattern list)
     if (userAgent.length < 20 || userAgent === 'Mozilla/5.0') {
       return { isBot: true, pattern: 'generic/minimal', botType: BotType.UNKNOWN };
     }
@@ -250,26 +294,26 @@ export class BotDetectionService {
     const now = click.timestamp.getTime();
     
     // Get existing clicks in window
-    let recentClicks = this.clickVelocityCache.get(key) || [];
+    let recentClicks = this.clickVelocityCache.get(key) ?? [];
     
     // Filter to only clicks within window
     recentClicks = recentClicks.filter(
-      c => now - c.timestamp.getTime() < this.VELOCITY_WINDOW_MS
+      (c) => now - c.timestamp.getTime() < this.VELOCITY_WINDOW_MS
     );
     
     // Add current click
     recentClicks.push(click);
+
+    // LRU promotion: delete + re-insert moves entry to tail of Map (most recently used).
+    // When we need to evict (below), we remove from the head (least recently used).
+    this.clickVelocityCache.delete(key);
     this.clickVelocityCache.set(key, recentClicks);
 
-    // C-095: Evict oldest entries when cache exceeds cap to prevent OOM
-    if (this.clickVelocityCache.size > BotDetectionService.MAX_VELOCITY_CACHE_SIZE) {
-      const excess = this.clickVelocityCache.size - BotDetectionService.MAX_VELOCITY_CACHE_SIZE;
-      let removed = 0;
-      for (const k of this.clickVelocityCache.keys()) {
-        if (removed >= excess) break;
-        this.clickVelocityCache.delete(k);
-        removed++;
-      }
+    // C-095: Evict LRU (head) entries when cache exceeds cap — O(1) per eviction.
+    while (this.clickVelocityCache.size > BotDetectionService.MAX_VELOCITY_CACHE_SIZE) {
+      const oldest = this.clickVelocityCache.keys().next();
+      if (oldest.done || oldest.value === undefined) break;
+      this.clickVelocityCache.delete(oldest.value);
     }
 
     // Check if velocity exceeds threshold

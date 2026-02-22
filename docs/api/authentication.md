@@ -19,39 +19,42 @@ API keys are long-lived credentials for server-to-server communication.
 
 ### Creating API Keys
 ```http
-POST /api/v1/api-keys
+POST /v1/auth/api-keys
 Authorization: Bearer {{jwt_token}}
 Content-Type: application/json
 
 {
   "name": "Production Server",
-  "scopes": ["messages:send", "templates:read"],
+  "scopes": ["messages:write", "templates:read"],
   "expiresAt": "2025-12-31T23:59:59Z",
-  "ipWhitelist": ["10.0.0.0/8", "192.168.1.0/24"]
+  "allowedIps": ["10.0.0.0/8", "192.168.1.0/24"]
 }
 ```
 
 Response:
 ```json
 {
-  "id": "key_abc123",
-  "name": "Production Server",
-  "key": "am_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-  "scopes": ["messages:send", "templates:read"],
-  "expiresAt": "2025-12-31T23:59:59Z",
-  "ipWhitelist": ["10.0.0.0/8", "192.168.1.0/24"],
-  "createdAt": "2024-01-15T10:30:00Z"
+  "apiKey": {
+    "id": "key_abc123",
+    "name": "Production Server",
+    "prefix": "am_live_XXXXXX",
+    "secretKey": "am_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "scopes": ["messages:write", "templates:read"],
+    "expiresAt": "2025-12-31T23:59:59Z",
+    "createdAt": "2024-01-15T10:30:00Z"
+  },
+  "warning": "Store the secret key securely. It will not be shown again."
 }
 ```
 
 > ⚠️ **Important**: The full API key is only shown once. Store it securely.
 
 ### Using API Keys
-Include the API key in the `Authorization` header:
+Include the API key in the `X-API-Key` header:
 
 ```http
-POST /api/v1/messages
-Authorization: Bearer am_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+POST /v1/messages
+X-API-Key: am_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 Content-Type: application/json
 
 {
@@ -71,22 +74,29 @@ Content-Type: application/json
 ### Scopes
 | Scope | Description |
 |-------|-------------|
-| `messages:send` | Send transactional emails |
+| `messages:send` | Send transactional emails (basic send only) |
+| `messages:write` | Send and manage transactional emails |
 | `messages:read` | View message history |
 | `templates:read` | Read templates |
 | `templates:write` | Create/update templates |
-| `campaigns:read` | View campaigns |
-| `campaigns:write` | Create/manage campaigns |
+| `webhooks:read` | View webhooks |
+| `webhooks:write` | Create/update/delete webhooks |
+| `domains:read` | View domains |
+| `domains:write` | Manage domains |
+| `suppressions:read` | View suppressions |
+| `suppressions:write` | Manage suppressions |
 | `analytics:read` | Access analytics |
+| `events:read` | View events |
+| `events:write` | Write custom events |
 | `contacts:read` | View contacts |
 | `contacts:write` | Manage contacts |
-| `webhooks:manage` | Configure webhooks |
-| `account:read` | View account info |
-| `account:write` | Modify account settings |
+| `dedicated-ips:read` | View dedicated IPs |
+| `dedicated-ips:write` | Manage dedicated IPs |
+| `admin` | Full administrative access |
 
 ### Revoking Keys
 ```http
-DELETE /api/v1/api-keys/key_abc123
+DELETE /v1/auth/api-keys/key_abc123
 Authorization: Bearer {{jwt_token}}
 ```
 
@@ -99,28 +109,26 @@ JWT tokens are used for user authentication in the dashboard and API.
 
 ### Login Flow
 ```http
-POST /api/v1/auth/login
+POST /v1/auth/login
 Content-Type: application/json
 
 {
   "email": "user@company.com",
-  "password": "secure_password",
-  "mfaCode": "123456"  // If MFA enabled
+  "password": "secure_password"
 }
 ```
 
 Response:
 ```json
 {
-  "accessToken": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refreshToken": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expiresIn": 3600,
-  "tokenType": "Bearer",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expiresIn": "1h",
   "user": {
     "id": "usr_abc123",
     "email": "user@company.com",
     "name": "John Doe",
-    "role": "admin"
+    "role": "admin",
+    "tenantId": "ten_xyz"
   }
 }
 ```
@@ -131,47 +139,54 @@ Access tokens contain the following claims:
 
 | Claim | Description |
 |-------|-------------|
-| User ID | Identifies the authenticated user |
-| Account ID | The account the token is scoped to |
+| User ID | Identifies the authenticated user (`sub`) |
+| Tenant ID | The tenant the token is scoped to (`tid`) |
 | Role | The user's role (owner, admin, editor, viewer) |
-| Permissions | Granted permission scopes |
-| Expiration | Access tokens expire after 1 hour |
+| Scopes | Granted permission scopes |
+| Expiration | Access tokens expire based on server config (`exp`) |
 
-Refresh tokens are long-lived (30 days) and support automatic rotation. When a refresh token is used, a new refresh token is issued and the old one is invalidated.
+Tokens are signed with **HS256**. Use `POST /v1/auth/refresh` with a valid token to obtain a new one before expiry.
 
 ### Using Access Tokens
 ```http
-GET /api/v1/account
+GET /v1/account
 Authorization: Bearer eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 ### Token Refresh
 ```http
-POST /api/v1/auth/refresh
-Content-Type: application/json
-
-{
-  "refreshToken": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
+POST /v1/auth/refresh
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 Response:
 ```json
 {
-  "accessToken": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refreshToken": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expiresIn": 3600
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expiresIn": "1h",
+  "user": {
+    "id": "usr_abc123",
+    "email": "user@company.com",
+    "name": "John Doe",
+    "role": "admin",
+    "tenantId": "ten_xyz"
+  }
 }
 ```
 
-### Token Revocation
+### Token Logout (Revocation)
 ```http
-POST /api/v1/auth/revoke
+POST /v1/auth/logout
 Authorization: Bearer {{access_token}}
-Content-Type: application/json
+```
 
+Response:
+```json
 {
-  "refreshToken": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9..."
+  "success": true,
+  "message": "Logged out successfully"
+}
+```"
 }
 ```
 
@@ -209,7 +224,7 @@ GET /oauth/authorize?
   response_type=code&
   client_id=app_xyz789&
   redirect_uri=https://yourapp.com/callback&
-  scope=messages:send%20analytics:read&
+  scope=messages:write%20analytics:read&
   state=random_state_value&
   code_challenge=CODE_CHALLENGE&
   code_challenge_method=S256
@@ -245,7 +260,7 @@ Response:
   "token_type": "Bearer",
   "expires_in": 3600,
   "refresh_token": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "scope": "messages:send analytics:read"
+  "scope": "messages:write analytics:read"
 }
 ```
 
@@ -260,13 +275,13 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=client_credentials&
 client_id=app_xyz789&
 client_secret=SECRET&
-scope=messages:send
+scope=messages:write
 ```
 
 ### Registering OAuth Applications
 
 ```http
-POST /api/v1/oauth/apps
+POST /v1/oauth/apps
 Authorization: Bearer {{jwt_token}}
 Content-Type: application/json
 
@@ -276,8 +291,7 @@ Content-Type: application/json
     "https://myapp.com/callback",
     "http://localhost:3000/callback"
   ],
-  "scopes": ["messages:send", "analytics:read"],
-  "grantTypes": ["authorization_code", "refresh_token"]
+  "scopes": ["messages:write", "analytics:read"],
 }
 ```
 
@@ -289,7 +303,7 @@ Response:
   "clientId": "app_xyz789",
   "clientSecret": "cs_XXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   "redirectUris": ["https://myapp.com/callback"],
-  "scopes": ["messages:send", "analytics:read"],
+  "scopes": ["messages:write", "analytics:read"],
   "createdAt": "2024-01-15T10:30:00Z"
 }
 ```
@@ -300,7 +314,7 @@ Response:
 
 ### Enabling MFA
 ```http
-POST /api/v1/auth/mfa/enable
+POST /v1/auth/mfa/enable
 Authorization: Bearer {{jwt_token}}
 Content-Type: application/json
 
@@ -326,7 +340,7 @@ Response:
 
 ### Verifying MFA Setup
 ```http
-POST /api/v1/auth/mfa/verify
+POST /v1/auth/mfa/verify
 Authorization: Bearer {{jwt_token}}
 Content-Type: application/json
 
@@ -375,22 +389,20 @@ Content-Type: application/json
 
 | Code | Error | Description |
 |------|-------|-------------|
-| 401 | `invalid_token` | Token expired or invalid |
-| 401 | `token_revoked` | Token has been revoked |
-| 401 | `invalid_api_key` | API key invalid or expired |
-| 403 | `insufficient_scope` | Missing required scope |
-| 403 | `ip_not_allowed` | IP not in whitelist |
-| 429 | `rate_limited` | Too many requests |
+| 401 | `INVALID_API_KEY` | API key invalid or expired |
+| 401 | `INVALID_TOKEN` | Token expired or invalid |
+| 401 | `TOKEN_REVOKED` | Token has been revoked |
+| 401 | `AUTH_REQUIRED` | No authentication provided |
+| 403 | `INSUFFICIENT_SCOPE` | Missing required scope |
+| 403 | `INVALID_SCOPE` | API key contains unrecognised scopes |
+| 429 | `RATE_LIMIT_EXCEEDED` | Too many requests |
 
 ### Example Error Response
 ```json
 {
   "error": {
-    "code": "invalid_token",
-    "message": "The access token has expired",
-    "details": {
-      "expiredAt": "2024-01-15T11:30:00Z"
-    }
+    "code": "INVALID_TOKEN",
+    "message": "The access token has expired"
   }
 }
 ```

@@ -508,12 +508,34 @@ export class InboundServer {
 
     // Check if we accept mail for this domain
     const result = await this.db.query(`
-      SELECT id, tenant_id FROM domains
-      WHERE name = $1 AND is_verified = true AND accepts_inbound = true
+      SELECT d.id, d.tenant_id, p.features, p.name AS plan_name
+      FROM domains d
+      JOIN tenants t ON d.tenant_id = t.id
+      JOIN plans p ON t.plan = p.name
+      WHERE d.name = $1 AND d.is_verified = true AND d.accepts_inbound = true
     `, [domain]);
 
     if (result.rows.length === 0) {
       return { accepted: false, error: '550 We do not accept mail for this domain' };
+    }
+
+    const row = result.rows[0] as { features: unknown; plan_name?: string };
+    let features: { inboundEmail?: boolean } = {};
+    try {
+      features = typeof row.features === 'string'
+        ? (JSON.parse(row.features) as { inboundEmail?: boolean })
+        : (row.features as { inboundEmail?: boolean });
+    } catch {
+      return { accepted: false, error: '451 Temporary error' };
+    }
+
+    const planName = row.plan_name ?? '';
+    const inboundAllowed = typeof features.inboundEmail === 'boolean'
+      ? features.inboundEmail
+      : ['scale', 'enterprise'].includes(planName);
+
+    if (!inboundAllowed) {
+      return { accepted: false, error: '550 Inbound email requires Scale plan or above' };
     }
 
     return { accepted: true };

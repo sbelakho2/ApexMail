@@ -116,6 +116,22 @@ export function createApp(): Hono {
   app.use('*', compress());
   app.use('*', secureHeaders());
 
+  // ISO-001: Internal API key authentication for service-to-service calls
+  // Health endpoints remain open for load balancer probes
+  const ISOLATION_INTERNAL_API_KEY = process.env.ISOLATION_INTERNAL_API_KEY || 'isolation-internal-key-dev';
+  
+  app.use('/api/*', async (c, next) => {
+    const apiKey = c.req.header('X-Internal-Api-Key');
+    if (!apiKey || apiKey !== ISOLATION_INTERNAL_API_KEY) {
+      logger.warn('[Isolation] Unauthorized request - missing or invalid X-Internal-Api-Key');
+      return c.json({
+        error: 'Unauthorized — X-Internal-Api-Key required',
+        code: 'UNAUTHORIZED',
+      }, 401);
+    }
+    await next();
+  });
+
   // Request ID middleware
   app.use('*', async (c, next) => {
     const requestId = c.req.header('X-Request-ID') || crypto.randomUUID();
@@ -142,7 +158,7 @@ export function createApp(): Hono {
           if (limitResult.ok) {
             c.header('X-RateLimit-Limit', String(apiConfig.maxRequests));
             c.header('X-RateLimit-Remaining', String(limitResult.value.remaining));
-            c.header('X-RateLimit-Reset', String(limitResult.value.resetAt.getTime()));
+            c.header('X-RateLimit-Reset', String(Math.floor(limitResult.value.resetAt.getTime() / 1000)));
             
             if (!limitResult.value.allowed) {
               return c.json({

@@ -263,7 +263,7 @@ describe('PHASE 4: MTA Stack - Deep Analysis', () => {
 
 describe('PHASE 5: Analytics & Tracking - Deep Analysis', () => {
   describe('Event Processor Implementation', () => {
-    const content = readSourceFile('apps/tracking/src/processor.ts');
+    const content = readSourceFile('services/mail-server/crates/tracking-service/src/processor.rs');
 
     it('should buffer events before flushing', () => {
       expect(content).toContain('buffer');
@@ -762,7 +762,7 @@ describe('Cross-Cutting: Resource Management', () => {
     const servicesWithTimers = [
       { name: 'MeteringService', path: 'apps/billing/src/services/metering.ts' },
       { name: 'CircuitBreakerService', path: 'apps/ha/src/services/circuit-breaker.ts' },
-      { name: 'EventProcessor', path: 'apps/tracking/src/processor.ts' },
+      { name: 'EventProcessor', path: 'services/mail-server/crates/tracking-service/src/processor.rs' },
     ];
 
     const missingCleanup: string[] = [];

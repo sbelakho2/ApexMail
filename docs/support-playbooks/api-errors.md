@@ -67,10 +67,10 @@ curl -s "https://api.apexmail.ee/health" | jq .
 # Expected: {"status":"ok","version":"x.x.x","uptime":...}
 
 # Check API response times (Prometheus)
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=histogram_quantile(0.99,rate(apexmail_api_request_duration_seconds_bucket[5m]))" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=histogram_quantile(0.99,rate(apexmail_api_request_duration_seconds_bucket[5m]))" | jq '.data.result[].value[1]'
 
 # Check error rate
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=rate(apexmail_api_requests_total{status=~'5..'}[5m])/rate(apexmail_api_requests_total[5m])*100" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=rate(apexmail_api_requests_total{status=~'5..'}[5m])/rate(apexmail_api_requests_total[5m])*100" | jq '.data.result[].value[1]'
 ```
 
 ### Step 3: Check API server logs
@@ -141,7 +141,7 @@ WHERE ak.prefix = 'ak_live_abc123'  -- first 15 chars of the API key
 - API key is deactivated or deleted
 - API key has expired (`expires_at` is in the past)
 - Using test key (`ak_test_`) against production endpoint or vice versa
-- Missing `Authorization: Bearer <key>` header
+- Missing `X-API-Key: <key>` header
 - Extra whitespace or newline in the API key
 - Key scoped to wrong permissions (e.g., read-only key used for sending)
 
@@ -250,7 +250,7 @@ curl -s "http://api.apexmail.internal:3000/metrics" | grep -E "nodejs_heap|proce
 
 ```bash
 # Check database connection pool
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=apexmail_db_pool_active" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=apexmail_db_pool_active" | jq '.data.result[].value[1]'
 
 # Check Redis connectivity
 redis-cli -h redis.apexmail.internal PING
@@ -449,10 +449,10 @@ time curl -s -o /dev/null -w "%{http_code} %{time_total}s" "https://api.apexmail
 time curl -s -o /dev/null -w "%{http_code} %{time_total}s" "http://api.apexmail.internal:3000/health"
 
 # Error rate (last 5 minutes)
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=sum(rate(apexmail_api_requests_total{status=~'5..'}[5m]))" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=sum(rate(apexmail_api_requests_total{status=~'5..'}[5m]))" | jq '.data.result[].value[1]'
 
 # Request volume (last 5 minutes)
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=sum(rate(apexmail_api_requests_total[5m]))*60" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=sum(rate(apexmail_api_requests_total[5m]))*60" | jq '.data.result[].value[1]'
 ```
 
 ### Useful Redis keys

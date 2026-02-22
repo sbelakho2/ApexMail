@@ -82,7 +82,7 @@ If multiple tenants show low open rates, this is likely a platform-level reputat
 # Check all sending IPs against major blocklists
 for ip in 65.108.x.x 135.181.x.x 95.217.x.x; do
   echo "=== $ip ==="
-  curl -s "https://mxtoolbox.com/api/v1/lookup/blacklist/$ip" \
+  curl -s "https://mxtoolbox.com/v1/lookup/blacklist/$ip" \
     -H "Authorization: Bearer $MXTOOLBOX_API_KEY" | jq '.Failed[] | .Name'
 done
 ```
@@ -218,18 +218,7 @@ LIMIT 10;
 1. **DNS fixes:** Guide the customer through correct SPF/DKIM/DMARC setup (see domain-verification playbook)
 2. **Content review:** Flag specific content issues and provide recommendations
 3. **List hygiene:** Recommend removing unengaged subscribers (no opens in 90+ days)
-4. **Warmup schedule:** If on a new dedicated IP, ensure they follow the warmup plan:
-
-| Day | Volume | Notes |
-|-----|--------|-------|
-| 1-3 | 200/day | Send to most engaged contacts only |
-| 4-7 | 500/day | Monitor open/bounce rates daily |
-| 8-14 | 1,000/day | Check Google Postmaster reputation |
-| 15-21 | 2,500/day | |
-| 22-30 | 5,000/day | |
-| 31-45 | 10,000/day | |
-| 46-60 | 25,000/day | Should reach "High" reputation |
-| 61+ | Full volume | Continue monitoring |
+4. **Warmup schedule:** If on a new dedicated IP, follow the ISP-specific warmup plan in the [IP Pools & Warmup Playbook](ip-pools-warmup-infrastructure.md). The system enforces per-ISP daily limits automatically (`apps/worker/src/services/ip-rate-limiter.ts`). Conservative guidance: start at 50/day for Gmail/Yahoo recipients, 100/day for Microsoft/default, doubling roughly every 1-2 days until full volume (~14-15 days).
 
 ### For blocklist removal
 
@@ -282,14 +271,14 @@ Run this to get a quick snapshot of platform deliverability health:
 
 ```bash
 # Overall inbox placement estimate (based on open rates)
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=apexmail_inbox_placement_pct" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=apexmail_inbox_placement_pct" | jq '.data.result[].value[1]'
 
 # Complaint rate
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=apexmail_complaint_rate_percent" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=apexmail_complaint_rate_percent" | jq '.data.result[].value[1]'
 
 # Sending volume (last hour)
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=increase(apexmail_emails_sent_total[1h])" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=increase(apexmail_emails_sent_total[1h])" | jq '.data.result[].value[1]'
 
 # Active blocklist entries
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=apexmail_blocklist_listings_total" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=apexmail_blocklist_listings_total" | jq '.data.result[].value[1]'
 ```

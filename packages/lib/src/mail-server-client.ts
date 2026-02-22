@@ -2,10 +2,10 @@
  * ApexMail Server Client
  * 
  * TypeScript client for the Rust-based ApexMail server.
- * Connects via gRPC to send emails through the self-hosted mail infrastructure.
+ * Connects via gRPC to send emails through the purpose-built mail infrastructure.
  * 
- * NO THIRD-PARTY EMAIL SERVICES - All emails are sent directly via SMTP
- * with DKIM signing through the Rust mail server.
+ * All emails are sent directly via SMTP with DKIM signing
+ * through the purpose-built Rust mail server.
  * 
  * Uses @grpc/grpc-js for native gRPC communication with the Rust tonic services
  * defined in mail.proto (OutboundService + MailstoreService).

@@ -15,7 +15,7 @@ The suppressions list prevents emails from being sent to addresses that have bou
 Include your API key in the `Authorization` header:
 
 ```
-Authorization: Bearer ak_live_...
+X-API-Key: ak_live_...
 ```
 
 ---
@@ -44,7 +44,7 @@ Authorization: Bearer ak_live_...
 | 403 | `INSUFFICIENT_SCOPE` | API key does not have the required `suppressions:*` scope |
 | 404 | `NOT_FOUND` | Suppression entry ID does not exist |
 | 409 | `ALREADY_EXISTS` | Email is already on the suppression list |
-| 429 | `RATE_LIMITED` | Rate limit exceeded |
+| 429 | `RATE_LIMIT_EXCEEDED` | Rate limit exceeded |
 | 500 | `INTERNAL_ERROR` | Server-side error |
 
 ---
@@ -71,8 +71,8 @@ Add a single email address to the suppression list.
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/suppressions" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/suppressions" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "jane.doe@example.com",
@@ -122,8 +122,8 @@ Add multiple email addresses to the suppression list in a single request.
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/suppressions/bulk" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/suppressions/bulk" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "entries": [
@@ -179,8 +179,8 @@ Retrieve a single suppression entry by ID.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/suppressions/sup_3f4a5b6c" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/suppressions/sup_3f4a5b6c" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -222,8 +222,8 @@ Check one or more email addresses against the suppression list. Returns the supp
 #### Example Request
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/suppressions/check" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/suppressions/check" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "emails": [
@@ -286,8 +286,8 @@ List suppression entries with filtering, searching, sorting, and pagination.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/suppressions?reason=hard_bounce&sort=-created_at&per_page=50" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/suppressions?reason=hard_bounce&sort=-created_at&per_page=50" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -332,8 +332,8 @@ Returns aggregate statistics about the suppression list.
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/suppressions/stats" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/suppressions/stats" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -382,8 +382,8 @@ Remove a single entry from the suppression list. The email address will be eligi
 #### Example Request
 
 ```bash
-curl -X DELETE "https://api.apexmail.dev/v1/suppressions/sup_3f4a5b6c" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X DELETE "https://api.apexmail.ee/v1/suppressions/sup_3f4a5b6c" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
@@ -418,8 +418,8 @@ Remove multiple entries from the suppression list in a single request.
 #### Example Request
 
 ```bash
-curl -X DELETE "https://api.apexmail.dev/v1/suppressions/bulk" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X DELETE "https://api.apexmail.ee/v1/suppressions/bulk" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "emails": [
@@ -479,8 +479,8 @@ user3@example.com,manual,,Cleaned from legacy system
 #### Example Request (JSON)
 
 ```bash
-curl -X POST "https://api.apexmail.dev/v1/suppressions/import" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx" \
+curl -X POST "https://api.apexmail.ee/v1/suppressions/import" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
     "format": "json",
@@ -559,8 +559,8 @@ Export the suppression list as JSON or CSV. Large exports are processed asynchro
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.dev/v1/suppressions/export?format=csv&reason=hard_bounce" \
-  -H "Authorization: Bearer ak_live_xxxxxxxxxxxx"
+curl -X GET "https://api.apexmail.ee/v1/suppressions/export?format=csv&reason=hard_bounce" \
+  -H "X-API-Key: ak_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — synchronous (small list)

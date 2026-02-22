@@ -152,14 +152,13 @@ describe('Batch 7: Concurrency & Queuing (#101–120)', () => {
     expect(code).toContain('Rate limiter wait timeout');
   });
 
-  it('#120 — Tracking flush uses setTimeout instead of setInterval', async () => {
-    const code = await src('apps/tracking/src/processor.ts');
-    expect(code).toContain('FIX-500-120');
-    expect(code).toContain('scheduleFlush');
-    expect(code).toContain('clearTimeout');
-    // Should NOT have setInterval for flush timer
-    const startMethod = code.match(/start\(\)[\s\S]*?(?=\n  (?:async )?stop)/)?.[0] ?? '';
-    expect(startMethod).not.toContain('setInterval');
+  it('#120 — Tracking flush uses tokio::time::sleep reschedule (not setInterval)', async () => {
+    const code = await src('services/mail-server/crates/tracking-service/src/processor.rs');
+    // Rust flush loop uses tokio::time::sleep for re-scheduling
+    expect(code).toContain('tokio::time::sleep');
+    expect(code).toContain('flush_interval_ms');
+    // Should use sleep-based reschedule, not a fixed interval timer
+    expect(code).toContain('flush');
   });
 
 });

@@ -119,6 +119,8 @@ async function main(): Promise<void> {
     notifier: queueNotifier,
     config: config.queues.email,
     smtp: config.smtp,
+    emailTransport: config.emailTransport,
+    ses: config.ses,
     dkim: config.dkim,
     tracking: config.tracking,
     warmup: config.warmup,

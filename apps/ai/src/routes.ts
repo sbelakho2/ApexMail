@@ -116,6 +116,28 @@ function getRedisClient(): Redis {
 }
 
 // ========================================
+// INTERNAL SERVICE AUTHENTICATION
+// ========================================
+
+// AI-010: Internal API key authentication for service-to-service calls
+// Public health endpoints remain open for load balancer probes;
+// API endpoints require X-Internal-Api-Key header for internal auth.
+const AI_INTERNAL_API_KEY = process.env.AI_INTERNAL_API_KEY || 'ai-internal-key-dev';
+
+const requireInternalAuth = async (c: any, next: () => Promise<void>) => {
+    const apiKey = c.req.header('X-Internal-Api-Key');
+    if (!apiKey || apiKey !== AI_INTERNAL_API_KEY) {
+        aiLogger.warn('Unauthorized request - missing or invalid X-Internal-Api-Key');
+        return c.json({
+            success: false,
+            error: 'Unauthorized — X-Internal-Api-Key required',
+            code: 'UNAUTHORIZED',
+        }, 401);
+    }
+    await next();
+};
+
+// ========================================
 // MIDDLEWARE
 // ========================================
 
@@ -125,6 +147,7 @@ app.use('*', bodyLimit({ maxSize: 1024 * 1024 }));
 app.use('*', cors({
     origin: ['http://localhost:3000', 'https://apexmail.app'],
     credentials: true,
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
 }));
 app.use('*', secureHeaders());
 app.use('*', prettyJSON());
@@ -144,6 +167,9 @@ app.use('*', async (c, next) => {
     
     return next();
 });
+
+// AI-010: Require internal API key for all API endpoints
+app.use('/api/*', requireInternalAuth);
 
 // AI-007: Rate limiting middleware for AI endpoints
 app.use('/api/*', async (c, next) => {

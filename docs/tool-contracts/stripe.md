@@ -18,20 +18,25 @@
 
 | Plan | Stripe Product ID | Price (Monthly) | Email Limit | Contacts |
 |------|--------------------|----------------|-------------|----------|
-| Free | `prod_free` | €0 | 1,000/mo | 500 |
-| Starter | `prod_starter` | €19/mo | 10,000/mo | 2,500 |
-| Growth | `prod_growth` | €49/mo | 50,000/mo | 10,000 |
-| Professional | `prod_professional` | €99/mo | 150,000/mo | 25,000 |
-| Business | `prod_business` | €199/mo | 500,000/mo | 100,000 |
-| Enterprise | `prod_enterprise` | Custom | Custom | Custom |
-| Enterprise+ | `prod_enterprise_plus` | Custom | Custom | Custom |
+| Free | `prod_free` | $0 | 3,000/mo | 500 |
+| Starter | `prod_starter` | $25/mo | 50,000/mo | 10,000 |
+| Pro | `prod_pro` | $65/mo | 150,000/mo | 50,000 |
+| Growth | `prod_growth` | $150/mo | 500,000/mo | 200,000 |
+| Scale | `prod_scale` | $350/mo | 2,000,000/mo | 500,000 |
+| Enterprise | `prod_enterprise` | $800/mo | 5,000,000/mo | Unlimited |
+
+### Add-ons
+
+| Add-on | Stripe Product ID | Price |
+|--------|-------------------|-------|
+| Dedicated IP | `prod_dedicated_ip` | $30/mo |
 
 ### Price Configuration
 
-- All prices are in **EUR** (single currency).
-- Billing cycle: monthly, with annual option (2 months free) for Starter through Business.
+- All prices are in **USD** (single currency).
+- Billing cycle: monthly, with annual option (2 months free) for Starter through Scale.
 - Metered usage (overage emails) is tracked via Stripe Usage Records and billed at invoice time.
-- Overage rate: plan-dependent, reported via `stripe.subscriptionItems.createUsageRecord()`.
+- Overage rate: $0.40 per 1,000 emails, reported via `stripe.subscriptionItems.createUsageRecord()`.
 
 ---
 
@@ -77,7 +82,7 @@ trial → canceled (no conversion)
 
 ### Endpoint
 
-- URL: `https://api.apexmail.com/api/v1/webhooks/stripe`
+- URL: `https://api.apexmail.com/v1/webhooks/stripe`
 - Signing secret: stored as `STRIPE_WEBHOOK_SECRET` env var.
 - All events are verified using `stripe.webhooks.constructEvent()` before processing.
 

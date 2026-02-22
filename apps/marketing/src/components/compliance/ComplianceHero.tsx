@@ -6,8 +6,8 @@ import { Shield, Scale, FileCheck, Lock, ArrowRight, Check } from '@/components/
 
 const badges = [
  { name: 'GDPR' },
- { name: 'HIPAA' },
- { name: 'SOC 2' },
+ { name: 'HIPAA (Enterprise)' },
+ { name: 'SOC 2 (Enterprise)' },
  { name: 'CCPA' },
  { name: 'ISO 27001' },
 ];
@@ -39,8 +39,8 @@ export function ComplianceHero() {
 
  {/* Subheadline */}
  <p className="text-lg text-surface-600 mb-10 leading-relaxed max-w-lg">
- Stop treating compliance as an afterthought. ApexMail bakes GDPR, HIPAA, 
- and SOC 2 requirements directly into the infrastructure layer.
+ Stop treating compliance as an afterthought. ApexMail bakes GDPR requirements into
+ the platform and provides HIPAA/SOC 2 controls for Enterprise plans.
  </p>
 
  {/* Key Points */}
@@ -99,7 +99,7 @@ export function ComplianceHero() {
  <div className="mt-10 p-4 rounded-sm bg-emerald-50 border border-emerald-100 ">
  <div className="flex items-center gap-3 text-emerald-700 text-[14px] font-bold">
  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
- Verified and Current
+ Enterprise compliance controls available on request
  </div>
  </div>
  </div>

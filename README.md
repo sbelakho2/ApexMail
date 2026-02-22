@@ -34,7 +34,7 @@ ApexMail is a monorepo containing multiple services that work together to provid
 | App | Description | Port |
 |-----|-------------|------|
 | `@apexmail/api` | REST API for message sending, domain management, templates | 3010 |
-| `@apexmail/tracking` | Open pixel, click tracking, unsubscribe handling | 3001 |
+| `tracking-service` (Rust) | Open pixel, click tracking, unsubscribe handling — `services/mail-server/crates/tracking-service` | 3001 |
 | `@apexmail/analytics` | Parquet compaction, reconciliation, DuckDB queries | 3002 |
 | `@apexmail/control-plane` | Internal administration dashboard for platform owners | 3020 |
 | `@apexmail/worker` | Background job processing (email delivery, webhooks) | N/A |
@@ -167,14 +167,13 @@ apexmail/
 
 ### Authentication
 
-All API requests require authentication via API key. Both header formats are supported:
+All API requests require authentication via API key in the `X-API-Key` header:
 
 ```bash
-# Using Authorization header (recommended)
-curl -H "Authorization: Bearer am_live_your_api_key" https://api.yourdomain.com/v1/messages
-
-# Using X-API-Key header
+# Using X-API-Key header (for API keys)
 curl -H "X-API-Key: am_live_your_api_key" https://api.yourdomain.com/v1/messages
+
+# Bearer token is used for dashboard JWT sessions only
 ```
 
 ### Endpoints

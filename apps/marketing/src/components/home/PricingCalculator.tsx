@@ -17,12 +17,12 @@ interface PricingOption {
 
 const pricingTiers = {
   apexmail: [
-    { max: 1000, price: 0 },
-    { max: 25000, price: 29 },
-    { max: 50000, price: 59 },
-    { max: 100000, price: 129 },
-    { max: 500000, price: 399 },
-    { max: Infinity, pricePerK: 0.45 },
+    { max: 3000, price: 0 },       // Free: 3K emails
+    { max: 50000, price: 25 },     // Starter: $25/mo, 50K emails
+    { max: 150000, price: 65 },    // Pro: $65/mo, 150K emails
+    { max: 500000, price: 150 },   // Growth: $150/mo, 500K emails
+    { max: 2000000, price: 350 },  // Scale: $350/mo, 2M emails
+    { max: Infinity, price: 800 }, // Enterprise: $800/mo, 5M emails
   ],
   sendgrid: [
     { max: 6000, price: 0 },
@@ -49,36 +49,47 @@ const pricingTiers = {
 };
 
 const addons = {
-  dedicatedIP: { apexmail: 50, sendgrid: 89, mailchimp: 29.95, ses: 24.95 },
-  sso: { apexmail: 0, sendgrid: 900, mailchimp: 0, ses: 0 },
-  hipaa: { apexmail: 100, sendgrid: 1000, mailchimp: 0, ses: 0 },
-  privateCloud: { apexmail: 2000, sendgrid: 0, mailchimp: 0, ses: 0 },
+  dedicatedIP: { apexmail: 30, sendgrid: 89, mailchimp: 29.95, ses: 24.95 },
+  sso: { apexmail: 0, sendgrid: 900, mailchimp: 0, ses: 0 },       // SSO included on Scale+
+  hipaa: { apexmail: 0, sendgrid: 1000, mailchimp: 0, ses: 0 },     // HIPAA included on Enterprise
+  privateCloud: { apexmail: 0, sendgrid: 0, mailchimp: 0, ses: 0 }, // Enterprise-only feature
 };
 
 function calculateApexMailCost(volume: number, options: PricingOption) {
+  // PAYG cost (tiered pricing from billing backend)
   let paygCost = 0;
   if (volume <= 10000) paygCost = volume * 0.001;
   else if (volume <= 100000) paygCost = (10000 * 0.001) + ((volume - 10000) * 0.0008);
   else if (volume <= 1000000) paygCost = (10000 * 0.001) + (90000 * 0.0008) + ((volume - 100000) * 0.0005);
   else paygCost = (10000 * 0.001) + (90000 * 0.0008) + (900000 * 0.0005) + ((volume - 1000000) * 0.0003);
 
-  if (options.dedicatedIP) paygCost += 50;
-  if (options.sso) paygCost += 100;
-  if (options.hipaa) paygCost += 500;
-  if (options.privateCloud) paygCost += 2000;
+  if (options.dedicatedIP) paygCost += 30;
+  // SSO/HIPAA/privateCloud require Scale+ or Enterprise plan, not available on PAYG
+  if (options.sso || options.hipaa || options.privateCloud) paygCost = Infinity;
 
+  // Subscription plan cost
   let planCost = Infinity;
   const plan = pricingTiers.apexmail.find(t => volume <= t.max && t.price !== undefined);
   
   if (plan && plan.price !== undefined) {
     planCost = plan.price;
-    const isGrowthOrHigher = plan.price >= 129;
-    const isScaleOrHigher = plan.price >= 399;
+    const isProOrHigher = plan.price >= 65;
+    const isGrowthOrHigher = plan.price >= 150;
+    const isScaleOrHigher = plan.price >= 350;
+    const isEnterprise = plan.price >= 800;
 
-    if (options.dedicatedIP && !isGrowthOrHigher) planCost += 50;
-    if (options.sso && !isScaleOrHigher) planCost += 100;
-    if (options.hipaa) planCost += 500;
-    if (options.privateCloud) planCost += 2000;
+    // Dedicated IP: included on Growth+, add-on ($30/mo) on Pro, not available below
+    if (options.dedicatedIP) {
+      if (!isProOrHigher) planCost = Infinity; // Not available
+      else if (!isGrowthOrHigher) planCost += 30; // Pro add-on
+      // Growth+ includes at least 1 dedicated IP
+    }
+    // SSO: included on Scale+, requires upgrade if below
+    if (options.sso && !isScaleOrHigher) planCost = Infinity;
+    // HIPAA: Enterprise only
+    if (options.hipaa && !isEnterprise) planCost = Infinity;
+    // Private Cloud: Enterprise only
+    if (options.privateCloud && !isEnterprise) planCost = Infinity;
   }
 
   return Math.min(paygCost, planCost);
@@ -306,10 +317,9 @@ function ComparisonRow({ name, price, apexPrice }: { name: string; price: number
         <span className="text-lg font-bold text-surface-400 tabular-nums">{formatCurrency(price)}</span>
       </div>
       <div className="relative h-2 bg-surface-100 rounded-full overflow-hidden">
-        <div 
-          className="absolute top-0 left-0 h-full bg-brand-500 transition-all duration-500" 
-          style={{ width: `${usageWidth}%` }} 
-        />
+        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+          <rect x="0" y="0" width={usageWidth} height="8" className="fill-brand-500" rx="999" ry="999" />
+        </svg>
       </div>
       <div className="flex justify-between mt-2">
         <span className="text-xs font-bold text-brand-600 uppercase tracking-wider">ApexMail</span>

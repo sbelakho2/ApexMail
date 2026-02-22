@@ -97,10 +97,11 @@ All recipients must have provided consent through one of:
 
 | Plan | Daily Limit | Monthly Limit | Burst Rate (per minute) |
 |------|-------------|---------------|------------------------|
-| Free Trial | 200 | 1,000 | 10 |
+| Free | 300 | 3,000 | 10 |
 | Starter | 5,000 | 50,000 | 100 |
-| Growth | 25,000 | 250,000 | 500 |
-| Business | 100,000 | 1,000,000 | 1,000 |
+| Pro | 15,000 | 150,000 | 250 |
+| Growth | 50,000 | 500,000 | 500 |
+| Scale | 200,000 | 2,000,000 | 1,000 |
 | Enterprise | Custom | Custom | Custom |
 
 ### 5.2 Warm-up Requirements

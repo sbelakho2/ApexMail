@@ -40,6 +40,7 @@ import { campaignsRoutes } from './routes/campaigns.js';
 import { contactsRoutes } from './routes/contacts.js';
 import { automationsRoutes } from './routes/automations.js';
 import { aiInsightsRoutes } from './routes/ai-insights.js';
+import { dedicatedIpsRoutes } from './routes/dedicated-ips.js';
 
 export interface AppContext {
   db: DatabasePool;
@@ -222,6 +223,7 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
   api.use('/domains/*', idempotencyMiddleware(ctx));
   api.use('/templates/*', idempotencyMiddleware(ctx));
   api.use('/suppressions/*', idempotencyMiddleware(ctx));
+  api.use('/dedicated-ips/*', idempotencyMiddleware(ctx));
 
   // Mount API routes (auth routes excluded — mounted above without auth)
   api.route('/auth', authRoutes(ctx)); // FIX-500-162: Authenticated auth routes (/me, /api-keys, /logout, /refresh)
@@ -238,6 +240,7 @@ export function createApp(ctx: AppContext): Hono<AppEnv> {
   api.route('/campaigns', campaignsRoutes(ctx));
   api.route('/contacts', contactsRoutes(ctx));
   api.route('/automations', automationsRoutes(ctx));
+  api.route('/dedicated-ips', dedicatedIpsRoutes(ctx));
 
   // Mount API under /v1
   app.route('/v1', api);

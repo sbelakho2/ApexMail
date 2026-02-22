@@ -1,7 +1,7 @@
 //! Outbound Queue Service
 //!
 //! Handles outbound email delivery with retry logic and direct SMTP sending.
-//! NO THIRD-PARTY EMAIL SERVICES - sends directly via SMTP with DKIM signing.
+//! Uses purpose-built infrastructure - sends directly via SMTP with DKIM signing.
 
 pub mod smtp_sender;
 pub mod queue;
@@ -24,7 +24,7 @@ use crate::smtp_sender::SmtpSender;
 
 #[derive(Parser)]
 #[command(name = "outbound-queue")]
-#[command(about = "Outbound Queue - Email delivery service (NO THIRD-PARTY SERVICES)")]
+#[command(about = "Outbound Queue - High-performance email delivery service")]
 struct Cli {
     /// gRPC listen address
     #[arg(short, long, default_value = "0.0.0.0:50052")]
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         .json()
         .init();
     
-    info!("Starting Outbound Queue Service (SELF-HOSTED - NO THIRD-PARTY SERVICES)");
+    info!("Starting Outbound Queue Service");
     info!("Listen address: {}", cli.listen);
     info!("From domain: {}", cli.from_domain);
     info!("DKIM selector: {}", cli.dkim_selector);

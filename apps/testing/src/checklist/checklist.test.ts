@@ -46,7 +46,7 @@ describe('🛑 Critical Success Factors', () => {
       expect(dirExists('apps/api')).toBe(true);
       expect(dirExists('apps/worker')).toBe(true);
       expect(dirExists('apps/mta')).toBe(true);
-      expect(dirExists('apps/tracking')).toBe(true);
+      expect(dirExists('services/mail-server/crates/tracking-service')).toBe(true);
       
       // Check package.json doesn't have required paid services in core
       const apiPkg = JSON.parse(readFile('apps/api/package.json'));
@@ -521,17 +521,17 @@ describe('Phase 5: Analytics & Cold Storage', () => {
 
   describe('5.3 Engagement Tracking', () => {
     
-    it('5.3.1 should have tracking application', () => {
-      expect(dirExists('apps/tracking')).toBe(true);
-      expect(fileExists('apps/tracking/src/index.ts')).toBe(true);
+    it('5.3.1 should have tracking application (Rust)', () => {
+      expect(dirExists('services/mail-server/crates/tracking-service')).toBe(true);
+      expect(fileExists('services/mail-server/crates/tracking-service/src/main.rs')).toBe(true);
     });
 
     it('5.3.2 should have tracking routes', () => {
-      expect(fileExists('apps/tracking/src/routes.ts')).toBe(true);
+      expect(fileExists('services/mail-server/crates/tracking-service/src/routes/mod.rs')).toBe(true);
     });
 
     it('5.3.3 should have tracking codec', () => {
-      expect(fileExists('apps/tracking/src/codec.ts')).toBe(true);
+      expect(fileExists('services/mail-server/crates/tracking-service/src/codec.rs')).toBe(true);
     });
   });
 

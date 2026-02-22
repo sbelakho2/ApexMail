@@ -365,8 +365,8 @@ Separate endpoints for different event types:
 Send a test webhook:
 
 ```http
-POST /api/v1/webhooks/{id}/test
-Authorization: Bearer {{api_key}}
+POST /v1/webhooks/{id}/test
+X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
@@ -400,15 +400,15 @@ ngrok http 3000
 ### List Webhooks
 
 ```http
-GET /api/v1/webhooks
-Authorization: Bearer {{api_key}}
+GET /v1/webhooks
+X-API-Key: {{api_key}}
 ```
 
 ### Create Webhook
 
 ```http
-POST /api/v1/webhooks
-Authorization: Bearer {{api_key}}
+POST /v1/webhooks
+X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
@@ -421,8 +421,8 @@ Content-Type: application/json
 ### Update Webhook
 
 ```http
-PATCH /api/v1/webhooks/{id}
-Authorization: Bearer {{api_key}}
+PATCH /v1/webhooks/{id}
+X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
@@ -433,13 +433,13 @@ Content-Type: application/json
 ### Delete Webhook
 
 ```http
-DELETE /api/v1/webhooks/{id}
-Authorization: Bearer {{api_key}}
+DELETE /v1/webhooks/{id}
+X-API-Key: {{api_key}}
 ```
 
 ### Get Webhook Logs
 
 ```http
-GET /api/v1/webhooks/{id}/logs?limit=50
-Authorization: Bearer {{api_key}}
+GET /v1/webhooks/{id}/logs?limit=50
+X-API-Key: {{api_key}}
 ```

@@ -25,7 +25,7 @@ export function APIConsoleCTA() {
             Go from Playground to Production
           </h2>
           <p className="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed font-medium">
-            Sign up for free and get 10,000 emails per month at no cost.
+            Sign up for free and get 3,000 emails per month at no cost.
             Same API, same reliability, your own API keys.
           </p>
 

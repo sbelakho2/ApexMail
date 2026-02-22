@@ -197,7 +197,7 @@ const valid = verifyWebhook({
   {
     slug: 'resend',
     name: 'Resend',
-    description: 'Switch from Resend to ApexMail for better compliance, self-hosting options, and enterprise features.',
+    description: 'Switch from Resend to ApexMail for better compliance, private deployment options, and enterprise features.',
     estimatedTime: '15 minutes',
     difficulty: 'easy',
     apiMappings: [
@@ -351,7 +351,7 @@ await apexmail.messages.send({
   {
     slug: 'postmark',
     name: 'Postmark',
-    description: 'Migrate from Postmark to ApexMail for self-hosting, advanced compliance tools, and transparent pricing.',
+    description: 'Migrate from Postmark to ApexMail for private deployment, advanced compliance tools, and transparent pricing.',
     estimatedTime: '20 minutes',
     difficulty: 'easy',
     apiMappings: [

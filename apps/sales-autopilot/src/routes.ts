@@ -104,6 +104,7 @@ app.use('*', cors({
         ? (process.env.CONTROL_PLANE_ORIGIN || 'http://localhost:3020')
         : '*',
     credentials: true,
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
 }));
 app.use('*', honoLogger());
 
@@ -492,6 +493,121 @@ app.post('/api/v1/campaigns/:campaignId/enroll', async (c) => {
 
 app.get('/api/v1/campaigns/templates', async (c) => {
     return c.json({ success: true, data: campaigns.campaignTemplates });
+});
+
+/**
+ * Create a new campaign and bulk-enroll leads
+ * Used by the automated sales system for migration outreach
+ */
+app.post('/api/v1/campaigns/create', async (c) => {
+    const body = await c.req.json<{
+        tenantId: string;
+        name: string;
+        templateId: string;
+        leadIds: string[];
+        variables?: Record<string, string>;
+        startImmediately?: boolean;
+    }>();
+
+    // Validate the template
+    const template = campaigns.cloneTemplate(body.templateId);
+    if (!template) {
+        return c.json({ success: false, error: 'Template not found' }, 404);
+    }
+
+    // FIX-500-400: Limit batch size to prevent memory issues
+    const MAX_LEADS = 500;
+    if (body.leadIds.length > MAX_LEADS) {
+        return c.json(
+            { success: false, error: `Maximum ${MAX_LEADS} leads per campaign` },
+            400
+        );
+    }
+
+    // Create the campaign
+    const campaign = await campaigns.createCampaign(body.tenantId, {
+        name: body.name,
+        description: `${template.name} - Automated outreach campaign`,
+        fromEmail: process.env.SALES_FROM_EMAIL || 'sales@apexmail.ee',
+        fromName: process.env.SALES_FROM_NAME || 'ApexMail Sales',
+        replyTo: process.env.SALES_REPLY_TO || null,
+        sequence: template.sequence,
+        triggers: [],
+        exitConditions: [{ type: 'replied', config: {} }],
+        settings: {
+            sendWindow: {
+                enabled: true,
+                timezone: 'Europe/Tallinn',
+                days: [1, 2, 3, 4, 5],
+                startHour: 9,
+                endHour: 17,
+            },
+            trackOpens: true,
+            trackClicks: true,
+            throttling: {
+                maxPerHour: 30,
+                maxPerDay: 100,
+                rampUp: true,
+                rampUpDays: 7,
+            },
+            unsubscribeLink: true,
+        },
+        createdBy: 'sales-automation',
+    });
+
+    // Bulk enroll leads
+    const enrollmentResults: Array<{ leadId: string; success: boolean; error?: string }> = [];
+    
+    for (const leadId of body.leadIds) {
+        try {
+            const lead = await crm.getLead(leadId);
+            if (!lead) {
+                enrollmentResults.push({ leadId, success: false, error: 'Lead not found' });
+                continue;
+            }
+
+            const enrollment = await campaigns.enrollLead(campaign.id, lead);
+            if (enrollment) {
+                // Record activity
+                await crm.recordActivity(leadId, {
+                    type: 'campaign_enrolled',
+                    description: `Enrolled in ${body.name}`,
+                    data: { campaignId: campaign.id, enrollmentId: enrollment.id, offer: body.variables?.primary_offer },
+                    userId: null,
+                });
+                enrollmentResults.push({ leadId, success: true });
+            } else {
+                enrollmentResults.push({ leadId, success: false, error: 'Enrollment failed' });
+            }
+        } catch (err) {
+            logger.warn('Failed to enroll lead in campaign', { leadId, campaignId: campaign.id, error: err });
+            enrollmentResults.push({ leadId, success: false, error: err instanceof Error ? err.message : 'Unknown error' });
+        }
+    }
+
+    // Activate the campaign if requested
+    if (body.startImmediately) {
+        await campaigns.updateCampaignStatus(campaign.id, 'active');
+    }
+
+    const successCount = enrollmentResults.filter(r => r.success).length;
+    logger.info('Bulk campaign creation completed', {
+        campaignId: campaign.id,
+        totalLeads: body.leadIds.length,
+        enrolled: successCount,
+        failed: body.leadIds.length - successCount,
+    });
+
+    return c.json({
+        success: true,
+        data: {
+            campaignId: campaign.id,
+            campaignName: campaign.name,
+            leadsEnrolled: successCount,
+            leadsFailed: body.leadIds.length - successCount,
+            results: enrollmentResults,
+        },
+    }, 201);
 });
 
 // ============================================

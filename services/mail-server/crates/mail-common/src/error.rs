@@ -51,6 +51,7 @@ pub enum Error {
 /// Result type alias
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(feature = "sqlx")]
 impl From<sqlx::Error> for Error {
     fn from(err: sqlx::Error) -> Self {
         Error::Database(err.to_string())

@@ -131,7 +131,7 @@ pnpm cli user:create \
 ### Via API
 
 ```bash
-curl -X POST http://localhost:3001/api/v1/auth/register \
+curl -X POST http://localhost:3001/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{
     "email": "admin@example.com",
@@ -146,13 +146,13 @@ curl -X POST http://localhost:3001/api/v1/auth/register \
 
 1. Log into the dashboard at http://localhost:3000
 2. Navigate to Settings → API Keys
-3. Create a new API key with `messages:send` scope
+3. Create a new API key with `messages:write` scope
 
 ### Send Test Email
 
 ```bash
-curl -X POST http://localhost:3001/api/v1/messages \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST http://localhost:3001/v1/messages \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "to": "test@example.com",

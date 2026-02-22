@@ -170,7 +170,7 @@ export class CliToolService {
       ],
       examples: [
         'apexmail apikeys list',
-        'apexmail apikeys create --name "Production" --scopes emails:send,domains:read',
+        'apexmail apikeys create --name "Production" --scopes messages:write,domains:read',
         'apexmail apikeys revoke key_abc123',
       ],
       action: 'apikeys',
@@ -547,7 +547,7 @@ export async function request<T>(options: RequestOptions): Promise<T> {
   const response = await fetch(url, {
     method: options.method,
     headers: {
-      'Authorization': \`Bearer \${apiKey}\`,
+      'X-API-Key': apiKey,
       'Content-Type': 'application/json',
       'User-Agent': 'apexmail-cli/1.0.0',
     },

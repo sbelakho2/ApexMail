@@ -48,7 +48,7 @@ console.log(email.status); // 'delivered'`,
     benefits: [
       'One-click GDPR data export & deletion',
       'Automatic consent tracking',
-      'HIPAA BAA available on request',
+      'HIPAA BAA available (Enterprise plan)',
       'EU data residency option',
       'Complete audit logs',
     ],
@@ -76,9 +76,9 @@ await apexmail.compliance.consent.record({
     title: 'AI-Powered Optimization',
     subtitle: 'Automatic Intelligence',
     description:
-      'AI-powered send-time optimization runs entirely within our infrastructure — no third-party API calls, no extra cost. The platform automatically learns each recipient\'s engagement patterns to maximize open rates.',
+      'AI-powered send-time optimization is included on Pro+ plans. The platform automatically learns each recipient\'s engagement patterns to maximize open rates.',
     benefits: [
-      'Automatic send-time optimization per recipient',
+      'Automatic send-time optimization per recipient (Pro+ plans)',
       'Bayesian engagement modeling with cold-start priors',
       'ML-based A/B test autopilot (Thompson Sampling)',
       'Inbox placement scoring and deliverability insights',

@@ -31,7 +31,7 @@ export interface Template {
   preheader: string | null;
   variables: string[];
   defaultData: Record<string, unknown>;
-  engine: 'handlebars' | 'mjml' | 'liquid' | 'ejs';
+  engine: 'handlebars' | 'mjml' | 'liquid' | 'ejs' | 'react';
   isActive: boolean;
   isDefault: boolean;
   metadata: Record<string, unknown>;
@@ -145,6 +145,17 @@ export class TemplatesRepository {
         }
         break;
       }
+      case 'react': {
+        // React templates use JSX syntax
+        // Check for balanced { and } in JSX expressions
+        const jsxOpens = (content.match(/\{[^{]/g) || []).length;
+        const jsxCloses = (content.match(/[^}]\}/g) || []).length;
+        // Allow some imbalance since {} can appear in CSS/objects
+        if (Math.abs(jsxOpens - jsxCloses) > 5) {
+          return `Potentially unbalanced JSX expressions: ${jsxOpens} opening vs ${jsxCloses} closing`;
+        }
+        break;
+      }
     }
 
     return null; // Valid
@@ -191,6 +202,18 @@ export class TemplatesRepository {
         while ((match = ejsRegex.exec(content)) !== null) {
           const varPart = match[1]?.split('.')[0];
           if (varPart) variables.add(varPart);
+        }
+        break;
+      }
+      case 'react': {
+        // Match {variable} and {props.variable} in JSX
+        const reactRegex = /\{([a-zA-Z_][a-zA-Z0-9_.]*)(?:[.\[]|\})/g;
+        while ((match = reactRegex.exec(content)) !== null) {
+          const varPart = match[1]?.split('.')[0];
+          // Filter out common React keywords
+          if (varPart && !['true', 'false', 'null', 'undefined', 'return', 'const', 'let', 'var', 'function'].includes(varPart)) {
+            variables.add(varPart);
+          }
         }
         break;
       }

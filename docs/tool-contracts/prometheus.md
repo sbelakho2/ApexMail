@@ -31,8 +31,8 @@ apexmail_<subsystem>_<metric>_<unit>
 ### Examples
 
 ```
-apexmail_api_requests_total{method="POST", route="/api/v1/emails", status="200"}
-apexmail_api_request_duration_seconds{method="GET", route="/api/v1/campaigns"}
+apexmail_api_requests_total{method="POST", route="/v1/messages", status="200"}
+apexmail_api_request_duration_seconds{method="GET", route="/v1/campaigns"}
 apexmail_worker_emails_sent_total{tenant_id="t_abc", status="delivered"}
 apexmail_mta_queue_depth{priority="high"}
 apexmail_billing_stripe_webhook_duration_seconds{event="invoice.paid"}
@@ -88,7 +88,7 @@ Point-in-time values that can go up or down.
 1. Labels use **snake_case**.
 2. Keep label cardinality **low**. High-cardinality labels (e.g., `email_id`, `user_id`) are FORBIDDEN — they cause TSDB explosion.
 3. `tenant_id` is the ONLY high-cardinality label permitted, and only on aggregate metrics (send totals, not per-request).
-4. HTTP route labels use the **route pattern** (`/api/v1/emails/:id`), never the resolved URL (`/api/v1/emails/abc123`).
+4. HTTP route labels use the **route pattern** (`/v1/messages/:id`), never the resolved URL (`/v1/messages/abc123`).
 5. Status labels use HTTP status codes as strings (`"200"`, `"404"`), not grouped (`"2xx"`).
 
 ### Standard Labels

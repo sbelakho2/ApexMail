@@ -13,7 +13,7 @@
 | **Package** | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | `apexmail` (gem) | `apexmail/apexmail-php` (Composer) | `ee.apexmail:apexmail-java` (Maven) |
 | **Min runtime** | Go 1.21 | Ruby 2.7 | PHP 8.1 + cURL | JDK 17 |
 | **External deps** | None (stdlib) | None (stdlib) | None (cURL) | None (java.net.http) |
-| **Auth header** | `Authorization: Bearer <key>` | Same | Same | Same |
+| **Auth header** | `X-API-Key: <key>` | Same | Same | Same |
 | **Idempotency header** | `X-Idempotency-Key` | `X-Idempotency-Key` | `X-Idempotency-Key` | `X-Idempotency-Key` |
 | **Default base URL** | `https://api.apexmail.ee` | Same | Same | Same |
 | **Default timeout** | 30 s | open: 10 s / read: 30 s | 30 s | 30 s |
@@ -366,7 +366,7 @@ client.suppressions().add(List.of("a@example.com", "b@example.com"), "manual");
 **Resolution:**
 1. **Check API key format:** Must start with `am_live_` (production) or `am_test_` (sandbox).
 2. **Check key is active:** Dashboard → API Keys → verify the key is not revoked.
-3. **Check key scopes:** The key must have the required scope for the operation (e.g., `emails:send` for sending).
+3. **Check key scopes:** The key must have the required scope for the operation (e.g., `messages:write` for sending).
 4. **Check for whitespace:** Trim leading/trailing spaces or newlines from the key.
 5. **Check environment:** Production keys only work against `https://api.apexmail.ee`; test keys only work in sandbox.
 

@@ -105,14 +105,15 @@ const NEGATIVE_TOKENS = new Set(['miss', 'lose', 'mistake', 'wrong', 'bad', 'pro
 export class SubjectLineAnalyzer {
     private readonly db: Pool;
     private readonly redis: Redis;
-    private readonly logger: Logger;
+    private readonly _logger: Logger;
     private readonly cachePrefix = 'subject:';
     private readonly cacheTTL = 24 * 60 * 60; // 24 hours
 
     constructor(config: SubjectLineAnalyzerConfig) {
         this.db = config.db;
         this.redis = config.redis;
-        this.logger = config.logger;
+        this._logger = config.logger;
+        this._logger.debug('SubjectLineAnalyzer initialized');
     }
 
     /**

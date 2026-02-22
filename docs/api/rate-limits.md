@@ -161,8 +161,8 @@ Contact support@apexmail.ee for enterprise rate limiting.
 ### Via API
 
 ```http
-GET /api/v1/account/usage
-Authorization: Bearer {{api_key}}
+GET /v1/account/usage
+X-API-Key: {{api_key}}
 ```
 
 Response:

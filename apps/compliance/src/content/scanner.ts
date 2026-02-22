@@ -50,6 +50,13 @@ interface SpamRule {
     score: number;
     description: string;
     checkFn?: (content: EmailContent) => boolean;
+    /**
+     * Which content to test the pattern against.
+     * - 'text'  — stripped plain text (default, works for body/subject spam phrases)
+     * - 'html'  — raw HTML body (needed for CSS-hiding patterns like display:none)
+     * Rules with a checkFn ignore this field.
+     */
+    checkTarget?: 'text' | 'html';
 }
 
 interface PhishingRule {
@@ -68,12 +75,21 @@ export class ContentScanner {
     private spamRules: SpamRule[];
     // @ts-expect-error Reserved for future phishing rules implementation  
     private _phishingRules: PhishingRule[];
+    /**
+     * Pre-compiled combined alternation of all TEXT-based spam patterns.
+     * Allows a single O(1) existence check before looping individual rules —
+     * on clean emails (the common case) we skip all N individual regex tests.
+     * Compiled once in the constructor; never mutated.
+     */
+    private spamFastCheckPattern!: RegExp;
 
     constructor(db: Pool, redis: Redis) {
         this.db = db;
         this._redis = redis;
         this.spamRules = this.initializeSpamRules();
         this._phishingRules = this.initializePhishingRules();
+        // Build fast-check pattern AFTER spamRules is assigned
+        this.spamFastCheckPattern = this.buildSpamFastCheckPattern();
     }
 
     /**
@@ -151,15 +167,27 @@ export class ContentScanner {
 
         const textContent = this.extractAllText(content);
 
+        // Fast existence check: single combined regex over all text-based pattern rules.
+        // On clean emails (no spam signals) this single test short-circuits the entire
+        // per-rule loop, replacing O(n) sequential regex calls with O(1).
+        const hasTextSpamSignal = this.spamFastCheckPattern.test(textContent);
+
         for (const rule of this.spamRules) {
             let matched = false;
 
             if (rule.checkFn) {
+                // Structural / functional checks must always run.
                 matched = rule.checkFn(content);
             } else if (rule.pattern instanceof RegExp) {
-                matched = rule.pattern.test(textContent);
-            } else {
-                matched = textContent.toLowerCase().includes(rule.pattern.toLowerCase());
+                const target = rule.checkTarget === 'html'
+                    ? (content.htmlBody ?? '')
+                    : textContent;
+                // For text rules, skip entirely when fast-check found no signal.
+                if (rule.checkTarget !== 'html' && !hasTextSpamSignal) continue;
+                matched = rule.pattern.test(target);
+            } else if (rule.pattern) {
+                if (!hasTextSpamSignal) continue;
+                matched = textContent.toLowerCase().includes((rule.pattern as string).toLowerCase());
             }
 
             if (matched) {
@@ -442,12 +470,16 @@ export class ContentScanner {
                 pattern: /<[^>]*display\s*:\s*none[^>]*>/i,
                 score: 3,
                 description: 'Contains hidden text in HTML',
+                // Must test against raw HTML — stripHtml() removes the tag so this pattern
+                // would never match against textContent (latent bug fix).
+                checkTarget: 'html',
             },
             {
                 name: 'TINY_FONT',
                 pattern: /font-size\s*:\s*[0-3]px/i,
                 score: 2,
                 description: 'Contains tiny unreadable text',
+                checkTarget: 'html',
             },
             {
                 name: 'IMAGE_ONLY',
@@ -565,9 +597,47 @@ export class ContentScanner {
                 data: { text },
             } = await this.ocrWorker.recognize(imageBuffer);
             return text;
-        } catch {
+        } catch (error) {
+            // OCR worker may have crashed (OOM, codec error, etc.).
+            // Terminate the old worker and restart so subsequent scans succeed.
+            console.warn('[ContentScanner] OCR recognition failed, attempting worker restart', error);
+            try {
+                await this.ocrWorker.terminate();
+            } catch {
+                // Ignore terminate errors — the worker may already be dead.
+            }
+            this.ocrWorker = null;
+
+            if (this.config.ocrEnabled) {
+                try {
+                    this.ocrWorker = await createWorker('eng');
+                    console.info('[ContentScanner] OCR worker restarted successfully');
+                } catch (restartError) {
+                    console.error('[ContentScanner] OCR worker restart failed', restartError);
+                    // Leave ocrWorker null — subsequent calls will return null gracefully.
+                }
+            }
+            // Return null for THIS extraction — the restarted worker handles the next one.
             return null;
         }
+    }
+
+    /**
+     * Build the combined fast-check pattern from all text-based (non-html, non-checkFn) rules.
+     * Called once in the constructor after spamRules is populated.
+     */
+    private buildSpamFastCheckPattern(): RegExp {
+        const patterns = this.spamRules
+            .filter(
+                (r) =>
+                    !r.checkFn &&
+                    r.pattern instanceof RegExp &&
+                    r.checkTarget !== 'html',
+            )
+            .map((r) => `(?:${(r.pattern as RegExp).source})`);
+        // Fallback: a pattern that never matches (in case all rules have checkFn)
+        if (patterns.length === 0) return /(?!)/;
+        return new RegExp(patterns.join('|'), 'i');
     }
 
     /**
@@ -1035,12 +1105,20 @@ export class ContentScanner {
     }
 
     /**
-     * Check content against a policy
+     * Check content against a policy.
+     *
+     * SECURITY: Policy rule patterns are tenant-supplied and may contain
+     * ReDoS-prone constructs (nested quantifiers, catastrophic backtracking).
+     * We: (1) enforce a max pattern length, (2) wrap regex evaluation in a
+     * try/catch to reject invalid patterns, and (3) limit input text to
+     * MAX_POLICY_TEXT_LEN to bound worst-case evaluation time.
      */
     private checkPolicy(
         content: EmailContent,
         policy: { name: string; rules: unknown[] }
     ): PolicyViolation[] {
+        const MAX_PATTERN_LEN = 512;
+        const MAX_POLICY_TEXT_LEN = 50_000;
         const violations: PolicyViolation[] = [];
 
         for (const rule of policy.rules as Array<{
@@ -1050,8 +1128,18 @@ export class ContentScanner {
             description: string;
         }>) {
             if (rule.type === 'forbidden_content' && rule.pattern) {
-                const regex = new RegExp(rule.pattern, 'i');
-                const text = this.extractAllText(content);
+                // Guard: reject overly long patterns that are likely malicious.
+                if (rule.pattern.length > MAX_PATTERN_LEN) continue;
+
+                let regex: RegExp;
+                try {
+                    regex = new RegExp(rule.pattern, 'i');
+                } catch {
+                    // Invalid regex — skip this rule rather than crash.
+                    continue;
+                }
+
+                const text = this.extractAllText(content).slice(0, MAX_POLICY_TEXT_LEN);
 
                 if (regex.test(text)) {
                     violations.push({

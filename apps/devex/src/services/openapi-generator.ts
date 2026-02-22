@@ -231,9 +231,9 @@ ApexMail provides a powerful email API for sending transactional emails at scale
 
 ## Authentication
 
-All API requests require authentication using either:
-- **Bearer Token**: Include in the Authorization header as \`Bearer <api_key>\`
-- **API Key Header**: Include in the \`X-API-Key\` header
+All API requests require authentication using an API key in the \`X-API-Key\` header:
+- **API Key Header**: Include in the \`X-API-Key\` header (e.g., \`X-API-Key: am_live_...\`)
+- **Bearer Token**: Used for dashboard JWT sessions only — not valid for API key authentication
 
 ## Rate Limiting
 

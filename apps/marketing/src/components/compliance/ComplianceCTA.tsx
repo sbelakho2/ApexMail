@@ -44,10 +44,10 @@ export function ComplianceCTA() {
  {/* Trust Signals */}
  <div className="grid grid-cols-2 md:grid-cols-4 gap-6 pt-8 border-t border-surface-100">
  {[
- { icon: Shield, label: 'SOC 2 Type II', sublabel: 'Certified' },
+ { icon: Shield, label: 'SOC 2 Controls', sublabel: 'Enterprise plan' },
  { icon: FileText, label: 'GDPR', sublabel: 'Compliant' },
- { icon: Shield, label: 'HIPAA', sublabel: 'BAA Available' },
- { icon: FileText, label: 'ISO 27001', sublabel: 'Certified' },
+ { icon: Shield, label: 'HIPAA', sublabel: 'BAA (Enterprise)' },
+ { icon: FileText, label: 'ISO 27001', sublabel: 'In progress' },
  ].map((item) => (
  <div key={item.label} className="flex flex-col items-center">
  <div className="w-10 h-10 rounded-full bg-surface-50 flex items-center justify-center mb-3 border border-surface-200 text-surface-900">

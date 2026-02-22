@@ -6,7 +6,8 @@
  * Local Map serves as L1 cache. On L1 miss, check Redis before fetching.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
 const robotsParser = require('robots-parser') as (url: string, txt: string) => RobotsParser;
 import { createLogger } from '@apexmail/lib/logger';
 import { config } from '../config.js';

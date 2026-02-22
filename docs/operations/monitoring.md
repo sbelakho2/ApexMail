@@ -472,7 +472,7 @@ All log entries are emitted as single-line JSON objects:
   "requestId": "req_abc123def456",
   "tenantId": "tenant_xyz789",
   "method": "POST",
-  "path": "/api/v1/messages",
+  "path": "/v1/messages",
   "statusCode": 202,
   "duration_ms": 45,
   "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -511,7 +511,7 @@ Requests exceeding a configurable duration threshold are logged at the `warn` le
   "slow": true,
   "requestId": "req_abc123def456",
   "method": "GET",
-  "path": "/api/v1/analytics/overview",
+  "path": "/v1/analytics/overview",
   "duration_ms": 4521,
   "timestamp": "2026-02-09T14:30:04.521Z"
 }

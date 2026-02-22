@@ -86,7 +86,7 @@ class BaseClient:
 
     def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "X-API-Key": self._api_key,
             "Content-Type": "application/json",
             "User-Agent": "apexmail-python/1.0.0",
         }

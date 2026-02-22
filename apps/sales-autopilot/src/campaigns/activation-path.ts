@@ -109,7 +109,7 @@ export const ACTIVATION_STEPS: ActivationStep[] = [
                 language: 'bash',
                 label: 'cURL (no SDK needed)',
                 code: `curl -X POST https://api.apexmail.ee/v1/messages \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "X-API-Key: YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
     "from": "test@yourdomain.com",

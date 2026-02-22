@@ -32,8 +32,8 @@ ApexMail automatically filters bot clicks from your engagement metrics. When a c
 ### Example: Checking Bot Status via API
 
 ```http
-GET /api/v1/analytics/clicks?campaignId=camp_123&includeBot=true
-Authorization: Bearer YOUR_API_KEY
+GET /v1/analytics/clicks?campaignId=camp_123&includeBot=true
+X-API-Key: YOUR_API_KEY
 ```
 
 Response includes a `botStatus` field for each click:
@@ -63,8 +63,8 @@ ApexMail uses multi-signal bot detection to separate genuine human engagement fr
 ApexMail can automatically inject invisible honeypot links into your emails. Only bots click these links, providing a definitive signal for detection. Enable honeypot links in your sending domain settings or via the API:
 
 ```http
-PUT /api/v1/domains/:id/settings
-Authorization: Bearer YOUR_API_KEY
+PUT /v1/domains/:id/settings
+X-API-Key: YOUR_API_KEY
 Content-Type: application/json
 
 {
@@ -102,8 +102,8 @@ Microsoft now "strongly recommends" allowing two-way communication. Reply rates 
 When reply tracking is enabled, ApexMail monitors incoming replies to your campaigns and provides structured analytics:
 
 ```http
-GET /api/v1/analytics/replies?campaignId=camp_123
-Authorization: Bearer YOUR_API_KEY
+GET /v1/analytics/replies?campaignId=camp_123
+X-API-Key: YOUR_API_KEY
 ```
 
 ```json
@@ -143,8 +143,8 @@ The service automatically detects and filters auto-replies via:
 Configure your reply-to settings via the dashboard or API:
 
 ```http
-PUT /api/v1/domains/:id/reply-tracking
-Authorization: Bearer YOUR_API_KEY
+PUT /v1/domains/:id/reply-tracking
+X-API-Key: YOUR_API_KEY
 Content-Type: application/json
 
 {
@@ -187,8 +187,8 @@ Trust = (Credibility + Reliability + Intimacy) / Self-Orientation
 ApexMail calculates a trust score (0–100) for each subscriber based on their engagement history. Access trust scores via the API or dashboard:
 
 ```http
-GET /api/v1/contacts/:id/trust-score
-Authorization: Bearer YOUR_API_KEY
+GET /v1/contacts/:id/trust-score
+X-API-Key: YOUR_API_KEY
 ```
 
 ```json
@@ -228,8 +228,8 @@ Authorization: Bearer YOUR_API_KEY
 ### Campaign-Level Trust Metrics
 
 ```http
-GET /api/v1/campaigns/:id/trust-metrics
-Authorization: Bearer YOUR_API_KEY
+GET /v1/campaigns/:id/trust-metrics
+X-API-Key: YOUR_API_KEY
 ```
 
 ```json
@@ -270,8 +270,8 @@ Gmail Annotations allow promotional emails to display:
 Add annotations to your campaigns via the API or dashboard:
 
 ```http
-POST /api/v1/campaigns/:id/annotations
-Authorization: Bearer YOUR_API_KEY
+POST /v1/campaigns/:id/annotations
+X-API-Key: YOUR_API_KEY
 Content-Type: application/json
 
 {
@@ -332,8 +332,8 @@ The service generates JSON-LD markup conforming to schema.org:
 Validate your annotation configuration before sending:
 
 ```http
-POST /api/v1/campaigns/:id/annotations/validate
-Authorization: Bearer YOUR_API_KEY
+POST /v1/campaigns/:id/annotations/validate
+X-API-Key: YOUR_API_KEY
 Content-Type: application/json
 
 { ... same payload as above ... }

@@ -1,12 +1,21 @@
 import type { Metadata } from 'next';
-import { Fraunces, IBM_Plex_Mono } from 'next/font/google';
+import localFont from 'next/font/local';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
 
-const fraunces = Fraunces({ subsets: ['latin'], variable: '--font-display', display: 'swap' });
-const plexMono = IBM_Plex_Mono({
-    subsets: ['latin'],
-    weight: ['400', '500'],
+const apex = localFont({
+    src: [
+        { path: '../../public/fonts/InterVariable.woff2', weight: '100 900', style: 'normal' },
+        { path: '../../public/fonts/InterVariable-Italic.woff2', weight: '100 900', style: 'italic' },
+    ],
+    variable: '--font-apex',
+    display: 'swap',
+});
+const plexMono = localFont({
+    src: [
+        { path: '../../public/fonts/JetBrainsMono-Variable.ttf', weight: '100 800', style: 'normal' },
+        { path: '../../public/fonts/JetBrainsMono-Italic-Variable.ttf', weight: '100 800', style: 'italic' },
+    ],
     variable: '--font-mono',
     display: 'swap',
 });
@@ -62,12 +71,10 @@ export default function RootLayout({
     children: React.ReactNode;
 }) {
     return (
-        <html lang="en" suppressHydrationWarning className={`${fraunces.variable} ${plexMono.variable}`}>
+        <html lang="en" suppressHydrationWarning className={`${apex.variable} ${plexMono.variable}`}>
             <head>
                 <meta name="theme-color" content="#2563EB" />
                 <meta name="color-scheme" content="light dark" />
-                <link rel="preconnect" href="https://fonts.googleapis.com" />
-                <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
                 {/* FIX-095: Prevent flash of wrong theme on load */}
                 <script
                     dangerouslySetInnerHTML={{
@@ -75,7 +82,7 @@ export default function RootLayout({
                     }}
                 />
             </head>
-            <body className="font-display antialiased text-[17px] leading-[1.6]">
+            <body className="font-apex antialiased text-[16px] leading-[1.55]">
                 <main className="min-h-screen bg-background">{children}</main>
                 <Toaster />
             </body>

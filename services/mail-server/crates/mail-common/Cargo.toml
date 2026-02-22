@@ -17,3 +17,8 @@ chrono.workspace = true
 uuid.workspace = true
 config.workspace = true
 dotenvy.workspace = true
+# Optional — enabled by crates that pull in sqlx
+sqlx = { workspace = true, optional = true }
+
+[features]
+sqlx = ["dep:sqlx"]

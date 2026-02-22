@@ -23,6 +23,7 @@ import {
   WalletService,
   ViralLoopService,
   CostCircuitService,
+  DedicatedIpBillingService,
 } from './services/index.js';
 import {
   billingRoutes,
@@ -56,6 +57,7 @@ export interface BillingContext {
   wallet: WalletService;
   viralLoop: ViralLoopService;
   costCircuit: CostCircuitService;
+  dedicatedIpBilling: DedicatedIpBillingService;
 }
 
 export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
@@ -77,13 +79,14 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   const plans = new PlansService(db);
   const proration = new ProrationEngine(db, plans);
   const invoices = new InvoiceService(db);
-  const stripeIntegration = new StripeService(db);
   const dunning = new DunningService(db, redis);
+  const stripeIntegration = new StripeService(db, dunning);
   const slaCredits = new SlaCreditsService(db);
   const contracts = new EnterpriseContractService(db);
   const wallet = new WalletService(db, redis);
   const viralLoop = new ViralLoopService(db, redis);
   const costCircuit = new CostCircuitService(db, redis);
+  const dedicatedIpBilling = new DedicatedIpBillingService(db);
 
   const ctx: BillingContext = {
     db,
@@ -100,7 +103,11 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
     wallet,
     viralLoop,
     costCircuit,
+    dedicatedIpBilling,
   };
+
+  // Start dedicated IP billing sync (picks up pending charges/cancels every 30s)
+  dedicatedIpBilling.startSync();
 
   // Create Hono app
   const app = new Hono<BillingEnv>();
@@ -113,7 +120,7 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
     origin: config.corsOrigins,
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID', 'X-Request-ID'],
-    exposeHeaders: ['X-Request-ID', 'X-Rate-Limit-Remaining'],
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
     maxAge: 86400,
     credentials: true,
   }));

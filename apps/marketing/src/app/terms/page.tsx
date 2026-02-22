@@ -46,9 +46,9 @@ export default function TermsPage() {
 
                 <h2 className="text-xl font-semibold mt-8">6. SLA</h2>
                 <p>
-                    We commit to 99.9% monthly uptime for paid plans. See our
+                    We commit to 99.9% monthly uptime for Scale and Enterprise plans. See our
                     <a href="/sla" className="text-primary hover:underline ml-1">Service Level Agreement</a> for
-                    credit terms.
+                    credit terms. Other plans are provided on a best-effort basis with no uptime guarantee.
                 </p>
 
                 <h2 className="text-xl font-semibold mt-8">7. Limitation of Liability</h2>

@@ -597,6 +597,172 @@ ${signature()}`
     ],
 };
 
+// ╔═══════════════════════════════════════════════════════════════════╗
+// ║  4. COMPETITOR MIGRATION — 4-Touch Provider-Specific Sequence   ║
+// ║                                                                   ║
+// ║  Cialdini: Reciprocity (free audit) → Authority (migration exp) ║
+// ║  → Social Proof (other migrations) → Scarcity (free support)    ║
+// ║                                                                   ║
+// ║  Philosophy: Target companies detected using SendGrid, Mailgun,  ║
+// ║  Resend, etc. Offer genuine value: free deliverability audit,    ║
+// ║  webhook migration guide, and free migration support.            ║
+// ╚═══════════════════════════════════════════════════════════════════╝
+
+const competitorMigrationTemplate: CampaignTemplate = {
+    id: 'tmpl_competitor_migration',
+    name: 'Competitor Migration — SendGrid/Mailgun/Resend',
+    description:
+        'Targets companies using competing email providers (detected via DNS). Leads with a free deliverability audit, offers webhook migration guide, and free migration support.',
+    category: 'cold_outreach',
+    cialdiniPrinciples: ['reciprocity', 'authority', 'social_proof', 'scarcity'],
+    suggestedTriggers: ['lead_added', 'tag_added:sendgrid', 'tag_added:mailgun', 'tag_added:resend'],
+    suggestedExitConditions: ['replied', 'unsubscribed', 'bounced', 'converted'],
+    variables: [
+        { name: 'sender_name', description: 'Your name', defaultValue: 'Alex', required: true },
+        { name: 'sender_title', description: 'Your job title', defaultValue: 'Migration Specialist', required: true },
+        { name: 'current_provider', description: 'Detected email provider (SendGrid, Mailgun, etc.)', defaultValue: 'SendGrid', required: true },
+        { name: 'audit_link', description: 'Link to request a free deliverability audit', defaultValue: 'https://apexmail.ee/audit', required: true },
+        { name: 'migration_guide_link', description: 'Link to provider-specific migration guide', defaultValue: 'https://apexmail.ee/migrate/from-sendgrid', required: true },
+        { name: 'webhook_guide_link', description: 'Link to webhook migration documentation', defaultValue: 'https://apexmail.ee/docs/webhooks/migration', required: true },
+        { name: 'calendar_link', description: 'Booking link for migration support call', defaultValue: 'https://cal.com/apexmail/migration', required: false },
+        { name: 'case_study_company', description: 'Company that migrated successfully', defaultValue: 'a Series B SaaS company', required: false },
+        { name: 'case_study_migration_time', description: 'How long the migration took', defaultValue: '45 minutes', required: false },
+    ],
+    sequence: [
+        // ── Touch 1: Free Deliverability Audit Offer (Reciprocity) ──
+        {
+            id: generateId('step'),
+            order: 1,
+            type: 'email',
+            name: 'Touch 1 — Free Deliverability Audit (Reciprocity)',
+            delay: createDelay(0, 'minutes'),
+            content: createEmailContent(
+                'Quick deliverability check for {{lead.domain}}',
+                `<p>Hi {{lead.first_name}},</p>
+
+<p>I noticed {{lead.company_name}} is using <strong>{{current_provider}}</strong> for transactional email — I saw it in your public DNS records (MX, SPF, DKIM).</p>
+
+<p>I put together deliverability audits for teams considering their email infrastructure options. It's a quick review that covers:</p>
+
+<ul>
+  <li><strong>DNS configuration</strong> — SPF alignment, DKIM rotation, DMARC policy</li>
+  <li><strong>Sender reputation</strong> — how your domain scores with major inbox providers</li>
+  <li><strong>Deliverability gaps</strong> — common issues I see with {{current_provider}} setups at scale</li>
+</ul>
+
+<p>It's free, takes me about 20 minutes to compile, and there's no obligation to do anything with it.</p>
+
+<a href="{{audit_link}}" class="cta-btn">Request Your Free Audit →</a>
+
+<p>If you'd rather I just send it to this email, reply "send it" and I'll have it over within 48 hours.</p>
+
+${signature()}`
+            ),
+            conditions: [],
+            abTest: null,
+        },
+
+        // ── Touch 2: Webhook Migration Guide (Authority) ──
+        {
+            id: generateId('step'),
+            order: 2,
+            type: 'email',
+            name: 'Touch 2 — Webhook Migration Guide (Authority)',
+            delay: createDelay(4, 'days'),
+            content: createEmailContent(
+                'Migrating webhooks from {{current_provider}} — the gotchas',
+                `<p>Hi {{lead.first_name}},</p>
+
+<p>One thing teams often underestimate when evaluating email providers is webhook migration. The event payloads look similar, but there are subtle differences that can break your tracking.</p>
+
+<p>I put together a guide specifically for teams moving from <strong>{{current_provider}}</strong>:</p>
+
+<div class="tip-box">
+  <strong>What's covered:</strong><br>
+  • 1:1 event type mapping (delivered, bounced, complained, etc.)<br>
+  • Payload structure differences and how to adapt your handlers<br>
+  • Signature verification changes (we use HMAC-SHA256)<br>
+  • Running both providers in parallel during transition
+</div>
+
+<a href="{{webhook_guide_link}}" class="cta-btn">View the Webhook Migration Guide →</a>
+
+<p>Even if you're not planning to switch providers, the guide is useful for understanding how different platforms handle email events.</p>
+
+${signature()}`
+            ),
+            conditions: [],
+            abTest: null,
+        },
+
+        // ── Touch 3: Migration Success Story (Social Proof) ──
+        {
+            id: generateId('step'),
+            order: 3,
+            type: 'email',
+            name: 'Touch 3 — Migration Success Story (Social Proof)',
+            delay: createDelay(5, 'days'),
+            content: createEmailContent(
+                'How {{case_study_company}} migrated from {{current_provider}} in {{case_study_migration_time}}',
+                `<p>Hi {{lead.first_name}},</p>
+
+<p>I wanted to share a quick migration story that might be relevant:</p>
+
+<p>{{case_study_company}} was using {{current_provider}} and experiencing intermittent deliverability issues — emails landing in spam for certain domains, inconsistent webhook delivery, and opaque bounce reporting.</p>
+
+<p>Their migration to ApexMail took <strong>{{case_study_migration_time}}</strong> of active engineering time:</p>
+
+<ol>
+  <li>Swapped the SDK import and API key (5 minutes)</li>
+  <li>Added new DNS records alongside existing ones (10 minutes)</li>
+  <li>Updated webhook handlers using our migration guide (20 minutes)</li>
+  <li>Ran both providers in parallel for 48 hours, then cut over</li>
+</ol>
+
+<p>The result: bounce rates dropped by 40% in the first month, and their ops team stopped getting paged for email issues.</p>
+
+<p><a href="{{migration_guide_link}}">Full migration guide here</a> if you want to see the technical steps.</p>
+
+${signature()}`
+            ),
+            conditions: [],
+            abTest: null,
+        },
+
+        // ── Touch 4: Free Migration Support Offer (Scarcity + Reciprocity) ──
+        {
+            id: generateId('step'),
+            order: 4,
+            type: 'email',
+            name: 'Touch 4 — Free Migration Support (Scarcity)',
+            delay: createDelay(6, 'days'),
+            content: createEmailContent(
+                'Free migration support for {{lead.company_name}}',
+                `<p>Hi {{lead.first_name}},</p>
+
+<p>This is the last email in this sequence — I want to respect your inbox.</p>
+
+<p>If {{lead.company_name}} is considering a move away from {{current_provider}}, we offer <strong>free migration support</strong> for teams making the switch. This includes:</p>
+
+<ul>
+  <li><strong>1:1 onboarding call</strong> — I'll walk through your specific setup and answer questions</li>
+  <li><strong>DNS review</strong> — I'll verify your new records are correctly configured before you cut over</li>
+  <li><strong>Webhook testing</strong> — We'll validate your handlers receive events correctly</li>
+  <li><strong>Parallel running guidance</strong> — Best practices for zero-downtime migration</li>
+</ul>
+
+<a href="{{calendar_link}}" class="cta-btn">Book Free Migration Support →</a>
+
+<p>If timing isn't right now, just reply to this thread whenever you're ready — the offer doesn't expire.</p>
+
+${signature()}`
+            ),
+            conditions: [],
+            abTest: null,
+        },
+    ],
+};
+
 // ────────────────────────────────────────────────────────────────────
 // Registry & Exports
 // ────────────────────────────────────────────────────────────────────
@@ -608,6 +774,7 @@ export const campaignTemplates: CampaignTemplate[] = [
     coldOutreachTemplate,
     trialOnboardingTemplate,
     reEngagementTemplate,
+    competitorMigrationTemplate,
 ];
 
 /**

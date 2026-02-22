@@ -47,7 +47,7 @@ export function CaseStudiesCTA() {
           </div>
 
           <p className="text-surface-500 text-sm mt-8 font-medium">
-            No credit card required • Free tier includes 1,000 emails/month
+            No credit card required • Free tier includes 3,000 emails/month
           </p>
         </motion.div>
       </div>

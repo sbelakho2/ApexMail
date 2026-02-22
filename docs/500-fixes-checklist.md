@@ -1327,7 +1327,7 @@ DO NOT JUST RUN GENERIC TESTS FOR EACH BATCH. WRITE/DESIGN THE PROPER TESTS FOR 
 670. Can I insert live product prices in emails?
 
 ### Follow-Up Conversations (671–730)
-671. You said the Starter plan is $29/mo — does that include taxes?
+671. You said the Starter plan is $25/mo — does that include taxes?
 672. You mentioned DMARC — do I need it if I already have SPF?
 673. Earlier you said 27% open rate — is that for all industries?
 674. You said API keys look like am_live_ — how long are they?

@@ -62,7 +62,7 @@ const KNOWLEDGE_BASE: KBEntry[] = [
   },
   {
     keywords: ['rate limit', 'sending limit', 'throttl', 'too many'],
-    answer: 'Rate limits depend on your plan. Free tier: 100 emails/day. Starter: 10,000/day. Pro: 50,000/day. Enterprise: custom limits. You can check your current usage in the Dashboard. If you need higher limits, consider upgrading your plan in Billing.',
+    answer: 'Email sending limits are monthly by plan: Free 3,000/mo, Starter 50,000/mo, Pro 150,000/mo, Growth 500,000/mo, Scale 2,000,000/mo, Enterprise 5,000,000/mo. API rate limits are 1,000 requests/min for all plans. You can check your current usage in the Dashboard, and upgrade in Billing if you need higher limits.',
   },
   {
     keywords: ['bounce', 'bounced', 'hard bounce', 'soft bounce'],
@@ -74,7 +74,7 @@ const KNOWLEDGE_BASE: KBEntry[] = [
   },
   {
     keywords: ['api key', 'api token', 'authentication', 'auth'],
-    answer: 'You can manage API keys in Settings → API & Webhooks. Create a new key, set its scopes (send, read, admin), and copy it immediately — it cannot be shown again. Use the key in the Authorization header: `Authorization: Bearer YOUR_API_KEY`.',
+    answer: 'You can manage API keys in Settings → API & Webhooks. Create a new key, set its scopes (send, read, admin), and copy it immediately — it cannot be shown again. Use the key in the `X-API-Key` header: `X-API-Key: YOUR_API_KEY`.',
   },
   {
     keywords: ['billing', 'invoice', 'payment', 'charge', 'subscription', 'plan', 'upgrade', 'downgrade'],

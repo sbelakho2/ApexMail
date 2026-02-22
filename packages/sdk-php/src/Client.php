@@ -83,7 +83,7 @@ class Client
         $url = $this->baseUrl . $path;
 
         $headers = [
-            'Authorization: Bearer ' . $this->apiKey,
+            'X-API-Key: ' . $this->apiKey,
             'Content-Type: application/json',
             'Accept: application/json',
             'User-Agent: apexmail-php/' . self::SDK_VERSION,

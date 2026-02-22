@@ -92,7 +92,6 @@ public final class ApexMailClient {
      * @return Parsed response body as a {@code Map<String, Object>}
      * @throws ApexMailException on API errors
      */
-    @SuppressWarnings("unchecked")
     public Map<String, Object> request(String method, String path, Object body) {
         return request(method, path, body, null);
     }
@@ -104,7 +103,7 @@ public final class ApexMailClient {
             String jsonBody = body != null ? toJson(body) : "";
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path))
-                .header("Authorization", "Bearer " + apiKey)
+                .header("X-API-Key", apiKey)
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .header("User-Agent", "apexmail-java/1.0.0");
@@ -202,7 +201,6 @@ public final class ApexMailClient {
 
     // ── Error mapping ─────────────────────────────────────────────────────
 
-    @SuppressWarnings("unchecked")
     private void throwApiException(int status, Map<String, Object> body) {
         String message = body.containsKey("error")
             ? String.valueOf(body.get("error"))

@@ -18,9 +18,7 @@
 **Industry average:** Open rate ~21.5%, CTR ~2.3%, Email ROI $36 per $1 spent.
 
 **IP Warmup Schedule (dedicated IPs):**
-- Week 1: 500/day → Week 2: 1,000/day → Week 3: 5,000/day
-- Week 4: 10,000/day → Week 5: 25,000/day → Week 6: 50,000/day
-- Week 7+: 100,000+/day
+Warmup is **ISP-specific** and enforced daily by `apps/worker/src/services/ip-rate-limiter.ts`. Approximate rough guidance (Gmail/Yahoo are strictest, starting at 50/day; Microsoft allows 100/day from day 1). Full schedules are in the [IP Pools & Warmup Playbook](ip-pools-warmup-infrastructure.md). Typical trajectory to full volume: ~14 days for Microsoft, ~15+ days for Gmail.
 
 ---
 
@@ -155,7 +153,7 @@
    - Bad subject + good reputation = probably fine
    - Bad subject + new/poor reputation = likely spam
 3. Recommendations: write naturally, use sentence case, avoid hype language, focus on value.
-4. A/B test subject lines (available on Growth+ plans) to optimize engagement.
+4. A/B test subject lines (available on Pro+ plans) to optimize engagement.
 
 ---
 
@@ -200,7 +198,7 @@
    - Segment list by engagement (active vs inactive).
    - Re-engage inactive with a targeted campaign.
    - Clean list of addresses that haven't opened in 90+ days.
-   - A/B test subject lines (Growth+ plans).
+   - A/B test subject lines (Pro+ plans).
 3. Industry benchmarks: open rate ~21.5%, CTR ~2.3%.
 
 ---
@@ -324,13 +322,13 @@
 **Root cause:** Large senders sometimes separate transactional and marketing email on different IPs to isolate reputation.
 
 **Resolution:**
-1. Dedicated IPs are available on Growth ($129/mo — 1 IP), Scale ($399/mo — 3 IPs), and Enterprise ($1,299/mo — 10 IPs) plans.
+1. Dedicated IPs are available on Growth ($150/mo — 1 IP), Scale ($350/mo — 3 IPs), and Enterprise ($800/mo — 10 IPs) plans.
 2. Use cases:
    - Separate transactional (password resets, receipts) from marketing (newsletters, promotions).
    - Isolate high-risk sends (re-engagement campaigns) from core sends.
 3. Setup: contact `contact@apexmail.ee` to request additional IPs and configure pools.
 4. Each IP needs independent warmup.
-5. Free ($0), Starter ($29/mo), and Pro ($59/mo) plans use shared IP pools managed by ApexMail.
+5. Free ($0) and Starter ($25/mo) plans use shared IP pools managed by ApexMail. Pro ($65/mo) uses shared IPs by default but can add a dedicated IP ($30/mo add-on).
 
 ---
 

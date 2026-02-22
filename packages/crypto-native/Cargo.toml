@@ -1,0 +1,53 @@
+[package]
+name = "crypto-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native Node.js bindings for ApexMail cryptographic operations"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi        = { version = "2", default-features = false, features = ["napi4", "async", "error_anyhow"] }
+napi-derive = "2"
+
+# Symmetric encryption
+aes-gcm     = { version = "0.10", features = ["aes"] }
+
+# MAC / KDF
+hmac        = "0.12"
+sha2        = "0.10"
+hkdf        = "0.12"
+
+# Password hashing
+argon2      = { version = "0.5", features = ["std"] }
+
+# Asymmetric / DKIM key generation
+rsa         = { version = "0.9", features = ["std", "pem"] }
+
+# Constant-time comparison
+subtle      = "2"
+
+# Randomness
+rand        = "0.8"
+
+# Encoding
+base64      = "0.22"
+hex         = "0.4"
+
+# Memory zeroization
+zeroize     = { version = "1.8", features = ["derive"] }
+
+# Error handling in async tasks
+anyhow      = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+opt-level   = 3
+lto         = true
+codegen-units = 1
+panic       = "abort"
+strip       = true

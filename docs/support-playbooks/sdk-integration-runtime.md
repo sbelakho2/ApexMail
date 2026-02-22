@@ -434,15 +434,15 @@ def apexmail_webhook(request):
    // Use the raw API instead of the SDK
    export default {
      async fetch(request: Request): Promise<Response> {
-       const response = await fetch('https://api.apexmail.ee/v1/emails', {
+       const response = await fetch('https://api.apexmail.ee/v1/messages', {
          method: 'POST',
          headers: {
-           'Authorization': `Bearer ${API_KEY}`,
+           'X-API-Key': API_KEY,
            'Content-Type': 'application/json',
          },
          body: JSON.stringify({
-           from: 'sender@example.com',
-           to: ['recipient@example.com'],
+           from: { email: 'sender@example.com', name: 'Sender' },
+           to: [{ email: 'recipient@example.com' }],
            subject: 'Hello from Edge',
            html: '<p>Sent from Cloudflare Workers</p>',
          }),
@@ -588,7 +588,7 @@ def apexmail_webhook(request):
    - Timezone: always UTC. Customer must convert their timezone.
 4. **Cancel scheduled:** Delete the message before the scheduled time:
    ```bash
-   curl -X DELETE -H "Authorization: Bearer <KEY>" \
+   curl -X DELETE -H "X-API-Key: <KEY>" \
      "https://api.apexmail.ee/v1/messages/<MSG_ID>"
    ```
 
@@ -905,9 +905,9 @@ await client.emails.send({
 
 ---
 
-## Issue F192 — "Custom API base URL (self-hosted or staging)"
+## Issue F192 — "Custom API base URL (on-premises or staging)"
 
-**Symptoms:** Customer has a self-hosted instance or wants to test against staging.
+**Symptoms:** Customer has an on-premises instance or wants to test against staging.
 
 **Resolution:**
 ```javascript

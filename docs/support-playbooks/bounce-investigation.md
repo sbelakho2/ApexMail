@@ -96,7 +96,7 @@ journalctl -u apexmail-mta --since "2 hours ago" | grep -oP 'rcpt_domain=\K[^ ]+
 # Primary Hetzner IPs — replace with actual IPs
 for ip in 65.108.x.x 135.181.x.x 95.217.x.x; do
   echo "=== Checking $ip ==="
-  curl -s "https://api.mxtoolbox.com/api/v1/lookup/blacklist/$ip" \
+  curl -s "https://api.mxtoolbox.com/v1/lookup/blacklist/$ip" \
     -H "Authorization: Bearer $MXTOOLBOX_API_KEY" | jq '.Failed'
 done
 
@@ -256,7 +256,7 @@ Summary: "Bounce rate spike - [X]% across [scope]"
 
 ```bash
 # Quick bounce rate check (last hour)
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query?query=apexmail_bounce_rate_percent" | jq '.data.result[].value[1]'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query?query=apexmail_bounce_rate_percent" | jq '.data.result[].value[1]'
 
 # Check MTA queue depth
 redis-cli -h redis.apexmail.internal LLEN mta:send:queue

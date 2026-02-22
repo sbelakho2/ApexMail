@@ -67,8 +67,8 @@ Monitor actual inbox vs spam folder placement rates using seed list testing.
 ### Run a Placement Test
 
 ```http
-POST /api/v1/inbox-placement/tests
-Authorization: Bearer {{token}}
+POST /v1/inbox-placement/tests
+X-API-Key: {{api_key}}
 Content-Type: application/json
 
 {
@@ -96,8 +96,8 @@ Content-Type: application/json
 ### Check Test Results
 
 ```http
-GET /api/v1/inbox-placement/tests/:testId
-Authorization: Bearer {{token}}
+GET /v1/inbox-placement/tests/:testId
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -155,8 +155,8 @@ Authorization: Bearer {{token}}
 ### Get Placement Trends
 
 ```http
-GET /api/v1/inbox-placement/trends?startDate=2024-01-01&endDate=2024-03-15&granularity=week
-Authorization: Bearer {{token}}
+GET /v1/inbox-placement/trends?startDate=2024-01-01&endDate=2024-03-15&granularity=week
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -177,8 +177,8 @@ Authorization: Bearer {{token}}
 ### Provider-Specific Analysis
 
 ```http
-GET /api/v1/inbox-placement/providers?days=30
-Authorization: Bearer {{token}}
+GET /v1/inbox-placement/providers?days=30
+X-API-Key: {{api_key}}
 ```
 
 ### Response

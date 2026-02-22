@@ -130,10 +130,12 @@ Migration `002` in the billing app updated plan pricing across all tiers:
 
 | Plan       | Previous Price | New Price  | Change   |
 |------------|---------------|------------|----------|
-| Pro        | $49/mo        | $59/mo     | +$10     |
-| Growth     | $99/mo        | $129/mo    | +$30     |
-| Scale      | $299/mo       | $399/mo    | +$100    |
-| Enterprise | $999/mo       | $1,299/mo  | +$300    |
+| Free       | $0/mo         | $0/mo      | —        |
+| Starter    | $29/mo        | $25/mo     | −$4      |
+| Pro        | $59/mo        | $65/mo     | +$6      |
+| Growth     | $129/mo       | $150/mo    | +$21     |
+| Scale      | $399/mo       | $350/mo    | −$49     |
+| Enterprise | $1,299/mo     | $800/mo    | −$499    |
 
 ### Grandfathering Policy
 
@@ -192,7 +194,7 @@ Both official SDKs follow **Semantic Versioning (semver)**:
 
 | SDK                          | Package                     |
 |------------------------------|-----------------------------|
-| Node.js (`packages/sdk-node`) | `@apexmail/sdk-node`        |
+| Node.js (`packages/sdk-node`) | `@apexmail/node`        |
 | Python (`packages/sdk-python`)| `apexmail`                  |
 
 ```
@@ -308,7 +310,7 @@ All environment variables are **validated at startup using Zod schemas**. If a r
 const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   JWT_SECRET: z.string().min(32),
-  API_KEY_SECRET: z.string().min(32),
+  API_KEY_HASH_SECRET: z.string().min(32),
   CORS_ORIGIN: z.string(),
   NODE_ENV: z.enum(['development', 'test', 'production']),
   // ...
@@ -321,7 +323,7 @@ When `NODE_ENV=production`, additional validation rules are enforced:
 
 | Requirement                     | Validation Rule                                              |
 |---------------------------------|--------------------------------------------------------------|
-| **Secrets ≥ 32 characters**     | `JWT_SECRET`, `API_KEY_SECRET`, and all signing keys must be at least 32 characters. |
+| **Secrets ≥ 32 characters**     | `JWT_SECRET`, `API_KEY_HASH_SECRET`, and all signing keys must be at least 32 characters. |
 | **No wildcard CORS**            | `CORS_ORIGIN` must not be `*`. An explicit origin list is required. |
 | **No dev-default secrets**      | Values like `change-me`, `secret`, `dev-secret`, `password` are rejected. |
 | **TLS database connections**    | `DATABASE_URL` must include `sslmode=require` or equivalent. |

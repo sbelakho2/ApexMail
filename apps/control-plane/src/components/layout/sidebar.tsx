@@ -23,7 +23,8 @@ import {
     FileText, 
     Settings,
     Lock,
-    LogOut
+    LogOut,
+    Zap
 } from '../ui/icons';
 import { cn } from '../../lib/utils';
 
@@ -42,6 +43,7 @@ const navSections: NavSection[] = [
     {
         title: 'Sales Automation',
         items: [
+            { href: '/sales', label: 'Sales System', icon: <Zap className="w-4 h-4" /> },
             { href: '/crm', label: 'CRM Pipeline', icon: <BarChart3 className="w-4 h-4" /> },
             { href: '/leads', label: 'Lead Discovery', icon: <Target className="w-4 h-4" /> },
             { href: '/campaigns', label: 'Drip Campaigns', icon: <Mail className="w-4 h-4" /> },

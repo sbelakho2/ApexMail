@@ -1,15 +1,15 @@
 # =============================================================================
-#  ApexMail AI — Qwen 2.5-7B-Instruct Fine-Tuning on vast.ai
+#  ApexMail AI — Qwen3-Next-80B-A3B-Instruct Fine-Tuning on vast.ai
 # =============================================================================
 #
 #  Core stack:
 #    - PyTorch 2.3+  (CUDA 12.x)
-#    - transformers + peft + trl  (QLoRA SFT)
-#    - bitsandbytes              (4-bit NF4 quantisation)
+#    - transformers + peft + trl  (QLoRA SFT with FSDP)
+#    - bitsandbytes              (4-bit NF4 quantisation for eval)
 #    - flash-attn 2              (memory-efficient attention)
 #    - optimum + onnxruntime     (ONNX export for prod)
 #
-#  Designed for a single-GPU vast.ai instance (A100 40 GB / A6000 48 GB).
+#  Designed for 8× NVIDIA B200 (183GB each) with NVLink on vast.ai.
 # =============================================================================
 
 # --- PyTorch (CUDA 12.x wheels auto-selected by pip when CUDA toolkit present)

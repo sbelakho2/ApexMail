@@ -39,7 +39,7 @@ All API requests require authentication via either an **API key** (for server-to
 - Verify the key format matches `am_live_<hex>` (production) or `am_test_<hex>` (sandbox).
 - Pass the key in the `X-API-Key` header:
   ```bash
-  curl -H "X-API-Key: am_live_abc123def456..." https://api.apexmail.dev/v1/messages
+  curl -H "X-API-Key: am_live_abc123def456..." https://api.apexmail.ee/v1/messages
   ```
 - Check that the key has not been revoked in **Settings → API Keys**.
 - Ensure you are using the correct key for the environment (live vs. test).
@@ -417,7 +417,7 @@ A `409 Conflict` response means the request conflicts with the current state of 
 Idempotency keys prevent duplicate operations when retrying requests. Include the `Idempotency-Key` header:
 
 ```bash
-curl -X POST https://api.apexmail.dev/v1/messages \
+curl -X POST https://api.apexmail.ee/v1/messages \
   -H "X-API-Key: am_live_..." \
   -H "Idempotency-Key: unique-request-id-12345" \
   -H "Content-Type: application/json" \

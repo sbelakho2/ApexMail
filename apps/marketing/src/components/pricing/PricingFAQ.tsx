@@ -15,7 +15,7 @@ const faqs: FAQ[] = [
  {
  question: 'What happens if I exceed my monthly email limit?',
  answer:
- "We'll notify you when you reach 80% and 100% of your limit. You can upgrade your plan or switch to Pay As You Go for overages (starting at $1.00 per 1,000 emails). We never cut off your sending mid-campaign.",
+ "We'll notify you when you reach 80% and 100% of your limit. You can upgrade your plan or switch to Pay As You Go for overages (starting at $0.40 per 1,000 emails). We never cut off your sending mid-campaign.",
  },
  {
  question: 'Can I change plans at any time?',

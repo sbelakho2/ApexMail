@@ -245,14 +245,11 @@
 
 **Resolution:**
 1. Explain: "IP warmup is essential. ISPs need to build trust with a new sending IP. Sending too much too fast will get you blocked."
-2. Recommended warmup schedule:
-   - Week 1: 500/day
-   - Week 2: 1,000/day
-   - Week 3: 5,000/day
-   - Week 4: 10,000/day
-   - Week 5: 25,000/day
-   - Week 6: 50,000/day
-   - Week 7+: 100,000+/day
+2. Recommended warmup schedule (ISP-specific; see [IP Pools & Warmup Playbook](ip-pools-warmup-infrastructure.md) for full per-ISP tables):
+   - Gmail/Yahoo: start at 50/day (strictest — Day 1)
+   - Microsoft: start at 100/day
+   - Default (unknown ISPs): start at 100/day
+   - Full volume reached in ~14–15 days of consistent sending
 3. During warmup: send to your most engaged recipients first.
 4. Monitor bounces and complaints at each step — pause if rates exceed thresholds.
 5. Do NOT skip warmup. Even Enterprise customers must follow this process.

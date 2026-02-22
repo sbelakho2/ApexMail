@@ -1,0 +1,86 @@
+[package]
+name = "tracking-service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ApexMail high-performance email tracking service (open pixel, click, unsubscribe)"
+
+[[bin]]
+name = "tracking-service"
+path = "src/main.rs"
+
+[dependencies]
+mail-common = { path = "../mail-common", features = ["sqlx"] }
+
+# Async runtime
+tokio.workspace = true
+futures.workspace = true
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+
+# CLI / config
+clap.workspace = true
+dotenvy.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Metrics
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# Database
+sqlx.workspace = true
+
+# Redis
+deadpool-redis.workspace = true
+redis.workspace = true
+
+# Cache
+moka.workspace = true
+
+# Rate limiting
+governor.workspace = true
+nonzero_ext.workspace = true
+
+# Crypto
+aes-gcm.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+
+# Pattern matching (linear-time)
+aho-corasick.workspace = true
+regex.workspace = true
+
+# IP networking
+ipnetwork.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utils
+bytes.workspace = true
+once_cell.workspace = true
+hex.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+
+[dev-dependencies]
+axum-test = "14"
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -122,15 +122,15 @@ const caseStudies = [
     challenge:
       'Fortune 500 clients demanded that no email data leave their private cloud environment. SaaS email providers were not an option.',
     solution:
-      'ApexMail\'s self-hosted deployment with Docker Compose gave DevPipeline complete control. Zero per-email costs meant predictable budgeting.',
+      'ApexMail\'s private deployment with Docker Compose gave DevPipeline complete control. Zero per-email costs meant predictable budgeting.',
     results: [
-      'Won 3 Fortune 500 contracts with self-hosted deployment',
+      'Won 3 Fortune 500 contracts with private deployment option',
       'Zero per-email costs after initial setup',
       'Full audit trail within client\'s infrastructure',
       'SOC 2 compliance maintained with internal controls',
     ],
     quote: {
-      text: 'Self-hosting ApexMail was the difference between winning and losing enterprise deals. Our clients\' security teams approve it because the data never leaves their environment.',
+      text: 'Private deployment of ApexMail was the difference between winning and losing enterprise deals. Our clients\' security teams approve it because the data never leaves their environment.',
       author: 'Alex Rivera',
       role: 'Founder & CEO, DevPipeline',
     },

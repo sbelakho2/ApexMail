@@ -11,9 +11,9 @@ This document describes ApexMail's API versioning policy, backward compatibility
 All API endpoints are prefixed with a version identifier:
 
 ```
-https://api.apexmail.dev/v1/messages
-https://api.apexmail.dev/v1/domains
-https://api.apexmail.dev/v1/templates
+https://api.apexmail.ee/v1/messages
+https://api.apexmail.ee/v1/domains
+https://api.apexmail.ee/v1/templates
 ```
 
 The current stable version is **v1**.

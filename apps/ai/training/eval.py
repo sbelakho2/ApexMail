@@ -2,7 +2,7 @@
 """
 ApexMail AI — Golden-Set Evaluation
 
-Evaluates the fine-tuned Qwen 2.5-7B-Instruct against a golden QA set.
+Evaluates the fine-tuned Qwen3-Next-80B-A3B-Instruct against a golden QA set.
 Each answer is graded A/B/C/D/F by a rubric that checks:
   - Factual accuracy (pricing, API details, features)
   - Relevance to the question
@@ -49,13 +49,13 @@ GOLDEN_SET: list[dict] = [
     # ── Pricing facts ────────────────────────────────────────────────────
     {
         "question": "How much is the Starter plan?",
-        "must_contain": ["$29", "25,000", "250,000"],
+        "must_contain": ["$25", "50,000", "500,000"],
         "must_not_contain": ["free tier", "free plan"],
         "category": "pricing",
     },
     {
         "question": "What does the Pro plan cost?",
-        "must_contain": ["$59", "100,000"],
+        "must_contain": ["$65", "150,000"],
         "must_not_contain": [],
         "category": "pricing",
     },
@@ -87,8 +87,8 @@ GOLDEN_SET: list[dict] = [
     },
     {
         "question": "What SDKs are available?",
-        "must_contain": ["Node.js", "Python", "@apexmail/sdk"],
-        "must_not_contain": [],
+        "must_contain": ["Node.js", "Python", "@apexmail/node"],
+        "must_not_contain": ["@apexmail/sdk"],
         "category": "api",
     },
 
@@ -160,9 +160,10 @@ GOLDEN_SET: list[dict] = [
     },
     {
         "question": "Is there a free plan?",
-        "must_contain": ["$29"],
-        "must_not_contain": ["free tier", "free plan", "yes"],
-        "category": "anti-hallucination",
+        "must_contain": ["Free", "3,000"],
+        "must_contain_any": ["$0", "yes", "Yes"],
+        "must_not_contain": [],
+        "category": "pricing",
     },
 ]
 

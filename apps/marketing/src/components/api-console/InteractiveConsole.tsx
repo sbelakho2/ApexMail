@@ -90,8 +90,8 @@ export function InteractiveConsole() {
   };
 
   const copyCode = () => {
-    const code = `curl -X POST https://api.apexmail.ee/v1/send \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
+    const code = `curl -X POST https://api.apexmail.ee/v1/messages \\
+  -H "X-API-Key: YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(requestBody, null, 2)}'`;
     navigator.clipboard.writeText(code);
@@ -115,7 +115,7 @@ export function InteractiveConsole() {
                 <div className="w-3 h-3 rounded-full bg-surface-200" />
                 <div className="w-3 h-3 rounded-full bg-surface-200" />
               </div>
-              <span className="text-xs font-bold text-surface-600 font-mono">POST /v1/send</span>
+              <span className="text-xs font-bold text-surface-600 font-mono">POST /v1/messages</span>
             </div>
             <div className="flex items-center gap-3">
               <button

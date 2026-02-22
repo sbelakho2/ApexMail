@@ -458,31 +458,33 @@ CREATE INDEX idx_billing_audit_tenant ON billing_audit_log(tenant_id);
 CREATE INDEX idx_billing_audit_action ON billing_audit_log(action);
 CREATE INDEX idx_billing_audit_created ON billing_audit_log(created_at);
 
--- Insert default plans
+-- Insert default plans (canonical pricing from docs/pricing.md)
+-- Note: PlansService.initializeDefaultPlans() upserts with camelCase features on startup.
+-- This seed uses the legacy snake_case schema as a fallback; runtime features use camelCase.
 INSERT INTO plans (name, display_name, description, price_monthly, price_yearly, features, limits, sort_order) VALUES
 ('free', 'Free', 'Get started with email delivery', 0, 0,
- '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true}',
- '{"emails_per_month": 1000, "contacts_limit": 100, "api_calls_per_minute": 60, "webhooks_per_day": 100, "team_members_limit": 1, "storage_gb": 1, "dedicated_ips": 0, "custom_domains_limit": 1}',
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "send_time_optimization": false, "inbound_email": false}',
+ '{"emails_per_month": 3000, "contacts_limit": 500, "api_calls_per_minute": 1000, "webhooks_per_day": 100, "team_members_limit": 1, "storage_gb": 1, "dedicated_ips": 0, "custom_domains_limit": 1}',
  1),
-('starter', 'Starter', 'Perfect for growing businesses', 2900, 29000,
- '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true}',
- '{"emails_per_month": 50000, "contacts_limit": 5000, "api_calls_per_minute": 300, "webhooks_per_day": 1000, "team_members_limit": 3, "storage_gb": 10, "dedicated_ips": 1, "custom_domains_limit": 5}',
+('starter', 'Starter', 'Perfect for growing businesses', 2500, 25000,
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "email_templates": true, "priority_support": true, "send_time_optimization": false, "inbound_email": false}',
+ '{"emails_per_month": 50000, "contacts_limit": 10000, "api_calls_per_minute": 1000, "webhooks_per_day": 1000, "team_members_limit": 5, "storage_gb": 10, "dedicated_ips": 0, "custom_domains_limit": 5}',
  2),
-('pro', 'Pro', 'For scaling teams with custom tracking needs', 5900, 59000,
- '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true}',
- '{"emails_per_month": 100000, "contacts_limit": 10000, "api_calls_per_minute": 450, "webhooks_per_day": 2500, "team_members_limit": 5, "storage_gb": 25, "dedicated_ips": 2, "custom_domains_limit": 10}',
+('pro', 'Pro', 'For scaling teams with custom tracking needs', 6500, 65000,
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "send_time_optimization": true, "inbound_email": false}',
+ '{"emails_per_month": 150000, "contacts_limit": 50000, "api_calls_per_minute": 1000, "webhooks_per_day": 2500, "team_members_limit": 10, "storage_gb": 25, "dedicated_ips": 0, "custom_domains_limit": 25}',
  3),
-('growth', 'Growth', 'Scale your email operations', 12900, 129000,
- '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true}',
- '{"emails_per_month": 250000, "contacts_limit": 25000, "api_calls_per_minute": 600, "webhooks_per_day": 5000, "team_members_limit": 10, "storage_gb": 50, "dedicated_ips": 3, "custom_domains_limit": 20}',
+('growth', 'Growth', 'Scale your email operations', 15000, 150000,
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "send_time_optimization": true, "inbound_email": false}',
+ '{"emails_per_month": 500000, "contacts_limit": 200000, "api_calls_per_minute": 1000, "webhooks_per_day": 5000, "team_members_limit": 25, "storage_gb": 50, "dedicated_ips": 1, "custom_domains_limit": 100}',
  4),
-('scale', 'Scale', 'Enterprise-grade email at scale', 39900, 399000,
- '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "custom_tracking_domain": true, "sso": true, "audit_logs": true}',
- '{"emails_per_month": 1000000, "contacts_limit": 100000, "api_calls_per_minute": 1200, "webhooks_per_day": 25000, "team_members_limit": 25, "storage_gb": 200, "dedicated_ips": 10, "custom_domains_limit": 50}',
+('scale', 'Scale', 'Enterprise-grade email at scale', 35000, 350000,
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "custom_tracking_domain": true, "sso": true, "audit_logs": true, "send_time_optimization": true, "inbound_email": true}',
+ '{"emails_per_month": 2000000, "contacts_limit": 500000, "api_calls_per_minute": 1000, "webhooks_per_day": 25000, "team_members_limit": 50, "storage_gb": 200, "dedicated_ips": 3, "custom_domains_limit": -1}',
  5),
-('enterprise', 'Enterprise', 'Custom solutions for large organizations', 129900, 1299000,
- '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "custom_tracking_domain": true, "sso": true, "audit_logs": true, "dedicated_account_manager": true, "custom_sla": true, "on_premise_available": true, "hipaa_compliant": true}',
- '{"emails_per_month": -1, "contacts_limit": -1, "api_calls_per_minute": -1, "webhooks_per_day": -1, "team_members_limit": -1, "storage_gb": -1, "dedicated_ips": -1, "custom_domains_limit": -1}',
+('enterprise', 'Enterprise', 'Custom solutions for large organizations', 80000, 800000,
+ '{"api_access": true, "smtp_relay": true, "webhooks": true, "basic_analytics": true, "advanced_analytics": true, "email_templates": true, "dedicated_ip_available": true, "priority_support": true, "a_b_testing": true, "automation": true, "custom_tracking_domain": true, "sso": true, "audit_logs": true, "dedicated_account_manager": true, "custom_sla": true, "on_premise_available": true, "hipaa_compliant": true, "send_time_optimization": true, "inbound_email": true}',
+ '{"emails_per_month": 5000000, "contacts_limit": -1, "api_calls_per_minute": 1000, "webhooks_per_day": -1, "team_members_limit": -1, "storage_gb": -1, "dedicated_ips": 10, "custom_domains_limit": -1}',
  6)
 ON CONFLICT (name) DO NOTHING;
 

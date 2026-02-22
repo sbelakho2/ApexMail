@@ -2,6 +2,9 @@
  * SaaS Hunter - Lead Discovery Scraper
  * Scrapes SaaS directories to find potential leads
  * Fully robots.txt compliant and ethically rate-limited
+ *
+ * FIX-500-401: Integrated rigorous lead verification for company names,
+ * emails, websites, and domains before enrichment.
  */
 
 import * as cheerio from 'cheerio';
@@ -14,6 +17,10 @@ import {
     identifyEmailProvider,
 } from './dns-resolver.js';
 import { LeadScoringModel, extractFeatures } from './hunter-training.js';
+import {
+    verifyCompanyData,
+    type VerificationResult,
+} from './lead-verifier.js';
 import type { Lead, LeadSource, MxRecord, EnrichmentResult } from '../types.js';
 
 const hunterLogger = createLogger({ name: 'saas-hunter', level: 'info' });
@@ -430,23 +437,75 @@ export async function scrapeCrunchbase(
 
 /**
  * Enriches scraped companies with MX record information
+ * FIX-500-401: Now includes rigorous verification of company data
  */
 export async function enrichWithMxRecords(
-    companies: ScrapedCompany[]
-): Promise<Array<ScrapedCompany & { mxRecords: MxRecord[]; emailProvider: string | null }>> {
-    const enriched: Array<ScrapedCompany & { mxRecords: MxRecord[]; emailProvider: string | null }> =
-        [];
+    companies: ScrapedCompany[],
+    options: { skipVerification?: boolean; minConfidence?: number } = {}
+): Promise<Array<ScrapedCompany & {
+    mxRecords: MxRecord[];
+    emailProvider: string | null;
+    verification?: VerificationResult;
+    verified: boolean;
+}>> {
+    const skipVerification = options.skipVerification ?? false;
+    const minConfidence = options.minConfidence ?? 50;
+
+    const enriched: Array<ScrapedCompany & {
+        mxRecords: MxRecord[];
+        emailProvider: string | null;
+        verification?: VerificationResult;
+        verified: boolean;
+    }> = [];
 
     for (const company of companies) {
-        if (!company.domain) {
+        // ─── Step 1: Verify company data ───
+        let verification: VerificationResult | undefined;
+        let verified = true;
+
+        if (!skipVerification) {
+            verification = await verifyCompanyData({
+                name: company.name,
+                domain: company.domain,
+                website: company.website,
+            });
+
+            verified = verification.isValid && verification.confidence >= minConfidence;
+
+            if (!verified) {
+                hunterLogger.warn('Company failed verification', {
+                    name: company.name,
+                    domain: company.domain,
+                    confidence: verification.confidence,
+                    issues: verification.issues.slice(0, 3),
+                });
+            }
+
+            // Use sanitized values if available
+            if (verification.sanitized.companyName) {
+                company.name = verification.sanitized.companyName;
+            }
+            if (verification.sanitized.domain) {
+                company.domain = verification.sanitized.domain;
+            }
+            if (verification.sanitized.website) {
+                company.website = verification.sanitized.website;
+            }
+        }
+
+        // ─── Step 2: Skip MX enrichment for invalid companies ───
+        if (!company.domain || !verified) {
             enriched.push({
                 ...company,
                 mxRecords: [],
                 emailProvider: null,
+                verification,
+                verified,
             });
             continue;
         }
 
+        // ─── Step 3: Enrich with MX records ───
         try {
             const mxRecords = await resolveMxRecords(company.domain);
             const emailProvider = identifyEmailProvider(mxRecords);
@@ -455,11 +514,14 @@ export async function enrichWithMxRecords(
                 ...company,
                 mxRecords,
                 emailProvider,
+                verification,
+                verified,
             });
 
             hunterLogger.debug('Enriched company with MX records', {
                 domain: company.domain,
                 provider: emailProvider,
+                verified,
             });
         } catch (error) {
             hunterLogger.warn('Failed to enrich MX records', { domain: company.domain, error });
@@ -467,12 +529,22 @@ export async function enrichWithMxRecords(
                 ...company,
                 mxRecords: [],
                 emailProvider: null,
+                verification,
+                verified,
             });
         }
 
         // Small delay between DNS lookups
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
+
+    // Log verification stats
+    const verifiedCount = enriched.filter((c) => c.verified).length;
+    hunterLogger.info('Enrichment complete', {
+        total: companies.length,
+        verified: verifiedCount,
+        rejected: companies.length - verifiedCount,
+    });
 
     return enriched;
 }
@@ -482,20 +554,47 @@ export async function enrichWithMxRecords(
  * FIX-500-325: Returns Lead[] instead of Partial<Lead>[]. All required fields
  * are populated by this function, so there's no reason to use Partial — that
  * forced unsafe casts in the caller.
+ * FIX-500-401: Now accepts enriched companies with verification data and
+ * optionally filters out unverified leads.
  */
 export function scrapedToLeads(
     scrapedCompanies: Array<
-        ScrapedCompany & { mxRecords: MxRecord[]; emailProvider: string | null }
+        ScrapedCompany & {
+            mxRecords: MxRecord[];
+            emailProvider: string | null;
+            verification?: VerificationResult;
+            verified?: boolean;
+        }
     >,
     tenantId: string,
-    enrichmentData?: Map<string, EnrichmentResult>
+    enrichmentData?: Map<string, EnrichmentResult>,
+    options: { onlyVerified?: boolean } = {}
 ): Lead[] {
-    return scrapedCompanies.map((company) => {
+    const { onlyVerified = false } = options;
+
+    // Filter out unverified companies if requested
+    const companies = onlyVerified
+        ? scrapedCompanies.filter((c) => c.verified !== false)
+        : scrapedCompanies;
+
+    hunterLogger.debug('Converting scraped companies to leads', {
+        total: scrapedCompanies.length,
+        afterFilter: companies.length,
+        onlyVerified,
+    });
+
+    return companies.map((company) => {
         // Get enrichment data for this company if available
         const enrichment = enrichmentData?.get(company.domain) || null;
 
-        // Calculate ML-based lead score
-        const score = calculateLeadScore(company, enrichment);
+        // Calculate ML-based lead score, boosted by verification confidence
+        let score = calculateLeadScore(company, enrichment);
+
+        // Boost or penalize score based on verification confidence
+        if (company.verification) {
+            const confidenceModifier = (company.verification.confidence - 50) / 100;
+            score = Math.round(Math.min(100, Math.max(0, score + score * confidenceModifier * 0.2)));
+        }
 
         const now = new Date();
         return {
@@ -515,13 +614,15 @@ export function scrapedToLeads(
             location: null,
             source: company.source,
             sourceUrl: company.sourceUrl,
-            score, // ML-based score (0-100)
+            score, // ML-based score (0-100), adjusted by verification
             status: 'new' as const,
             stage: 'prospect' as const,
             assignedTo: null,
             tags: company.tags,
             customFields: {
                 description: company.description,
+                verificationConfidence: company.verification?.confidence ?? null,
+                verificationIssues: company.verification?.issues ?? [],
             } as Record<string, unknown>,
             mxRecords: company.mxRecords,
             emailProvider: company.emailProvider,

@@ -36,7 +36,7 @@ Parent Account (Agency/Enterprise)
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "parentAccountId": "acc_parent",
@@ -89,7 +89,7 @@ Configure limits per sub-account:
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}/quotas \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "quotas": {
       "maxMonthlyEmails": 500000,
@@ -174,7 +174,7 @@ Sub-Account User
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/sub-accounts \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -208,7 +208,7 @@ Response:
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id} \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "name": "Client ABC - Premium",
     "status": "active",
@@ -222,7 +222,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id} 
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}/suspend \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "reason": "billing_issue",
     "notifyUsers": true
@@ -233,7 +233,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}
 
 ```bash
 curl -X DELETE https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id} \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "confirmDeletion": true,
     "exportData": true,
@@ -247,7 +247,7 @@ curl -X DELETE https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_i
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}/analytics \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "startDate=2024-01-01" -d "endDate=2024-01-31"
 ```
 
@@ -285,7 +285,7 @@ Get analytics across all sub-accounts:
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/sub-accounts/analytics/aggregate \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 ## Billing
@@ -294,7 +294,7 @@ curl https://api.apexmail.ee/enterprise/v1/sub-accounts/analytics/aggregate \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/sub-accounts/billing \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "month=2024-01"
 ```
 

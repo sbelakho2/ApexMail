@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | **Framework** | Hono v4+ |
-| **Runtime** | Node.js 22 LTS |
+| **Runtime** | Node.js ≥ 20.11.0 |
 | **Language** | TypeScript (strict mode) |
 | **Role** | HTTP API framework for all REST endpoints |
 | **Entry Point** | `apps/api/src/index.ts` |
@@ -19,26 +19,39 @@ Middleware executes in **strict order**. The order below is mandatory and MUST N
 ```
 Request
   │
-  ├─ 1. Request ID          — Assign unique X-Request-Id header
-  ├─ 2. Request Logger       — Log method, path, start time
-  ├─ 3. CORS                 — Cross-origin rules
-  ├─ 4. Security Headers     — X-Content-Type-Options, etc.
-  ├─ 5. Auth                 — Validate Bearer token / API key
-  ├─ 6. Rate Limit           — Per-tenant / per-IP rate check (Redis)
-  ├─ 7. Tenant Context       — Load tenant, set app.current_tenant_id
-  ├─ 8. Request Validation   — Validate body/query/params (Zod)
-  ├─ 9. Route Handler        — Business logic
-  ├─ 10. Response Logger     — Log status, duration
+  ├─ 1.  Request ID          — Assigns unique X-Request-ID
+  ├─ 2.  Server Timing       — Adds Server-Timing header
+  ├─ 3.  Compress            — gzip/br response compression
+  ├─ 4.  ETag                — Response caching support
+  ├─ 5.  Security Headers    — CSP, HSTS, X-Frame-Options, etc.
+  ├─ 6.  Timeout             — 30 s limit → 504 REQUEST_TIMEOUT
+  ├─ 7.  Body Limit          — 10 MB default, 25 MB for upload routes
+  ├─ 8.  Pretty JSON         — Human-readable JSON in development
+  ├─ 9.  Null-byte Sanitizer — Rejects payloads containing null bytes
+  ├─ 10. Extra Security Hdrs — X-API-Version, additional HSTS config
+  ├─ 11. CORS                — Cross-origin rules
+  ├─ 12. Trusted Proxy       — Validates X-Forwarded-For sources
+  ├─ 13. Request Logger      — Logs method, path, start time
+  ├─ [public routes: /v1/auth/login, /v1/auth/forgot-password]
+  │    ├─ Rate Limit         — Brute-force protection for public auth
+  │
+  ├─ [authenticated API routes: /v1/*]
+  │    ├─ Auth               — Validates X-API-Key or Bearer JWT
+  │    ├─ CSRF Protection    — State-changing requests
+  │    ├─ Rate Limit         — Per-tenant + per-IP (Redis)
+  │    ├─ Idempotency        — /messages/*, /domains/*, /templates/*,
+  │    │                        /suppressions/*, /dedicated-ips/*
+  │    └─ Route Handler      — Business logic
   │
 Response
 ```
 
 ### Middleware Rules
 
-1. **Auth** middleware sets `c.set('user', user)` and `c.set('tenantId', tenantId)` on the Hono context.
-2. **Tenant Context** middleware calls `SET LOCAL app.current_tenant_id` on the database connection for RLS enforcement.
-3. **Rate Limit** middleware returns `429 Too Many Requests` with `Retry-After` header when exceeded.
-4. Middleware that needs to skip certain routes (e.g., auth skip for public endpoints) uses a route allowlist, not conditional logic inside the middleware.
+1. **Auth** middleware sets `c.set('tenantId', ...)`, `c.set('userId', ...)`, `c.set('apiKeyId', ...)`, and `c.set('scopes', [...])` on the Hono context.
+2. **Rate Limit** middleware returns `429 Too Many Requests` with `Retry-After` header when exceeded; error code is `RATE_LIMIT_EXCEEDED`.
+3. Public endpoints (`/v1/auth/login`, `/v1/auth/forgot-password`) are mounted on a separate sub-app without the auth middleware — not via an allowlist inside auth middleware.
+4. CSRF protection runs after auth so the user context (`userId`) is available.
 5. Every middleware calls `await next()` exactly once — never zero times (swallows request) and never twice (double execution).
 
 ---
@@ -49,23 +62,32 @@ Response
 
 ```
 apps/api/src/
-├── index.ts              # App entry, middleware registration
+├── index.ts                # App entry, middleware registration
+├── app.ts                  # Hono app factory
 ├── routes/
-│   ├── auth.ts           # POST /auth/login, /auth/register, etc.
-│   ├── campaigns.ts      # CRUD /campaigns
-│   ├── contacts.ts       # CRUD /contacts
-│   ├── emails.ts         # POST /emails/send, GET /emails/:id
-│   ├── templates.ts      # CRUD /templates
-│   ├── webhooks.ts       # POST /webhooks/stripe, /webhooks/ses
-│   ├── health.ts         # GET /health, /ready
-│   └── tenants.ts        # Tenant management
+│   ├── auth.ts             # POST /auth/login, GET /auth/me, /auth/api-keys
+│   ├── campaigns.ts        # CRUD /campaigns
+│   ├── contacts.ts         # CRUD /contacts
+│   ├── messages.ts         # POST /messages, /messages/batch
+│   ├── domains.ts          # CRUD /domains, /domains/:id/verify
+│   ├── templates.ts        # CRUD /templates
+│   ├── suppressions.ts     # CRUD /suppressions
+│   ├── events.ts           # GET /events
+│   ├── webhooks.ts         # CRUD /webhooks
+│   ├── analytics.ts        # GET /analytics/*
+│   ├── ai-insights.ts      # GET /analytics/ai/*
+│   ├── dedicated-ips.ts    # CRUD /dedicated-ips
+│   ├── automations.ts      # CRUD /automations
+│   ├── scim.ts             # SCIM 2.0 /scim/*
+│   ├── support.ts          # GET /support
+│   └── health.ts           # GET /health
 └── middleware/
-    ├── auth.ts
-    ├── cors.ts
-    ├── rate-limit.ts
-    ├── tenant-context.ts
-    ├── validation.ts
-    └── request-id.ts
+    ├── auth.ts             # API key + JWT authentication
+    ├── rate-limiter.ts     # Per-tenant + per-IP rate limiting
+    ├── idempotency.ts      # X-Idempotency-Key support
+    ├── csrf.ts             # CSRF token protection
+    ├── error-handler.ts    # ApiError class + global onError
+    └── request-id.ts      # X-Request-ID injection
 ```
 
 ### Registration Pattern
@@ -73,30 +95,37 @@ apps/api/src/
 ```ts
 // routes/campaigns.ts
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
-import { createCampaignSchema, updateCampaignSchema } from '../schemas/campaigns';
+import { z } from 'zod';
+import type { AppEnv, AppContext } from '../app.js';
 
-const campaigns = new Hono();
+const createCampaignSchema = z.object({ /* ... */ });
 
-campaigns.get('/', listCampaigns);
-campaigns.post('/', zValidator('json', createCampaignSchema), createCampaign);
-campaigns.get('/:id', getCampaign);
-campaigns.put('/:id', zValidator('json', updateCampaignSchema), updateCampaign);
-campaigns.delete('/:id', deleteCampaign);
+export function campaignsRoutes(ctx: AppContext): Hono<AppEnv> {
+  const router = new Hono<AppEnv>();
 
-export { campaigns };
+  router.get('/', async (c) => { /* list */ });
+  router.post('/', async (c) => {
+    const body = await c.req.json();
+    const input = createCampaignSchema.parse(body); // Inline Zod validation
+    /* ... */
+  });
+  router.get('/:id', async (c) => { /* get */ });
+  router.delete('/:id', async (c) => { /* delete */ });
+
+  return router;
+}
 ```
 
 ```ts
 // index.ts
-app.route('/api/v1/campaigns', campaigns);
-app.route('/api/v1/contacts', contacts);
+app.route('/v1/campaigns', campaigns);
+app.route('/v1/contacts', contacts);
 // ...
 ```
 
 ### Rules
 
-1. All API routes are prefixed with `/api/v1/`.
+1. All API routes are prefixed with `/v1/`.
 2. Route files export a `Hono` instance — they do NOT export raw handler functions.
 3. Route parameter naming: `:id` for primary resource, `:contactId` for nested resources.
 4. No business logic in route files — handlers call service-layer functions.
@@ -106,12 +135,12 @@ app.route('/api/v1/contacts', contacts);
 
 ## 3. Error Handling
 
-### AppError Class
+### ApiError Class
 
-All application errors extend `AppError`:
+All application errors are created via the `ApiError` factory class:
 
 ```ts
-class AppError extends Error {
+class ApiError extends Error {
   constructor(
     public statusCode: number,
     public code: string,
@@ -120,6 +149,15 @@ class AppError extends Error {
   ) {
     super(message);
   }
+
+  // Factory methods
+  static badRequest(message: string, code?: string, details?: Record<string, unknown>): ApiError
+  static unauthorized(message: string, code?: string): ApiError
+  static forbidden(message: string, code?: string): ApiError
+  static notFound(resource: string): ApiError
+  static conflict(message: string, code?: string): ApiError
+  static tooManyRequests(message: string, code?: string): ApiError
+  static internal(message: string): ApiError
 }
 ```
 
@@ -133,14 +171,14 @@ class AppError extends Error {
 | 404 | `NOT_FOUND` | Resource does not exist (or not visible to tenant) |
 | 409 | `CONFLICT` | Duplicate resource (e.g., email already exists) |
 | 422 | `UNPROCESSABLE` | Valid syntax but semantically invalid (e.g., send to bounced contact) |
-| 429 | `RATE_LIMITED` | Rate limit exceeded |
+| 429 | `RATE_LIMIT_EXCEEDED` | Rate limit exceeded |
 | 500 | `INTERNAL_ERROR` | Unhandled server error |
 
 ### Global Error Handler
 
 ```ts
 app.onError((err, c) => {
-  if (err instanceof AppError) {
+  if (err instanceof ApiError) {
     return c.json({
       success: false,
       error: {
@@ -165,7 +203,7 @@ app.onError((err, c) => {
 
 ### Rules
 
-1. Handlers MUST throw `AppError` for known error conditions — never return raw status codes.
+1. Handlers MUST throw `ApiError` for known error conditions — never return raw status codes.
 2. Unexpected errors (thrown by libraries, DB, etc.) are caught by the global handler and logged with full stack trace.
 3. Error responses NEVER leak internal details (stack traces, SQL errors, file paths) to the client.
 
@@ -173,16 +211,16 @@ app.onError((err, c) => {
 
 ## 4. Request Validation
 
-All request inputs are validated using **Zod** schemas via `@hono/zod-validator`.
+All request inputs are validated using **Zod** schemas invoked inline in route handlers.
 
 ### Validation Targets
 
-| Target | Validator | Example |
-|--------|-----------|---------|
-| JSON body | `zValidator('json', schema)` | POST/PUT payloads |
-| Query params | `zValidator('query', schema)` | `?page=1&limit=20` |
-| URL params | `zValidator('param', schema)` | `/:id` (UUID format) |
-| Headers | `zValidator('header', schema)` | Custom headers (rare) |
+| Target | Method | Example |
+|--------|--------|---------|
+| JSON body | `schema.parse(await c.req.json())` | POST/PUT payloads |
+| Query params | `schema.parse(c.req.query())` | `?page=1&limit=20` |
+| URL params | UUID regex validated before DB queries | `/:id` (UUID format) |
+| Headers | `c.req.header('X-...')` with manual checks | Custom headers |
 
 ### Schema Location
 
@@ -247,8 +285,8 @@ All API responses use a consistent **JSON envelope**:
 ## 6. OpenAPI Generation
 
 - OpenAPI 3.1 specification is auto-generated from Zod schemas using `@hono/zod-openapi`.
-- The spec is served at `/api/v1/openapi.json`.
-- A Scalar UI is served at `/api/v1/docs` for interactive documentation.
+- The spec is served at `/v1/openapi.json`.
+- A Scalar UI is served at `/v1/docs` for interactive documentation.
 - CI validates that the OpenAPI spec is up to date and matches route definitions.
 - The SDK packages (`packages/sdk-node`, `packages/sdk-python`) are generated from the OpenAPI spec.
 

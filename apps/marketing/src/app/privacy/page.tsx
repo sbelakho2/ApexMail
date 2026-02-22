@@ -36,7 +36,7 @@ export default function PrivacyPage() {
                 <p>
                     Account data is retained for the duration of your subscription plus 90 days.
                     Transactional email metadata is retained for up to 30 days after delivery.
-                    Audit logs are retained for 1 year.
+                    Audit logs are retained for up to 2 years, depending on plan.
                 </p>
 
                 <h2 className="text-xl font-semibold mt-8">5. Your Rights</h2>

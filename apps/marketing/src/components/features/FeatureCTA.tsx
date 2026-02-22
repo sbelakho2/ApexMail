@@ -27,7 +27,7 @@ export function FeatureCTA() {
 
           <p className="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
             Join thousands of developers who trust ApexMail for their transactional email.
-            Start free with 1,000 emails per month.
+            Start free with 3,000 emails per month.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -48,7 +48,7 @@ export function FeatureCTA() {
           </div>
 
           <p className="text-surface-500 text-sm mt-8 font-medium">
-            No credit card required • Free tier includes 1,000 emails/month
+            No credit card required • Free tier includes 3,000 emails/month
           </p>
         </motion.div>
       </div>

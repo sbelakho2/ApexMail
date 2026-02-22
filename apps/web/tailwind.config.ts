@@ -105,9 +105,11 @@ const config: Config = {
                 sm: 'var(--radius-sm)',
             },
             fontFamily: {
-                sans: ['var(--font-display)', 'serif'],
-                display: ['var(--font-display)', 'serif'],
+                sans: ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                display: ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
                 mono: ['var(--font-mono)', 'monospace'],
+                apex: ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                'apex-display': ['var(--font-apex)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
             },
             fontSize: {
                 '2xs': ['0.625rem', { lineHeight: '0.75rem' }],

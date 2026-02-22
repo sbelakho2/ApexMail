@@ -7,10 +7,18 @@ import type { Redis } from 'ioredis';
 import type { Logger } from '@apexmail/lib';
 import { generateId } from '@apexmail/lib';
 import { DomainsRepository, SuppressionsRepository, type Domain, type DatabasePool } from '@apexmail/db';
-import { createTransport, type Transporter, type SentMessageInfo } from 'nodemailer';
 import { CircuitBreakerFactory } from '../circuit-breaker.js';
 import { IPRateLimiter } from '../services/ip-rate-limiter.js';
 import type { QueueNotifier } from '../queue-notifier.js';
+import {
+  createEmailTransport,
+  type EmailTransport,
+  type SendResult,
+  type EmailMessage,
+  type DkimConfig,
+  type TransportType,
+  type SesTransportConfig,
+} from '../services/email-transport.js';
 
 interface EmailProcessorConfig {
   db: Pool;
@@ -53,6 +61,8 @@ interface EmailProcessorConfig {
     enabled: boolean;
     ipAddress?: string; // The IP this worker sends from
   };
+  emailTransport?: TransportType;
+  ses?: SesTransportConfig;
   notifier?: QueueNotifier;
   logger: Logger;
 }
@@ -92,6 +102,8 @@ export class EmailProcessor {
   private readonly trackingConfig: EmailProcessorConfig['tracking'];
   private readonly warmupConfig: EmailProcessorConfig['warmup'];
   private readonly ipRateLimitingConfig: EmailProcessorConfig['ipRateLimiting'];
+  private readonly emailTransport: TransportType;
+  private readonly sesConfig: SesTransportConfig | undefined;
   private readonly notifier: QueueNotifier | undefined;
   private readonly logger: Logger;
   
@@ -101,7 +113,7 @@ export class EmailProcessor {
   private readonly suppressionsRepo: SuppressionsRepository;
   private readonly circuitBreakers: CircuitBreakerFactory;
   private ipRateLimiter: IPRateLimiter | null = null;
-  private transporter: Transporter | null = null;
+  private transport: EmailTransport | null = null;
   private isRunning = false;
   private activeJobs = 0;
 
@@ -151,6 +163,8 @@ export class EmailProcessor {
     this.trackingConfig = options.tracking;
     this.warmupConfig = options.warmup;
     this.ipRateLimitingConfig = options.ipRateLimiting;
+    this.emailTransport = options.emailTransport ?? 'smtp';
+    this.sesConfig = options.ses;
     this.notifier = options.notifier;
     this.logger = options.logger;
     
@@ -197,33 +211,36 @@ export class EmailProcessor {
       });
     }
 
-    // Initialize SMTP transporter
-    // FIX-500-007: Use Nodemailer's built-in socketTimeout + connectionTimeout.
-    // Previously a manual Promise.race timeout was used, but it cannot cancel
-    // the underlying sendMail() — the SMTP socket stays open, leaking into the
-    // pool. Nodemailer's native timeouts properly close the socket on expiry.
-    this.transporter = createTransport({
-      host: this.smtpConfig.host,
-      port: this.smtpConfig.port,
-      secure: this.smtpConfig.secure,
-      auth: this.smtpConfig.auth,
-      pool: this.smtpConfig.pool,
-      maxConnections: this.smtpConfig.maxConnections,
-      maxMessages: this.smtpConfig.maxMessages,
-      socketTimeout: 30_000,      // 30s — kill idle/hung socket
-      connectionTimeout: 15_000,  // 15s — kill slow connect
-      greetingTimeout: 15_000,    // 15s — kill slow EHLO
-      tls: {
-        rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
+    // Initialize email transport (SMTP or SES, controlled by EMAIL_TRANSPORT env var)
+    // FIX-500-007: For SMTP, Nodemailer's built-in socketTimeout + connectionTimeout
+    // properly close the socket on expiry (previous Promise.race leaked sockets).
+    this.transport = createEmailTransport(
+      {
+        type: this.emailTransport,
+        smtp: {
+          host: this.smtpConfig.host,
+          port: this.smtpConfig.port,
+          secure: this.smtpConfig.secure,
+          auth: this.smtpConfig.auth,
+          pool: this.smtpConfig.pool,
+          maxConnections: this.smtpConfig.maxConnections,
+          maxMessages: this.smtpConfig.maxMessages,
+          socketTimeout: 30_000,
+          connectionTimeout: 15_000,
+          greetingTimeout: 15_000,
+          tlsRejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
+        },
+        ses: this.sesConfig,
       },
-    } as Parameters<typeof createTransport>[0]);
+      this.logger,
+    );
 
-    // Verify SMTP connection
+    // Verify transport connection
     try {
-      await this.transporter.verify();
-      this.logger.info('SMTP connection verified');
+      await this.transport.verify();
+      this.logger.info('Email transport verified', { type: this.emailTransport });
     } catch (error) {
-      this.logger.error('SMTP verification failed', { error });
+      this.logger.error('Email transport verification failed', { type: this.emailTransport, error });
       throw error;
     }
 
@@ -264,9 +281,9 @@ export class EmailProcessor {
       this.logger.warn('Forcing stop with active jobs', { activeJobs: this.activeJobs });
     }
 
-    // Close SMTP connection
-    if (this.transporter) {
-      this.transporter.close();
+    // Close email transport
+    if (this.transport) {
+      await this.transport.close();
     }
 
     // Clean up IP rate limiter if initialized
@@ -844,46 +861,31 @@ export class EmailProcessor {
    * internal MimeNode builder handles boundary generation, encoding, and
    * part ordering (text/plain first, text/html second) per RFC 2046 §5.1.4.
    */
-  private async sendEmail(email: PreparedEmail): Promise<SentMessageInfo> {
-    if (!this.transporter) {
-      throw new Error('SMTP transporter not initialized');
+  private async sendEmail(email: EmailMessage): Promise<SendResult> {
+    if (!this.transport) {
+      throw new Error('Email transport not initialized');
     }
 
-    // Use circuit breaker keyed by SMTP host to prevent overwhelming a failing server
-    const circuitBreakerKey = `smtp:${this.smtpConfig.host}:${this.smtpConfig.port}`;
+    // Use circuit breaker keyed by transport type + endpoint
+    const circuitBreakerKey = this.emailTransport === 'ses'
+      ? `ses:${this.sesConfig?.region ?? 'us-east-1'}`
+      : `smtp:${this.smtpConfig.host}:${this.smtpConfig.port}`;
     const circuitBreaker = this.circuitBreakers.get(circuitBreakerKey);
     
     // Check if circuit is open (too many failures)
     const state = await circuitBreaker.getState();
     if (state === 'open') {
-      this.logger.warn('Circuit breaker open for SMTP server', {
-        host: this.smtpConfig.host,
-        port: this.smtpConfig.port,
+      this.logger.warn('Circuit breaker open for email transport', {
+        transport: this.emailTransport,
+        key: circuitBreakerKey,
       });
-      throw new Error(`SMTP circuit breaker open - server ${this.smtpConfig.host} temporarily unavailable`);
+      throw new Error(`Email transport circuit breaker open - ${circuitBreakerKey} temporarily unavailable`);
     }
 
-    const mailOptions: Record<string, unknown> = {
-      from: email.from,
-      to: email.to,
-      subject: email.subject,
-      html: email.html,
-      text: email.text,
-      headers: email.headers,
-      attachments: email.attachments,
-    };
-
-    // Add DKIM signing options
-    if (email.dkim) {
-      mailOptions.dkim = email.dkim;
-    }
-
-    // FIX-500-007: Nodemailer's built-in socketTimeout/connectionTimeout now handle
-    // timeouts natively, properly closing the underlying socket on expiry.
-    // The old Promise.race approach leaked sockets because sendMail() could
-    // not be cancelled — the socket stayed open in the pool after the timeout.
+    // FIX-500-007: For SMTP, Nodemailer's built-in socketTimeout/connectionTimeout
+    // handle timeouts natively. For SES, the AWS SDK manages its own retries/timeouts.
     try {
-      const result = await this.transporter.sendMail(mailOptions);
+      const result = await this.transport.send(email);
       
       // Record success to circuit breaker
       await circuitBreaker.recordSuccess();
@@ -908,13 +910,13 @@ export class EmailProcessor {
    * churn from N clients per poll cycle to 1.
    * FIX-500-463: Verified — batch completions are both documented AND implemented.
    */
-  private pendingSuccesses: Array<{ job: EmailJob; result: SentMessageInfo }> = [];
+  private pendingSuccesses: Array<{ job: EmailJob; result: SendResult }> = [];
 
   /**
    * Queue a successful send for batch completion. The actual DB writes
    * happen in flushPendingSuccesses (called once per poll cycle).
    */
-  private queueSuccess(job: EmailJob, result: SentMessageInfo): void {
+  private queueSuccess(job: EmailJob, result: SendResult): void {
     this.pendingSuccesses.push({ job, result });
   }
 
@@ -1037,7 +1039,7 @@ export class EmailProcessor {
   /**
    * Individual success handler — used as fallback when batch completion fails.
    */
-  private async handleSuccessIndividual(job: EmailJob, result: SentMessageInfo): Promise<void> {
+  private async handleSuccessIndividual(job: EmailJob, result: SendResult): Promise<void> {
     this.logger.info('Email sent successfully', {
       jobId: job.id,
       messageId: job.messageId,
@@ -1095,7 +1097,7 @@ export class EmailProcessor {
     }
   }
 
-  private async handleSuccess(job: EmailJob, result: SentMessageInfo): Promise<void> {
+  private async handleSuccess(job: EmailJob, result: SendResult): Promise<void> {
     // FIX-080: Queue for batch completion instead of per-job DB writes.
     // Batch is flushed at the end of the poll cycle by flushPendingSuccesses().
     this.queueSuccess(job, result);
@@ -1585,26 +1587,9 @@ export class EmailProcessor {
   }
 }
 
-interface PreparedEmail {
-  from: string;
-  to: string;
-  subject: string;
-  html?: string;
-  text?: string;
-  headers: Record<string, string>;
-  attachments?: Array<{
-    filename: string;
-    content: Buffer;
-    contentType: string;
-  }>;
-  dkim?: DkimConfig;
-}
-
-interface DkimConfig {
-  domainName: string;
-  keySelector: string;
-  privateKey: string;
-}
+// PreparedEmail and DkimConfig are now imported as EmailMessage and DkimConfig
+// from ../services/email-transport.ts — single source of truth.
+type PreparedEmail = EmailMessage;
 
 /**
  * Token Bucket Rate Limiter

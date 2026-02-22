@@ -191,7 +191,7 @@
 
     body {
         @apply bg-background text-foreground;
-        font-family: var(--font-display), Georgia, Cambria, 'Times New Roman', serif;
+        font-family: var(--font-apex), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
         font-size: 17px;
         line-height: 1.6;
         font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;

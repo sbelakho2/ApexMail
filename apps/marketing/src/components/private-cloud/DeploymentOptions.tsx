@@ -76,7 +76,7 @@ const deploymentOptions: DeploymentOption[] = [
  'Self-managed Redis',
  'Local S3-compatible storage',
  'Prometheus/Grafana',
- 'No external dependencies',
+ 'Minimal external dependencies',
  ],
  bestFor: 'Regulated industries (ITAR, FedRAMP)',
  availability: 'Enterprise Only',

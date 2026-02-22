@@ -2,13 +2,13 @@
 
 A modular, security-focused mail server written in Rust for ApexMail.
 
-> **⚠️ STANDALONE SERVER - NO THIRD-PARTY EMAIL SERVICES**
+> **⚠️ STANDALONE SERVER - HIGH-PERFORMANCE EMAIL INFRASTRUCTURE**
 >
 > This mail server is completely self-contained:
 > - **Outbound:** Direct SMTP delivery with DKIM signing
 > - **Inbound:** SMTP server on port 25
 > - **Storage:** PostgreSQL + local blob storage
-> - **No Resend, SendGrid, Mailgun - pure self-hosted**
+> - **Purpose-built mail infrastructure with full delivery control**
 
 ## Architecture
 
@@ -81,7 +81,7 @@ selector = "apexmail2026"
 private_key_path = "/etc/apexmail/dkim/apexmail2026.private"
 
 [outbound]
-# Direct SMTP delivery - no third-party services
+# Direct SMTP delivery with enterprise-grade infrastructure
 max_retries = 5
 retry_delay_seconds = 300
 concurrent_deliveries = 10
@@ -166,7 +166,7 @@ console.log(`Pending: ${stats.pendingCount}, Sent today: ${stats.sentToday}`);
 - DKIM signing for outbound mail
 - SPF/DMARC verification for inbound
 - Rate limiting and abuse prevention
-- No external API dependencies
+- Minimal external API dependencies
 
 ## License
 

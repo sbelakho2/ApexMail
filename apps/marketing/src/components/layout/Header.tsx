@@ -114,7 +114,7 @@ export function Header() {
             <Link href="https://app.apexmail.ee/login" className="text-sm font-semibold text-surface-600 hover:text-surface-900 transition-colors px-3 py-2.5 hover:bg-surface-50 rounded-lg">
               Sign In
             </Link>
-            <Link href="https://app.apexmail.ee/signup" className="btn-primary text-sm shadow-sm">
+            <Link href="https://app.apexmail.ee/signup" className="btn-primary text-sm">
               Get Started Free
             </Link>
           </div>
@@ -174,7 +174,7 @@ export function Header() {
                 <Link href="https://app.apexmail.ee/login" className="block w-full text-center py-2.5 text-surface-900 font-semibold border border-surface-200 rounded-lg hover:bg-surface-50 transition-colors text-sm">
                   Sign In
                 </Link>
-                <Link href="https://app.apexmail.ee/signup" className="block w-full btn-primary text-center py-2.5 text-sm shadow-sm">
+                <Link href="https://app.apexmail.ee/signup" className="block w-full btn-primary text-center py-2.5 text-sm">
                   Get Started Free
                 </Link>
               </div>

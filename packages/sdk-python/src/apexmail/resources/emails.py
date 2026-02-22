@@ -127,7 +127,7 @@ class EmailsResource:
             payload["metadata"] = metadata
 
         # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
-        data = self._client._request("POST", "/emails", json=payload, idempotency_key=idempotency_key)
+        data = self._client._request("POST", "/messages", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
     def batch(
@@ -157,7 +157,7 @@ class EmailsResource:
                 processed_email["from"] = processed_email.pop("from_")
             processed.append(processed_email)
 
-        data = self._client._request("POST", "/emails/batch", json={"emails": processed})
+        data = self._client._request("POST", "/messages/batch", json={"emails": processed})
         return [SendEmailResponse(**item) for item in data.get("results", [])]
 
     def get(self, email_id: str) -> Email:
@@ -171,7 +171,7 @@ class EmailsResource:
             Email details
         """
         _validate_id(email_id, 'email')
-        data = self._client._request("GET", f"/emails/{email_id}")
+        data = self._client._request("GET", f"/messages/{email_id}")
         return Email(**data["email"])
 
     def list(
@@ -219,7 +219,7 @@ class EmailsResource:
         if until:
             params["until"] = until
 
-        data = self._client._request("GET", "/emails", params=params)
+        data = self._client._request("GET", "/messages", params=params)
         return EmailListResponse(**data)
 
     def cancel(self, email_id: str) -> Email:
@@ -233,7 +233,7 @@ class EmailsResource:
             Updated email details
         """
         _validate_id(email_id, 'email')
-        data = self._client._request("POST", f"/emails/{email_id}/cancel")
+        data = self._client._request("POST", f"/messages/{email_id}/cancel")
         return Email(**data["email"])
 
 
@@ -304,7 +304,7 @@ class AsyncEmailsResource:
             payload["metadata"] = metadata
 
         # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
-        data = await self._client._request("POST", "/emails", json=payload, idempotency_key=idempotency_key)
+        data = await self._client._request("POST", "/messages", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
     async def batch(self, emails: list[dict[str, Any]]) -> list[SendEmailResponse]:
@@ -322,13 +322,13 @@ class AsyncEmailsResource:
                 processed_email["from"] = processed_email.pop("from_")
             processed.append(processed_email)
 
-        data = await self._client._request("POST", "/emails/batch", json={"emails": processed})
+        data = await self._client._request("POST", "/messages/batch", json={"emails": processed})
         return [SendEmailResponse(**item) for item in data.get("results", [])]
 
     async def get(self, email_id: str) -> Email:
         """Get email details by ID asynchronously."""
         _validate_id(email_id, 'email')
-        data = await self._client._request("GET", f"/emails/{email_id}")
+        data = await self._client._request("GET", f"/messages/{email_id}")
         return Email(**data["email"])
 
     async def list(
@@ -361,11 +361,11 @@ class AsyncEmailsResource:
         if until:
             params["until"] = until
 
-        data = await self._client._request("GET", "/emails", params=params)
+        data = await self._client._request("GET", "/messages", params=params)
         return EmailListResponse(**data)
 
     async def cancel(self, email_id: str) -> Email:
         """Cancel a scheduled email asynchronously."""
         _validate_id(email_id, 'email')
-        data = await self._client._request("POST", f"/emails/{email_id}/cancel")
+        data = await self._client._request("POST", f"/messages/{email_id}/cancel")
         return Email(**data["email"])

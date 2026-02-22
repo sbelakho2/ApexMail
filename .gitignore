@@ -1,8 +1,11 @@
-# Dependencies
+# ─── Node / JS ────────────────────────────────────────────────────────────────
 node_modules/
 **/node_modules/
 
-# Builds & caches
+# Compiled native addons (napi-rs / node-gyp outputs)
+*.node
+
+# ─── Build & cache outputs ────────────────────────────────────────────────────
 .next/
 **/.next/
 out/
@@ -18,7 +21,30 @@ build/
 .eslintcache
 *.tsbuildinfo
 
-# Test artifacts
+# ─── Rust build artefacts ─────────────────────────────────────────────────────
+target/
+**/target/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+.venv/
+venv/
+.env_python/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+*.egg-info/
+dist-info/
+.ipynb_checkpoints/
+
+# ─── Test artifacts ───────────────────────────────────────────────────────────
 coverage/
 **/coverage/
 .nyc_output/
@@ -26,8 +52,9 @@ playwright-report/
 **/playwright-report/
 test-results/
 **/test-results/
+apps/testing/reports/
 
-# Logs
+# ─── Logs ─────────────────────────────────────────────────────────────────────
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -35,27 +62,61 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Env files
+# ─── Env / secrets ────────────────────────────────────────────────────────────
 .env
 .env.*
 !.env.example
 !.env.sample
+.vast_api_key
+vast_instance_id.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
 
-# OS / Editor
+# ─── OS / Editor ──────────────────────────────────────────────────────────────
 .DS_Store
+**/.DS_Store
 *.swp
 *.swo
+*.bak
 .idea/
 .vscode/
+*.orig
 
-# AI model artifacts (large binaries — use external storage)
+# ─── AI / ML model artefacts (large binaries — use external storage / LFS) ────
 apps/ai/training/onnx_model/
 apps/ai/training/output/
+apps/ai/training/output-merged/
+apps/ai/training/gguf_model/
+apps/ai/training/checkpoints/
+apps/ai/training/wandb/
+apps/ai/training/runs/
+apps/ai/training/eval_results/
+apps/ai/training/eval_results_full/
+apps/ai/training/artifacts_*/
 *.onnx
 *.onnx_data
+*.safetensors
+*.gguf
+*.pt
+*.pth
 
-# Test reports (generated artifacts)
-apps/testing/reports/
+# ─── Training data (generated / large) ───────────────────────────────────────
+data/train_agent.jsonl
+apps/ai/training/data/train.jsonl
+apps/ai/training/data/train.jsonl.gz
+apps/ai/training/data/val.jsonl
+apps/ai/training/data/test.jsonl
+apps/ai/training/data/eval_1000.jsonl
+apps/ai/training/data/golden_qa.jsonl
 
-# Misc
+# ─── Local dev scratch files ──────────────────────────────────────────────────
+# Tailwind color-palette snippet exports (local dev helpers, not source)
+cp_colors.txt
+marketing_colors.txt
+web_colors.txt
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
 .vercel/

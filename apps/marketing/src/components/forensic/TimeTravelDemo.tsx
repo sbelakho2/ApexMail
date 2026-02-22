@@ -135,7 +135,7 @@ export function TimeTravelDemo() {
                       </li>
                     ))}
                   </ul>
-                  <button className="w-full btn-primary py-3 rounded-md font-medium text-sm shadow-sm hover:shadow transition-all">
+                  <button className="w-full btn-primary py-3 rounded-md font-medium text-sm transition-colors">
                     Get Started
                   </button>
                 </div>
@@ -184,7 +184,7 @@ export function TimeTravelDemo() {
                 </button>
                 <button
                   onClick={() => setIsPlaying(!isPlaying)}
-                  className="p-3 bg-primary-600 text-white rounded-md hover:bg-primary-700 transition-all shadow-sm active:scale-95"
+                  className="p-3 bg-primary-600 text-white rounded-md border border-primary-600 hover:bg-primary-700 transition-colors"
                 >
                   {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
                 </button>

@@ -191,7 +191,7 @@ export class ViralLoopService {
   ): Promise<Result<ViralStats, Error>> {
     // Get impressions from metering
     const impressionsResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::text as count FROM usage_events
+      `SELECT COUNT(*)::text as count FROM metering_events
        WHERE tenant_id = $1
          AND event_type = 'emails_sent'
          AND timestamp >= $2

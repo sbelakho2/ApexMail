@@ -34,7 +34,8 @@
     "pino": "^8.17.0",
     "pino-pretty": "^10.3.0",
     "undici": "^6.4.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "@apexmail/crypto-native": "workspace:*"
   },
   "devDependencies": {
     "@types/handlebars": "^4.1.0",

@@ -84,7 +84,7 @@ services:
     environment:
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
-      API_KEY_SECRET: ${API_KEY_SECRET:?API_KEY_SECRET is required in production}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:?API_KEY_HASH_SECRET is required in production}
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required in production}
       TRACKING_BASE_URL: ${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production}
     deploy:
@@ -120,7 +120,7 @@ services:
 
   tracking:
     environment:
-      NODE_ENV: production
+      RUST_LOG: info
     deploy:
       replicas: 2
       resources:

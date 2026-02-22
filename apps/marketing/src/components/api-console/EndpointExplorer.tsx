@@ -26,7 +26,7 @@ const categories: EndpointCategory[] = [
     endpoints: [
       {
         method: 'POST',
-        path: '/v1/send',
+        path: '/v1/messages',
         description: 'Send a single email',
         example: `{
   "to": "user@example.com",
@@ -36,7 +36,7 @@ const categories: EndpointCategory[] = [
       },
       {
         method: 'POST',
-        path: '/v1/batch',
+        path: '/v1/messages/batch',
         description: 'Send up to 1000 emails in a single request',
         example: `{
   "messages": [
@@ -47,7 +47,7 @@ const categories: EndpointCategory[] = [
       },
       {
         method: 'POST',
-        path: '/v1/send/template',
+        path: '/v1/messages',
         description: 'Send using a pre-defined template',
         example: `{
   "template_id": "tmpl_welcome",

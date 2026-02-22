@@ -6,10 +6,10 @@ import { ArrowRight, Play, Check } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 
 const heroCode = `// Send your first email in 3 lines
-const response = await fetch('https://api.apexmail.ee/v1/send', {
+const response = await fetch('https://api.apexmail.ee/v1/messages', {
  method: 'POST',
  headers: {
- 'Authorization': 'Bearer YOUR_API_KEY',
+ 'X-API-Key': 'YOUR_API_KEY',
  'Content-Type': 'application/json'
  },
  body: JSON.stringify({

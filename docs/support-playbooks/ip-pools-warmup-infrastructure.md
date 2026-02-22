@@ -10,7 +10,7 @@
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| IP Warmup (rate limiting) | ✅ Implemented | `apps/worker/src/ip-rate-limiter.ts` — gradual volume increase per IP |
+| IP Warmup (rate limiting) | ✅ Implemented | `apps/worker/src/services/ip-rate-limiter.ts` — gradual volume increase per IP, ISP-specific schedules |
 | Dedicated IP assignment | ✅ Supported | Provisioned per tenant, configured via control plane |
 | IP Pools (multi-IP grouping) | ⚠️ Roadmap | No dedicated IP pool abstraction layer; current architecture is 1 IP per tenant |
 | rDNS / PTR records | ✅ Manual setup | Configured at infrastructure level (Hetzner Cloud) |
@@ -34,21 +34,29 @@ Tenant Account
     └── Outbound → Nodemailer → SMTP host
 ```
 
-### Warmup Schedule (Default)
+### Warmup Schedules (from `apps/worker/src/services/ip-rate-limiter.ts`)
 
-| Day | Daily Send Limit | Cumulative |
-|-----|-----------------|-----------|
-| 1 | 50 | 50 |
-| 2 | 100 | 150 |
-| 3 | 250 | 400 |
-| 4 | 500 | 900 |
-| 5 | 1,000 | 1,900 |
-| 6 | 2,500 | 4,400 |
-| 7 | 5,000 | 9,400 |
-| 8-14 | 10,000 | ~79,400 |
-| 15-21 | 25,000 | ~254,400 |
-| 22-28 | 50,000 | ~604,400 |
-| 29+ | 100,000+ | Full volume |
+Schedules are **ISP-specific** (per-day daily send limits). Gmail and Yahoo use the strictest ramp; Microsoft is more lenient.
+
+| Day | Gmail / Yahoo | Microsoft | Apple | Default (unknown ISP) |
+|-----|--------------|-----------|-------|-----------------------|
+| 1 | 50 | 100 | 75 | 100 |
+| 2 | 100 | 200 | 150 | 200 |
+| 3 | 200 | 400 | 300 | 400 |
+| 4 | 400 | 800 | 600 | 800 |
+| 5 | 800 | 1,500 | 1,200 | 1,500 |
+| 6 | 1,500 | 3,000 | 2,400 | 3,000 |
+| 7 | 2,500 | 5,000 | 4,000 | 5,000 |
+| 8 | 4,000 | 8,000 | 6,000 | 8,000 |
+| 9 | 6,000 | 12,000 | 9,000 | 12,000 |
+| 10 | 8,000 | 18,000 | 12,000 | 18,000 |
+| 11 | 10,000 | 25,000 | 16,000 | 25,000 |
+| 12 | 15,000 | 35,000 | 22,000 | 35,000 |
+| 13 | 20,000 | 50,000 | 30,000 | 50,000 |
+| 14 | 30,000 | — | — | 75,000 |
+| 15+ | — (full) | — (full) | — (full) | 100,000+ |
+
+> **Note:** These are **per-ISP** limits that the `IPRateLimiter` enforces separately. A single IP can send up to the Gmail limit to Gmail recipients AND the Microsoft limit to Outlook recipients within the same day.
 
 ---
 
@@ -57,7 +65,11 @@ Tenant Account
 **Symptoms:** Customer wants to move from shared IP pool to a dedicated IP for reputation isolation.
 
 **Resolution:**
-1. **Dedicated IPs are available on Growth (1 IP), Scale (3 IPs), and Enterprise (10 IPs) plans.**
+1. **Dedicated IPs are available from the Pro plan and above:**
+   - **Pro** — add-on available ($30/mo, 0 included)
+   - **Growth** — 1 IP included
+   - **Scale** — 3 IPs included
+   - **Enterprise** — 10 IPs included
 2. **Request process:**
    - Dashboard → Settings → Dedicated IP → Request.
    - Or contact `contact@apexmail.ee` with the request.
@@ -91,7 +103,7 @@ Tenant Account
 
 **Resolution:**
 1. **IP warmup gradually increases sending volume** to build reputation with ISPs.
-2. **How it works:** `apps/worker/src/ip-rate-limiter.ts` enforces per-IP daily limits based on the warmup schedule (see table above).
+2. **How it works:** `apps/worker/src/services/ip-rate-limiter.ts` enforces per-IP daily limits based on the warmup schedule (see table above).
 3. **During warmup:**
    - Emails exceeding the daily limit are queued and sent the next day (NOT dropped).
    - Warmup progress is tracked per IP.
@@ -635,7 +647,14 @@ Customer's SPF record must include the dedicated IP: `v=spf1 ip4:<DEDICATED_IP> 
 
 ### E161 — "Can I bring my own IP (BYOIP)?"
 
-⚠️ Not currently supported. ApexMail provisions IPs from our own allocations. BYOIP requires BGP integration and is not on the current roadmap.
+BYOIP is available on the **Enterprise plan** ($800/mo). Customers can register their own IP ranges, which are verified and provisioned through the Enterprise private deployment service (`apps/enterprise/src/services/private-deploy.ts`). The process:
+
+1. Customer submits IP range via Enterprise API
+2. ApexMail verifies ownership via ARIN/RIPE WHOIS + LOA
+3. IP range is provisioned and BGP announcement is configured
+4. Customer confirms working state; range enters production
+
+**Requirements:** Customer must own the IP range and provide a signed Letter of Authorization (LOA). Minimum allocation: /24 (256 IPs). Contact the dedicated account manager to initiate BYOIP onboarding.
 
 ### E162 — "Sending volume spike triggers automatic throttling"
 

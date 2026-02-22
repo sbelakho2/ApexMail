@@ -190,7 +190,7 @@ function ChatbotWidget({ onCreateTicket }: { onCreateTicket: () => void }) {
       </button>
 
       {isOpen && (
-        <div className="fixed bottom-24 right-6 z-50 w-96 max-w-[calc(100vw-3rem)] bg-card border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden" style={{ height: '480px' }}>
+        <div className="fixed bottom-24 right-6 z-50 w-96 max-w-[calc(100vw-3rem)] bg-card border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden h-[480px]">
           <div className="bg-primary text-primary-foreground px-4 py-3 flex items-center gap-3">
             <Bot className="h-5 w-5" />
             <div>

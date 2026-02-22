@@ -293,7 +293,6 @@ export function getStarterTemplate(componentName = 'EmailTemplate'): string {
   Link,
   Preview,
   Hr,
-  Font,
 } from '@react-email/components';
 import * as React from 'react';
 
@@ -309,58 +308,39 @@ export default function ${componentName}({
 }: ${componentName}Props) {
   return (
     <Html lang="en">
-      <Head>
-        <Font
-          fontFamily="Inter"
-          fallbackFontFamily="Arial"
-          webFont={{
-            url: 'https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiJ-Ek-_EeA.woff2',
-            format: 'woff2',
-          }}
-          fontWeight={400}
-          fontStyle="normal"
-        />
-      </Head>
+      <Head />
       <Preview>Hello, {recipientName}!</Preview>
-      <Body style={{ backgroundColor: '#f6f9fc', fontFamily: 'Inter, Arial, sans-serif' }}>
-        <Container style={{ maxWidth: '600px', margin: '40px auto', padding: '24px', backgroundColor: '#ffffff', borderRadius: '8px' }}>
+      <Body className="bg-slate-50 font-sans">
+        <Container className="mx-auto my-10 max-w-[600px] rounded-lg bg-white p-6">
           <Img
             src="https://example.com/logo.png"
             alt="Logo"
             width={120}
             height={40}
           />
-          <Hr style={{ borderColor: '#e6ebf1' }} />
+          <Hr className="border-slate-200" />
           <Section>
-            <Heading style={{ fontSize: '24px', color: '#1a1a2e' }}>
+            <Heading className="text-2xl text-slate-900">
               Hi {recipientName}!
             </Heading>
-            <Text style={{ fontSize: '16px', color: '#555', lineHeight: '1.6' }}>
+            <Text className="text-base leading-7 text-slate-600">
               Welcome to our platform. We&apos;re excited to have you on board.
             </Text>
             <Button
               href={actionUrl}
-              style={{
-                backgroundColor: '#6366f1',
-                color: '#fff',
-                padding: '12px 24px',
-                borderRadius: '6px',
-                fontSize: '16px',
-                fontWeight: '600',
-                textDecoration: 'none',
-              }}
+              className="rounded-md bg-indigo-500 px-6 py-3 text-base font-semibold text-white no-underline"
             >
               Get Started
             </Button>
           </Section>
-          <Hr style={{ borderColor: '#e6ebf1' }} />
-          <Text style={{ fontSize: '12px', color: '#8898aa', textAlign: 'center' }}>
+          <Hr className="border-slate-200" />
+          <Text className="text-center text-xs text-slate-400">
             You received this email because you signed up at{' '}
-            <Link href="https://example.com" style={{ color: '#6366f1' }}>
+            <Link href="https://example.com" className="text-indigo-500">
               example.com
             </Link>
             . To unsubscribe,{' '}
-            <Link href="{{unsubscribeUrl}}" style={{ color: '#6366f1' }}>
+            <Link href="{{unsubscribeUrl}}" className="text-indigo-500">
               click here
             </Link>
             .

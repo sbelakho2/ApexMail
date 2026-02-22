@@ -94,13 +94,29 @@ export function createApp(): Hono {
     origin: config.cors.origins,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
-    exposeHeaders: ['X-Request-ID'],
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
     credentials: true,
     maxAge: 86400,
   }));
   app.use('*', prettyJSON());
   app.use('*', compress());
   app.use('*', secureHeaders());
+
+  // EDGE-001: Internal API key authentication for service-to-service calls
+  // Health endpoints remain open for load balancer probes
+  const EDGE_INTERNAL_API_KEY = process.env.EDGE_INTERNAL_API_KEY || 'edge-internal-key-dev';
+  
+  app.use('/api/*', async (c, next) => {
+    const apiKey = c.req.header('X-Internal-Api-Key');
+    if (!apiKey || apiKey !== EDGE_INTERNAL_API_KEY) {
+      edgeLogger.warn('[EdgeCases] Unauthorized request - missing or invalid X-Internal-Api-Key');
+      return c.json({
+        error: 'Unauthorized — X-Internal-Api-Key required',
+        code: 'UNAUTHORIZED',
+      }, 401);
+    }
+    await next();
+  });
 
   // Request ID middleware
   app.use('*', async (c, next) => {

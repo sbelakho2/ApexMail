@@ -31,7 +31,7 @@ Compliance features include:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -78,7 +78,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent \
 ```bash
 # Send verification email
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent/verify \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "consentId": "consent_abc123"
   }'
@@ -94,7 +94,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent/confirm \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/compliance/consent/status \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "email=user@example.com"
 ```
 
@@ -129,7 +129,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/access \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "email": "user@example.com",
@@ -180,7 +180,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/erasure \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "email": "user@example.com",
@@ -220,7 +220,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/portability \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "email": "user@example.com",
@@ -238,7 +238,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/portability \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dpa/generate \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "controllerInfo": {
@@ -294,7 +294,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dpa/sign \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "dpaId": "dpa_abc123",
     "signatory": {
@@ -312,7 +312,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dpa/sign \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/compliance/audit-logs \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "accountId=acc_xxx" \
   -d "startDate=2024-01-01" \
   -d "endDate=2024-01-31" \
@@ -367,7 +367,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/audit-logs/export \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "startDate": "2024-01-01",
@@ -383,7 +383,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/audit-logs/export 
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/retention \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "policies": {
@@ -426,7 +426,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/retention \
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/data-residency \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "primaryRegion": "eu-west-1",
@@ -446,7 +446,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/data-residency \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/reports \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "type": "gdpr_compliance",

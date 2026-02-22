@@ -37,9 +37,11 @@ export interface PlanFeatures {
   // API & Integrations
   apiAccess: boolean;
   webhooksEnabled: boolean;
+  inboundEmail: boolean;
   
   // Analytics & Data
   advancedAnalytics: boolean;
+  sendTimeOptimization: boolean;
   abTesting: boolean;
   timeTravelDebugging: boolean;
   dataExport: boolean;
@@ -87,9 +89,11 @@ const DEFAULT_PLAN_FEATURES: PlanFeatures = {
   // API & Integrations
   apiAccess: true,
   webhooksEnabled: false,
+  inboundEmail: false,
   
   // Analytics & Data
   advancedAnalytics: false,
+  sendTimeOptimization: false,
   abTesting: false,
   timeTravelDebugging: false,
   dataExport: false,
@@ -182,6 +186,31 @@ export function calculatePaygCost(emailsSent: number, apiCalls: number): {
   };
 }
 
+/**
+ * Subscription overage pricing
+ * $0.40 per 1,000 emails = $0.0004 per email = 0.04 cents per email
+ */
+export const OVERAGE_RATE_PER_EMAIL_CENTS = 0.04; // $0.40/1K = 0.04 cents/email
+
+/**
+ * Calculate overage cost for subscription plans that exceed their monthly email limit.
+ * Returns cost in cents.
+ * 
+ * @param emailsSent - Total emails sent in the billing period
+ * @param emailLimit - Plan's email limit (-1 for unlimited)
+ * @returns Overage cost in cents
+ */
+export function calculateOverageCost(emailsSent: number, emailLimit: number): number {
+  // Unlimited plans (-1) have no overage
+  if (emailLimit === -1) return 0;
+  // No overage if within limit
+  if (emailsSent <= emailLimit) return 0;
+  
+  const overageEmails = emailsSent - emailLimit;
+  // Round up to nearest cent
+  return Math.ceil(overageEmails * OVERAGE_RATE_PER_EMAIL_CENTS);
+}
+
 export interface CreatePlanInput {
   name: string;
   displayName: string;
@@ -203,8 +232,8 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     description: 'Get started with basic email sending',
     priceMonthly: 0,
     priceYearly: 0,
-    emailLimit: 1000,
-    apiCallLimit: 10000,
+    emailLimit: 3000,
+    apiCallLimit: 50000,
     features: {
       dedicatedIp: false,
       dedicatedIpCount: 0,
@@ -213,7 +242,9 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       auditLogs: false,
       apiAccess: true,
       webhooksEnabled: false,
+      inboundEmail: false,
       advancedAnalytics: false,
+      sendTimeOptimization: false,
       abTesting: false,
       timeTravelDebugging: false,
       dataExport: false,
@@ -243,19 +274,21 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'starter',
     displayName: 'Starter',
     description: 'For growing businesses with moderate email needs',
-    priceMonthly: 2900, // $29
-    priceYearly: 29000, // $290 (~17% discount)
-    emailLimit: 25000,
-    apiCallLimit: 250000,
+    priceMonthly: 2500, // $25
+    priceYearly: 25000, // $250 (~17% discount)
+    emailLimit: 50000,
+    apiCallLimit: 500000,
     features: {
       dedicatedIp: false,
       dedicatedIpCount: 0,
-      maxSendingDomains: 3,
+      maxSendingDomains: 5,
       ssoEnabled: false,
       auditLogs: false,
       apiAccess: true,
       webhooksEnabled: true,
+      inboundEmail: false,
       advancedAnalytics: true,
+      sendTimeOptimization: false,
       abTesting: false,
       timeTravelDebugging: false,
       dataExport: true,
@@ -266,7 +299,7 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       poweredByFooter: false,
       customRetention: false,
       maxRetentionDays: 30,
-      maxTeamMembers: 3,
+      maxTeamMembers: 5,
       subaccounts: false,
       maxSubaccounts: 0,
       supportLevel: 'email',
@@ -285,20 +318,22 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'pro',
     displayName: 'Pro',
     description: 'For scaling teams with custom tracking needs',
-    priceMonthly: 5900, // $59
-    priceYearly: 59000, // $590 (~17% discount)
-    emailLimit: 50000,
-    apiCallLimit: 500000,
+    priceMonthly: 6500, // $65
+    priceYearly: 65000, // $650 (~17% discount)
+    emailLimit: 150000,
+    apiCallLimit: 2000000,
     features: {
-      dedicatedIp: false,
+      dedicatedIp: true,
       dedicatedIpCount: 0,
-      maxSendingDomains: 5,
+      maxSendingDomains: 25,
       ssoEnabled: false,
       auditLogs: false,
       apiAccess: true,
       webhooksEnabled: true,
+      inboundEmail: false,
       advancedAnalytics: true,
-      abTesting: false,
+      sendTimeOptimization: true,
+      abTesting: true,
       timeTravelDebugging: false,
       dataExport: true,
       customTrackingDomain: true,
@@ -308,7 +343,7 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       poweredByFooter: false,
       customRetention: true,
       maxRetentionDays: 60,
-      maxTeamMembers: 5,
+      maxTeamMembers: 10,
       subaccounts: false,
       maxSubaccounts: 0,
       supportLevel: 'email',
@@ -327,19 +362,21 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'growth',
     displayName: 'Growth',
     description: 'For teams that need advanced deliverability features',
-    priceMonthly: 12900, // $129
-    priceYearly: 129000, // $1290 (~17% discount)
-    emailLimit: 100000,
-    apiCallLimit: 1000000,
+    priceMonthly: 15000, // $150
+    priceYearly: 150000, // $1500 (~17% discount)
+    emailLimit: 500000,
+    apiCallLimit: 5000000,
     features: {
       dedicatedIp: true,
       dedicatedIpCount: 1,
-      maxSendingDomains: 10,
+      maxSendingDomains: 100,
       ssoEnabled: false,
       auditLogs: true,
       apiAccess: true,
       webhooksEnabled: true,
+      inboundEmail: false,
       advancedAnalytics: true,
+      sendTimeOptimization: true,
       abTesting: true,
       timeTravelDebugging: true,
       dataExport: true,
@@ -350,7 +387,7 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       poweredByFooter: false,
       customRetention: true,
       maxRetentionDays: 90,
-      maxTeamMembers: 10,
+      maxTeamMembers: 25,
       subaccounts: false,
       maxSubaccounts: 0,
       supportLevel: 'priority',
@@ -369,10 +406,10 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'scale',
     displayName: 'Scale',
     description: 'For high-volume senders needing isolation',
-    priceMonthly: 39900, // $399
-    priceYearly: 399000, // $3990 (~17% discount)
-    emailLimit: 500000,
-    apiCallLimit: 5000000,
+    priceMonthly: 35000, // $350
+    priceYearly: 350000, // $3500 (~17% discount)
+    emailLimit: 2000000,
+    apiCallLimit: 20000000,
     features: {
       dedicatedIp: true,
       dedicatedIpCount: 3,
@@ -381,7 +418,9 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       auditLogs: true,
       apiAccess: true,
       webhooksEnabled: true,
+      inboundEmail: true,
       advancedAnalytics: true,
+      sendTimeOptimization: true,
       abTesting: true,
       timeTravelDebugging: true,
       dataExport: true,
@@ -392,7 +431,7 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       poweredByFooter: false,
       customRetention: true,
       maxRetentionDays: 365,
-      maxTeamMembers: 25,
+      maxTeamMembers: 50,
       subaccounts: true,
       maxSubaccounts: 10,
       supportLevel: 'phone',
@@ -411,10 +450,10 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     name: 'enterprise',
     displayName: 'Enterprise',
     description: 'Custom solutions for large organizations',
-    priceMonthly: 129900, // $1299 (base)
-    priceYearly: 1299000, // $12990
-    emailLimit: 2000000,
-    apiCallLimit: 20000000,
+    priceMonthly: 80000, // $800 (base)
+    priceYearly: 800000, // $8000 (~17% discount)
+    emailLimit: 5000000,
+    apiCallLimit: -1, // Unlimited
     features: {
       dedicatedIp: true,
       dedicatedIpCount: 10,
@@ -423,7 +462,9 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       auditLogs: true,
       apiAccess: true,
       webhooksEnabled: true,
+      inboundEmail: true,
       advancedAnalytics: true,
+      sendTimeOptimization: true,
       abTesting: true,
       timeTravelDebugging: true,
       dataExport: true,
@@ -460,12 +501,14 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
     features: {
       dedicatedIp: false,
       dedicatedIpCount: 0,
-      maxSendingDomains: 3,
+      maxSendingDomains: 5,
       ssoEnabled: false,
       auditLogs: false,
       apiAccess: true,
       webhooksEnabled: true,
+      inboundEmail: false,
       advancedAnalytics: true,
+      sendTimeOptimization: false,
       abTesting: false,
       timeTravelDebugging: false,
       dataExport: true,
@@ -476,7 +519,7 @@ const DEFAULT_PLANS: CreatePlanInput[] = [
       poweredByFooter: false,
       customRetention: false,
       maxRetentionDays: 30,
-      maxTeamMembers: 3,
+      maxTeamMembers: 5,
       subaccounts: false,
       maxSubaccounts: 0,
       supportLevel: 'email',

@@ -25,7 +25,7 @@
 
 #### 1. API Request Reception
 ```typescript
-// POST /api/v1/messages
+// POST /v1/messages
 {
   "to": "user@example.com",
   "from": "sender@company.com",

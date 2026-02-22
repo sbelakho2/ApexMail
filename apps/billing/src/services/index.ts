@@ -14,3 +14,4 @@ export { EnterpriseContractService } from './enterprise-contracts.js';
 export { WalletService } from './wallet.js';
 export { ViralLoopService } from './viral-loop.js';
 export { CostCircuitService } from './cost-circuit.js';
+export { DedicatedIpBillingService } from './dedicated-ip-billing.js';

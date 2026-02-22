@@ -20,6 +20,7 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY: z.string().startsWith('sk_'),
   STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_'),
   STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_').optional(),
+  STRIPE_DEDICATED_IP_PRICE_ID: z.string().startsWith('price_').optional(),
   
   // Internal service auth
   SERVICE_AUTH_TOKEN: z.string().min(32),
@@ -91,6 +92,9 @@ export const config = {
   },
   get meteringFlushIntervalMs(): number {
     return parseInt(getConfig().METERING_FLUSH_INTERVAL_MS, 10) || 10000;
+  },
+  get stripeDedicatedIpPriceId(): string | undefined {
+    return getConfig().STRIPE_DEDICATED_IP_PRICE_ID;
   },
 };
 

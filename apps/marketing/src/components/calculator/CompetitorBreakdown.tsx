@@ -15,14 +15,14 @@ interface FeatureComparison {
 const features: FeatureComparison[] = [
   {
     feature: 'Free tier',
-    apexmail: '10K/mo',
+    apexmail: '3K/mo',
     sendgrid: '100/day',
     mailchimp: '500 contacts',
     ses: 'None (EC2 only)',
   },
   {
     feature: 'Price per 100K emails',
-    apexmail: '$29',
+    apexmail: '$30',
     sendgrid: '$34.95',
     mailchimp: '~$100',
     ses: '$10',
@@ -78,21 +78,21 @@ const features: FeatureComparison[] = [
   },
   {
     feature: 'Private cloud option',
-    apexmail: true,
+    apexmail: 'Enterprise plan',
     sendgrid: false,
     mailchimp: false,
     ses: true,
   },
   {
     feature: 'Support',
-    apexmail: '24/7 (Pro+)',
+    apexmail: 'Priority+ (Growth+)',
     sendgrid: 'Email only',
     mailchimp: 'Email only',
     ses: 'Paid support',
   },
   {
     feature: 'Uptime SLA',
-    apexmail: '99.99%',
+    apexmail: '99.9% (Scale+)',
     sendgrid: '99.95%',
     mailchimp: 'None',
     ses: '99.9%',

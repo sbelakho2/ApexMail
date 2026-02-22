@@ -523,7 +523,7 @@ export class HttpClient {
     }
 
     const headers: Record<string, string> = {
-      'Authorization': \`Bearer \${this.config.apiKey}\`,
+      'X-API-Key': this.config.apiKey,
       'Content-Type': 'application/json',
       'X-API-Version': this.config.apiVersion,
       'User-Agent': 'apexmail-node/${sdkConfig.version}',
@@ -662,42 +662,42 @@ export class EmailsResource {
    * Send a single email
    */
   async send(request: SendEmailRequest, idempotencyKey?: string): Promise<SendEmailResponse> {
-    return this.http.post<SendEmailResponse>('/v1/emails', request, idempotencyKey);
+    return this.http.post<SendEmailResponse>('/v1/messages', request, idempotencyKey);
   }
 
   /**
    * Send batch emails
    */
   async sendBatch(request: BatchSendRequest, idempotencyKey?: string): Promise<BatchSendResponse> {
-    return this.http.post<BatchSendResponse>('/v1/emails/batch', request, idempotencyKey);
+    return this.http.post<BatchSendResponse>('/v1/messages/batch', request, idempotencyKey);
   }
 
   /**
    * Get email by ID
    */
   async get(emailId: string): Promise<Email> {
-    return this.http.get<Email>(\`/v1/emails/\${emailId}\`);
+    return this.http.get<Email>(\`/v1/messages/\${emailId}\`);
   }
 
   /**
    * List emails
    */
   async list(options?: ListOptions): Promise<PaginatedResponse<Email>> {
-    return this.http.get<PaginatedResponse<Email>>('/v1/emails', options);
+    return this.http.get<PaginatedResponse<Email>>('/v1/messages', options);
   }
 
   /**
    * Cancel scheduled email
    */
   async cancel(emailId: string): Promise<{ success: boolean }> {
-    return this.http.post<{ success: boolean }>(\`/v1/emails/\${emailId}/cancel\`);
+    return this.http.post<{ success: boolean }>(\`/v1/messages/\${emailId}/cancel\`);
   }
 
   /**
    * Get email events
    */
   async getEvents(emailId: string): Promise<EmailEvent[]> {
-    return this.http.get<EmailEvent[]>(\`/v1/emails/\${emailId}/events\`);
+    return this.http.get<EmailEvent[]>(\`/v1/messages/\${emailId}/events\`);
   }
 }
 
@@ -1328,7 +1328,7 @@ class HttpClient:
         self.async_mode = async_mode
         
         self._headers = {
-            "Authorization": f"Bearer {api_key}",
+            "X-API-Key": api_key,
             "Content-Type": "application/json",
             "X-API-Version": api_version,
             "User-Agent": f"apexmail-python/${sdkConfig.version}",
@@ -1822,11 +1822,11 @@ class EmailsResource:
                 else scheduled_at
             )
         
-        return self._http.post("/v1/emails", body, idempotency_key)
+        return self._http.post("/v1/messages", body, idempotency_key)
     
     def get(self, email_id: str) -> Dict[str, Any]:
         """Get email by ID."""
-        return self._http.get(f"/v1/emails/{email_id}")
+        return self._http.get(f"/v1/messages/{email_id}")
     
     def list(
         self,
@@ -1837,15 +1837,15 @@ class EmailsResource:
         params = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
-        return self._http.get("/v1/emails", params)
+        return self._http.get("/v1/messages", params)
     
     def cancel(self, email_id: str) -> Dict[str, Any]:
         """Cancel a scheduled email."""
-        return self._http.post(f"/v1/emails/{email_id}/cancel")
+        return self._http.post(f"/v1/messages/{email_id}/cancel")
     
     def get_events(self, email_id: str) -> List[Dict[str, Any]]:
         """Get email events."""
-        return self._http.get(f"/v1/emails/{email_id}/events")
+        return self._http.get(f"/v1/messages/{email_id}/events")
 
 
 class AsyncEmailsResource(EmailsResource):
@@ -1854,22 +1854,22 @@ class AsyncEmailsResource(EmailsResource):
     async def send(self, *args, **kwargs) -> Dict[str, Any]:
         body = self._build_send_body(*args, **kwargs)
         idempotency_key = kwargs.get("idempotency_key")
-        return await self._http.apost("/v1/emails", body, idempotency_key)
+        return await self._http.apost("/v1/messages", body, idempotency_key)
     
     async def get(self, email_id: str) -> Dict[str, Any]:
-        return await self._http.aget(f"/v1/emails/{email_id}")
+        return await self._http.aget(f"/v1/messages/{email_id}")
     
     async def list(self, limit: int = 50, cursor: Optional[str] = None) -> Dict[str, Any]:
         params = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
-        return await self._http.aget("/v1/emails", params)
+        return await self._http.aget("/v1/messages", params)
     
     async def cancel(self, email_id: str) -> Dict[str, Any]:
-        return await self._http.apost(f"/v1/emails/{email_id}/cancel")
+        return await self._http.apost(f"/v1/messages/{email_id}/cancel")
     
     async def get_events(self, email_id: str) -> List[Dict[str, Any]]:
-        return await self._http.aget(f"/v1/emails/{email_id}/events")
+        return await self._http.aget(f"/v1/messages/{email_id}/events")
 `,
     });
 
@@ -2326,7 +2326,7 @@ module ApexMail
     def build_connection
       Faraday.new(url: BASE_URL) do |conn|
         conn.request :retry, max: 3, interval: 0.5, backoff_factor: 2
-        conn.headers["Authorization"] = "Bearer #{@api_key}"
+        conn.headers["X-API-Key"] = @api_key
         conn.headers["Content-Type"] = "application/json"
         conn.headers["X-API-Version"] = @api_version
         conn.headers["User-Agent"] = "apexmail-ruby/#{VERSION}"
@@ -2516,7 +2516,7 @@ func (c *Client) request(method, path string, body interface{}, result interface
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Version", c.apiVersion)
 	req.Header.Set("User-Agent", "apexmail-go/${sdkConfig.version}")
@@ -2614,7 +2614,7 @@ type SendEmailResponse struct {
 // Send sends an email.
 func (s *EmailsService) Send(req *SendEmailRequest) (*SendEmailResponse, error) {
 	var resp SendEmailResponse
-	err := s.client.request("POST", "/v1/emails", req, &resp)
+	err := s.client.request("POST", "/v1/messages", req, &resp)
 	if err != nil {
 		return nil, err
 	}
@@ -2624,7 +2624,7 @@ func (s *EmailsService) Send(req *SendEmailRequest) (*SendEmailResponse, error) 
 // Get retrieves an email by ID.
 func (s *EmailsService) Get(emailID string) (*Email, error) {
 	var email Email
-	err := s.client.request("GET", "/v1/emails/"+emailID, nil, &email)
+	err := s.client.request("GET", "/v1/messages/"+emailID, nil, &email)
 	if err != nil {
 		return nil, err
 	}
@@ -2633,7 +2633,7 @@ func (s *EmailsService) Get(emailID string) (*Email, error) {
 
 // Cancel cancels a scheduled email.
 func (s *EmailsService) Cancel(emailID string) error {
-	return s.client.request("POST", "/v1/emails/"+emailID+"/cancel", nil, nil)
+	return s.client.request("POST", "/v1/messages/"+emailID+"/cancel", nil, nil)
 }
 `,
     });
@@ -2749,7 +2749,7 @@ class ApexMailClient
             'base_uri' => $options['base_url'] ?? self::BASE_URL,
             'timeout' => $options['timeout'] ?? 30,
             'headers' => [
-                'Authorization' => 'Bearer ' . $this->apiKey,
+                'X-API-Key' => $this->apiKey,
                 'Content-Type' => 'application/json',
                 'X-API-Version' => $this->apiVersion,
                 'User-Agent' => 'apexmail-php/${sdkConfig.version}',
@@ -2919,7 +2919,7 @@ public class ApexMailClient {
             .addInterceptor(chain -> {
                 Request original = chain.request();
                 Request request = original.newBuilder()
-                    .header("Authorization", "Bearer " + apiKey)
+                    .header("X-API-Key", apiKey)
                     .header("Content-Type", "application/json")
                     .header("X-API-Version", apiVersion)
                     .header("User-Agent", "apexmail-java/${sdkConfig.version}")
@@ -3090,8 +3090,7 @@ public class ApexMailClient : IDisposable
             Timeout = TimeSpan.FromSeconds(30)
         };
 
-        _httpClient.DefaultRequestHeaders.Authorization = 
-            new AuthenticationHeaderValue("Bearer", apiKey);
+        _httpClient.DefaultRequestHeaders.Add("X-API-Key", apiKey);
         _httpClient.DefaultRequestHeaders.Add("X-API-Version", apiVersion ?? DefaultApiVersion);
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("apexmail-dotnet/${sdkConfig.version}");
 

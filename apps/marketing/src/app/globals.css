@@ -162,15 +162,15 @@
   }
 
   .btn-primary {
-    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-lg transition-premium shadow-lg shadow-primary-500/20 active:scale-[0.98];
+    @apply px-6 py-3 bg-primary-500 hover:bg-primary-600 text-white font-semibold rounded-lg border border-primary-500 transition-premium;
   }
 
   .btn-secondary {
-    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-semibold rounded-lg transition-premium active:scale-[0.98];
+    @apply px-6 py-3 border border-surface-200 hover:border-surface-300 hover:bg-surface-50 bg-white text-surface-900 font-semibold rounded-lg transition-premium;
   }
 
   .btn-accent {
-    @apply px-6 py-3 bg-accent-500 hover:bg-accent-600 text-white font-semibold rounded-lg transition-premium shadow-lg shadow-accent-500/20 active:scale-[0.98];
+    @apply px-6 py-3 bg-accent-500 hover:bg-accent-600 text-white font-semibold rounded-lg border border-accent-500 transition-premium;
   }
 
   .section-title {

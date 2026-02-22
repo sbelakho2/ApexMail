@@ -10,7 +10,7 @@
 | Item | Value |
 |------|-------|
 | Base URL | `https://api.apexmail.ee/v1` |
-| Auth | `Authorization: Bearer am_live_<hex>` (production) or `am_test_<hex>` (sandbox) |
+| Auth | `X-API-Key: am_live_<hex>` (production) or `am_test_<hex>` (sandbox) |
 | Content-Type | `application/json` |
 | Rate Limit | Plan-dependent; headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` |
 | Max Attachment Size | 25 MB per attachment; 50 MB total per message |
@@ -21,7 +21,7 @@
 
 ## Issue 47 — API key invalid / revoked / rotated
 
-**Symptoms:** API returns `401 invalid_api_key` or `401 token_revoked`. Previously working integration stops.
+**Symptoms:** API returns `401 INVALID_API_KEY` or `401 TOKEN_REVOKED`. Previously working integration stops.
 
 **Root cause:** API key was deleted, rotated, or revoked (manually or by security policy).
 
@@ -82,7 +82,7 @@
    - `from` must be an object: `{"email": "sender@example.com", "name": "Sender"}`
    - `subject` is a string (required)
    - `html` and/or `text` for body content
-   - `reply_to` is an object (optional): `{"email": "...", "name": "..."}`
+   - `replyTo` is a string (optional): `"reply-to@example.com"`
 3. Unknown fields are ignored (not rejected) — so if customer has extra fields, that's not the issue.
 4. Ensure JSON is valid (no trailing commas, proper escaping).
 
@@ -90,7 +90,7 @@
 
 ## Issue 51 — Idempotency key reused incorrectly causing "duplicates blocked"
 
-**Symptoms:** API returns `409 duplicate_resource` or customer sees duplicate prevention triggering.
+**Symptoms:** API returns `409 CONFLICT` or customer sees duplicate prevention triggering.
 
 **Root cause:** Customer reuses the same idempotency key for different messages, or retries a failed request with a modified body but same idempotency key.
 
@@ -229,7 +229,7 @@
      "attachments": [{
        "filename": "report.pdf",
        "content": "<base64-encoded-content>",
-       "type": "application/pdf"
+       "contentType": "application/pdf"
      }]
    }
    ```

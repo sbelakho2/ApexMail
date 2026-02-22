@@ -97,12 +97,12 @@ apexmail/
 
 ## Design Principles
 
-### 1. Zero Paid SaaS Dependencies (Core)
-The core email pipeline runs entirely self-hosted:
+### 1. Purpose-Built Email Infrastructure
+The core email pipeline uses enterprise-grade infrastructure:
 - PostgreSQL for data storage
 - Redis for caching and queues
-- Postfix for email delivery
-- No OpenAI, Twilio, SendGrid required
+- High-performance email delivery pipeline
+- Minimal external dependencies for core operations
 
 ### 2. Pluggable Integrations
 All optional integrations are adapter-based:

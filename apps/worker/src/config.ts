@@ -59,6 +59,15 @@ const envSchema = z.object({
   SMTP_MAX_MESSAGES: envNumber(100),
   SMTP_RATE_LIMIT: envNumber(10),
   
+  // Email Transport (smtp | ses)
+  EMAIL_TRANSPORT: z.enum(['smtp', 'ses']).default('smtp'),
+  
+  // AWS SES (only used when EMAIL_TRANSPORT=ses)
+  AWS_REGION: z.string().default('us-east-1'),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  SES_CONFIGURATION_SET: z.string().optional(),
+  
   // DKIM
   DKIM_ENABLED: envBoolean(true),
   DKIM_SELECTOR: z.string().default('apexmail'),
@@ -141,6 +150,15 @@ export interface WorkerConfig {
     maxConnections: number;
     maxMessages: number;
     rateLimitPerSecond: number;
+  };
+  
+  emailTransport: 'smtp' | 'ses';
+  
+  ses: {
+    region: string;
+    accessKeyId?: string;
+    secretAccessKey?: string;
+    configurationSetName?: string;
   };
   
   dkim: {
@@ -250,6 +268,15 @@ export function loadConfig(): WorkerConfig {
       maxConnections: env.SMTP_MAX_CONNECTIONS,
       maxMessages: env.SMTP_MAX_MESSAGES,
       rateLimitPerSecond: env.SMTP_RATE_LIMIT,
+    },
+    
+    emailTransport: env.EMAIL_TRANSPORT,
+    
+    ses: {
+      region: env.AWS_REGION,
+      accessKeyId: env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+      configurationSetName: env.SES_CONFIGURATION_SET,
     },
     
     dkim: {

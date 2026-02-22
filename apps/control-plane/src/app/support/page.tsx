@@ -358,7 +358,9 @@ function SupportPageContent() {
                                                         <span className="font-medium">{count} ({pct.toFixed(0)}%)</span>
                                                     </div>
                                                     <div className="h-2 bg-muted rounded-full overflow-hidden">
-                                                        <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${pct}%` }} />
+                                                        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                                                            <rect x="0" y="0" width={Math.max(0, Math.min(100, pct))} height="8" className="fill-primary" />
+                                                        </svg>
                                                     </div>
                                                 </div>
                                             );
@@ -383,7 +385,15 @@ function SupportPageContent() {
                                                         <span className="font-medium">{count} ({pct.toFixed(0)}%)</span>
                                                     </div>
                                                     <div className="h-2 bg-muted rounded-full overflow-hidden">
-                                                        <div className={cn('h-full rounded-full transition-all', cfg.bgColor === 'bg-muted' ? 'bg-gray-400' : 'bg-current ' + cfg.color)} style={{ width: `${pct}%` }} />
+                                                        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                                                            <rect
+                                                                x="0"
+                                                                y="0"
+                                                                width={Math.max(0, Math.min(100, pct))}
+                                                                height="8"
+                                                                className={cn(cfg.bgColor === 'bg-muted' ? 'fill-gray-400' : cfg.color.replace('text-', 'fill-'))}
+                                                            />
+                                                        </svg>
                                                     </div>
                                                 </div>
                                             );
@@ -440,7 +450,17 @@ function SupportPageContent() {
                                                 const height = (d.count / maxCount) * 100;
                                                 return (
                                                     <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${d.date}: ${d.count} tickets`}>
-                                                        <div className="w-full bg-primary/80 rounded-t transition-all hover:bg-primary" style={{ height: `${Math.max(height, 4)}%` }} />
+                                                        <div className="w-full h-full rounded-t overflow-hidden">
+                                                            <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                                                                <rect
+                                                                    x="0"
+                                                                    y={100 - Math.max(4, Math.min(100, height))}
+                                                                    width="100"
+                                                                    height={Math.max(4, Math.min(100, height))}
+                                                                    className="fill-primary/80 transition-all duration-300 hover:fill-primary"
+                                                                />
+                                                            </svg>
+                                                        </div>
                                                     </div>
                                                 );
                                             })}

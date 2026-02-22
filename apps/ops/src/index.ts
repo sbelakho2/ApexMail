@@ -254,7 +254,7 @@ export async function main(): Promise<void> {
         serviceName: process.env.SERVICE_NAME || 'apexmail',
         serviceVersion: process.env.SERVICE_VERSION || '1.0.0',
         environment: process.env.NODE_ENV || 'development',
-        port: parseInt(process.env.OPS_PORT || '9090'),
+        port: parseInt(process.env.OPS_PORT || '9095'), // Changed from 9090 to avoid conflict with worker metrics
         metricsEnabled: process.env.METRICS_ENABLED !== 'false',
         tracingEnabled: process.env.TRACING_ENABLED !== 'false',
         tracingEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,

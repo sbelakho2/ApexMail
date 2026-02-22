@@ -142,15 +142,17 @@ services:
   tracking:
     build:
       context: .
-      dockerfile: apps/tracking/Dockerfile
+      dockerfile: Dockerfile.tracking
     container_name: apexmail-tracking
     restart: unless-stopped
     ports:
       - "3002:3002"
     environment:
-      NODE_ENV: production
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      RUST_LOG: info
     depends_on:
       - postgres
       - redis

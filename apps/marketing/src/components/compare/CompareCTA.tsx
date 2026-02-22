@@ -62,7 +62,7 @@ export function CompareCTA({ verdict }: CompareCTAProps) {
             </div>
 
             <p className="text-sm text-surface-500 font-medium">
-                No credit card required • 1,000 free emails per month • Setup in 5 minutes
+                No credit card required • 3,000 free emails per month • Setup in 5 minutes
             </p>
           </div>
         </motion.div>

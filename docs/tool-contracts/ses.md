@@ -107,7 +107,7 @@ The SES IAM user has **exactly one permission**:
 SES sends email
   → Bounce or complaint occurs
   → SES publishes to SNS topic (eu-west-1)
-  → SNS delivers to HTTPS endpoint: https://api.apexmail.com/api/v1/webhooks/ses
+  → SNS delivers to HTTPS endpoint: https://api.apexmail.com/v1/webhooks/ses
   → API processes bounce/complaint
 ```
 

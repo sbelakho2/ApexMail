@@ -20,7 +20,27 @@ import {
   scrypt,
   type ScryptOptions,
 } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { Result } from '../result.js';
+
+// ── Native addon acceleration ──────────────────────────────────────────────
+// When @apexmail/crypto-native is compiled, hot-path functions delegate to
+// the Rust napi-rs addon (runs on the libuv thread-pool, off the main thread).
+// Falls back transparently to Node.js crypto when the native binary is absent.
+interface NativeCrypto {
+  timingSafeEqual(a: Buffer, b: Buffer): boolean;
+  secureRandomBytes(length: number): Buffer;
+  hmacSha256(key: Buffer, data: Buffer): Buffer;
+  bufToHex(bytes: Buffer): string;
+}
+
+const _cjsRequire = createRequire(import.meta.url);
+let _native: NativeCrypto | null = null;
+try {
+  _native = _cjsRequire('@apexmail/crypto-native') as NativeCrypto;
+} catch {
+  // Native addon not compiled or not installed — all operations use Node.js crypto.
+}
 
 // Promisified scrypt with proper typing
 function scryptAsync(
@@ -80,6 +100,12 @@ export function signHMAC(
   options: HMACOptions = {}
 ): string {
   const algorithm = options.algorithm ?? 'sha256';
+  // Native fast-path for the common sha256 case
+  if (_native && algorithm === 'sha256') {
+    const keyBuf = Buffer.from(secret);
+    const dataBuf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+    return _native.bufToHex(_native.hmacSha256(keyBuf, dataBuf));
+  }
   const hmac = createHmac(algorithm, secret);
   hmac.update(payload);
   return hmac.digest('hex');
@@ -340,6 +366,7 @@ export function generateDKIMKeyPair(selector: string, domain: string): DKIMKeyPa
  * Generate secure random bytes
  */
 export function secureRandomBytes(length: number): Buffer {
+  if (_native) return _native.secureRandomBytes(length);
   return randomBytes(length);
 }
 
@@ -347,16 +374,18 @@ export function secureRandomBytes(length: number): Buffer {
  * Generate a secure random hex string
  */
 export function secureRandomHex(length: number): string {
-  return randomBytes(Math.ceil(length / 2))
-    .toString('hex')
-    .slice(0, length);
+  const bytes = _native
+    ? _native.secureRandomBytes(Math.ceil(length / 2))
+    : randomBytes(Math.ceil(length / 2));
+  return bytes.toString('hex').slice(0, length);
 }
 
 /**
  * Generate a secure random base64 string
  */
 export function secureRandomBase64(length: number): string {
-  return randomBytes(length).toString('base64url');
+  const bytes = _native ? _native.secureRandomBytes(length) : randomBytes(length);
+  return bytes.toString('base64url');
 }
 
 /**
@@ -392,6 +421,7 @@ export function hmacSign(
  * Generate a random token (hex string)
  */
 export function randomToken(bytes: number = 32): string {
+  if (_native) return _native.bufToHex(_native.secureRandomBytes(bytes));
   return randomBytes(bytes).toString('hex');
 }
 
@@ -413,6 +443,7 @@ export function timingSafeCompare(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8');
   const bufB = Buffer.from(b, 'utf8');
   
+  if (_native) return _native.timingSafeEqual(bufA, bufB);
   return timingSafeEqual(bufA, bufB);
 }
 
@@ -426,6 +457,10 @@ export function createHmacSignature(
   algorithm: 'sha256' | 'sha384' | 'sha512' = 'sha256',
   encoding: 'hex' | 'base64' | 'base64url' = 'hex'
 ): string {
+  // Native fast-path: sha256 + hex (most common combination)
+  if (_native && algorithm === 'sha256' && encoding === 'hex') {
+    return _native.bufToHex(_native.hmacSha256(Buffer.from(secret), Buffer.from(data)));
+  }
   const hmac = createHmac(algorithm, secret);
   hmac.update(data);
   return hmac.digest(encoding);
@@ -562,6 +597,9 @@ export function hmacBuffer(
   data: string,
   algorithm: 'sha256' | 'sha384' | 'sha512' = 'sha256'
 ): Buffer {
+  if (_native && algorithm === 'sha256') {
+    return _native.hmacSha256(secret, Buffer.from(data));
+  }
   return createHmac(algorithm, secret).update(data).digest();
 }
 
@@ -572,6 +610,7 @@ export function timingSafeCompareBuffers(a: Buffer, b: Buffer): boolean {
   if (a.length !== b.length) {
     return false;
   }
+  if (_native) return _native.timingSafeEqual(a, b);
   return timingSafeEqual(a, b);
 }
 

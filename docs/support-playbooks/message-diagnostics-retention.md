@@ -14,7 +14,7 @@
 | Queue | Redis queue (BullMQ) | Queue depth metrics, `message.queued` event |
 | Process | Worker (`apps/worker/src/`) | Template render, content scan, suppression check |
 | Deliver | Worker → Nodemailer → SMTP relay | `message.delivered`, `message.bounced`, SMTP transcript |
-| Track | Tracking service (`apps/tracking/src/`) | `message.opened`, `message.clicked` |
+| Track | Tracking service (`services/mail-server/crates/tracking-service/`) | `message.opened`, `message.clicked` |
 | Feedback | Bounce server + FBL server (`apps/mta/src/`) | `message.bounced`, `message.complained` |
 
 ### Retention Defaults
@@ -41,7 +41,7 @@
 1. **Check message status via API:**
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>" | jq '.status, .events'
 ```
 
@@ -70,7 +70,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 1. **Via API:**
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>/events" | jq '.'
 ```
 
@@ -85,7 +85,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
    ]
    ```
 3. **Via Dashboard:** Dashboard → Messages → search by message ID → click to view timeline.
-4. **Retention:** Event history is retained for 90 days (plan-dependent).
+4. **Retention:** Event history is retained according to the plan (Free: 7 days, Starter: 30 days, Pro: 60 days, Growth: 90 days, Scale: 365 days, Enterprise: 730 days). See the retention reference table at the top of this playbook.
 
 ---
 
@@ -120,7 +120,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 2. **Via API (if exposed):**
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>/smtp-log" | jq '.'
 ```
 
@@ -159,7 +159,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 2. **Check message events:**
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>/events" | \
   jq '.[] | select(.type == "delivered") | .tls'
 ```
@@ -241,7 +241,7 @@ dig TXT apexmail._domainkey.example.com +short
 4. **Full bounce detail via API:**
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>/events" | \
   jq '.[] | select(.type == "bounced")'
 ```
@@ -282,18 +282,18 @@ curl -s -H "Authorization: Bearer <KEY>" \
 
 ```bash
 # List failed webhook deliveries
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/webhooks/<WEBHOOK_ID>/deliveries?status=failed&limit=50" | jq '.'
 
 # Replay a specific delivery
-curl -s -X POST -H "Authorization: Bearer <KEY>" \
+curl -s -X POST -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/webhooks/<WEBHOOK_ID>/deliveries/<DELIVERY_ID>/replay"
 ```
 
 2. **Bulk replay:** Replay all failed deliveries within a time range:
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer <KEY>" \
+curl -s -X POST -H "X-API-Key: <KEY>" \
   -H "Content-Type: application/json" \
   -d '{"from": "2026-02-10T00:00:00Z", "to": "2026-02-16T00:00:00Z", "status": "failed"}' \
   "https://api.apexmail.ee/v1/webhooks/<WEBHOOK_ID>/replay"
@@ -321,9 +321,10 @@ curl -s -X POST -H "Authorization: Bearer <KEY>" \
 | Plan | Body Retention | Event Retention |
 |------|---------------|-----------------|
 | Starter | 3 days | 30 days |
-| Growth | 7 days | 60 days |
-| Scale | 14 days | 90 days |
-| Enterprise | 30 days | 365 days |
+| Pro | 3 days | 60 days |
+| Growth | 7 days | 90 days |
+| Scale | 14 days | 365 days |
+| Enterprise | 30 days | 730 days |
 
 5. **Customer action:** If they need to retain content longer, they should store it on their side before sending (the API accepts the content, so they have a copy).
 6. **Privacy note:** Short body retention is a feature, not a bug. It reduces data exposure and aligns with privacy best practices.
@@ -353,7 +354,7 @@ curl -s -X POST -H "Authorization: Bearer <KEY>" \
 # Page through events
 cursor=""
 while true; do
-  response=$(curl -s -H "Authorization: Bearer <KEY>" \
+  response=$(curl -s -H "X-API-Key: <KEY>" \
     "https://api.apexmail.ee/v1/events?from=2026-02-01T00:00:00Z&to=2026-02-15T23:59:59Z&limit=100&cursor=$cursor")
   echo "$response" | jq '.data[]' >> events_export.json
   cursor=$(echo "$response" | jq -r '.pagination.next_cursor')
@@ -365,7 +366,7 @@ done
 3. **For large exports (>100K events):** Use the async export endpoint:
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer <KEY>" \
+curl -s -X POST -H "X-API-Key: <KEY>" \
   -H "Content-Type: application/json" \
   -d '{"from": "2026-02-01T00:00:00Z", "to": "2026-02-15T23:59:59Z", "format": "csv"}' \
   "https://api.apexmail.ee/v1/exports/events"
@@ -445,7 +446,7 @@ grep "<MSG_ID>" /var/log/apexmail/mta.log
 1. **Check the API request:** What email was specified in the `to` field?
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>" | jq '.to'
 ```
 
@@ -523,7 +524,7 @@ curl -s "https://mta-sts.example.com/.well-known/mta-sts.txt"
 3. **Template test endpoint:**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer <KEY>" \
+curl -s -X POST -H "X-API-Key: <KEY>" \
   -H "Content-Type: application/json" \
   -d '{"template_id": "tmpl_abc", "merge_variables": {"first_name": "Test"}}' \
   "https://api.apexmail.ee/v1/templates/render-preview"
@@ -543,7 +544,7 @@ curl -s -X POST -H "Authorization: Bearer <KEY>" \
 1. **Check rejection reason:**
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/messages/<MSG_ID>" | jq '.rejection_reason'
 ```
 
@@ -683,7 +684,7 @@ ORDER BY id DESC LIMIT 50;
 2. **Via API:**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer <KEY>" \
+curl -s -X POST -H "X-API-Key: <KEY>" \
   -H "Content-Type: application/json" \
   -d '{"email": "subject@example.com", "format": "json"}' \
   "https://api.apexmail.ee/v1/compliance/data-export"
@@ -710,7 +711,7 @@ curl -s -X POST -H "Authorization: Bearer <KEY>" \
 1. **Via API:**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer <KEY>" \
+curl -s -X POST -H "X-API-Key: <KEY>" \
   -H "Content-Type: application/json" \
   -d '{"email": "subject@example.com", "type": "erasure"}' \
   "https://api.apexmail.ee/v1/compliance/data-erasure"
@@ -753,7 +754,7 @@ curl -s -X POST -H "Authorization: Bearer <KEY>" \
 1. **Check webhook status:** Is the webhook active?
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/webhooks/<WH_ID>" | jq '.status, .circuit_breaker_state'
 ```
 
@@ -761,7 +762,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 3. **Check event subscriptions:** The webhook may not be subscribed to the event types the customer expects:
 
 ```bash
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/webhooks/<WH_ID>" | jq '.events'
 ```
 
@@ -779,7 +780,7 @@ curl -s -H "Authorization: Bearer <KEY>" \
 2. **For true real-time:** Use the Events Streaming API (if available on plan):
 
 ```bash
-curl -N -H "Authorization: Bearer <KEY>" \
+curl -N -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/events/stream"
 # Server-Sent Events (SSE) stream
 ```
@@ -788,7 +789,7 @@ curl -N -H "Authorization: Bearer <KEY>" \
 
 ```bash
 # Poll events endpoint every 10 seconds
-curl -s -H "Authorization: Bearer <KEY>" \
+curl -s -H "X-API-Key: <KEY>" \
   "https://api.apexmail.ee/v1/events?since=2026-02-16T10:00:00Z"
 ```
 

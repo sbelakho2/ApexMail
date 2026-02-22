@@ -109,22 +109,25 @@
     }
 
     body {
-        @apply bg-background text-foreground text-[17px] leading-[1.6];
-        font-family: var(--font-display), Georgia, Cambria, 'Times New Roman', serif;
+        @apply bg-background text-foreground text-[16px] leading-[1.55];
+        font-family: var(--font-apex), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
         font-feature-settings: 'rlig' 1, 'calt' 1, 'tnum' 1;
         text-rendering: optimizeLegibility;
     }
 
     h1 {
         @apply font-display text-[40px] md:text-[56px] font-semibold leading-[1.1] tracking-[-0.02em];
+        font-family: var(--font-apex), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     }
 
     h2 {
         @apply font-display text-[28px] md:text-[36px] font-semibold leading-[1.2] tracking-[-0.015em];
+        font-family: var(--font-apex), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     }
 
     h3 {
         @apply font-display text-[20px] md:text-[24px] font-semibold leading-[1.2] tracking-[-0.01em];
+        font-family: var(--font-apex), ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     }
 
     /* Core UI elements from Style Guide */
@@ -246,7 +249,7 @@
 
     /* Data table - sticky header, tabular numerals */
     .data-table {
-        @apply w-full border-collapse font-display;
+        @apply w-full border-collapse font-sans;
     }
 
     .data-table th {

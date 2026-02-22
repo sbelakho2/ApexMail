@@ -26,7 +26,7 @@ export function CalculatorCTA() {
           </h2>
           <p className="text-lg text-surface-600 mb-10 max-w-2xl mx-auto leading-relaxed">
             Join thousands of companies saving money with ApexMail. 
-            Start free with 10,000 emails per month—no credit card required.
+            Start free with 3,000 emails per month—no credit card required.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">

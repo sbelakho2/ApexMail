@@ -303,8 +303,8 @@ describe('Users API', () => {
     await client.cleanup();
   });
   
-  it('POST /api/v1/users creates a user', async () => {
-    const response = await client.post('/api/v1/users', {
+  it('POST /v1/users creates a user', async () => {
+    const response = await client.post('/v1/users', {
       email: 'new@example.com',
       name: 'New User',
     });
@@ -504,7 +504,7 @@ Examples:
 ```
 feat(api): add email scheduling endpoint
 
-Add POST /api/v1/messages/schedule endpoint for delayed sending.
+Add POST /v1/messages/schedule endpoint for delayed sending.
 Includes validation for future timestamps.
 
 Closes #123

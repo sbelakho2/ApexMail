@@ -1,6 +1,6 @@
 //! Direct SMTP Sender
 //!
-//! Sends emails directly via SMTP without any third-party services.
+//! Sends emails directly via SMTP with enterprise-grade infrastructure.
 //! Includes DKIM signing, proper MX lookup, and retry logic.
 
 use anyhow::{anyhow, Result};
@@ -46,7 +46,7 @@ impl Default for SmtpSenderConfig {
     }
 }
 
-/// Direct SMTP Sender - NO THIRD-PARTY SERVICES
+/// Direct SMTP Sender - Enterprise-Grade Infrastructure
 pub struct SmtpSender {
     config: SmtpSenderConfig,
     from_domain: String,

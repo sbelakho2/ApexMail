@@ -261,7 +261,7 @@ describe('Phase 4: MTA Stack (Comprehensive)', () => {
             });
             
             it('should have unsubscribe endpoint in tracking service', () => {
-                const content = readFile('apps/tracking/src/routes.ts');
+                const content = readFile('services/mail-server/crates/tracking-service/src/routes/unsubscribe.rs');
                 expect(content).toContain('List-Unsubscribe');
             });
         });
@@ -528,7 +528,7 @@ describe('Phase 4: MTA Stack (Comprehensive)', () => {
             });
             
             it('should have tracking service', () => {
-                expect(fileExists('apps/tracking/src/routes.ts')).toBe(true);
+                expect(fileExists('services/mail-server/crates/tracking-service/src/routes/mod.rs')).toBe(true);
             });
         });
         

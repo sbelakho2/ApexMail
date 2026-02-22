@@ -32,7 +32,7 @@ const testimonials = [
  company: 'MedConnect',
  industry: 'Healthcare',
  image: '/testimonials/emily.jpg',
- stats: { metric: 'Compliance Cost', before: '$10k/mo', after: '$399/mo' },
+ stats: { metric: 'Compliance Cost', before: '$10k/mo', after: '$350/mo' },
  },
  {
  quote: "The API is so clean that our junior devs had email sending working in their first hour. The TypeScript SDK with full type inference made it feel like a native part of our stack.",

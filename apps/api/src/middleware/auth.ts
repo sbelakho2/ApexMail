@@ -364,6 +364,10 @@ const VALID_SCOPES = new Set([
   'analytics:read',
   'webhooks:read',
   'webhooks:write',
+  'dedicated-ips:read',
+  'dedicated-ips:write',
+  'contacts:read',
+  'contacts:write',
   'admin',
   '*',
 ]);

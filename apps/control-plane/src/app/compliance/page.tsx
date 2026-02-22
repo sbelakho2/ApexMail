@@ -167,16 +167,20 @@ export default function CompliancePage() {
                             <div key={level} className="flex items-center gap-4">
                                 <div className="w-24 text-sm font-medium text-muted-foreground">{label}</div>
                                 <div className="flex-1 bg-muted rounded-full h-3 overflow-hidden">
-                                    <div
-                                        className={cn(
-                                            'h-full rounded-full transition-all duration-500',
-                                            level === 'low' && 'bg-success',
-                                            level === 'medium' && 'bg-warning',
-                                            level === 'high' && 'bg-orange-500',
-                                            level === 'critical' && 'bg-destructive'
-                                        )}
-                                        style={{ width: `${(count / totalTenants) * 100}%` }}
-                                    />
+                                    <svg width="100%" height="100%" viewBox="0 0 100 12" preserveAspectRatio="none" aria-hidden="true">
+                                        <rect
+                                            x="0"
+                                            y="0"
+                                            width={Math.max(0, Math.min(100, (count / Math.max(totalTenants, 1)) * 100))}
+                                            height="12"
+                                            className={cn(
+                                                level === 'low' && 'fill-success',
+                                                level === 'medium' && 'fill-warning',
+                                                level === 'high' && 'fill-orange-500',
+                                                level === 'critical' && 'fill-destructive'
+                                            )}
+                                        />
+                                    </svg>
                                 </div>
                                 <div className="w-16 text-right font-medium text-foreground">{count}</div>
                             </div>
@@ -196,15 +200,19 @@ export default function CompliancePage() {
                                 <div className="text-sm font-medium text-foreground">{policy.name}</div>
                                 <div className="flex items-center gap-3">
                                     <div className="w-32 bg-muted rounded-full h-2 overflow-hidden">
-                                        <div
-                                            className={cn(
-                                                'h-full rounded-full transition-all duration-500',
-                                                policy.compliant / policy.total >= 0.95 && 'bg-success',
-                                                policy.compliant / policy.total >= 0.8 && policy.compliant / policy.total < 0.95 && 'bg-warning',
-                                                policy.compliant / policy.total < 0.8 && 'bg-destructive'
-                                            )}
-                                            style={{ width: `${(policy.compliant / policy.total) * 100}%` }}
-                                        />
+                                        <svg width="100%" height="100%" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">
+                                            <rect
+                                                x="0"
+                                                y="0"
+                                                width={Math.max(0, Math.min(100, (policy.compliant / Math.max(policy.total, 1)) * 100))}
+                                                height="8"
+                                                className={cn(
+                                                    policy.compliant / policy.total >= 0.95 && 'fill-success',
+                                                    policy.compliant / policy.total >= 0.8 && policy.compliant / policy.total < 0.95 && 'fill-warning',
+                                                    policy.compliant / policy.total < 0.8 && 'fill-destructive'
+                                                )}
+                                            />
+                                        </svg>
                                     </div>
                                     <span className={cn(
                                         'text-sm font-bold w-12 text-right',

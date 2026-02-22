@@ -64,7 +64,7 @@ Add ApexMail as a SAML application in your IdP with:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/sso/configure \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -93,7 +93,7 @@ Create an OIDC application with:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/sso/configure \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -221,7 +221,7 @@ Enable debug logging for SSO:
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/sso/config/{account_id} \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{"debugMode": true}'
 ```
 

@@ -75,7 +75,7 @@ module ApexMail
       }.fetch(method.upcase) { raise ArgumentError, "Unsupported HTTP method: #{method}" }
 
       req = klass.new(uri.path.empty? ? "/" : uri.full_path)
-      req["Authorization"]   = "Bearer #{@api_key}"
+      req["X-API-Key"]      = @api_key
       req["Content-Type"]    = "application/json"
       req["User-Agent"]      = "apexmail-ruby/#{SDK_VERSION}"
       req["X-Idempotency-Key"] = idempotency_key if idempotency_key

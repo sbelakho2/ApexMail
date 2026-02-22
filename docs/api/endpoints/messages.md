@@ -6,11 +6,11 @@ The Messages API allows you to send transactional emails programmatically.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/v1/messages` | Send a message |
-| GET | `/api/v1/messages` | List messages |
-| GET | `/api/v1/messages/:id` | Get message details |
-| POST | `/api/v1/messages/batch` | Send batch messages |
-| DELETE | `/api/v1/messages/:id` | Cancel scheduled message |
+| POST | `/v1/messages` | Send a message |
+| GET | `/v1/messages` | List messages |
+| GET | `/v1/messages/:id` | Get message details |
+| POST | `/v1/messages/batch` | Send batch messages |
+| DELETE | `/v1/messages/:id` | Cancel scheduled message |
 
 ---
 
@@ -21,8 +21,8 @@ Send a single transactional email.
 ### Request
 
 ```http
-POST /api/v1/messages
-Authorization: Bearer {{api_key}}
+POST /v1/messages
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -30,15 +30,19 @@ Content-Type: application/json
 
 ```json
 {
-  "to": "recipient@example.com",
-  "from": "sender@yourcompany.com",
-  "fromName": "Your Company",
+  "to": [
+    { "email": "recipient@example.com", "name": "Recipient Name" }
+  ],
+  "from": {
+    "email": "sender@yourcompany.com",
+    "name": "Your Company"
+  },
   "replyTo": "support@yourcompany.com",
   "subject": "Welcome to Our Service",
   "html": "<h1>Welcome!</h1><p>Thanks for signing up.</p>",
   "text": "Welcome! Thanks for signing up.",
   "templateId": "tmpl_welcome_001",
-  "variables": {
+  "templateData": {
     "name": "John",
     "company": "Acme Inc"
   },
@@ -58,8 +62,7 @@ Content-Type: application/json
   },
   "tags": ["welcome", "onboarding"],
   "scheduledAt": "2024-01-20T10:00:00Z",
-  "trackOpens": true,
-  "trackClicks": true
+  "priority": "normal"
 }
 ```
 
@@ -67,22 +70,22 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `to` | string | ✓ | Recipient email address |
-| `from` | string | ✓ | Sender email (must be verified) |
-| `fromName` | string | | Sender display name |
-| `replyTo` | string | | Reply-to address |
+| `to` | array | ✓ | Array of recipient objects (max 50 per field) |
+| `from` | object | ✓ | Sender `{email, name?}`. Email must be verified. |
+| `replyTo` | string | | Reply-to email address |
+| `cc` | array | | CC recipients (max 50) |
+| `bcc` | array | | BCC recipients (max 50) |
 | `subject` | string | ✓* | Email subject (* unless template provides) |
-| `html` | string | ✓* | HTML body (* unless template provides) |
-| `text` | string | | Plain text body (auto-generated if omitted) |
-| `templateId` | string | | Template to use |
-| `variables` | object | | Variables for template rendering |
+| `html` | string | ✓* | HTML body (* unless template or text provides) |
+| `text` | string | | Plain text body |
+| `templateId` | string | | Template UUID to use |
+| `templateData` | object | | Variables for template rendering |
 | `headers` | object | | Custom email headers |
-| `attachments` | array | | File attachments |
+| `attachments` | array | | File attachments (max 20, 25 MB each, 50 MB total) |
 | `metadata` | object | | Custom metadata (returned in webhooks) |
-| `tags` | string[] | | Tags for categorization |
+| `tags` | string[] | | Tags for categorization (max 10, plain strings) |
+| `priority` | string | | `high`, `normal` (default), or `low` |
 | `scheduledAt` | string | | ISO 8601 timestamp for delayed sending |
-| `trackOpens` | boolean | | Enable open tracking (default: true) |
-| `trackClicks` | boolean | | Enable click tracking (default: true) |
 
 ### Attachment Object
 
@@ -133,8 +136,8 @@ Retrieve a paginated list of messages.
 ### Request
 
 ```http
-GET /api/v1/messages?status=sent&limit=20&cursor=cur_xyz
-Authorization: Bearer {{api_key}}
+GET /v1/messages?status=sent&limit=20&cursor=cur_xyz
+X-API-Key: {{api_key}}
 ```
 
 ### Query Parameters
@@ -186,8 +189,8 @@ Retrieve detailed information about a specific message.
 ### Request
 
 ```http
-GET /api/v1/messages/msg_abc123xyz
-Authorization: Bearer {{api_key}}
+GET /v1/messages/msg_abc123xyz
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -268,8 +271,8 @@ Send multiple messages in a single API call (up to 1000 per batch).
 ### Request
 
 ```http
-POST /api/v1/messages/batch
-Authorization: Bearer {{api_key}}
+POST /v1/messages/batch
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -366,8 +369,8 @@ Cancel a message that hasn't been sent yet.
 ### Request
 
 ```http
-DELETE /api/v1/messages/msg_abc123xyz
-Authorization: Bearer {{api_key}}
+DELETE /v1/messages/msg_abc123xyz
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -436,22 +439,22 @@ Templates use Handlebars syntax:
 ### Node.js
 
 ```javascript
-const response = await fetch('https://api.apexmail.ee/api/v1/messages', {
+const response = await fetch('https://api.apexmail.ee/v1/messages', {
   method: 'POST',
   headers: {
-    'Authorization': `Bearer ${API_KEY}`,
+    'X-API-Key': API_KEY,
     'Content-Type': 'application/json',
   },
   body: JSON.stringify({
-    to: 'user@example.com',
-    from: 'hello@yourcompany.com',
+    to: [{ email: 'user@example.com' }],
+    from: { email: 'hello@yourcompany.com', name: 'Your Company' },
     subject: 'Welcome!',
     html: '<h1>Hello World</h1>',
   }),
 });
 
 const message = await response.json();
-console.log(`Message sent: ${message.id}`);
+console.log(`Message sent: ${message.message.id}`);
 ```
 
 ### Python
@@ -460,32 +463,32 @@ console.log(`Message sent: ${message.id}`);
 import requests
 
 response = requests.post(
-    'https://api.apexmail.ee/api/v1/messages',
+    'https://api.apexmail.ee/v1/messages',
     headers={
-        'Authorization': f'Bearer {API_KEY}',
+        'X-API-Key': API_KEY,
         'Content-Type': 'application/json',
     },
     json={
-        'to': 'user@example.com',
-        'from': 'hello@yourcompany.com',
+        'to': [{'email': 'user@example.com'}],
+        'from': {'email': 'hello@yourcompany.com', 'name': 'Your Company'},
         'subject': 'Welcome!',
         'html': '<h1>Hello World</h1>',
     }
 )
 
 message = response.json()
-print(f"Message sent: {message['id']}")
+print(f"Message sent: {message['message']['id']}")
 ```
 
 ### cURL
 
 ```bash
-curl -X POST https://api.apexmail.ee/api/v1/messages \
-  -H "Authorization: Bearer $API_KEY" \
+curl -X POST https://api.apexmail.ee/v1/messages \
+  -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "to": "user@example.com",
-    "from": "hello@yourcompany.com",
+    "to": [{"email": "user@example.com"}],
+    "from": {"email": "hello@yourcompany.com", "name": "Your Company"},
     "subject": "Welcome!",
     "html": "<h1>Hello World</h1>"
   }'
@@ -515,11 +518,8 @@ X-RateLimit-Reset: 1705312800
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
-| `invalid_email` | 400 | Invalid email address format |
-| `sender_not_verified` | 400 | Sender domain not verified |
-| `template_not_found` | 404 | Template ID doesn't exist |
-| `missing_variables` | 400 | Required template variables missing |
-| `attachment_too_large` | 400 | Attachment exceeds 25MB limit |
-| `rate_limit_exceeded` | 429 | Too many requests |
-| `insufficient_credits` | 402 | No sending credits remaining |
-| `recipient_suppressed` | 400 | Recipient on suppression list |
+| `VALIDATION_ERROR` | 400 | Invalid email address, missing fields, or attachment exceeds 25MB |
+| `DOMAIN_NOT_VERIFIED` | 400 | Sender domain not verified |
+| `NOT_FOUND` | 404 | Template ID doesn't exist |
+| `ALL_RECIPIENTS_SUPPRESSED` | 400 | All recipients are on suppression list |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests |

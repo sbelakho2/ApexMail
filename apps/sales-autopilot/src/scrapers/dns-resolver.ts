@@ -26,6 +26,34 @@ const EMAIL_PROVIDERS: Record<string, string[]> = {
         'protection.outlook.com',
         'mail.protection.outlook.com',
     ],
+    // Primary competitor for migration targeting
+    'SendGrid': [
+        'sendgrid.net',
+        'sendgrid.com',
+        'em.em.sendgrid.net',
+        'mx.sendgrid.net',
+    ],
+    // Other transactional email providers (migration targets)
+    'Mailgun': [
+        'mailgun.org',
+        'mailgun.com',
+    ],
+    'Postmark': [
+        'mtasv.net',
+        'postmarkapp.com',
+    ],
+    'Mailchimp/Mandrill': [
+        'mandrillapp.com',
+        'mailchimp.com',
+    ],
+    'SparkPost': [
+        'sparkpostmail.com',
+        'sparkpost.com',
+    ],
+    'Resend': [
+        'resend.dev',
+        'resend.com',
+    ],
     Zoho: ['zoho.com', 'zoho.eu', 'zohomail.com'],
     Fastmail: ['fastmail.com', 'messagingengine.com'],
     ProtonMail: ['protonmail.ch', 'proton.me'],

@@ -83,12 +83,28 @@ export async function createApp(): Promise<{ app: Hono; context: AppContext }> {
     credentials: true,
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Workspace-ID'],
-    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
     maxAge: 86400,
   }));
 
   app.use('*', honoLogger());
   app.use('*', prettyJSON());
+
+  // OBS-001: Internal API key authentication for service-to-service calls
+  // Health endpoints remain open for load balancer probes
+  const OBS_INTERNAL_API_KEY = process.env.OBS_INTERNAL_API_KEY || 'obs-internal-key-dev';
+  
+  app.use('/api/*', async (c, next) => {
+    const apiKey = c.req.header('X-Internal-Api-Key');
+    if (!apiKey || apiKey !== OBS_INTERNAL_API_KEY) {
+      logger.warn('[Observability] Unauthorized request - missing or invalid X-Internal-Api-Key');
+      return c.json({
+        error: 'Unauthorized — X-Internal-Api-Key required',
+        code: 'UNAUTHORIZED',
+      }, 401);
+    }
+    await next();
+  });
 
   // Request ID middleware
   app.use('*', async (c, next) => {

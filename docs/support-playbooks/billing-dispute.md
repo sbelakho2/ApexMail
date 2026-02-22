@@ -21,7 +21,7 @@
 - "I was charged but I cancelled last month"
 - "My invoice is wrong, I should be on the Starter plan"
 - "I want a refund for the downtime last week"
-- "Why was I charged $129 when I signed up for $59?"
+- "Why was I charged $150 when I signed up for $65?"
 - "I need an SLA credit for the outage"
 - "I got double-charged this month"
 
@@ -82,17 +82,17 @@ GROUP BY DATE_TRUNC('month', sent_at);
 
 | Plan | Monthly price | Email limit | Contacts | Dedicated IP | SLA Guarantee |
 |------|---------------|-------------|----------|--------------|---------------|
-| Free | $0 | 1,000/mo | 100 | No | No |
-| Starter | $29/mo | 25,000/mo | 5,000 | No | No |
-| Pro | $59/mo | 50,000/mo | 10,000 | No | No |
-| Growth | $129/mo | 100,000/mo | 25,000 | 1 included | No |
-| Scale | $399/mo | 500,000/mo | 100,000 | 3 included | Yes (10% credit) |
-| Enterprise | $1,299/mo | 2,000,000/mo | Unlimited | 10 included | Yes (25% credit) |
+| Free | $0 | 3,000/mo | 500 | No | No |
+| Starter | $25/mo | 50,000/mo | 10,000 | No | No |
+| Pro | $65/mo | 150,000/mo | 50,000 | Add-on ($30/mo) | No |
+| Growth | $150/mo | 500,000/mo | 200,000 | 1 included | No |
+| Scale | $350/mo | 2,000,000/mo | 500,000 | 3 included | Yes (10% credit) |
+| Enterprise | $800/mo | 5,000,000/mo | Unlimited | 10 included | Yes (25% credit) |
 
 **Overage rates** (when applicable):
-- Emails beyond limit: $0.50 per 1,000
+- Emails beyond limit: $0.40 per 1,000
 - Contacts beyond limit: $5 per 1,000
-- Dedicated IP add-on: $49/mo
+- Dedicated IP add-on: $30/mo
 
 ### Step 5: Check for SLA violations
 
@@ -100,7 +100,7 @@ If the customer is claiming an SLA credit, verify actual uptime for the billing 
 
 ```bash
 # Query Prometheus for uptime during the disputed period
-curl -s "http://prometheus.apexmail.internal:9090/api/v1/query_range?query=apexmail_api_up&start=2026-01-01T00:00:00Z&end=2026-02-01T00:00:00Z&step=5m" | jq '.data.result'
+curl -s "http://prometheus.apexmail.internal:9090/v1/query_range?query=apexmail_api_up&start=2026-01-01T00:00:00Z&end=2026-02-01T00:00:00Z&step=5m" | jq '.data.result'
 ```
 
 ```sql
@@ -136,9 +136,9 @@ $$\text{Uptime \%} = \frac{\text{Total minutes} - \text{Downtime minutes}}{\text
 
 Example for January (44,640 minutes):
 - 60 minutes downtime = $(44640 - 60) / 44640 \times 100 = 99.87\%$
-- Scale plan ($399) → 99.87% is 0.03% below 99.9% target → does not breach 0.1% threshold → No credit
+- Scale plan ($350) → 99.87% is 0.03% below 99.9% target → does not breach 0.1% threshold → No credit
 - 90 minutes downtime = $(44640 - 90) / 44640 \times 100 = 99.80\%$
-- Scale plan ($399) → 99.80% is 0.1% below 99.9% target → 10% credit = $39.90
+- Scale plan ($350) → 99.80% is 0.1% below 99.9% target → 10% credit = $35.00
 
 ### Step 6: Check for billing system issues
 

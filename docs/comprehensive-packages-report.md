@@ -1094,7 +1094,7 @@ ApexMailError                            (base)
 ## 6. Service: mail-server (Rust)
 
 **Path:** `services/mail-server/`  
-**Architecture:** Cargo workspace, **no third-party email SaaS** — everything self-hosted.
+**Architecture:** Cargo workspace with purpose-built email infrastructure.
 
 ### Crates
 
@@ -1259,7 +1259,7 @@ ApexMailError                            (base)
 ```
 POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
 REDIS_PASSWORD (optional in dev)
-JWT_SECRET, API_KEY_SECRET
+JWT_SECRET, API_KEY_HASH_SECRET
 ```
 
 ### Docker Compose — Production (`docker-compose.prod.yml`)

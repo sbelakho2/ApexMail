@@ -48,7 +48,7 @@ export function createApp(deps: AppDependencies) {
     origin: config.corsOrigins,
     allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Account-ID', 'X-Request-ID'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
     maxAge: 86400,
     credentials: true,
   }));

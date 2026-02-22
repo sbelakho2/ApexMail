@@ -18,7 +18,7 @@ Template approval workflows provide:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/template-workflows \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -112,7 +112,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/template-workflows \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/templates/{template_id}/submit \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "workflowId": "wf_marketing_review",
     "notes": "Q1 promotion campaign template",
@@ -155,7 +155,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/templates/{template_id}/submi
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "submissionId": "sub_xyz789",
     "approverId": "user_abc123",
@@ -173,7 +173,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "submissionId": "sub_xyz789",
     "approverId": "user_legal_head",
@@ -193,7 +193,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/templates/{template_id}/versions \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -228,7 +228,7 @@ Response:
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/templates/{template_id}/compare \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "v1=2" -d "v2=3"
 ```
 
@@ -238,7 +238,7 @@ curl https://api.apexmail.ee/enterprise/v1/templates/{template_id}/compare \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/templates/submissions/{submission_id} \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -286,7 +286,7 @@ Response:
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/templates/submissions/pending \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "approverId=user_legal_head"
 ```
 

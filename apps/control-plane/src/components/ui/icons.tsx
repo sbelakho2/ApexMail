@@ -56,7 +56,8 @@ type Glyph =
   | 'menu'
   | 'logout'
   | 'more'
-  | 'spinner';
+  | 'spinner'
+  | 'zap';
 
 const glyphs: Record<Glyph, React.ReactNode> = {
   'arrow-right': <path d="M5 12h12m-4-4 4 4-4 4" />,
@@ -114,6 +115,7 @@ const glyphs: Record<Glyph, React.ReactNode> = {
   ),
   more: <path d="M6 12h.01M12 12h.01M18 12h.01" />,
   spinner: <path d="M12 4a8 8 0 1 1-5.6 2.4" />,
+  zap: <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />,
 };
 
 const createIcon = (glyph: Glyph): ApexIconComponent => {
@@ -194,3 +196,4 @@ export const Menu = createIcon('menu');
 export const LogOut = createIcon('logout');
 export const MoreHorizontal = createIcon('more');
 export const Loader2 = createIcon('spinner');
+export const Zap = createIcon('zap');

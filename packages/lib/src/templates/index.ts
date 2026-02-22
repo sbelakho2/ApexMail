@@ -297,15 +297,15 @@ function extractAttr(attrs: string, name: string): string | undefined {
 }
 
 function getSocialIcon(name: string): string {
-    // Return placeholder data URIs for common social networks
+    // Return embedded SVG data URIs for common social networks
     const icons: Record<string, string> = {
-        'facebook': 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/facebook.svg',
-        'twitter': 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/twitter.svg',
-        'linkedin': 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/linkedin.svg',
-        'instagram': 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/instagram.svg',
-        'youtube': 'https://cdn.jsdelivr.net/npm/simple-icons@v9/icons/youtube.svg',
+        'facebook': 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563EB"><path d="M22 12a10 10 0 1 0-11.56 9.87v-6.98H7.9V12h2.54V9.8c0-2.5 1.49-3.88 3.78-3.88 1.1 0 2.25.2 2.25.2v2.47h-1.27c-1.25 0-1.64.78-1.64 1.58V12h2.8l-.45 2.89h-2.35v6.98A10 10 0 0 0 22 12z"/></svg>',
+        'twitter': 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563EB"><path d="M18.9 2H22l-6.77 7.74L23.2 22h-6.24l-4.9-6.5L6.4 22H3.3l7.24-8.28L.8 2H7.2l4.43 5.88L18.9 2z"/></svg>',
+        'linkedin': 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563EB"><path d="M4.98 3.5C4.98 4.88 3.86 6 2.49 6S0 4.88 0 3.5 1.12 1 2.49 1s2.49 1.12 2.49 2.5zM.5 8h4V23h-4V8zm7 0h3.8v2h.05c.53-1 1.83-2.05 3.77-2.05C19 7.95 21 10.1 21 14.1V23h-4v-7.7c0-1.84-.03-4.2-2.56-4.2-2.56 0-2.95 2-2.95 4.07V23h-4V8z"/></svg>',
+        'instagram': 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563EB"><path d="M7.75 2h8.5A5.75 5.75 0 0 1 22 7.75v8.5A5.75 5.75 0 0 1 16.25 22h-8.5A5.75 5.75 0 0 1 2 16.25v-8.5A5.75 5.75 0 0 1 7.75 2zm8.3 1.5h-8.1A4.45 4.45 0 0 0 3.5 7.95v8.1a4.45 4.45 0 0 0 4.45 4.45h8.1a4.45 4.45 0 0 0 4.45-4.45v-8.1a4.45 4.45 0 0 0-4.45-4.45zM12 7a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 1.5A3.5 3.5 0 1 0 12 15.5 3.5 3.5 0 0 0 12 8.5zm5.2-2.3a1.2 1.2 0 1 1 0 2.4 1.2 1.2 0 0 1 0-2.4z"/></svg>',
+        'youtube': 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%232563EB"><path d="M23.5 7.2a3 3 0 0 0-2.1-2.1C19.4 4.5 12 4.5 12 4.5s-7.4 0-9.4.6A3 3 0 0 0 .5 7.2 31.4 31.4 0 0 0 0 12a31.4 31.4 0 0 0 .5 4.8 3 3 0 0 0 2.1 2.1c2 .6 9.4.6 9.4.6s7.4 0 9.4-.6a3 3 0 0 0 2.1-2.1A31.4 31.4 0 0 0 24 12a31.4 31.4 0 0 0-.5-4.8zM9.75 15.5v-7L16 12l-6.25 3.5z"/></svg>',
     };
-    return icons[name.toLowerCase()] || '';
+    return icons[name.toLowerCase()] || icons.facebook;
 }
 
 // ============================================================================

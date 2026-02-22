@@ -66,6 +66,52 @@ export function aiInsightsRoutes(ctx: AppContext): Hono<AppEnv> {
 
   const logger = ctx.logger.child({ module: 'ai-insights' });
 
+  async function getPlanFeaturesOrThrow(tenantId: string): Promise<{ sendTimeOptimization: boolean }> {
+    const planResult = await ctx.db.query<{ features: unknown; plan_name: string }>(
+      `SELECT p.features
+             , p.name AS plan_name
+       FROM tenants t
+       JOIN plans p ON t.plan = p.name
+       WHERE t.id = $1`,
+      [tenantId],
+    );
+
+    if (!planResult.ok) {
+      throw ApiError.internal('Failed to check plan eligibility');
+    }
+
+    const row = planResult.value.rows[0];
+    if (!row) {
+      throw ApiError.forbidden(
+        'No active plan found. Please subscribe to a plan to use send-time optimization.',
+        'NO_PLAN',
+      );
+    }
+
+    let features: { sendTimeOptimization?: boolean };
+    try {
+      features = typeof row.features === 'string'
+        ? (JSON.parse(row.features) as { sendTimeOptimization?: boolean })
+        : (row.features as { sendTimeOptimization?: boolean });
+    } catch {
+      throw ApiError.internal('Failed to parse plan features');
+    }
+
+    const planName = row.plan_name ?? '';
+    const stoAllowed = typeof features.sendTimeOptimization === 'boolean'
+      ? features.sendTimeOptimization
+      : ['pro', 'growth', 'scale', 'enterprise'].includes(planName);
+
+    if (!stoAllowed) {
+      throw ApiError.forbidden(
+        'Send-time optimization is available on Pro plans and above. Please upgrade your plan.',
+        'PLAN_NOT_ELIGIBLE',
+      );
+    }
+
+    return { sendTimeOptimization: true };
+  }
+
   // Instantiate analytics engines (once per process, shared across requests)
   const sendTimeOptimizer = new SendTimeOptimizer({ db: pgPool, redis, logger });
   const churnPredictionEngine = new ChurnPredictionEngine({ db: pgPool, redis, logger });
@@ -123,6 +169,8 @@ export function aiInsightsRoutes(ctx: AppContext): Hono<AppEnv> {
     const tenantId = c.get('tenantId');
     const email = c.req.query('email');
 
+    await getPlanFeaturesOrThrow(tenantId);
+
     if (!email) {
       throw ApiError.badRequest('email query parameter is required');
     }
@@ -143,6 +191,8 @@ export function aiInsightsRoutes(ctx: AppContext): Hono<AppEnv> {
   router.get('/sto/tenant', requireScopes('analytics:read'), async (c) => {
     const tenantId = c.get('tenantId');
     const key = aiCacheKey(tenantId, 'sto:tenant', {});
+
+    await getPlanFeaturesOrThrow(tenantId);
 
     const optimalTimes = await cached(key, 120, async () => {
       return sendTimeOptimizer.getTenantOptimalTimes(tenantId);

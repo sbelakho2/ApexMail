@@ -45,7 +45,7 @@ export default function BillingPage() {
                             <p className="text-sm text-muted-foreground mt-1 apex-metric-number">{plan.emailLimit.toLocaleString()} emails/mo</p>
                             <Separator className="my-4" />
                             <ul className="space-y-2">
-                                {['Email sending', 'Analytics', 'API access', ...(plan.name === 'pro' ? ['Priority support'] : []), ...(plan.name === 'enterprise' ? ['Priority support', 'Dedicated IP', 'SSO/SAML'] : [])].map(f => (
+                                {['Email sending', 'Analytics', 'API access', ...(plan.name === 'pro' ? ['A/B testing', 'Dedicated IP add-on'] : []), ...(plan.name === 'growth' ? ['Audit logs', 'Priority support'] : []), ...(['scale', 'enterprise'].includes(plan.name) ? ['SSO/SAML', 'Dedicated IPs', 'SLA guarantee'] : []), ...(plan.name === 'enterprise' ? ['HIPAA/SOC 2', 'White-label'] : [])].map(f => (
                                     <li key={f} className="flex items-center gap-2 text-sm"><Check className="h-4 w-4 text-success" />{f}</li>
                                 ))}
                             </ul>

@@ -73,9 +73,11 @@ export class EmailAuthenticator {
   
   /**
    * RFC 7208 Section 4.6.4: SPF implementations MUST limit DNS lookups to 10
-   * This counter tracks TOTAL lookups across the entire SPF evaluation, not just depth
+   * FIX: Moved from instance variable to per-evaluation context to avoid
+   * shared-state race when multiple concurrent authenticate() calls share
+   * the same EmailAuthenticator instance.
    */
-  private spfDnsLookupCount = 0;
+  // (spfDnsLookupCount removed — now passed via SpfEvalContext)
   private readonly SPF_MAX_DNS_LOOKUPS = 10; // RFC 7208 mandated limit
 
   constructor(config: Partial<EmailAuthConfig> = {}) {
@@ -221,10 +223,9 @@ export class EmailAuthenticator {
     _heloHostname: string,
     domain: string
   ): Promise<SPFResult> {
+    // Per-evaluation DNS lookup counter — NOT shared across concurrent calls.
+    const ctx = { count: 0 };
     try {
-      // Reset DNS lookup counter for this SPF evaluation (RFC 7208 Section 4.6.4)
-      this.spfDnsLookupCount = 0;
-      
       if (!domain) {
         return { result: 'none', domain: '', explanation: 'No domain in MAIL FROM' };
       }
@@ -235,7 +236,7 @@ export class EmailAuthenticator {
       }
 
       // Look up SPF record (counts as 1 lookup)
-      this.spfDnsLookupCount++;
+      ctx.count++;
       const spfRecords = await this.lookupTXT(domain);
       const spfRecord = spfRecords.find(r => r.startsWith('v=spf1 '));
 
@@ -244,7 +245,7 @@ export class EmailAuthenticator {
       }
 
       // Parse and evaluate SPF record
-      const result = await this.evaluateSPF(spfRecord, clientIP, domain, 0);
+      const result = await this.evaluateSPF(spfRecord, clientIP, domain, 0, ctx);
       return { ...result, domain };
 
     } catch (error) {
@@ -269,13 +270,14 @@ export class EmailAuthenticator {
     record: string,
     clientIP: string,
     domain: string,
-    _depth: number // Kept for API compatibility but we use total counter now
+    _depth: number, // Kept for API compatibility but we use total counter now
+    ctx: { count: number }
   ): Promise<Omit<SPFResult, 'domain'>> {
     // RFC 7208 Section 4.6.4: Check total DNS lookup limit (prevents infinite loops)
-    if (this.spfDnsLookupCount > this.SPF_MAX_DNS_LOOKUPS) {
+    if (ctx.count > this.SPF_MAX_DNS_LOOKUPS) {
       return { 
         result: 'permerror', 
-        explanation: `SPF evaluation exceeded RFC 7208 limit of ${this.SPF_MAX_DNS_LOOKUPS} DNS lookups (count: ${this.spfDnsLookupCount})` 
+        explanation: `SPF evaluation exceeded RFC 7208 limit of ${this.SPF_MAX_DNS_LOOKUPS} DNS lookups (count: ${ctx.count})` 
       };
     }
 
@@ -295,7 +297,7 @@ export class EmailAuthenticator {
       }
 
       // Evaluate mechanism
-      const match = await this.matchesMechanism(mech, clientIP, domain, isIPv6, _depth);
+      const match = await this.matchesMechanism(mech, clientIP, domain, isIPv6, _depth, ctx);
       
       if (match) {
         switch (qualifier) {
@@ -320,13 +322,14 @@ export class EmailAuthenticator {
     clientIP: string,
     domain: string,
     isIPv6: boolean,
-    depth: number
+    depth: number,
+    ctx: { count: number }
   ): Promise<boolean> {
     // Check DNS lookup limit before any DNS-requiring mechanism
     const checkDnsLimit = (): boolean => {
-      if (this.spfDnsLookupCount >= this.SPF_MAX_DNS_LOOKUPS) {
+      if (ctx.count >= this.SPF_MAX_DNS_LOOKUPS) {
         this.logger.warn('SPF DNS lookup limit reached', { 
-          count: this.spfDnsLookupCount, 
+          count: ctx.count, 
           limit: this.SPF_MAX_DNS_LOOKUPS,
           mechanism: mech 
         });
@@ -351,7 +354,7 @@ export class EmailAuthenticator {
     // Handle 'a' mechanism (requires DNS lookup - RFC 7208 Section 5.3)
     if (mech === 'a' || mech.startsWith('a:') || mech.startsWith('a/')) {
       if (!checkDnsLimit()) return false;
-      this.spfDnsLookupCount++;
+      ctx.count++;
       const targetDomain = mech.includes(':') ? mech.split(':')[1]?.split('/')[0] ?? domain : domain;
       const ips = isIPv6 ? await this.lookupAAAA(targetDomain) : await this.lookupA(targetDomain);
       return ips.includes(clientIP);
@@ -361,7 +364,7 @@ export class EmailAuthenticator {
     // Note: RFC 7208 also limits MX record lookups to 10 (implicit in total limit)
     if (mech === 'mx' || mech.startsWith('mx:') || mech.startsWith('mx/')) {
       if (!checkDnsLimit()) return false;
-      this.spfDnsLookupCount++;
+      ctx.count++;
       const targetDomain = mech.includes(':') ? mech.split(':')[1]?.split('/')[0] ?? domain : domain;
       const mxRecords = await this.lookupMX(targetDomain);
       
@@ -370,7 +373,7 @@ export class EmailAuthenticator {
       const limitedMxRecords = mxRecords.slice(0, 10);
       for (const mx of limitedMxRecords) {
         if (!checkDnsLimit()) return false;
-        this.spfDnsLookupCount++;
+        ctx.count++;
         const ips = isIPv6 ? await this.lookupAAAA(mx) : await this.lookupA(mx);
         if (ips.includes(clientIP)) return true;
       }
@@ -380,12 +383,12 @@ export class EmailAuthenticator {
     // Handle 'include' mechanism (requires DNS lookup - RFC 7208 Section 5.2)
     if (mech.startsWith('include:')) {
       if (!checkDnsLimit()) return false;
-      this.spfDnsLookupCount++;
+      ctx.count++;
       const includeDomain = mech.slice(8);
       const records = await this.lookupTXT(includeDomain);
       const spfRecord = records.find(r => r.startsWith('v=spf1 '));
       if (spfRecord) {
-        const result = await this.evaluateSPF(spfRecord, clientIP, includeDomain, depth + 1);
+        const result = await this.evaluateSPF(spfRecord, clientIP, includeDomain, depth + 1, ctx);
         return result.result === 'pass';
       }
       return false;
@@ -394,12 +397,12 @@ export class EmailAuthenticator {
     // Handle 'redirect' modifier (requires DNS lookup - RFC 7208 Section 6.1)
     if (mech.startsWith('redirect=')) {
       if (!checkDnsLimit()) return false;
-      this.spfDnsLookupCount++;
+      ctx.count++;
       const redirectDomain = mech.slice(9);
       const records = await this.lookupTXT(redirectDomain);
       const spfRecord = records.find(r => r.startsWith('v=spf1 '));
       if (spfRecord) {
-        const result = await this.evaluateSPF(spfRecord, clientIP, redirectDomain, depth + 1);
+        const result = await this.evaluateSPF(spfRecord, clientIP, redirectDomain, depth + 1, ctx);
         return result.result === 'pass';
       }
       return false;
@@ -408,7 +411,7 @@ export class EmailAuthenticator {
     // Handle 'exists' mechanism (requires DNS lookup - RFC 7208 Section 5.7)
     if (mech.startsWith('exists:')) {
       if (!checkDnsLimit()) return false;
-      this.spfDnsLookupCount++;
+      ctx.count++;
       const existsDomain = mech.slice(7);
       const ips = await this.lookupA(existsDomain);
       return ips.length > 0;
@@ -418,7 +421,7 @@ export class EmailAuthenticator {
     // Note: PTR is expensive and discouraged, but we must handle it
     if (mech === 'ptr' || mech.startsWith('ptr:')) {
       if (!checkDnsLimit()) return false;
-      this.spfDnsLookupCount++;
+      ctx.count++;
       this.logger.warn('SPF ptr mechanism used - this is deprecated per RFC 7208');
       // PTR lookup is expensive; skip actual implementation but count the lookup
       return false;
@@ -1100,6 +1103,14 @@ export class EmailAuthenticator {
 
   // DNS lookup helpers with caching
 
+  /** Evict oldest entry when cache is at capacity (insert-time bound). */
+  private dnsCacheEvictIfFull(): void {
+    if (this.dnsCache.size >= this.DNS_CACHE_MAX_SIZE) {
+      const oldest = this.dnsCache.keys().next().value;
+      if (oldest) this.dnsCache.delete(oldest);
+    }
+  }
+
   private async lookupTXT(domain: string): Promise<string[]> {
     const cacheKey = `txt:${domain}`;
     const cached = this.dnsCache.get(cacheKey);
@@ -1111,6 +1122,7 @@ export class EmailAuthenticator {
     try {
       const records = await dns.resolveTxt(domain);
       const values = records.map(r => r.join(''));
+      this.dnsCacheEvictIfFull();
       this.dnsCache.set(cacheKey, { value: values, expires: Date.now() + this.DNS_CACHE_TTL });
       return values;
     } catch {
@@ -1128,6 +1140,7 @@ export class EmailAuthenticator {
 
     try {
       const addresses = await dns.resolve4(domain);
+      this.dnsCacheEvictIfFull();
       this.dnsCache.set(cacheKey, { value: addresses, expires: Date.now() + this.DNS_CACHE_TTL });
       return addresses;
     } catch {
@@ -1145,6 +1158,7 @@ export class EmailAuthenticator {
 
     try {
       const addresses = await dns.resolve6(domain);
+      this.dnsCacheEvictIfFull();
       this.dnsCache.set(cacheKey, { value: addresses, expires: Date.now() + this.DNS_CACHE_TTL });
       return addresses;
     } catch {
@@ -1163,6 +1177,7 @@ export class EmailAuthenticator {
     try {
       const records = await dns.resolveMx(domain);
       const exchanges = records.sort((a, b) => a.priority - b.priority).map(r => r.exchange);
+      this.dnsCacheEvictIfFull();
       this.dnsCache.set(cacheKey, { value: exchanges, expires: Date.now() + this.DNS_CACHE_TTL });
       return exchanges;
     } catch {

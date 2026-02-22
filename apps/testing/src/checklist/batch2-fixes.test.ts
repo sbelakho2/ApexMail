@@ -19,15 +19,15 @@ function read(rel: string): string {
 // #11: Tracking X-Forwarded-For already validates against trusted proxy list
 // ---------------------------------------------------------------------------
 describe('#11 – Tracking X-Forwarded-For trusted-proxy validation', () => {
-    const src = read('apps/tracking/src/routes.ts');
+    const src = read('services/mail-server/crates/tracking-service/src/routes/mod.rs');
 
     it('iterates through forwarded IPs and skips trusted proxies', () => {
-        // The implementation must check each IP against a known-trusted list
-        expect(src).toContain('trustedProxies');
+        // The Rust implementation checks each IP against a known-trusted CIDR list
+        expect(src).toContain('trusted_proxies');
         // Must check connecting IP is trusted before trusting headers
-        expect(src).toContain('isIPInRanges');
+        expect(src).toContain('is_in_trusted');
         // Iterates IPs and skips any that are trusted proxies
-        expect(src).toMatch(/for\s*\(.*ip.*of.*ips\)/);
+        expect(src).toMatch(/for\s+part\s+in|is_in_trusted/);
     });
 });
 

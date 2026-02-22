@@ -301,34 +301,39 @@ export default function AnalyticsPage() {
                                 { name: 'Yahoo/AOL', delivered: 97.8, inbox: 91.5, spam: 5.2, color: CHART_COLORS.purple },
                                 { name: 'Apple iCloud', delivered: 99.4, inbox: 97.8, spam: 1.2, color: CHART_COLORS.slate },
                                 { name: 'Other', delivered: 98.2, inbox: 93.4, spam: 4.1, color: CHART_COLORS.teal },
-                            ].map((isp, i) => (
-                                <div key={i} className="flex items-center gap-4">
-                                    <div className="w-32 font-medium text-muted-foreground">{isp.name}</div>
-                                    <div className="flex-1">
-                                        <div className="flex gap-1 h-6 rounded-lg overflow-hidden">
-                                            <div
-                                                className="flex items-center justify-center text-xs text-primary-foreground font-medium"
-                                                style={{ width: `${isp.inbox}%`, backgroundColor: CHART_COLORS.success }}
-                                            >
-                                                {isp.inbox}% Inbox
+                            ].map((isp, i) => {
+                                const inboxWidth = Math.max(0, Math.min(100, isp.inbox));
+                                const spamWidth = Math.max(0, Math.min(100 - inboxWidth, isp.spam));
+                                const failWidth = Math.max(0, 100 - isp.delivered);
+                                const inboxLabelX = Math.min(98, inboxWidth / 2);
+                                const spamLabelX = Math.min(98, inboxWidth + spamWidth / 2);
+
+                                return (
+                                    <div key={i} className="flex items-center gap-4">
+                                        <div className="w-32 font-medium text-muted-foreground">{isp.name}</div>
+                                        <div className="flex-1">
+                                            <div className="h-6 rounded-lg overflow-hidden bg-muted/20">
+                                                <svg width="100%" height="100%" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
+                                                    <rect x="0" y="0" width={inboxWidth} height="24" fill={CHART_COLORS.success} />
+                                                    <rect x={inboxWidth} y="0" width={spamWidth} height="24" fill={CHART_COLORS.warning} />
+                                                    <rect x={inboxWidth + spamWidth} y="0" width={failWidth} height="24" fill={CHART_COLORS.danger} />
+                                                    <text x={inboxLabelX} y="15" textAnchor="middle" fill="#ffffff" fontSize="4" fontWeight="600">
+                                                        {isp.inbox}% Inbox
+                                                    </text>
+                                                    {spamWidth >= 8 && (
+                                                        <text x={spamLabelX} y="15" textAnchor="middle" fill="#ffffff" fontSize="4" fontWeight="600">
+                                                            {isp.spam}%
+                                                        </text>
+                                                    )}
+                                                </svg>
                                             </div>
-                                            <div
-                                                className="flex items-center justify-center text-xs text-primary-foreground font-medium"
-                                                style={{ width: `${isp.spam}%`, backgroundColor: CHART_COLORS.warning }}
-                                            >
-                                                {isp.spam}%
-                                            </div>
-                                            <div
-                                                className="flex items-center justify-center text-xs text-primary-foreground font-medium"
-                                                style={{ width: `${100 - isp.delivered}%`, backgroundColor: CHART_COLORS.danger }}
-                                            />
+                                        </div>
+                                        <div className="w-24 text-right text-sm text-muted-foreground">
+                                            {isp.delivered}% delivered
                                         </div>
                                     </div>
-                                    <div className="w-24 text-right text-sm text-muted-foreground">
-                                        {isp.delivered}% delivered
-                                    </div>
-                                </div>
-                            ))}
+                                );
+                            })}
                         </div>
                     </div>
 

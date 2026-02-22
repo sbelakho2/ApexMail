@@ -18,12 +18,13 @@ import os, time, json, torch
 # Single CUDA connection per device enables better NCCL/compute overlap
 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 # NCCL tuning for NVLink topology (NV18 all-to-all on this machine)
-os.environ["NCCL_ALGO"] = "Ring"               # Ring is optimal for 4 GPUs
+os.environ["NCCL_ALGO"] = "Ring"               # Ring is optimal for 8 GPUs
 os.environ["NCCL_NET_GDR_LEVEL"] = "5"          # Max GPU Direct RDMA
 os.environ["NCCL_P2P_LEVEL"] = "NVL"            # Use NVLink for P2P
 os.environ["NCCL_CROSS_NIC"] = "1"              # Allow cross-NIC traffic
 os.environ["NCCL_IB_QPS_PER_CONNECTION"] = "4"  # More QPs for bandwidth
-os.environ["NCCL_MIN_NCHANNELS"] = "16"         # More channels for bandwidth
+os.environ["NCCL_MIN_NCHANNELS"] = "32"         # More channels for 8 GPUs
+os.environ["NCCL_NTHREADS"] = "512"             # More threads for collectives
 # Memory allocation optimization
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -44,7 +45,7 @@ OUTPUT_DIR = "/workspace/output_agent_r15_v2"
 
 def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 4))
+    world_size = int(os.environ.get("WORLD_SIZE", 8))
     is_main = local_rank == 0
 
     # Set device for this process

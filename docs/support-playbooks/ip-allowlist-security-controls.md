@@ -10,9 +10,9 @@
 
 | Layer | Mechanism | Where Configured |
 |-------|-----------|-----------------|
-| API Key Auth | Bearer token (`am_live_*` / `am_test_*`) | Dashboard → Settings → API Keys |
+| API Key Auth | X-API-Key header (`am_live_*` / `am_test_*`) | Dashboard → Settings → API Keys |
 | IP Allowlist | Per-API-key `allowedIps` array (IPv4, IPv6, CIDR) | Dashboard → API Keys → Edit Key |
-| Scopes | Per-key permission scopes (`emails:send`, `domains:read`, etc.) | Dashboard → API Keys → Create/Edit |
+| Scopes | Per-key permission scopes (`messages:write`, `domains:read`, etc.) | Dashboard → API Keys → Create/Edit |
 | Rate Limits | Per-tenant + per-IP dual-mode (Redis-backed) | Plan-based + custom override |
 | RBAC | User roles (`owner`, `admin`, `developer`, `analyst`, `billing`) | Dashboard → Settings → Team |
 | SSO | SAML 2.0 / OIDC | Dashboard → Settings → SSO |
@@ -25,18 +25,18 @@
 
 | Scope | Permits |
 |-------|---------|
-| `emails:send` | Send emails, batch sends |
-| `emails:read` | Read message status, list messages |
-| `domains:manage` | Add, verify, delete domains |
+| `messages:write` | Send emails, batch sends |
+| `messages:read` | Read message status, list messages |
+| `domains:write` | Add, verify, delete domains |
 | `domains:read` | List and get domain details |
-| `webhooks:manage` | Create, update, delete webhook endpoints |
+| `webhooks:write` | Create, update, delete webhook endpoints |
 | `webhooks:read` | List webhook endpoints and delivery logs |
-| `templates:manage` | Create, update, delete templates |
+| `templates:write` | Create, update, delete templates |
 | `templates:read` | List and get templates |
-| `suppressions:manage` | Add and remove suppressions |
+| `suppressions:write` | Add and remove suppressions |
 | `suppressions:read` | List and check suppressions |
 | `analytics:read` | Read analytics, reports, deliverability data |
-| `contacts:manage` | Manage contact lists |
+| `contacts:write` | Manage contacts |
 | `contacts:read` | Read contact data |
 | `admin` | Full access (owner/admin only) |
 
@@ -122,7 +122,7 @@ VALUES ('support_agent', '<AGENT_EMAIL>', 'api_key_ip_restriction_removed', 'api
 2. Update the API key's allowlist in Dashboard → API Keys → Edit.
 3. **Best practice for dynamic IPs:**
    - Use CIDR ranges for cloud provider IP pools (e.g., GitHub Actions publishes their IP ranges).
-   - Consider NOT using IP allowlisting for CI/CD keys; instead use narrowly-scoped keys (e.g., `emails:send` only).
+   - Consider NOT using IP allowlisting for CI/CD keys; instead use narrowly-scoped keys (e.g., `messages:write` only).
    - Rotate API keys on a schedule instead of relying on IP restrictions.
 4. GitHub Actions IP ranges: https://api.github.com/meta (look for `actions` field).
 5. If customer uses multiple CI environments: each needs its IPs in the allowlist.
@@ -229,21 +229,21 @@ LIMIT 100;
 
 ## Issue A8 — "Keys work for send but not for domains/webhooks—permission scope mismatch"
 
-**Symptoms:** API key works for `POST /v1/emails` but returns `403` for `GET /v1/domains` or webhook endpoints.
+**Symptoms:** API key works for `POST /v1/messages` but returns `403` for `GET /v1/domains` or webhook endpoints.
 
-**Root cause:** API key was created with limited scopes (e.g., only `emails:send`).
+**Root cause:** API key was created with limited scopes (e.g., only `messages:write`).
 
 **Resolution:**
 1. Check key scopes: Dashboard → API Keys → click the key → view Scopes.
 2. Each endpoint requires a specific scope:
-   - Sending: `emails:send`
-   - Domain management: `domains:manage` or `domains:read`
-   - Webhook management: `webhooks:manage` or `webhooks:read`
-   - Suppression management: `suppressions:manage`
+   - Sending: `messages:write`
+   - Domain management: `domains:write` or `domains:read`
+   - Webhook management: `webhooks:write` or `webhooks:read`
+   - Suppression management: `suppressions:write`
    - Analytics: `analytics:read`
 3. **Fix:** Create a new API key with the required scopes, or update the existing key's scopes.
 4. **Best practice:** Use the principle of least privilege. Create separate keys for different concerns:
-   - Production sending key: `emails:send` only
+   - Production sending key: `messages:write` only
    - Admin key: `admin` (full access, restricted by IP)
    - Analytics key: `analytics:read`, `domains:read`
 
@@ -374,10 +374,10 @@ FROM tenants t WHERE t.id = '<TENANT_ID>';
 | Plan | Max Users |
 |------|-----------|
 | Free | 1 |
-| Starter | 3 |
-| Pro | 5 |
-| Growth | 10 |
-| Scale | 25 |
+| Starter | 5 |
+| Pro | 10 |
+| Growth | 25 |
+| Scale | 50 |
 | Enterprise | Unlimited |
 
 3. **Resolution:** Upgrade plan, or remove inactive users (Dashboard → Settings → Team → Remove User).
@@ -390,7 +390,7 @@ FROM tenants t WHERE t.id = '<TENANT_ID>';
 **Symptoms:** Customer wants to trace who made a specific change (domain deleted, key rotated, etc.) but can't find it in audit logs.
 
 **Resolution:**
-1. **Dashboard audit logs** (available on Pro+ plans) show user-initiated actions.
+1. **Dashboard audit logs** (available on Growth+ plans) show user-initiated actions.
 2. **Control Plane → Audit** (internal) shows all actions including system-generated ones.
 3. Query audit logs directly:
 
@@ -598,9 +598,9 @@ UPDATE users SET locked_at = NULL, failed_login_attempts = 0 WHERE id = '<USER_I
 **Symptoms:** API returns `403` when calling template endpoints. OR Dashboard shows "Access Denied" on Templates page.
 
 **Resolution:**
-1. Check the API key scopes: does it include `templates:read` or `templates:manage`?
+1. Check the API key scopes: does it include `templates:read` or `templates:write`?
 2. Check the user's role: `analyst` and `billing` roles cannot access templates.
-3. **Fix (API key):** Create a new key or update the existing key to include `templates:read` (for GET) or `templates:manage` (for CRUD).
+3. **Fix (API key):** Create a new key or update the existing key to include `templates:read` (for GET) or `templates:write` (for CRUD).
 4. **Fix (user role):** Change the user's role to `developer` or higher.
 
 ---
@@ -610,9 +610,9 @@ UPDATE users SET locked_at = NULL, failed_login_attempts = 0 WHERE id = '<USER_I
 **Symptoms:** API returns `403` on `DELETE /v1/suppressions/{email}`.
 
 **Resolution:**
-1. Suppression deletion requires `suppressions:manage` scope.
+1. Suppression deletion requires `suppressions:write` scope.
 2. `suppressions:read` only allows listing/checking — not modifying.
-3. **Fix:** Update the API key to include `suppressions:manage`.
+3. **Fix:** Update the API key to include `suppressions:write`.
 4. Via dashboard: user needs `developer`, `admin`, or `owner` role.
 
 ---
@@ -631,7 +631,7 @@ UPDATE users SET locked_at = NULL, failed_login_attempts = 0 WHERE id = '<USER_I
 
 ## Issue A27 — "Key created but doesn't work—wrong environment / region / workspace"
 
-**Symptoms:** Freshly created key returns `401 invalid_api_key`.
+**Symptoms:** Freshly created key returns `401 INVALID_API_KEY`.
 
 **Resolution:**
 1. **Check key prefix:**
@@ -676,7 +676,7 @@ UPDATE users SET locked_at = NULL, failed_login_attempts = 0 WHERE id = '<USER_I
    - `POST /v1/scim/v2/Groups` — Create group
    - `GET /v1/scim/v2/ServiceProviderConfig` — SCIM capabilities
    - `GET /v1/scim/v2/Schemas` — Schema definitions
-3. **Authentication:** Use API key with `admin` scope as Bearer token: `Authorization: Bearer <api-key>`
+3. **Authentication:** Use API key with `admin` scope in the `X-API-Key` header
 4. **Setting up with IdPs:**
    - **Okta:** Applications → Add Application → SCIM 2.0. Base URL: `https://api.apexmail.ee/v1/scim/v2`
    - **Azure AD:** Enterprise Applications → Provisioning → Automatic. Tenant URL: `https://api.apexmail.ee/v1/scim/v2`
@@ -776,7 +776,7 @@ UPDATE api_keys SET is_active = false WHERE tenant_id = '<TENANT_ID>';
 2. **API export (Enterprise):**
 
 ```bash
-curl -H "Authorization: Bearer <API_KEY>" \
+curl -H "X-API-Key: <API_KEY>" \
   "https://api.apexmail.ee/v1/audit-logs?start=2025-01-01&end=2026-01-01&format=json" \
   -o audit-logs-2025.json
 ```
@@ -792,7 +792,7 @@ node apps/ops/dist/cli.js audit export \
 ```
 
 4. **Audit log integrity:** ApexMail's audit logs use a cryptographic hash chain. Each entry includes the hash of the previous entry, making tampering detectable. This is valuable evidence for SOC2.
-5. **Retention:** Audit logs are retained for 365 days by default (up to 2 years on Enterprise plan). Older logs are archived to S3.
+5. **Retention:** Audit log retention is plan-dependent: Growth (90 days), Scale (365 days), Enterprise (730 days). Older logs are archived to S3.
 
 **Backend:** `apps/compliance/src/audit/hash-chain.ts` — HMAC-signed hash chain with `hashChainService.verify()` to validate chain integrity.
 
@@ -808,7 +808,7 @@ node apps/ops/dist/cli.js audit export \
 3. **Configuring mTLS for a webhook:**
    ```bash
    curl -X POST https://api.apexmail.ee/v1/webhooks \
-     -H "Authorization: Bearer <API_KEY>" \
+     -H "X-API-Key: <API_KEY>" \
      -H "Content-Type: application/json" \
      -d '{
        "name": "Secure Webhook",
@@ -839,7 +839,7 @@ node apps/ops/dist/cli.js audit export \
 
 **Resolution:**
 1. **Current retention behavior:**
-   - Email metadata (to, from, subject, timestamps, status) is retained for the activity retention period (plan-dependent: 3-90 days).
+   - Email metadata (to, from, subject, timestamps, status) is retained for the activity retention period (plan-dependent: 7 days on Free up to 730 days on Enterprise — see retention table in message-diagnostics-retention.md).
    - Email HTML/text body content is stored temporarily for delivery and retries, then purged.
    - Attachments are NOT stored after delivery (processed and discarded).
 2. **Content retention settings:**

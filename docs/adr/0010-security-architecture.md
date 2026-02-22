@@ -42,10 +42,10 @@ interface ApiKey {
 
 // Permissions follow least privilege principle
 type Permission = 
-  | 'emails:send'
-  | 'emails:read'
-  | 'domains:manage'
-  | 'webhooks:manage'
+  | 'messages:write'
+  | 'messages:read'
+  | 'domains:write'
+  | 'webhooks:write'
   | 'analytics:read';
 ```
 

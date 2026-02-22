@@ -92,7 +92,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 	if err != nil {
 		return &NetworkError{Message: "create request: " + err.Error(), Cause: err}
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "apexmail-go/"+sdkVersion)
 	if len(idempotencyKey) > 0 && idempotencyKey[0] != "" {

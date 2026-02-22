@@ -86,11 +86,11 @@ Staging is seeded with realistic but synthetic data for testing all plan tiers.
 | Tenant | Plan | Contacts | Campaigns |
 |--------|------|----------|-----------|
 | `acme-free` | Free | 500 | 5 |
-| `acme-starter` | Starter ($29) | 5 000 | 20 |
-| `acme-pro` | Pro ($59) | 25 000 | 50 |
-| `acme-growth` | Growth ($129) | 100 000 | 100 |
-| `acme-scale` | Scale ($399) | 500 000 | 200 |
-| `acme-enterprise` | Enterprise ($1 299) | 1 000 000 | 500 |
+| `acme-starter` | Starter ($25) | 5 000 | 20 |
+| `acme-pro` | Pro ($65) | 25 000 | 50 |
+| `acme-growth` | Growth ($150) | 100 000 | 100 |
+| `acme-scale` | Scale ($350) | 500 000 | 200 |
+| `acme-enterprise` | Enterprise ($800) | 1 000 000 | 500 |
 | `acme-payg` | PAYG | 10 000 | 30 |
 
 ### Seed Script

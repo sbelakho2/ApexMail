@@ -43,22 +43,22 @@
 All keys MUST follow this hierarchical pattern:
 
 ```
-apx:<domain>:<tenant_id>:<resource>:<identifier>
+apexmail:<domain>:<tenant_id>:<resource>:<identifier>
 ```
 
 ### Examples
 
 | Purpose | Key Pattern | Example |
 |---------|------------|---------|
-| API response cache | `apx:cache:<tenant>:<resource>:<id>` | `apx:cache:t_abc:campaign:c_123` |
-| Rate limit counter | `apx:rl:<tenant>:<action>:<window>` | `apx:rl:t_abc:api:60s` |
-| Rate limit sliding | `apx:rls:<tenant>:<action>` | `apx:rls:t_abc:send` |
-| Session | `apx:sess:<session_id>` | `apx:sess:s_a1b2c3` |
-| Blocklist | `apx:bl:<tenant>:<type>` | `apx:bl:t_abc:email` |
-| Lock | `apx:lock:<resource>:<id>` | `apx:lock:campaign:c_123` |
-| Pub/sub channel | `apx:evt:<event_type>` | `apx:evt:email_sent` |
-| Feature flag | `apx:ff:<flag_name>` | `apx:ff:new_editor` |
-| Queue metadata | `apx:q:<queue>:<field>` | `apx:q:send:depth` |
+| API response cache | `apexmail:cache:<tenant>:<resource>:<id>` | `apexmail:cache:t_abc:campaign:c_123` |
+| Rate limit counter | `apexmail:rl:<tenant>:<action>:<window>` | `apexmail:rl:t_abc:api:60s` |
+| Rate limit sliding | `apexmail:rls:<tenant>:<action>` | `apexmail:rls:t_abc:send` |
+| Session | `apexmail:sess:<session_id>` | `apexmail:sess:s_a1b2c3` |
+| Blocklist | `apexmail:bl:<tenant>:<type>` | `apexmail:bl:t_abc:email` |
+| Lock | `apexmail:lock:<resource>:<id>` | `apexmail:lock:campaign:c_123` |
+| Pub/sub channel | `apexmail:evt:<event_type>` | `apexmail:evt:email_sent` |
+| Feature flag | `apexmail:ff:<flag_name>` | `apexmail:ff:new_editor` |
+| Queue metadata | `apexmail:q:<queue>:<field>` | `apexmail:q:send:depth` |
 
 ### Rules
 
@@ -95,8 +95,8 @@ apx:<domain>:<tenant_id>:<resource>:<identifier>
 ### Strings — Cache
 
 ```ts
-await redis.setex(`apx:cache:${tenantId}:campaign:${id}`, 60, JSON.stringify(campaign));
-const cached = await redis.get(`apx:cache:${tenantId}:campaign:${id}`);
+await redis.setex(`apexmail:cache:${tenantId}:campaign:${id}`, 60, JSON.stringify(campaign));
+const cached = await redis.get(`apexmail:cache:${tenantId}:campaign:${id}`);
 ```
 
 - Values are JSON-serialized. Max value size: **64 KB** (enforced at application layer).
@@ -108,7 +108,7 @@ const cached = await redis.get(`apx:cache:${tenantId}:campaign:${id}`);
 // Sliding window rate limiter
 const now = Date.now();
 const windowMs = 60_000;
-const key = `apx:rls:${tenantId}:api`;
+const key = `apexmail:rls:${tenantId}:api`;
 
 await redis
   .multi()
@@ -125,8 +125,8 @@ await redis
 ### Sets — Blocklists
 
 ```ts
-await redis.sadd(`apx:bl:${tenantId}:email`, 'spam@example.com');
-const blocked = await redis.sismember(`apx:bl:${tenantId}:email`, recipientEmail);
+await redis.sadd(`apexmail:bl:${tenantId}:email`, 'spam@example.com');
+const blocked = await redis.sismember(`apexmail:bl:${tenantId}:email`, recipientEmail);
 ```
 
 - Blocklists are loaded from PostgreSQL on cache miss and cached for 24 h.
@@ -136,10 +136,10 @@ const blocked = await redis.sismember(`apx:bl:${tenantId}:email`, recipientEmail
 
 ```ts
 // Publisher (Worker)
-await redis.publish('apx:evt:email_sent', JSON.stringify({ emailId, tenantId }));
+await redis.publish('apexmail:evt:email_sent', JSON.stringify({ emailId, tenantId }));
 
 // Subscriber (API — WebSocket relay)
-redis.subscribe('apx:evt:email_sent');
+redis.subscribe('apexmail:evt:email_sent');
 redis.on('message', (channel, message) => { /* relay to WS */ });
 ```
 
@@ -153,13 +153,13 @@ redis.on('message', (channel, message) => { /* relay to WS */ });
 ### Hashes — Session Storage
 
 ```ts
-await redis.hset(`apx:sess:${sessionId}`, {
+await redis.hset(`apexmail:sess:${sessionId}`, {
   userId: user.id,
   tenantId: user.tenantId,
   role: user.role,
   createdAt: Date.now().toString(),
 });
-await redis.expire(`apx:sess:${sessionId}`, 86400);
+await redis.expire(`apexmail:sess:${sessionId}`, 86400);
 ```
 
 ---

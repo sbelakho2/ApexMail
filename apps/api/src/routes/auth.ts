@@ -36,6 +36,10 @@ const ALLOWED_SCOPES = [
   'analytics:read',
   'webhooks:read',
   'webhooks:write',
+  'dedicated-ips:read',
+  'dedicated-ips:write',
+  'contacts:read',
+  'contacts:write',
   'admin',
 ] as const;
 

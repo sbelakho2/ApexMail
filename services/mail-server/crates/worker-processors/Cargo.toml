@@ -1,0 +1,73 @@
+[package]
+name = "worker-processors"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ApexMail worker processors (analytics, email, reply-handler, webhook)"
+
+[dependencies]
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Database
+sqlx.workspace = true
+
+# Redis
+redis.workspace = true
+deadpool-redis.workspace = true
+
+# Crypto
+hmac.workspace = true
+sha2.workspace = true
+aes-gcm.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+rand.workspace = true
+
+# HTTP client (webhook delivery)
+reqwest.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utils
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+
+# DNS (SSRF protection)
+trust-dns-resolver.workspace = true
+
+# IP networking
+ipnetwork.workspace = true
+
+# Pattern matching (reply classification)
+aho-corasick.workspace = true
+regex.workspace = true
+
+# Concurrent cache
+moka.workspace = true
+
+# Rate limiting
+governor.workspace = true
+nonzero_ext.workspace = true
+
+# Email protocols (for email processor)
+mail-builder.workspace = true
+mail-auth.workspace = true
+mail-send = "0.4"
+tokio-rustls = "0.26"
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"

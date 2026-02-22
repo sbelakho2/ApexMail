@@ -45,7 +45,7 @@ Custom lists support the same filtering, segmentation, and bulk-action capabilit
 **Via API:**
 
 ```bash
-curl -X POST https://api.apexmail.dev/v1/contacts \
+curl -X POST https://api.apexmail.ee/v1/contacts \
   -H "X-API-Key: am_live_<hex>" \
   -H "Content-Type: application/json" \
   -d '{

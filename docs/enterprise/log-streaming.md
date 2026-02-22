@@ -31,7 +31,7 @@ Log streaming enables:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/log-streams \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -372,7 +372,7 @@ Automatically redact sensitive data:
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/log-streams/{stream_id}/status \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -398,7 +398,7 @@ Response:
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/log-streams/{stream_id}/metrics \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "period=24h"
 ```
 

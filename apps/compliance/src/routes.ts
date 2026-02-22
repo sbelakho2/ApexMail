@@ -119,7 +119,10 @@ const gdprAutomation = new GDPRAutomation(db, redis);
 const app = new Hono();
 
 // Middleware
-app.use('*', cors());
+app.use('*', cors({
+    origin: process.env.CORS_ORIGIN ?? '*',
+    exposeHeaders: ['X-Request-ID', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+}));
 app.use('*', logger());
 
 // FIX-007: Authentication middleware — the compliance API was completely

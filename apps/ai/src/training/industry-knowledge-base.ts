@@ -1607,7 +1607,7 @@ If your invoice doesn't match expectations:
 **Dedicated vs Shared IP:**
 | Factor | Shared IP | Dedicated IP |
 |--------|-----------|-------------|
-| Cost | Included in plan | Starter: N/A, Business: $30/mo, Enterprise: included |
+| Cost | Included in plan | Free/Starter: N/A, Pro: $30/mo add-on, Growth: 1 included, Scale: 3 included, Enterprise: 10 included |
 | Reputation | Shared with other senders | 100% yours to build |
 | Volume needed | Any | Minimum 50,000 emails/month recommended |
 | Warmup required | No (already warm) | Yes (4-8 weeks) |

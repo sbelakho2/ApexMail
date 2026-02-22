@@ -23,7 +23,7 @@ ApexMail offers comprehensive support tiers designed to meet the needs of organi
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -93,7 +93,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id} \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:
@@ -150,7 +150,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id}/comments \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "message": "I have noticed this is affecting emails to Gmail specifically. Here are the bounce codes we are seeing...",
     "attachments": [
@@ -166,7 +166,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id}/c
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/support/tickets \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "status=open" -d "priority=high"
 ```
 
@@ -176,7 +176,7 @@ curl https://api.apexmail.ee/enterprise/v1/support/tickets \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/tickets/{ticket_id}/escalate \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "reason": "Impact has expanded to transactional emails. Revenue impact estimated at $50K/day.",
     "requestedAction": "Engineering team involvement",
@@ -213,7 +213,7 @@ Response:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/csm/meetings \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "type": "strategy_review",
@@ -264,7 +264,7 @@ Enterprise customers receive quarterly business reviews covering:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/qbr/request \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "quarter": "2024-Q1",
@@ -282,7 +282,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/support/qbr/request \
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/training \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "topic": "advanced_deliverability",
@@ -338,7 +338,7 @@ Enterprise customers with TAM receive:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/tam/consultation \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "topic": "architecture_review",
     "description": "Planning migration to event-driven architecture. Need guidance on webhook design and scaling.",
@@ -372,7 +372,7 @@ For critical issues outside business hours:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/support/emergency \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
     "issue": "Complete service outage - no emails being delivered",
@@ -391,7 +391,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/support/emergency \
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/support/sla/status \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "period=2024-01"
 ```
 

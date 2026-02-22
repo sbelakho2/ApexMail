@@ -27,7 +27,7 @@ Private cloud deployment offers:
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/request \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "accountId": "acc_xxx",
@@ -103,7 +103,7 @@ All components include automatic health monitoring and alerting.
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/dedicated-ips \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
     "ipPools": [
@@ -160,7 +160,7 @@ Connect your private network to your ApexMail deployment via an encrypted VPN tu
 
 ```bash
 curl -X POST https://api.apexmail.ee/enterprise/v1/private-deploy/vpn-tunnel \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
     "tunnelType": "wireguard",
@@ -226,7 +226,7 @@ ApexMail supports customer-managed encryption keys (CMEK). You provide the key e
 
 ```bash
 curl -X PUT https://api.apexmail.ee/enterprise/v1/private-deploy/encryption \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "deploymentId": "deploy_abc123",
     "encryption": {
@@ -258,7 +258,7 @@ Private Cloud deployments include a pre-configured firewall, web application fir
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/private-deploy/metrics \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -G -d "deploymentId=deploy_abc123"
 ```
 
@@ -318,7 +318,7 @@ Private Cloud supports multi-region deployments with automatic failover and near
 
 ```bash
 curl https://api.apexmail.ee/enterprise/v1/private-deploy/status/{deployment_id} \
-  -H "Authorization: Bearer YOUR_API_KEY"
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 Response:

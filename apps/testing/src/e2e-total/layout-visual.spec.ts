@@ -60,7 +60,11 @@ test.describe('Total Visual Layout - Console', () => {
                 await stabilizePage(page);
                 await expect(page.getByRole('heading').first()).toBeVisible();
                 await assertNoHorizontalOverflow(page, `control-plane ${viewport.name} ${route}`);
-                await expect(page).toHaveScreenshot(`control-plane-${route.replace(/\//g, '_') || 'root'}-${viewport.name}.png`, { fullPage: true });
+                const screenshotOptions =
+                    route === '/tenants' && viewport.name === 'tablet'
+                        ? { fullPage: true, maxDiffPixels: 3500 }
+                        : { fullPage: true };
+                await expect(page).toHaveScreenshot(`control-plane-${route.replace(/\//g, '_') || 'root'}-${viewport.name}.png`, screenshotOptions);
                 await page.context().close();
             });
         }

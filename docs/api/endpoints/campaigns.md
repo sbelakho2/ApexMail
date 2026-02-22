@@ -6,16 +6,16 @@ The Campaigns API allows you to create and manage email marketing campaigns.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/v1/campaigns` | Create a campaign |
-| GET | `/api/v1/campaigns` | List campaigns |
-| GET | `/api/v1/campaigns/:id` | Get campaign details |
-| PATCH | `/api/v1/campaigns/:id` | Update campaign |
-| DELETE | `/api/v1/campaigns/:id` | Delete campaign |
-| POST | `/api/v1/campaigns/:id/send` | Send campaign |
-| POST | `/api/v1/campaigns/:id/schedule` | Schedule campaign |
-| POST | `/api/v1/campaigns/:id/pause` | Pause sending |
-| POST | `/api/v1/campaigns/:id/resume` | Resume sending |
-| GET | `/api/v1/campaigns/:id/stats` | Get campaign statistics |
+| POST | `/v1/campaigns` | Create a campaign |
+| GET | `/v1/campaigns` | List campaigns |
+| GET | `/v1/campaigns/:id` | Get campaign details |
+| PATCH | `/v1/campaigns/:id` | Update campaign |
+| DELETE | `/v1/campaigns/:id` | Delete campaign |
+| POST | `/v1/campaigns/:id/send` | Send campaign |
+| POST | `/v1/campaigns/:id/schedule` | Schedule campaign |
+| POST | `/v1/campaigns/:id/pause` | Pause sending |
+| POST | `/v1/campaigns/:id/resume` | Resume sending |
+| GET | `/v1/campaigns/:id/stats` | Get campaign statistics |
 
 ---
 
@@ -26,8 +26,8 @@ Create a new email campaign.
 ### Request
 
 ```http
-POST /api/v1/campaigns
-Authorization: Bearer {{api_key}}
+POST /v1/campaigns
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -130,8 +130,8 @@ Retrieve paginated list of campaigns.
 ### Request
 
 ```http
-GET /api/v1/campaigns?status=completed&limit=20
-Authorization: Bearer {{api_key}}
+GET /v1/campaigns?status=completed&limit=20
+X-API-Key: {{api_key}}
 ```
 
 ### Query Parameters
@@ -182,8 +182,8 @@ Retrieve full campaign details including content and settings.
 ### Request
 
 ```http
-GET /api/v1/campaigns/camp_xyz789
-Authorization: Bearer {{api_key}}
+GET /v1/campaigns/camp_xyz789
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -238,8 +238,8 @@ Update a draft campaign. Cannot update campaigns that are sending or completed.
 ### Request
 
 ```http
-PATCH /api/v1/campaigns/camp_xyz789
-Authorization: Bearer {{api_key}}
+PATCH /v1/campaigns/camp_xyz789
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -276,8 +276,8 @@ Delete a draft or canceled campaign.
 ### Request
 
 ```http
-DELETE /api/v1/campaigns/camp_xyz789
-Authorization: Bearer {{api_key}}
+DELETE /v1/campaigns/camp_xyz789
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -298,8 +298,8 @@ Immediately start sending a campaign.
 ### Request
 
 ```http
-POST /api/v1/campaigns/camp_xyz789/send
-Authorization: Bearer {{api_key}}
+POST /v1/campaigns/camp_xyz789/send
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -340,8 +340,8 @@ Schedule a campaign for future delivery.
 ### Request
 
 ```http
-POST /api/v1/campaigns/camp_xyz789/schedule
-Authorization: Bearer {{api_key}}
+POST /v1/campaigns/camp_xyz789/schedule
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -374,8 +374,8 @@ Pause a campaign that is currently sending.
 ### Request
 
 ```http
-POST /api/v1/campaigns/camp_xyz789/pause
-Authorization: Bearer {{api_key}}
+POST /v1/campaigns/camp_xyz789/pause
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -399,8 +399,8 @@ Resume a paused campaign.
 ### Request
 
 ```http
-POST /api/v1/campaigns/camp_xyz789/resume
-Authorization: Bearer {{api_key}}
+POST /v1/campaigns/camp_xyz789/resume
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -424,8 +424,8 @@ Retrieve detailed statistics for a campaign.
 ### Request
 
 ```http
-GET /api/v1/campaigns/camp_xyz789/stats
-Authorization: Bearer {{api_key}}
+GET /v1/campaigns/camp_xyz789/stats
+X-API-Key: {{api_key}}
 ```
 
 ### Response
@@ -500,8 +500,8 @@ Authorization: Bearer {{api_key}}
 ### Create A/B Test Campaign
 
 ```http
-POST /api/v1/campaigns
-Authorization: Bearer {{api_key}}
+POST /v1/campaigns
+X-API-Key: {{api_key}}
 Content-Type: application/json
 ```
 
@@ -613,10 +613,7 @@ Campaign events are delivered via webhooks:
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
-| `campaign_not_found` | 404 | Campaign doesn't exist |
-| `invalid_status` | 400 | Action not allowed for status |
-| `no_recipients` | 400 | No recipients match criteria |
-| `template_not_found` | 404 | Template doesn't exist |
-| `list_not_found` | 404 | Contact list doesn't exist |
-| `sender_not_verified` | 400 | Sender domain not verified |
-| `insufficient_credits` | 402 | Not enough sending credits |
+| `NOT_FOUND` | 404 | Campaign doesn't exist |
+| `INVALID_STATE` | 400 | Action not allowed for current campaign status |
+| `VALIDATION_ERROR` | 422 | Request body failed schema validation |
+| `DOMAIN_NOT_VERIFIED` | 400 | Sender domain not verified |
