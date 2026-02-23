@@ -1,0 +1,42 @@
+[package]
+name = "api-server"
+version.workspace = true
+edition.workspace = true
+[[bin]]
+name = "api-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+apexmail-lib = { path = "../apexmail-lib" }
+apexmail-db = { path = "../apexmail-db" }
+dns-resolver = { path = "../dns-resolver" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+redis = { workspace = true }
+deadpool-redis = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+ipnetwork = { workspace = true }
+url = { workspace = true }
+hex = { workspace = true }
+jsonwebtoken = "9.3"
+headers = "0.4"
+http = "1.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -1,5 +1,11 @@
 # Data Flow Architecture
 
+> **Implementation Note (2026-02):** This document describes the conceptual data flow. The actual implementation uses:
+> - **Rust tracking service** instead of TypeScript API
+> - **PostgreSQL-native queues** instead of BullMQ (see [queue-system.md](./queue-system.md))
+> - **Rust MTA crate** instead of Postfix
+> - Code examples below are pseudo-code; actual implementation is in `services/mail-server/crates/`
+
 ## Email Sending Pipeline
 
 ### Overview
@@ -271,35 +277,35 @@ async function processEvent(event: EmailEvent): Promise<boolean> {
 
 ### CDC to Analytics
 
-```typescript
-// Change Data Capture using PostgreSQL logical replication
+```rust
+// ClickHouse OLAP engine for enterprise-scale analytics
+// Events are synced from PostgreSQL to ClickHouse via async inserts
 
-// 1. PostgreSQL publication
-// CREATE PUBLICATION apexmail_events FOR TABLE email_events;
+// ClickHouse initialization (services/mail-server/crates/analytics/src/clickhouse_engine.rs)
+use crate::config::ClickHouseConfig;
 
-// 2. Debezium connector config
-const debeziumConfig = {
-  'connector.class': 'io.debezium.connector.postgresql.PostgresConnector',
-  'database.hostname': 'postgres',
-  'database.dbname': 'apexmail',
-  'table.include.list': 'public.email_events',
-  'publication.name': 'apexmail_events',
-  'slot.name': 'apexmail_slot',
-  'transforms': 'unwrap',
-  'transforms.unwrap.type': 'io.debezium.transforms.ExtractNewRecordState',
+let config = ClickHouseConfig {
+    url: "http://clickhouse:8123".to_string(),
+    database: "apexmail".to_string(),
+    user: "default".to_string(),
+    password: "".to_string(),
+    max_connections: 20,
+    query_timeout_secs: 30,
 };
 
-// 3. ClickHouse Kafka engine table
-// CREATE TABLE email_events_queue (
-//   event_id UUID,
-//   message_id String,
-//   event_type Enum8('open'=1, 'click'=2, 'bounce'=3, 'complaint'=4),
-//   timestamp DateTime64(3),
-//   data String
-// ) ENGINE = Kafka
-// SETTINGS kafka_broker_list = 'kafka:9092',
-//          kafka_topic_list = 'apexmail.public.email_events',
-//          kafka_group_name = 'clickhouse_consumers';
+let engine = ClickHouseEngine::new(config).await?;
+
+// Insert events using async inserts for high throughput
+engine.insert_events(&events).await?;
+
+// Time-series query with ClickHouse OLAP performance (sub-second on billions of rows)
+let series = engine.time_series(
+    tenant_id,
+    start_date,
+    end_date,
+    "day",  // granularity
+    Some(&["delivered", "opened", "clicked"]),
+).await?;
 ```
 
 ---
@@ -313,8 +319,8 @@ const debeziumConfig = {
 └────────────────────────────────────────────────────────────────────────────────┘
 
   ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-  │Dashboard│────▶│ API/Next │────▶│ Analytics│────▶│ ClickHse │
-  │ Request │     │  Route   │     │  Service │     │  Query   │
+  │Dashboard│────▶│ API/Next │────▶│ Analytics│────▶│ClickHouse│
+  │ Request │     │  Route   │     │  Engine  │     │  (OLAP)  │
   └─────────┘     └──────────┘     └──────────┘     └──────────┘
                                           │
                                           ▼

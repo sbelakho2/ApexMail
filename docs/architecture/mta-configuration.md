@@ -2,6 +2,8 @@
 
 > **ApexMail Internal Documentation**
 > Last updated: 2026-02-09
+>
+> **Implementation Note (2026-02):** The MTA is implemented as a Rust crate at `services/mail-server/crates/mta/`. Postfix is not used; SMTP handling is native Rust using the `lettre` and `mail-parser` crates.
 
 This document covers the architecture, security controls, and authentication engine of the ApexMail Mail Transfer Agent (MTA). All inbound email processing, sender authentication, and feedback loop handling are managed by this subsystem.
 

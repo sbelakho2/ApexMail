@@ -44,13 +44,9 @@ const SPAM_RULES: &[SpamRule] = &[
     SpamRule { name: "MEDICATION_SPAM", score: 7.0, description: "Medication spam", target: RuleTarget::Text, pattern: r"(?i)(viagra|cialis|pharmacy|prescription).{0,30}(cheap|discount|buy|order)" },
     SpamRule { name: "WEIGHT_LOSS", score: 5.0, description: "Weight loss spam", target: RuleTarget::Text, pattern: r"(?i)weight\s+loss|lose\s+\d+\s*(lb|kg|pound)|diet\s+pill|fat\s+burn" },
     SpamRule { name: "CRYPTOCURRENCY_SCAM", score: 8.0, description: "Cryptocurrency scam", target: RuleTarget::Text, pattern: r"(?i)(bitcoin|crypto|blockchain).{0,30}(invest|profit|double|guaranteed)" },
-    SpamRule { name: "UNSUBSCRIBE_MISSING", score: 3.0, description: "Missing unsubscribe link", target: RuleTarget::Text, pattern: r"(?i)UNSUBSCRIBE_CHECK_PLACEHOLDER" },
-    SpamRule { name: "SENDER_MISMATCH", score: 4.0, description: "Sender address mismatch", target: RuleTarget::Text, pattern: r"(?i)SENDER_MISMATCH_PLACEHOLDER" },
+    // Note: UNSUBSCRIBE_MISSING, IMAGE_ONLY, EXCESSIVE_LINKS, ALL_CAPS checks are implemented as custom logic below
     SpamRule { name: "HIDDEN_TEXT", score: 6.0, description: "Hidden text in HTML", target: RuleTarget::Html, pattern: r#"(?i)(display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0)"# },
     SpamRule { name: "TINY_FONT", score: 5.0, description: "Extremely small font", target: RuleTarget::Html, pattern: r"(?i)font-size\s*:\s*[01](px|pt|em)" },
-    SpamRule { name: "IMAGE_ONLY", score: 4.0, description: "Image-only email body", target: RuleTarget::Html, pattern: r"(?i)IMAGE_ONLY_CHECK_PLACEHOLDER" },
-    SpamRule { name: "EXCESSIVE_LINKS", score: 3.0, description: "Excessive links", target: RuleTarget::Html, pattern: r"(?i)EXCESSIVE_LINKS_PLACEHOLDER" },
-    SpamRule { name: "ALL_CAPS_SUBJECT", score: 4.0, description: "All caps subject line", target: RuleTarget::Text, pattern: r"(?i)ALL_CAPS_SUBJECT_PLACEHOLDER" },
 ];
 
 lazy_static! {
@@ -333,6 +329,30 @@ impl ContentScanner {
                     rule: "EXCESSIVE_CAPS".into(),
                     score: 4.0,
                     description: format!("Caps ratio {:.0}% in subject", ratio * 100.0),
+                });
+            }
+
+            // ALL CAPS subject (>90% uppercase)
+            if ratio > 0.9 {
+                score += 4.0;
+                triggers.push(SpamTrigger {
+                    rule: "ALL_CAPS_SUBJECT".into(),
+                    score: 4.0,
+                    description: "Subject line is all caps".into(),
+                });
+            }
+        }
+
+        // Sender mismatch: check if From domain doesn't match Reply-To or visible domain
+        let from_domain = content.from_address.split('@').last().unwrap_or("");
+        if let Some(reply_to) = content.headers.get("Reply-To").or_else(|| content.headers.get("reply-to")) {
+            let reply_domain = reply_to.split('@').last().unwrap_or("").trim_end_matches('>');
+            if !from_domain.is_empty() && !reply_domain.is_empty() && from_domain != reply_domain {
+                score += 4.0;
+                triggers.push(SpamTrigger {
+                    rule: "SENDER_MISMATCH".into(),
+                    score: 4.0,
+                    description: format!("From domain '{}' differs from Reply-To '{}'", from_domain, reply_domain),
                 });
             }
         }

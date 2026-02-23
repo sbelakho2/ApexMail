@@ -20,8 +20,6 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     depends_on:
-      api:
-        condition: service_healthy
       tracking:
         condition: service_healthy
     ports:
@@ -79,44 +77,6 @@ services:
           cpus: '1.0'
         reservations:
           memory: 512M
-
-  api:
-    environment:
-      NODE_ENV: production
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
-      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:?API_KEY_HASH_SECRET is required in production}
-      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required in production}
-      TRACKING_BASE_URL: ${TRACKING_BASE_URL:?TRACKING_BASE_URL is required in production}
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          memory: 2G
-          cpus: '2.0'
-        reservations:
-          memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
-
-  worker:
-    environment:
-      NODE_ENV: production
-      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST is required in production}
-      SMTP_PORT: ${SMTP_PORT:?SMTP_PORT is required in production}
-    deploy:
-      replicas: 2
-      resources:
-        limits:
-          memory: 2G
-          cpus: '2.0'
-        reservations:
-          memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   tracking:
     environment:

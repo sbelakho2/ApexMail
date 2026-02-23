@@ -2,7 +2,7 @@
 
 This document describes ApexMail's disaster recovery (DR) architecture, backup strategies, failover mechanisms, and recovery procedures. The systems described here are primarily implemented in the HA (High Availability) application and the Control Plane.
 
-All infrastructure runs on **Hetzner Cloud servers** (Hetzner Cloud ARM) in Finland (primary) and Germany (standby). No AWS, GCP, or Azure services are used for core infrastructure. See [Multi-Region Architecture](../architecture/multi-region.md) for the full deployment layout.
+All infrastructure runs on **Hetzner Cloud servers** (Hetzner Cloud ARM) in Finland (primary) and Germany (standby). No AWS, GCP, or Azure services are used for core infrastructure.
 
 ---
 
@@ -308,15 +308,18 @@ ApexMail includes a built-in chaos engineering framework (`tools/chaos/`) for va
 
 ### Running Experiments
 
+Experiments are run via scripts in `tools/chaos/`:
+
 ```bash
-# Via the ops CLI
-apexmail-ops chaos run --experiment node-failure --target worker
+# Run a chaos experiment
+cd tools/chaos
+./run-experiment.sh --experiment node-failure --target tracking
 
 # Dry run (no actual disruption)
-apexmail-ops chaos run --experiment network-partition --target api --dry-run
+./run-experiment.sh --experiment network-partition --dry-run
 
 # Force a database failover test in staging
-apexmail-ops chaos run --experiment database-failover --target postgres
+./run-experiment.sh --experiment database-failover --target postgres
 ```
 
 ---

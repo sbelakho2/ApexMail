@@ -4,6 +4,8 @@
 
 Accepted
 
+> **Implementation Note (2026-02):** Multi-tenant isolation is implemented in the Rust tracking service. The TypeScript middleware examples below are historical; actual implementation is in Rust using Axum state extractors.
+
 ## Date
 
 2024-01-18

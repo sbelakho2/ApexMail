@@ -35,6 +35,8 @@ redis      = { workspace = true }
 reqwest    = { workspace = true }
 bytes      = { workspace = true }
 flate2 = "1.1"
+sysinfo = "0.33"
+observability-service = { path = "../observability-service" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

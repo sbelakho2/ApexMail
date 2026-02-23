@@ -1,0 +1,31 @@
+[package]
+name = "integration-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+apexmail-lib = { path = "../apexmail-lib" }
+apexmail-db = { path = "../apexmail-db" }
+api-server = { path = "../api-server" }
+billing-service = { path = "../billing-service" }
+devex-service = { path = "../devex-service" }
+observability-service = { path = "../observability-service" }
+ops-service = { path = "../ops-service" }
+sales-autopilot = { path = "../sales-autopilot" }
+ai-service = { path = "../ai-service" }
+analytics = { path = "../analytics" }
+compliance = { path = "../compliance" }
+enterprise = { path = "../enterprise" }
+pattern-matcher = { path = "../pattern-matcher" }
+apexmail-rate-limiter = { path = "../rate-limiter" }
+template-renderer = { path = "../template-renderer" }
+
+tokio = { workspace = true, features = ["full", "test-util"] }
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+http-body-util = "0.1"
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+hyper = "1"

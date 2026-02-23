@@ -29,10 +29,10 @@ This document defines the on-call structure, responsibilities, response SLAs, an
 
 | Priority | Description | Acknowledge | Respond / Act | Examples |
 |----------|-------------|-------------|---------------|----------|
-| **P1 — Critical** | Service down, data loss, or complete email delivery failure | 5 min | 15 min | API returning 5xx for all requests, database unreachable, MTA down |
-| **P2 — Major** | Degraded service, partial outage, or significant latency | 15 min | 1 hour | Elevated error rate (> 1 %), queue backlog growing, single-tenant outage |
-| **P3 — Minor** | Non-critical degradation, monitoring anomaly | 30 min | 4 hours | Disk usage > 80 %, certificate expiring in < 7 days, elevated retry rate |
-| **P4 — Low** | Informational, cosmetic, or non-urgent | Next business day | Next business day | Staging environment issue, non-critical dependency deprecation |
+| **P1 — Critical** | Service down, data loss | 5 min | 15 min | Tracking service unreachable, database down |
+| **P2 — Major** | Degraded service, partial outage | 15 min | 1 hour | Elevated error rate, queue backlog |
+| **P3 — Minor** | Non-critical degradation | 30 min | 4 hours | Disk usage > 80%, cert expiring |
+| **P4 — Low** | Informational, non-urgent | Next business day | Next business day | Staging issues |
 
 ---
 
@@ -64,9 +64,7 @@ For P1 incidents, the engineering lead is **always** notified immediately (in pa
 
 | PagerDuty Service | Source | Escalation Policy |
 |-------------------|--------|-------------------|
-| `apexmail-api` | Prometheus → Alertmanager → PagerDuty | `apexmail-oncall` |
-| `apexmail-worker` | Prometheus → Alertmanager → PagerDuty | `apexmail-oncall` |
-| `apexmail-mta` | Prometheus → Alertmanager → PagerDuty | `apexmail-oncall` |
+| `apexmail-tracking` | Prometheus → Alertmanager → PagerDuty | `apexmail-oncall` |
 | `apexmail-database` | Prometheus (pg_exporter) → PagerDuty | `apexmail-oncall` |
 | `apexmail-infra` | Hetzner monitoring + Prometheus → PagerDuty | `apexmail-oncall` |
 
@@ -128,36 +126,28 @@ At rotation boundary (Monday 09:00 UTC):
 
 ## Common First-Response Actions
 
-### API — High Error Rate
+### Tracking — High Error Rate
 
-1. Check Grafana dashboard `api-overview` for error distribution.
-2. SSH into API server: `docker logs apexmail-api --tail 200`.
+1. Check Prometheus/Grafana dashboard for error distribution.
+2. Check tracking logs: `docker compose logs --tail 200 tracking`.
 3. Check PostgreSQL connectivity: `pg_isready -h localhost`.
-4. Check Redis connectivity: `redis-cli ping`.
-5. If a recent deploy: consider immediate rollback (`./tools/canary.sh rollback`).
+4. Check Redis connectivity: `docker compose exec redis redis-cli ping`.
+5. If a recent deploy: consider immediate rollback via image tag revert.
 
-### Worker — Queue Backlog Growing
+### Tracking — High Latency
 
-1. Check Grafana dashboard `worker-overview` for job failure rate.
-2. Check worker logs: `docker logs apexmail-worker --tail 200`.
-3. Verify Redis queue depth: `redis-cli LLEN bull:email:waiting`.
-4. If workers are crash-looping, restart: `docker compose restart worker`.
-5. If backlog is extreme, scale workers temporarily.
-
-### MTA — Delivery Failures
-
-1. Check MTA logs for bounce codes.
-2. Check IP reputation: MXToolbox, Google Postmaster Tools.
-3. Verify DNS (SPF, DKIM, DMARC): `dig TXT apexmail.dev`.
-4. If IP is blocklisted, see runbook: [Blocklist Removal](./runbooks/README.md).
-5. If deliverability is tanked, pause outbound sending until resolved.
+1. Check tracking service logs: `docker compose logs --tail 200 tracking`.
+2. Verify nginx proxy cache hit rate (should be > 90% for pixel).
+3. Check Redis write throughput (event buffering).
+4. Check Prometheus metrics: `curl http://localhost:9092/metrics | grep latency`.
+5. Restart tracking service if unresponsive: `docker compose restart tracking`.
 
 ### Database — High Connection Count
 
-1. Check PgBouncer stats: `psql -p 6432 -U pgbouncer pgbouncer -c 'SHOW POOLS'`.
+1. Check PgBouncer stats (if using): `psql -p 6432 -U pgbouncer pgbouncer -c 'SHOW POOLS'`.
 2. Check for long-running queries: `SELECT * FROM pg_stat_activity WHERE state = 'active' ORDER BY query_start`.
 3. Kill stuck queries if needed: `SELECT pg_terminate_backend(pid)`.
-4. If PgBouncer is exhausted, increase `max_client_conn` and reload.
+4. If pool exhausted, restart postgres: `docker compose restart postgres`.
 
 ### Infrastructure — Server Unreachable
 
@@ -166,13 +156,6 @@ At rotation boundary (Monday 09:00 UTC):
 3. If server is truly down, use Hetzner console to restart.
 4. If hardware failure, provision replacement Hetzner Cloud ARM server and restore from latest backup.
 5. Update DNS in Zone.ee if IP changes.
-
-### Tracking — High Latency
-
-1. Check tracking service logs: `docker logs apexmail-tracking --tail 200`.
-2. Verify nginx proxy cache hit rate (should be > 90 % for pixel).
-3. Check Redis write throughput (event buffering).
-4. Restart tracking service if unresponsive.
 
 ---
 
@@ -194,4 +177,4 @@ See [operations/runbooks/README.md](./runbooks/README.md) for the complete list 
 
 ---
 
-*Last updated: 2026-02-09*
+*Last updated: 2026-02-23*

@@ -1,6 +1,8 @@
 # Staging Environment Specification
 
 > Internal document — Bel Consulting OÜ
+>
+> **Implementation Note (2026-02):** Staging deploys the Rust tracking service. The api/worker Docker images referenced below are historical; current deployment uses only the `tracking` image.
 
 ## Overview
 
@@ -55,7 +57,7 @@ Staging deploys are triggered automatically on merge to `main`, or manually via 
 
 Every merge to `main` triggers the staging pipeline:
 
-1. Build Docker images (`api`, `worker`, `tracking`).
+1. Build Docker image (`tracking`).
 2. Push to container registry with `staging-<sha>` tag.
 3. SSH into staging server, pull images, run migrations, restart services.
 4. Run integration test suite against staging.

@@ -47,7 +47,8 @@ apx-<role>-<index>
 - Servers are provisioned via the **Hetzner Cloud API** using infrastructure scripts in `tools/`.
 - Base image: Ubuntu 24.04 LTS ARM64.
 - Post-provision configuration is applied via shell scripts (no Ansible/Terraform — kept simple for single-team operation).
-- All servers run Node.js 22 LTS (installed via `fnm`).
+- Backend services run the Rust mail-server binary.
+- Frontend services run Node.js 22 LTS (installed via `fnm`) for Next.js apps.
 
 ---
 

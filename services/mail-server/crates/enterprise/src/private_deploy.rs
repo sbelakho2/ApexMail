@@ -145,6 +145,176 @@ impl PrivateDeployService {
         Ok(ApiResult::ok(row))
     }
 
+    /// Allocate a dedicated IP from the available pool
+    pub async fn allocate_ip_from_pool(
+        &self,
+        tenant_id: Uuid,
+        deployment_id: Option<Uuid>,
+        region: Option<&str>,
+        prefer_warmed: bool,
+    ) -> Result<ApiResult<DedicatedIP>, String> {
+        // Use advisory lock to prevent race conditions
+        let lock_id: i64 = tenant_id.as_u128() as i64 % i64::MAX;
+
+        let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
+
+        // Acquire advisory lock
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Advisory lock: {e}"))?;
+
+        // Find an available IP from the pool, preferring warmed IPs if requested
+        let query = if prefer_warmed {
+            "SELECT id, ip_address, region, datacenter, provider, reputation_score, ptr_record
+             FROM ip_pool_available
+             WHERE status = 'available'
+               AND ($1::text IS NULL OR region = $1)
+             ORDER BY is_warmed DESC, reputation_score DESC
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED"
+        } else {
+            "SELECT id, ip_address, region, datacenter, provider, reputation_score, ptr_record
+             FROM ip_pool_available
+             WHERE status = 'available'
+               AND ($1::text IS NULL OR region = $1)
+             ORDER BY reputation_score DESC
+             LIMIT 1
+             FOR UPDATE SKIP LOCKED"
+        };
+
+        let pool_row: Option<(Uuid, std::net::IpAddr, String, Option<String>, String, f64, Option<String>)> =
+            sqlx::query_as(query)
+            .bind(region)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("Query available pool: {e}"))?;
+
+        let (pool_id, ip_address, ip_region, datacenter, provider, reputation, ptr_record) = match pool_row {
+            Some(row) => row,
+            None => {
+                return Ok(ApiResult::err(
+                    "No available IPs in pool for requested region",
+                    "NO_AVAILABLE_IPS",
+                ));
+            }
+        };
+
+        // Mark the pool IP as allocated
+        sqlx::query(
+            "UPDATE ip_pool_available
+             SET status = 'allocated', allocated_to = $1, allocated_at = NOW(), updated_at = NOW()
+             WHERE id = $2"
+        )
+            .bind(tenant_id)
+            .bind(pool_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Update pool IP: {e}"))?;
+
+        // Create the dedicated IP record for the tenant
+        let id = Uuid::new_v4();
+        let row = sqlx::query_as::<_, DedicatedIP>(
+            "INSERT INTO ent_dedicated_ips (
+                id, tenant_id, deployment_id, ip_address, status,
+                emails_sent_total, bounces_total, complaints_total,
+                blocklisted, reputation_score, region, ptr_record, created_at
+             )
+             VALUES ($1, $2, $3, $4::inet, 'active', 0, 0, 0, false, $5, $6, $7, NOW())
+             RETURNING *"
+        )
+            .bind(id)
+            .bind(tenant_id)
+            .bind(deployment_id)
+            .bind(ip_address.to_string())
+            .bind(reputation)
+            .bind(&ip_region)
+            .bind(&ptr_record)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| format!("Insert dedicated IP: {e}"))?;
+
+        tx.commit().await.map_err(|e| format!("Commit transaction: {e}"))?;
+
+        info!(
+            tenant_id = %tenant_id,
+            ip = %ip_address,
+            region = %ip_region,
+            provider = %provider,
+            pool_id = %pool_id,
+            "Dedicated IP allocated from pool"
+        );
+
+        Ok(ApiResult::ok(row))
+    }
+
+    /// Release a dedicated IP back to the pool
+    pub async fn release_ip_to_pool(&self, tenant_id: Uuid, ip_id: Uuid) -> Result<ApiResult<()>, String> {
+        let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
+
+        // Get the IP address
+        let ip_row: Option<(String,)> = sqlx::query_as(
+            "SELECT ip_address::text FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2"
+        )
+            .bind(ip_id)
+            .bind(tenant_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("Get dedicated IP: {e}"))?;
+
+        let ip_address = match ip_row {
+            Some(row) => row.0,
+            None => {
+                return Ok(ApiResult::err("Dedicated IP not found", "NOT_FOUND"));
+            }
+        };
+
+        // Release in pool
+        sqlx::query(
+            "UPDATE ip_pool_available
+             SET status = 'available', allocated_to = NULL, allocated_at = NULL, updated_at = NOW()
+             WHERE ip_address = $1::inet AND allocated_to = $2"
+        )
+            .bind(&ip_address)
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Update pool IP: {e}"))?;
+
+        // Remove from dedicated IPs
+        sqlx::query("DELETE FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2")
+            .bind(ip_id)
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Delete dedicated IP: {e}"))?;
+
+        tx.commit().await.map_err(|e| format!("Commit transaction: {e}"))?;
+
+        info!(tenant_id = %tenant_id, ip = %ip_address, "Dedicated IP released to pool");
+        Ok(ApiResult::ok(()))
+    }
+
+    /// Get available IP count by region
+    pub async fn get_available_ip_count(&self, region: Option<&str>) -> Result<ApiResult<AvailableIpCount>, String> {
+        let counts: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT region, COUNT(*) as count
+             FROM ip_pool_available
+             WHERE status = 'available' AND ($1::text IS NULL OR region = $1)
+             GROUP BY region"
+        )
+            .bind(region)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|e| format!("Query available count: {e}"))?;
+
+        let total: i64 = counts.iter().map(|(_, c)| c).sum();
+        let by_region: std::collections::HashMap<String, i64> = counts.into_iter().collect();
+
+        Ok(ApiResult::ok(AvailableIpCount { total, by_region }))
+    }
+
     /// Get dedicated IP by ID
     pub async fn get_dedicated_ip(&self, id: Uuid) -> Result<ApiResult<DedicatedIP>, String> {
         let row = sqlx::query_as::<_, DedicatedIP>(

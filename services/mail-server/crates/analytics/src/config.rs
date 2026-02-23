@@ -9,7 +9,7 @@ pub struct AnalyticsConfig {
     pub storage_path: String,
     pub compaction: CompactionConfig,
     pub reconciliation: ReconciliationConfig,
-    pub duckdb: DuckDbConfig,
+    pub clickhouse: ClickHouseConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,10 +28,12 @@ pub struct ReconciliationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DuckDbConfig {
-    pub path: String,
-    pub memory_limit: String,
-    pub threads: u32,
+pub struct ClickHouseConfig {
+    pub url: String,
+    pub database: String,
+    pub user: String,
+    pub password: String,
+    pub max_connections: u32,
     pub query_timeout_secs: u64,
 }
 
@@ -58,12 +60,14 @@ impl Default for ReconciliationConfig {
     }
 }
 
-impl Default for DuckDbConfig {
+impl Default for ClickHouseConfig {
     fn default() -> Self {
         Self {
-            path: "/tmp/apexmail_analytics.duckdb".into(),
-            memory_limit: "32GB".into(),
-            threads: 24,
+            url: "http://localhost:8123".into(),
+            database: "apexmail".into(),
+            user: "default".into(),
+            password: "".into(),
+            max_connections: 20,
             query_timeout_secs: 30,
         }
     }
@@ -77,7 +81,7 @@ impl Default for AnalyticsConfig {
             storage_path: "/var/lib/apexmail/analytics".into(),
             compaction: CompactionConfig::default(),
             reconciliation: ReconciliationConfig::default(),
-            duckdb: DuckDbConfig::default(),
+            clickhouse: ClickHouseConfig::default(),
         }
     }
 }
@@ -110,15 +114,19 @@ impl AnalyticsConfig {
                 ..Default::default()
             },
             reconciliation: ReconciliationConfig::default(),
-            duckdb: DuckDbConfig {
-                path: std::env::var("DUCKDB_PATH")
-                    .unwrap_or_else(|_| "/tmp/apexmail_analytics.duckdb".into()),
-                memory_limit: std::env::var("DUCKDB_MEMORY_LIMIT")
-                    .unwrap_or_else(|_| "32GB".into()),
-                threads: std::env::var("DUCKDB_THREADS")
+            clickhouse: ClickHouseConfig {
+                url: std::env::var("CLICKHOUSE_URL")
+                    .unwrap_or_else(|_| "http://clickhouse:8123".into()),
+                database: std::env::var("CLICKHOUSE_DATABASE")
+                    .unwrap_or_else(|_| "apexmail".into()),
+                user: std::env::var("CLICKHOUSE_USER")
+                    .unwrap_or_else(|_| "default".into()),
+                password: std::env::var("CLICKHOUSE_PASSWORD")
+                    .unwrap_or_default(),
+                max_connections: std::env::var("CLICKHOUSE_MAX_CONNECTIONS")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(24),
+                    .unwrap_or(20),
                 query_timeout_secs: 30,
             },
         }
@@ -135,6 +143,6 @@ mod tests {
         assert_eq!(cfg.compaction.hot_retention_days, 90);
         assert_eq!(cfg.compaction.cold_retention_days, 730);
         assert_eq!(cfg.compaction.batch_size, 100_000);
-        assert_eq!(cfg.duckdb.threads, 24);
+        assert_eq!(cfg.clickhouse.max_connections, 20);
     }
 }

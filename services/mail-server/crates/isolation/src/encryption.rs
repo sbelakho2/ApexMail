@@ -485,13 +485,162 @@ impl EncryptionService {
 
     async fn reencrypt_data(
         &self,
-        _organization_id: &str,
-        _old_key_id: &str,
-        _new_key_id: &str,
+        organization_id: &str,
+        old_key_id: &str,
+        new_key_id: &str,
     ) -> anyhow::Result<()> {
-        // In a real implementation, we would iterate over all encrypted records
-        // and re-encrypt them with the new key. For now, this is a stub.
-        info!("Re-encryption triggered (stub)");
+        info!(
+            org_id = organization_id,
+            old_key = old_key_id,
+            new_key = new_key_id,
+            "Starting re-encryption"
+        );
+
+        // Get old and new keys
+        let old_key = self.get_key_by_id(old_key_id).await?;
+        let new_key = self.get_key_by_id(new_key_id).await?;
+
+        // Decrypt the raw key material for both keys
+        let old_raw = self.decrypt_data_key(&old_key.encrypted_key)?;
+        let new_raw = self.decrypt_data_key(&new_key.encrypted_key)?;
+
+        let old_cipher = Aes256Gcm::new_from_slice(&old_raw)?;
+        let new_cipher = Aes256Gcm::new_from_slice(&new_raw)?;
+
+        // Get all enabled policies to find encrypted resources/fields
+        let policies: Vec<EncryptionPolicy> = self.policies.iter().map(|e| e.value().clone()).collect();
+
+        let mut total_reencrypted = 0u64;
+
+        for policy in policies {
+            // Map resource to table name (convention: iso_<resource>)
+            let table = format!("iso_{}", policy.resource.replace('-', "_"));
+
+            for field in &policy.fields {
+                // Find records where the JSONB field has our old key_id
+                // The encrypted field structure: {"ciphertext":"...", "key_id":"...", "algorithm":"...", "iv":"...", "auth_tag":"..."}
+                let query = format!(
+                    "SELECT id, {field} FROM {table} WHERE organization_id = $1 AND {field}->>'key_id' = $2",
+                    field = field,
+                    table = table
+                );
+
+                let rows: Vec<(String, serde_json::Value)> = match sqlx::query_as(&query)
+                    .bind(organization_id)
+                    .bind(old_key_id)
+                    .fetch_all(&self.db)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Table might not exist or schema mismatch - log and continue
+                        warn!(
+                            table = table,
+                            field = field,
+                            error = %e,
+                            "Skipping re-encryption for field"
+                        );
+                        continue;
+                    }
+                };
+
+                for (record_id, encrypted_value) in rows {
+                    // Parse the encrypted field
+                    let enc_field: EncryptedField = match serde_json::from_value(encrypted_value) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            warn!(record_id = record_id, error = %e, "Failed to parse encrypted field");
+                            continue;
+                        }
+                    };
+
+                    // Decrypt with old key
+                    let iv = match B64.decode(&enc_field.iv) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(record_id = record_id, error = %e, "Failed to decode IV");
+                            continue;
+                        }
+                    };
+                    let auth_tag = match B64.decode(&enc_field.auth_tag) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(record_id = record_id, error = %e, "Failed to decode auth tag");
+                            continue;
+                        }
+                    };
+                    let ciphertext = match B64.decode(&enc_field.ciphertext) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(record_id = record_id, error = %e, "Failed to decode ciphertext");
+                            continue;
+                        }
+                    };
+
+                    // Combine ciphertext + auth_tag for decryption
+                    let mut combined = ciphertext.clone();
+                    combined.extend_from_slice(&auth_tag);
+
+                    let nonce = Nonce::from_slice(&iv);
+                    let plaintext = match old_cipher.decrypt(nonce, combined.as_ref()) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(record_id = record_id, error = %e, "Failed to decrypt field");
+                            continue;
+                        }
+                    };
+
+                    // Re-encrypt with new key
+                    let mut new_iv = [0u8; IV_LENGTH];
+                    rand::thread_rng().fill_bytes(&mut new_iv);
+                    let new_nonce = Nonce::from_slice(&new_iv);
+
+                    let new_ciphertext = match new_cipher.encrypt(new_nonce, plaintext.as_ref()) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(record_id = record_id, error = %e, "Failed to re-encrypt field");
+                            continue;
+                        }
+                    };
+
+                    // Split ciphertext and auth_tag (last 16 bytes is auth tag)
+                    let (new_ct, new_tag) = new_ciphertext.split_at(new_ciphertext.len() - 16);
+
+                    let new_enc_field = EncryptedField {
+                        ciphertext: B64.encode(new_ct),
+                        key_id: new_key_id.to_string(),
+                        algorithm: ALGORITHM.to_string(),
+                        iv: B64.encode(new_iv),
+                        auth_tag: B64.encode(new_tag),
+                    };
+
+                    // Update the record
+                    let update_query = format!(
+                        "UPDATE {table} SET {field} = $1 WHERE id = $2",
+                        table = table,
+                        field = field
+                    );
+
+                    if let Err(e) = sqlx::query(&update_query)
+                        .bind(serde_json::to_value(&new_enc_field)?)
+                        .bind(&record_id)
+                        .execute(&self.db)
+                        .await
+                    {
+                        warn!(record_id = record_id, error = %e, "Failed to update re-encrypted field");
+                        continue;
+                    }
+
+                    total_reencrypted += 1;
+                }
+            }
+        }
+
+        info!(
+            org_id = organization_id,
+            records = total_reencrypted,
+            "Re-encryption completed"
+        );
         Ok(())
     }
 

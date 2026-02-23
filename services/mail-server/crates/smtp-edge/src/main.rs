@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
         max_recipients: 100,
         enable_starttls,
         tls_acceptor,
+        local_domains: vec![],
     });
     
     let listener = TcpListener::bind(&cli.listen).await?;

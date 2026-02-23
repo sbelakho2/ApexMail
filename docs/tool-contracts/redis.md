@@ -17,15 +17,17 @@
 
 ### Pooling
 
-- All services use a shared connection pool via `ioredis` cluster-compatible client.
+> **Note (2026-02):** The Rust tracking service uses `deadpool_redis` for connection pooling. TypeScript apps use `ioredis`.
+
+- Rust services use `deadpool_redis` with async connection pooling.
+- TypeScript/Next.js apps use `ioredis` for Redis operations.
 - **Max connections per service**:
 
 | Service | Connections |
 |---------|------------|
-| API | 20 |
-| Worker | 10 |
-| Tracking | 5 |
-| MTA | 5 |
+| Tracking (Rust) | 16 |
+| Web (Next.js) | 10 |
+| Control Plane | 5 |
 
 - Connections use `lazyConnect: true` — established on first command, not at boot.
 - All connections MUST set a `commandTimeout` of **5 s** and `connectTimeout` of **3 s**.
@@ -179,7 +181,7 @@ Complex multi-step operations MUST use Lua scripts to guarantee atomicity.
 
 ### Rules
 
-1. All Lua scripts live in `packages/lib/src/redis/scripts/`.
+1. Lua scripts for TypeScript apps live in `packages/lib/src/`. Rust services embed scripts directly in code.
 2. Scripts are loaded at startup via `SCRIPT LOAD` and called via `EVALSHA`.
 3. Scripts MUST NOT call `TIME` — pass timestamps as arguments for determinism.
 4. Scripts MUST complete in < **5 ms**. Redis is single-threaded; long scripts block everything.

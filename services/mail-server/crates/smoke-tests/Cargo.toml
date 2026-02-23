@@ -1,0 +1,36 @@
+[package]
+name = "smoke-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# All service crates (library targets only; tracking-service is binary-only)
+apexmail-lib = { path = "../apexmail-lib" }
+apexmail-db = { path = "../apexmail-db" }
+api-server = { path = "../api-server" }
+billing-service = { path = "../billing-service" }
+devex-service = { path = "../devex-service" }
+observability-service = { path = "../observability-service" }
+ops-service = { path = "../ops-service" }
+sales-autopilot = { path = "../sales-autopilot" }
+ai-service = { path = "../ai-service" }
+analytics = { path = "../analytics" }
+compliance = { path = "../compliance" }
+enterprise = { path = "../enterprise" }
+ha = { path = "../ha" }
+isolation = { path = "../isolation" }
+mta = { path = "../mta" }
+edge-cases = { path = "../edge-cases" }
+worker-processors = { path = "../worker-processors" }
+template-renderer = { path = "../template-renderer" }
+ai-embeddings = { path = "../ai-embeddings" }
+pattern-matcher = { path = "../pattern-matcher" }
+apexmail-rate-limiter = { path = "../rate-limiter" }
+apexmail-dns-resolver = { path = "../dns-resolver" }
+queue-provider = { path = "../queue-provider" }
+
+# Test utilities
+tokio = { workspace = true, features = ["full", "test-util"] }
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true

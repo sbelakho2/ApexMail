@@ -347,6 +347,5 @@ Each inbox placement test tracks:
 
 ## Related Documentation
 
-- [Email Authentication](./email-authentication.md)
-- [Deliverability Best Practices](./deliverability.md)
-- [Analytics Module](../architecture/analytics-data-science.md)
+- [Email Authentication](../security/email-authentication.md)
+- [Analytics Endpoints](../api/endpoints/analytics.md)

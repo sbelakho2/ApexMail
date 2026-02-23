@@ -2,9 +2,12 @@
 
 Get ApexMail running locally in under 10 minutes.
 
+> **Note (2026-02):** The backend uses a Rust tracking service. TypeScript is used only for the frontend apps.
+
 ## Prerequisites
 
-- **Node.js** 20.11.0 or later
+- **Node.js** 20.11.0 or later (for frontend apps)
+- **Rust** 1.75+ (for backend service)
 - **pnpm** 8.14.0 or later
 - **Docker** and Docker Compose
 - **Git**
@@ -25,12 +28,12 @@ The bootstrap script sets up the entire development environment:
 ```
 
 This script will:
-1. ✅ Verify prerequisites (Node.js, pnpm, Docker)
+1. ✅ Verify prerequisites (Node.js, pnpm, Docker, Rust)
 2. ✅ Install dependencies
 3. ✅ Start infrastructure services (PostgreSQL, Redis)
 4. ✅ Run database migrations
 5. ✅ Seed development data
-6. ✅ Generate TypeScript types
+6. ✅ Build the Rust tracking service
 
 ## 3. Configure Environment
 
@@ -43,48 +46,52 @@ cp .env.example .env
 Essential configuration:
 
 ```env
-# Database
-DATABASE_URL="postgresql://apexmail:apexmail@localhost:5432/apexmail"
+# PostgreSQL
+POSTGRES_USER=apexmail
+POSTGRES_PASSWORD=your-secure-password
+POSTGRES_DB=apexmail
 
-# Redis
-REDIS_URL="redis://localhost:6379"
+# Redis (optional password)
+REDIS_PASSWORD=
 
-# JWT Secret (generate a secure random string)
-JWT_SECRET="your-secure-jwt-secret-minimum-32-characters"
+# Tracking Service (required - min 32 chars)
+TRACKING_SECRET_KEY=your-secure-tracking-secret-minimum-32-characters
 
-# Encryption Key (32 bytes base64)
-ENCRYPTION_KEY="generate-with-openssl-rand-base64-32"
+# URLs
+TRACKING_BASE_URL=http://localhost:3001
 ```
 
 Generate secure secrets:
 
 ```bash
-# Generate JWT secret
-openssl rand -base64 32
-
-# Generate encryption key
+# Generate tracking secret
 openssl rand -base64 32
 ```
 
-## 4. Start Development Servers
+## 4. Start Services
 
-Start all services in development mode:
+### Start Infrastructure
 
 ```bash
+docker compose up -d
+```
+
+This starts:
+- PostgreSQL (port 5432)
+- Redis (port 6379)
+- Tracking service (port 3001, metrics on 9092)
+- Mailpit (port 8025 - dev SMTP)
+
+### Start Frontend Apps
+
+```bash
+# Start all frontend apps
 pnpm dev
-```
 
-Or start individual services:
-
-```bash
-# API server only
-pnpm --filter @apexmail/api dev
-
-# Web dashboard only
-pnpm --filter @apexmail/web dev
-
-# Worker processes only
-pnpm --filter @apexmail/worker dev
+# Or start individually:
+pnpm --filter @apexmail/web dev         # Dashboard (port 3000)
+pnpm --filter @apexmail/control-plane dev  # Admin (port 4000)
+pnpm --filter @apexmail/marketing dev   # Marketing site (port 4100)
 ```
 
 ## 5. Verify Installation
@@ -93,10 +100,11 @@ Open your browser and navigate to:
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| Dashboard | http://localhost:3000 | Web interface |
-| API | http://localhost:3001 | REST API |
-| API Docs | http://localhost:3001/docs | OpenAPI documentation |
-| Tracking | http://localhost:3002 | Tracking pixel/links |
+| Dashboard | http://localhost:3000 | User web interface |
+| Control Plane | http://localhost:4000 | Admin interface |
+| Tracking Health | http://localhost:3001/health | Backend health check |
+| Mailpit | http://localhost:8025 | Dev email inbox |
+| Prometheus Metrics | http://localhost:9092/metrics | Service metrics |
 
 ### Health Check
 
@@ -107,40 +115,16 @@ curl http://localhost:3001/health
 Expected response:
 ```json
 {
-  "status": "healthy",
-  "version": "1.0.0",
-  "services": {
-    "database": "healthy",
-    "redis": "healthy",
-    "worker": "healthy"
-  }
+  "status": "healthy"
 }
 ```
 
-## 6. Create Test Account
-
-### Via CLI
-
+Readiness check (includes dependencies):
 ```bash
-pnpm cli user:create \
-  --email admin@example.com \
-  --password "SecurePassword123!" \
-  --role admin
+curl http://localhost:3001/ready
 ```
 
-### Via API
-
-```bash
-curl -X POST http://localhost:3001/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "admin@example.com",
-    "password": "SecurePassword123!",
-    "name": "Admin User"
-  }'
-```
-
-## 7. Send Your First Email
+## 6. Send Your First Email
 
 ### Get API Key
 
@@ -164,7 +148,7 @@ curl -X POST http://localhost:3001/v1/messages \
 
 > **Note**: In development mode, emails are captured by Mailpit at http://localhost:8025
 
-## 8. View Development Emails
+## 7. View Development Emails
 
 Open Mailpit to see captured emails:
 
@@ -181,24 +165,28 @@ Mailpit intercepts all outgoing emails in development, allowing you to test with
 ```
 apexmail/
 ├── apps/
-│   ├── api/          # REST API (Hono)
-│   ├── web/          # Dashboard (Next.js)
-│   ├── worker/       # Background jobs (BullMQ)
-│   ├── mta/          # Email server (Postfix)
-│   ├── tracking/     # Open/click tracking
-│   ├── analytics/    # Analytics engine
-│   ├── ai/           # AI inference
-│   ├── compliance/   # Security & GDPR
-│   ├── sales-autopilot/  # CRM
-│   ├── ops/          # Operations/monitoring
-│   └── testing/      # Test infrastructure
+│   ├── billing/          # Billing service
+│   ├── control-plane/    # Admin dashboard (Next.js)
+│   ├── marketing/        # Marketing site (Next.js)
+│   ├── testing/          # Playwright tests
+│   └── web/              # User dashboard (Next.js)
+│
+├── services/
+│   └── mail-server/      # Rust backend
+│       └── crates/
+│           ├── tracking-service/  # Main HTTP server
+│           ├── api-server/        # API routes
+│           └── ...                # 30+ crates
 │
 ├── packages/
-│   ├── db/           # Database layer
-│   └── lib/          # Shared utilities
+│   ├── db/               # Database schema
+│   ├── lib/              # Shared TypeScript utils
+│   ├── sdk-node/         # Node.js SDK
+│   ├── sdk-python/       # Python SDK
+│   └── ...               # More SDKs
 │
-├── docs/             # Documentation
-└── tools/            # Scripts & utilities
+├── docs/                 # Documentation
+└── tools/                # Scripts & utilities
 ```
 
 ---
@@ -207,14 +195,27 @@ apexmail/
 
 | Command | Description |
 |---------|-------------|
-| `pnpm dev` | Start all services in dev mode |
-| `pnpm build` | Build all packages |
-| `pnpm test` | Run all tests |
+| `pnpm dev` | Start all frontend apps in dev mode |
+| `pnpm build` | Build all TypeScript packages |
+| `pnpm test` | Run TypeScript tests |
 | `pnpm lint` | Lint all packages |
 | `pnpm typecheck` | Type check all packages |
-| `pnpm db:migrate` | Run database migrations |
-| `pnpm db:seed` | Seed development data |
-| `pnpm db:studio` | Open Prisma Studio |
+| `docker compose up -d` | Start backend services |
+| `docker compose logs -f tracking` | View tracking service logs |
+
+### Rust Commands
+
+```bash
+# Build tracking service
+cd services/mail-server
+cargo build -p tracking-service
+
+# Run tests
+cargo test -p tracking-service
+
+# Run with debug logging
+RUST_LOG=debug cargo run -p tracking-service
+```
 
 ---
 
@@ -229,6 +230,7 @@ Error: connect ECONNREFUSED 127.0.0.1:5432
 **Solution**: Ensure PostgreSQL is running:
 ```bash
 docker compose up -d postgres
+docker compose logs postgres
 ```
 
 ### Redis Connection Failed
@@ -242,42 +244,29 @@ Error: connect ECONNREFUSED 127.0.0.1:6379
 docker compose up -d redis
 ```
 
+### Tracking Service Won't Start
+
+Check logs:
+```bash
+docker compose logs tracking
+```
+
+Common issues:
+- `TRACKING_SECRET_KEY must be set` - Set in `.env`
+- `POSTGRES_PASSWORD must be set` - Set in `.env`
+
 ### Port Already in Use
 
-```
-Error: listen EADDRINUSE :::3000
-```
-
-**Solution**: Kill the process using the port:
 ```bash
-lsof -ti:3000 | xargs kill -9
-```
+# Find what's using the port
+lsof -ti:3001 | xargs kill -9
 
-Or use a different port:
-```bash
-PORT=3100 pnpm --filter @apexmail/api dev
+# Or restart Docker
+docker compose down && docker compose up -d
 ```
-
-### Migration Failed
-
-```
-Error: P3009 migrate found failed migrations
-```
-
-**Solution**: Reset the database:
-```bash
-pnpm db:reset
-```
-
-> ⚠️ This will delete all data!
 
 ### Dependencies Out of Sync
 
-```
-Error: Cannot find module '@apexmail/lib'
-```
-
-**Solution**: Rebuild dependencies:
 ```bash
 pnpm install
 pnpm build
@@ -287,16 +276,16 @@ pnpm build
 
 ## Next Steps
 
-1. **Verify Domain**: [Domain Verification Guide](./configuration.md#domain-verification)
-2. **Configure SMTP**: [SMTP Setup Guide](./configuration.md#smtp-configuration)
-3. **Set Up Webhooks**: [Webhook Configuration](../api/webhooks.md)
-4. **Deploy to Production**: [Docker Deployment](./docker.md)
+1. **Verify Domain**: [Domain Configuration](./configuration.md)
+2. **Set Up Webhooks**: [Webhook Configuration](../api/webhooks.md)
+3. **Explore the API**: [API Documentation](../api/sdk-reference.md)
+4. **Production Deployment**: Use `docker-compose.prod.yml`
 
 ---
 
 ## Getting Help
 
 - 📖 [Full Documentation](../README.md)
-- 💬 [GitHub Discussions](https://github.com/Bel-Consulting-OU/ApexMail/discussions)
-- 🐛 [Issue Tracker](https://github.com/Bel-Consulting-OU/ApexMail/issues)
+- 💬 [GitHub Discussions](https://github.com/sbelakho2/ApexMail/discussions)
+- 🐛 [Issue Tracker](https://github.com/sbelakho2/ApexMail/issues)
 - 📧 [Email Support](mailto:support@apexmail.ee)

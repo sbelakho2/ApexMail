@@ -206,22 +206,29 @@ impl SubAccountService {
     }
 
     /// Check volume allocation for a sub-account
-    pub fn check_volume_allowed(&self, volume_used: i64, volume_limit: Option<i64>, _parent_headroom: i64) -> bool {
-        match &self.volume_allocation_mode {
-            VolumeAllocationMode::Fixed => {
-                volume_limit.map(|l| volume_used < l).unwrap_or(true)
-            }
-            VolumeAllocationMode::Shared => {
-                // Shared mode: no hard per-account limit
-                true
-            }
-            VolumeAllocationMode::Burst => {
-                // Burst mode: allow up to 120% of limit if parent has headroom
-                volume_limit.map(|l| {
-                    let burst_limit = (l as f64 * 1.2) as i64;
-                    volume_used < burst_limit
-                }).unwrap_or(true)
-            }
+    pub fn check_volume_allowed(&self, volume_used: i64, volume_limit: Option<i64>, parent_headroom: i64) -> bool {
+        check_volume_logic(&self.volume_allocation_mode, volume_used, volume_limit, parent_headroom)
+    }
+}
+
+/// Pure function: volume check logic (extracted for testability)
+pub fn check_volume_logic(
+    mode: &VolumeAllocationMode, volume_used: i64, volume_limit: Option<i64>, _parent_headroom: i64,
+) -> bool {
+    match mode {
+        VolumeAllocationMode::Fixed => {
+            volume_limit.map(|l| volume_used < l).unwrap_or(true)
+        }
+        VolumeAllocationMode::Shared => {
+            // Shared mode: no hard per-account limit
+            true
+        }
+        VolumeAllocationMode::Burst => {
+            // Burst mode: allow up to 120% of limit if parent has headroom
+            volume_limit.map(|l| {
+                let burst_limit = (l as f64 * 1.2) as i64;
+                volume_used < burst_limit
+            }).unwrap_or(true)
         }
     }
 }
@@ -238,12 +245,12 @@ pub fn sha256_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_sha256_hex() {
         let hash = sha256_hex("test");
         assert_eq!(hash.len(), 64);
-        // Known SHA-256 of "test"
         assert_eq!(hash, "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08");
     }
 
@@ -254,64 +261,32 @@ mod tests {
 
     #[test]
     fn test_volume_fixed_under_limit() {
-        let svc = SubAccountService {
-            db: unsafe { std::mem::zeroed() }, // not used in this test
-            max_sub_accounts: 100,
-            volume_allocation_mode: VolumeAllocationMode::Fixed,
-        };
-        assert!(svc.check_volume_allowed(500, Some(1000), 0));
+        assert!(check_volume_logic(&VolumeAllocationMode::Fixed, 500, Some(1000), 0));
     }
 
     #[test]
     fn test_volume_fixed_over_limit() {
-        let svc = SubAccountService {
-            db: unsafe { std::mem::zeroed() },
-            max_sub_accounts: 100,
-            volume_allocation_mode: VolumeAllocationMode::Fixed,
-        };
-        assert!(!svc.check_volume_allowed(1000, Some(1000), 0));
+        assert!(!check_volume_logic(&VolumeAllocationMode::Fixed, 1000, Some(1000), 0));
     }
 
     #[test]
     fn test_volume_shared_always_allowed() {
-        let svc = SubAccountService {
-            db: unsafe { std::mem::zeroed() },
-            max_sub_accounts: 100,
-            volume_allocation_mode: VolumeAllocationMode::Shared,
-        };
-        assert!(svc.check_volume_allowed(999999, Some(100), 0));
+        assert!(check_volume_logic(&VolumeAllocationMode::Shared, 999999, Some(100), 0));
     }
 
     #[test]
     fn test_volume_burst_within_120_percent() {
-        let svc = SubAccountService {
-            db: unsafe { std::mem::zeroed() },
-            max_sub_accounts: 100,
-            volume_allocation_mode: VolumeAllocationMode::Burst,
-        };
-        // 1100 < 1200 (120% of 1000)
-        assert!(svc.check_volume_allowed(1100, Some(1000), 5000));
+        assert!(check_volume_logic(&VolumeAllocationMode::Burst, 1100, Some(1000), 5000));
     }
 
     #[test]
     fn test_volume_burst_over_120_percent() {
-        let svc = SubAccountService {
-            db: unsafe { std::mem::zeroed() },
-            max_sub_accounts: 100,
-            volume_allocation_mode: VolumeAllocationMode::Burst,
-        };
-        // 1200 >= 1200 (120% of 1000)
-        assert!(!svc.check_volume_allowed(1200, Some(1000), 5000));
+        assert!(!check_volume_logic(&VolumeAllocationMode::Burst, 1200, Some(1000), 5000));
     }
 
     #[test]
     fn test_volume_no_limit() {
-        let svc = SubAccountService {
-            db: unsafe { std::mem::zeroed() },
-            max_sub_accounts: 100,
-            volume_allocation_mode: VolumeAllocationMode::Fixed,
-        };
-        assert!(svc.check_volume_allowed(999999, None, 0));
+        assert!(check_volume_logic(&VolumeAllocationMode::Fixed, 999999, None, 0));
     }
 
     #[test]

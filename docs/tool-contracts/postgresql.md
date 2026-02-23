@@ -61,7 +61,7 @@ CREATE POLICY tenant_isolation ON emails
 1. The application MUST call `SET LOCAL app.current_tenant_id = '<uuid>'` inside every transaction before querying tenant data.
 2. Superuser / migration connections bypass RLS — these connections are NEVER exposed to application code.
 3. Every new table with a `tenant_id` column MUST have an RLS policy added in the same migration.
-4. CI runs a lint step (`tools/verify-rls.ts`) that fails if any tenant-scoped table lacks RLS.
+4. CI verifies that tenant-scoped tables have appropriate RLS policies.
 
 ---
 
@@ -75,7 +75,7 @@ CREATE POLICY tenant_isolation ON emails
 4. Destructive operations (drop column, drop table) require a **two-phase migration**:
    - Phase 1: stop writing to the column, deploy.
    - Phase 2 (next release): drop the column.
-5. Migrations run via `tools/migrate/run.ts` which wraps each file in a transaction (unless `-- no-transaction` pragma is present, required for `CREATE INDEX CONCURRENTLY`).
+5. Migrations run via `tools/migrate/index.ts` which wraps each file in a transaction (unless `-- no-transaction` pragma is present, required for `CREATE INDEX CONCURRENTLY`).
 6. Migration lock: an advisory lock (`pg_advisory_lock(42)`) prevents concurrent migration runs.
 
 ### Schema Conventions

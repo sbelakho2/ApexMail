@@ -28,10 +28,9 @@ Every stage is gated on the following thresholds, measured over a rolling 5-minu
 | Metric | Threshold | Source |
 |--------|-----------|--------|
 | HTTP error rate (5xx) | < 0.1 % | Prometheus (`http_requests_total`) |
-| API latency p95 | < 200 ms | Prometheus (`http_request_duration_seconds`) |
-| API latency p99 | < 500 ms | Prometheus |
-| Worker error rate | < 0.05 % | Prometheus (`worker_job_failures_total`) |
-| Queue processing latency | < 10 s | Prometheus (`queue_processing_duration_seconds`) |
+| Tracking latency p95 | < 200 ms | Prometheus (`http_request_duration_seconds`) |
+| Tracking latency p99 | < 500 ms | Prometheus |
+| Tracking error rate | < 0.05 % | Prometheus (`tracking_errors_total`) |
 | PostgreSQL active connections | < 80 % of pool | PgBouncer metrics |
 | Redis memory usage | < 80 % of max | Redis `INFO memory` |
 
@@ -45,8 +44,8 @@ Immediate, automated rollback to the previous stable version occurs when:
 
 1. **Error rate** exceeds 0.5 % for 2 consecutive minutes at any stage.
 2. **Latency p99** exceeds 2 000 ms for 3 consecutive minutes.
-3. **Health endpoint** (`/healthz`) returns non-200 for 1 minute.
-4. **Worker crash loop** — more than 3 restarts within 5 minutes.
+3. **Health endpoint** (`/health`) returns non-200 for 1 minute.
+4. **Tracking container crash loop** — more than 3 restarts within 5 minutes.
 5. **Database connection failures** — any stage reporting connection pool exhaustion.
 
 Rollback is executed by updating the reverse proxy config to route 100 % to stable and rolling back canary Docker containers.
@@ -144,7 +143,7 @@ Panels compare canary vs stable side-by-side:
 - Request rate per upstream
 - Error rate per upstream
 - Latency percentiles per upstream
-- Worker job success rate per container
+- Tracking event throughput per container
 - Database query duration per container
 
 ### Prometheus Labels
@@ -172,7 +171,6 @@ sum(rate(apexmail_http_requests_total{deployment="canary"}[5m]))
 
 ## Related Documents
 
-- [Release Checklist](./release-checklist.md) — pre-deployment validation
 - [Load Testing](./load-testing.md) — performance baselines
 - [On-Call](../operations/on-call.md) — escalation during canary issues
-- [Scaling](../operations/scaling.md) — multi-server canary deployments
+- [Monitoring](../operations/monitoring.md) — metrics and alerting

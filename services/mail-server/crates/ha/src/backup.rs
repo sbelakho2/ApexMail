@@ -82,10 +82,20 @@ impl BackupService {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
 
         for table in &target_tables {
+            // Write table start marker
+            let start_marker = format!("--TABLE:{}:START--\n", table);
+            encoder.write_all(start_marker.as_bytes()).map_err(|e| format!("Write marker: {e}"))?;
+            hasher.update(start_marker.as_bytes());
+
             let data = self.stream_table(table).await?;
             hasher.update(&data);
             encoder.write_all(&data).map_err(|e| format!("Gzip write: {e}"))?;
             total_size += data.len() as i64;
+
+            // Write table end marker
+            let end_marker = format!("--TABLE:{}:END--\n", table);
+            encoder.write_all(end_marker.as_bytes()).map_err(|e| format!("Write marker: {e}"))?;
+            hasher.update(end_marker.as_bytes());
         }
 
         let compressed = encoder.finish().map_err(|e| format!("Gzip finish: {e}"))?;
@@ -210,11 +220,38 @@ impl BackupService {
 
         let started = Utc::now();
 
-        // Simulate restore (actual restore would download from S3 and import)
+        // Download backup from S3
+        let location = backup.location.clone().ok_or("Backup location not set")?;
+        let compressed_data = self.download_from_storage(&location).await?;
+
+        // Decompress the backup data
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut decoder = GzDecoder::new(&compressed_data[..]);
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)
+            .map_err(|e| format!("Decompress failed: {e}"))?;
+
+        // Verify checksum
+        if let Some(expected_checksum) = &backup.checksum {
+            let mut hasher = Sha256::new();
+            hasher.update(&decompressed);
+            let actual_checksum = format!("{:x}", hasher.finalize());
+            if &actual_checksum != expected_checksum {
+                return Err(format!("Checksum mismatch: expected {}, got {}",
+                    expected_checksum, actual_checksum));
+            }
+        }
+
+        // Parse and restore each table
         let tables = backup.tables_included.clone().unwrap_or_default();
+        for table in &tables {
+            self.restore_table(table, &decompressed).await?;
+        }
+
         let duration_ms = (Utc::now() - started).num_milliseconds();
 
-        // Post-restore verification (4 checks)
+        // Post-restore verification
         let verification = self.verify_restore(&tables).await?;
 
         Ok(RestoreResult {
@@ -225,6 +262,119 @@ impl BackupService {
             verification: Some(verification),
             message: Some("Restore completed".into()),
         })
+    }
+
+    /// Download backup data from S3/storage
+    async fn download_from_storage(&self, location: &str) -> Result<Vec<u8>, String> {
+        // Parse S3 URI: s3://bucket/path/to/file.gz
+        if let Some(path) = location.strip_prefix("s3://") {
+            let parts: Vec<&str> = path.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return Err(format!("Invalid S3 location: {}", location));
+            }
+            let bucket = parts[0];
+            let key = parts[1];
+
+            // Use AWS SDK or object_store crate
+            // For now, check if it's a local file fallback
+            let local_path = format!("/tmp/apexmail-backups/{}", key.replace('/', "_"));
+            if std::path::Path::new(&local_path).exists() {
+                return tokio::fs::read(&local_path).await
+                    .map_err(|e| format!("Read local backup: {e}"));
+            }
+
+            // Real S3 download using reqwest with presigned URL or aws-sdk
+            let s3_endpoint = std::env::var("S3_ENDPOINT")
+                .unwrap_or_else(|_| format!("https://{}.s3.amazonaws.com", bucket));
+            let url = format!("{}/{}", s3_endpoint, key);
+
+            let response = reqwest::get(&url).await
+                .map_err(|e| format!("S3 download failed: {e}"))?;
+
+            if !response.status().is_success() {
+                return Err(format!("S3 download returned status: {}", response.status()));
+            }
+
+            response.bytes().await
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("Read S3 response: {e}"))
+        } else if let Some(path) = location.strip_prefix("file://") {
+            // Local file for testing
+            tokio::fs::read(path).await
+                .map_err(|e| format!("Read local file: {e}"))
+        } else {
+            Err(format!("Unknown storage location scheme: {}", location))
+        }
+    }
+
+    /// Restore a single table from backup data
+    async fn restore_table(&self, table: &str, data: &[u8]) -> Result<(), String> {
+        // Parse the backup format: table data is JSONL with table markers
+        let content = String::from_utf8_lossy(data);
+
+        // Find this table's section in the backup
+        let marker_start = format!("--TABLE:{}:START--", table);
+        let marker_end = format!("--TABLE:{}:END--", table);
+
+        let start_idx = content.find(&marker_start)
+            .ok_or_else(|| format!("Table {} not found in backup", table))?;
+        let end_idx = content.find(&marker_end)
+            .ok_or_else(|| format!("Table {} end marker not found", table))?;
+
+        let table_data = &content[start_idx + marker_start.len()..end_idx];
+
+        // Begin transaction for this table's restore
+        let mut tx = self.pool.begin().await
+            .map_err(|e| format!("Begin transaction: {e}"))?;
+
+        // Truncate existing data if requested
+        let truncate_sql = format!("TRUNCATE TABLE {} CASCADE", table);
+        sqlx::query(&truncate_sql)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Truncate {}: {e}", table))?;
+
+        // Insert each row
+        let mut row_count = 0;
+        for line in table_data.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Parse JSONL row and generate INSERT
+            if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(obj) = row.as_object() {
+                    let columns: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+                    let placeholders: Vec<String> = (1..=columns.len())
+                        .map(|i| format!("${}", i))
+                        .collect();
+
+                    let insert_sql = format!(
+                        "INSERT INTO {} ({}) VALUES ({})",
+                        table,
+                        columns.join(", "),
+                        placeholders.join(", ")
+                    );
+
+                    let mut query = sqlx::query(&insert_sql);
+                    for col in &columns {
+                        let val = &obj[*col];
+                        query = query.bind(val.to_string());
+                    }
+
+                    query.execute(&mut *tx).await
+                        .map_err(|e| format!("Insert into {}: {e}", table))?;
+                    row_count += 1;
+                }
+            }
+        }
+
+        tx.commit().await
+            .map_err(|e| format!("Commit restore: {e}"))?;
+
+        info!(table = %table, rows = row_count, "Table restored");
+        Ok(())
     }
 
     /// Point in time recovery.

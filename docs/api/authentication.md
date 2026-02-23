@@ -186,8 +186,6 @@ Response:
   "success": true,
   "message": "Logged out successfully"
 }
-```"
-}
 ```
 
 ### Security Features

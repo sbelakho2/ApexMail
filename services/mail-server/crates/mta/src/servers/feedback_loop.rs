@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use dashmap::DashMap;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
@@ -393,7 +395,8 @@ impl FeedbackLoopServer {
                         complaints = complaints,
                         "High complaint rate detected"
                     );
-                    // TODO: trigger alert webhook
+                    // Trigger alert webhook
+                    self.trigger_alert_webhook(domain, rate, sent, complaints).await;
                 }
             }
         }
@@ -410,6 +413,96 @@ impl FeedbackLoopServer {
         .await?;
 
         Ok(())
+    }
+
+    /// Trigger alert webhooks for high complaint rate
+    async fn trigger_alert_webhook(&self, domain: &str, rate: f64, sent: i64, complaints: i64) {
+        // Query all active webhooks for this type of alert
+        let webhooks: Vec<(Uuid, String, String)> = match sqlx::query_as(
+            "SELECT id, url, secret FROM alert_webhooks
+             WHERE enabled = true AND alert_types @> $1::jsonb"
+        )
+            .bind(serde_json::json!(["complaint_rate"]))
+            .fetch_all(&self.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(error = %e, "Failed to query alert webhooks");
+                return;
+            }
+        };
+
+        if webhooks.is_empty() {
+            return;
+        }
+
+        let payload = serde_json::json!({
+            "alert_type": "complaint_rate",
+            "severity": if rate > 0.005 { "critical" } else { "warning" },
+            "domain": domain,
+            "complaint_rate": rate,
+            "sent_count": sent,
+            "complaint_count": complaints,
+            "threshold": 0.001,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        for (webhook_id, url, secret) in webhooks {
+            // Compute HMAC signature
+            type HmacSha256 = Hmac<Sha256>;
+            let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+            let signature = if !secret.is_empty() {
+                let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+                mac.update(payload_str.as_bytes());
+                let result = mac.finalize();
+                hex::encode(result.into_bytes())
+            } else {
+                String::new()
+            };
+
+            let response = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("X-ApexMail-Signature", &signature)
+                .header("X-ApexMail-Event", "complaint_rate_alert")
+                .body(payload_str.clone())
+                .send()
+                .await;
+
+            // Record delivery attempt
+            let (success, status_code, error_msg) = match response {
+                Ok(resp) => {
+                    let status = resp.status().as_u16() as i32;
+                    let success = resp.status().is_success();
+                    (success, Some(status), None)
+                }
+                Err(e) => (false, None, Some(e.to_string())),
+            };
+
+            let _ = sqlx::query(
+                "INSERT INTO alert_webhook_deliveries (webhook_id, alert_type, payload, success, status_code, error_message, delivered_at)
+                 VALUES ($1, 'complaint_rate', $2, $3, $4, $5, NOW())"
+            )
+                .bind(webhook_id)
+                .bind(&payload)
+                .bind(success)
+                .bind(status_code)
+                .bind(error_msg)
+                .execute(&self.pool)
+                .await;
+
+            if success {
+                debug!(webhook_id = %webhook_id, url = %url, "Alert webhook delivered");
+            } else {
+                warn!(webhook_id = %webhook_id, url = %url, "Alert webhook delivery failed");
+            }
+        }
     }
 }
 

@@ -1,0 +1,191 @@
+//! Low-level DNS lookup utilities.
+//!
+//! Wraps trust-dns-resolver queries and converts them to our record types.
+
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::TokioAsyncResolver;
+
+use crate::config::DnsConfig;
+use crate::records::*;
+
+/// DNS lookup error.
+#[derive(Debug, thiserror::Error)]
+pub enum DnsError {
+    #[error("DNS resolution failed: {0}")]
+    ResolveFailed(String),
+    #[error("No records found for {0}")]
+    NoRecords(String),
+    #[error("Timeout resolving {0}")]
+    Timeout(String),
+    #[error("Invalid domain: {0}")]
+    InvalidDomain(String),
+}
+
+/// Thin wrapper around trust-dns-resolver for email-specific lookups.
+pub struct DnsLookup {
+    resolver: TokioAsyncResolver,
+}
+
+impl DnsLookup {
+    /// Create a new resolver with system defaults.
+    pub fn new() -> Result<Self, DnsError> {
+        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        Ok(Self { resolver })
+    }
+
+    /// Create from config (custom nameservers not yet wired, uses defaults).
+    pub fn from_config(config: &DnsConfig) -> Result<Self, DnsError> {
+        let mut opts = ResolverOpts::default();
+        opts.timeout = config.query_timeout();
+        opts.attempts = config.retries as usize;
+        opts.use_hosts_file = false;
+
+        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), opts);
+        Ok(Self { resolver })
+    }
+
+    /// Lookup MX records for a domain.
+    pub async fn lookup_mx(&self, domain: &str) -> Result<Vec<MxRecord>, DnsError> {
+        let response = self
+            .resolver
+            .mx_lookup(domain)
+            .await
+            .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
+
+        let mut records: Vec<MxRecord> = response
+            .iter()
+            .map(|mx| MxRecord::new(mx.preference(), mx.exchange().to_string()))
+            .collect();
+
+        records.sort();
+        Ok(records)
+    }
+
+    /// Lookup TXT records for a domain.
+    pub async fn lookup_txt(&self, domain: &str) -> Result<Vec<String>, DnsError> {
+        let response = self
+            .resolver
+            .txt_lookup(domain)
+            .await
+            .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
+
+        let texts: Vec<String> = response
+            .iter()
+            .map(|txt| {
+                txt.txt_data()
+                    .iter()
+                    .map(|d| String::from_utf8_lossy(d).to_string())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect();
+
+        Ok(texts)
+    }
+
+    /// Lookup SPF record for a domain.
+    pub async fn lookup_spf(&self, domain: &str) -> Result<Option<SpfRecord>, DnsError> {
+        let txts = self.lookup_txt(domain).await?;
+        Ok(txts.iter().find_map(|txt| SpfRecord::parse(txt)))
+    }
+
+    /// Lookup DKIM record for a selector._domainkey.domain.
+    pub async fn lookup_dkim(
+        &self,
+        selector: &str,
+        domain: &str,
+    ) -> Result<Option<DkimRecord>, DnsError> {
+        let query = format!("{selector}._domainkey.{domain}");
+        let txts = self.lookup_txt(&query).await?;
+        Ok(txts.iter().find_map(|txt| DkimRecord::parse(txt)))
+    }
+
+    /// Lookup DMARC record for _dmarc.domain.
+    pub async fn lookup_dmarc(&self, domain: &str) -> Result<Option<DmarcPolicy>, DnsError> {
+        let query = format!("_dmarc.{domain}");
+        let txts = self.lookup_txt(&query).await?;
+        Ok(txts.iter().find_map(|txt| DmarcPolicy::parse(txt)))
+    }
+
+    /// Lookup A records.
+    pub async fn lookup_a(&self, domain: &str) -> Result<Vec<String>, DnsError> {
+        let response = self
+            .resolver
+            .ipv4_lookup(domain)
+            .await
+            .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
+
+        Ok(response.iter().map(|ip| ip.to_string()).collect())
+    }
+
+    /// Lookup AAAA records.
+    pub async fn lookup_aaaa(&self, domain: &str) -> Result<Vec<String>, DnsError> {
+        let response = self
+            .resolver
+            .ipv6_lookup(domain)
+            .await
+            .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
+
+        Ok(response.iter().map(|ip| ip.to_string()).collect())
+    }
+
+    /// Reverse DNS lookup.
+    pub async fn reverse_lookup(&self, ip: std::net::IpAddr) -> Result<Vec<String>, DnsError> {
+        let response = self
+            .resolver
+            .reverse_lookup(ip)
+            .await
+            .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
+
+        Ok(response.iter().map(|name| name.to_string()).collect())
+    }
+
+    /// Validate that a domain has MX or A records (can receive email).
+    pub async fn can_receive_email(&self, domain: &str) -> Result<bool, DnsError> {
+        // Check MX first
+        if let Ok(mx) = self.lookup_mx(domain).await {
+            if !mx.is_empty() {
+                return Ok(true);
+            }
+        }
+        // Fall back to A record (implicit MX per RFC 5321)
+        if let Ok(a) = self.lookup_a(domain).await {
+            if !a.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // DNS lookups require network; we test construction and error handling.
+
+    #[test]
+    fn test_dns_lookup_creation() {
+        let lookup = DnsLookup::new();
+        assert!(lookup.is_ok());
+    }
+
+    #[test]
+    fn test_dns_lookup_from_config() {
+        let config = DnsConfig::default();
+        let lookup = DnsLookup::from_config(&config);
+        assert!(lookup.is_ok());
+    }
+
+    #[test]
+    fn test_dns_error_display() {
+        let e = DnsError::NoRecords("example.com".into());
+        assert_eq!(e.to_string(), "No records found for example.com");
+    }
+
+    #[test]
+    fn test_dns_error_timeout() {
+        let e = DnsError::Timeout("slow.example.com".into());
+        assert!(e.to_string().contains("Timeout"));
+    }
+}

@@ -1,0 +1,53 @@
+[package]
+name = "template-renderer"
+description = "React-like email template rendering with sandboxed execution"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "template-renderer"
+path = "src/bin/server.rs"
+
+[dependencies]
+# Async
+tokio = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+
+# Utils
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Config
+clap = { workspace = true }
+config = { workspace = true }
+dotenvy = { workspace = true }
+
+# Template-specific
+regex = { workspace = true }
+aho-corasick = { workspace = true }
+moka = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

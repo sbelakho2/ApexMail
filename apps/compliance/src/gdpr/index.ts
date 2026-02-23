@@ -1,1 +1,0 @@
-export { GDPRAutomation } from './automation';

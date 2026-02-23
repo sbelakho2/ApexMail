@@ -3,6 +3,8 @@
 ## Status
 Accepted
 
+> **Implementation Note (2026-02):** PostgreSQL is the primary OLTP database. ClickHouse is deployed as the OLAP engine for enterprise-scale analytics (`services/mail-server/crates/analytics/src/clickhouse_engine.rs`). ClickHouse runs as a separate Docker container with MergeTree tables partitioned by month, supporting billions of events with sub-second queries. Connection pooling for PostgreSQL is handled by the Rust tracking service using `deadpool-postgres`.
+
 ## Date
 2024-01-15
 
@@ -23,9 +25,11 @@ We chose **PostgreSQL 15+** as the primary database with the following architect
 - Connection pooling via PgBouncer (transaction mode)
 - Native partitioning for event logs
 
-### Analytics Layer (ClickHouse/DuckDB)
-- OLAP workloads: aggregations, reporting
-- Sync via Change Data Capture (CDC)
+### Analytics Layer (ClickHouse)
+- OLAP workloads: aggregations, reporting, dashboards
+- MergeTree tables with monthly partitioning
+- Materialized views for automatic rollups
+- 730-day TTL with columnar compression
 - Sub-second queries on billions of rows
 
 ### Connection Configuration

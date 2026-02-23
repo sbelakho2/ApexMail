@@ -19,6 +19,7 @@ async-trait.workspace = true
 
 # Database
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
+clickhouse = { version = "0.12", features = ["lz4"] }
 
 # Redis
 deadpool-redis.workspace = true

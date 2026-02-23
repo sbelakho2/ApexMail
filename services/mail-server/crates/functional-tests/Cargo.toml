@@ -1,0 +1,28 @@
+[package]
+name = "functional-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Library crate (no binary) — all logic lives in integration test files.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+# Service crates under test
+apexmail-lib       = { path = "../apexmail-lib" }
+billing-service    = { path = "../billing-service" }
+ai-service         = { path = "../ai-service" }
+sales-autopilot    = { path = "../sales-autopilot" }
+compliance         = { path = "../compliance" }
+pattern-matcher    = { path = "../pattern-matcher" }
+apexmail-rate-limiter = { path = "../rate-limiter" }
+template-renderer  = { path = "../template-renderer" }
+
+# Utilities used in tests
+tokio      = { workspace = true, features = ["test-util", "macros"] }
+serde_json = { workspace = true }
+chrono     = { workspace = true }
+uuid       = { workspace = true }

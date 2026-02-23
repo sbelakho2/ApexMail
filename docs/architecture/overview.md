@@ -1,96 +1,105 @@
 # Architecture Overview
 
+> **Implementation Note (2026-02):** The backend services have been consolidated into a single Rust mail-server binary. This document reflects the current production architecture.
+
 ## System Architecture
 
-ApexMail is built as a modular monorepo with clear service boundaries:
+ApexMail uses a hybrid architecture with TypeScript frontends and a Rust backend service:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
 │                              Load Balancer                              │
-│                         (nginx reverse proxy)                     │
-└────────────────────────────────┬───────────────────────────────────────┘
+│                         (nginx reverse proxy)                           │
+└────────────────────────────────────────────────────────────────────────┘
                                  │
          ┌───────────────────────┼───────────────────────┐
          │                       │                       │
          ▼                       ▼                       ▼
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Web App       │    │   API Service   │    │ Tracking Service│
-│   (Next.js 14)  │    │   (Hono)        │    │   (Hono)        │
-│   Port: 3000    │    │   Port: 3001    │    │   Port: 3002    │
-└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
-         │                      │                      │
-         └──────────────────────┴──────────────────────┘
+│   Web App       │    │ Control Plane   │    │    Marketing    │
+│   (Next.js 14)  │    │   (Next.js)     │    │   (Next.js)     │
+│   Port: 3000    │    │   Port: 4000    │    │   Port: 4100    │
+└────────┬────────┘    └────────┬────────┘    └─────────────────┘
+         │                      │
+         └──────────────────────┘
                                 │
-         ┌──────────────────────┼──────────────────────┐
-         │                      │                      │
-         ▼                      ▼                      ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   PostgreSQL    │    │     Redis       │    │   Workers       │
-│   (Primary DB)  │    │  (Cache/Queue)  │    │   (BullMQ)      │
-└─────────────────┘    └─────────────────┘    └────────┬────────┘
-                                                       │
-                                                       ▼
-                                              ┌─────────────────┐
-                                              │  Postfix MTA    │
-                                              │  (Email Sending)│
-                                              └─────────────────┘
+                                ▼
+                  ┌─────────────────────────┐
+                  │   Tracking Service      │
+                  │   (Rust/Axum)           │
+                  │   Port: 3001            │
+                  │   Metrics: 9092         │
+                  └────────────┬────────────┘
+                               │
+     ┌───────────────┬─────────┴─────────┬───────────────┐
+     │               │                   │               │
+     ▼               ▼                   ▼               ▼
+┌─────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────┐
+│PostgreSQL│   │ ClickHouse  │   │    Redis    │   │ Mailpit │
+│ (OLTP)  │   │   (OLAP)    │   │   (Cache)   │   │(DevSMTP)│
+└─────────┘   └─────────────┘   └─────────────┘   └─────────┘
 ```
 
 ## Service Breakdown
 
-### Frontend Services
+### Frontend Services (TypeScript/Next.js)
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
-| Web | 3000 | Next.js 14 | Dashboard, UI |
-| API | 3001 | Hono | REST API |
-| Tracking | 3002 | Hono | Open/click tracking |
+| Web | 3000 | Next.js 14 | User dashboard |
+| Control Plane | 4000 | Next.js 14 | Admin interface |
+| Marketing | 4100 | Next.js 14 | Marketing site |
 
-### Backend Services
+### Backend Services (Rust)
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
-| Worker | - | BullMQ | Background jobs |
-| Analytics | 3010 | ClickHouse | OLAP queries |
-| AI | 3012 | ONNX Runtime | ML inference |
-| Compliance | 3013 | Hono | Security/GDPR |
-| Sales Autopilot | 3014 | Hono | CRM |
-| Ops | 9090 | Hono | Monitoring/SLOs |
+| Tracking | 3001 | Rust/Axum | API, tracking, webhooks |
+| Metrics | 9092 | Prometheus | Observability |
 
-### Infrastructure
+### Infrastructure (Docker)
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| Database | PostgreSQL 15+ | Primary data store |
-| Cache | Redis 7+ | Caching, queues |
-| MTA | Postfix | Email delivery |
-| Search | DuckDB | Analytics queries |
+| Database | PostgreSQL 16 | Primary OLTP data store |
+| Analytics | ClickHouse 24.8 | OLAP analytics (billions of events) |
+| Cache | Redis 7 | Caching, rate limiting |
+| SMTP (dev) | Mailpit | Local email testing |
 
 ## Monorepo Structure
 
 ```
 apexmail/
 ├── apps/
-│   ├── api/                 # REST API service
-│   ├── web/                 # Next.js frontend
-│   ├── worker/              # Background job processor
-│   ├── mta/                 # Postfix configuration
-│   ├── tracking/            # Open/click tracking
-│   ├── analytics/           # Analytics engine
-│   ├── ai/                  # AI inference service
-│   ├── compliance/          # Security & GDPR
-│   ├── sales-autopilot/     # CRM module
-│   ├── ops/                 # Operations & monitoring
-│   └── testing/             # Test infrastructure
+│   ├── billing/             # Billing service
+│   ├── control-plane/       # Admin Next.js app
+│   ├── marketing/           # Marketing site
+│   ├── testing/             # Playwright tests
+│   └── web/                 # User dashboard
+│
+├── services/
+│   └── mail-server/         # Rust mail server
+│       └── crates/
+│           ├── tracking-service/   # Main HTTP server
+│           ├── api-server/         # REST API routes
+│           ├── analytics/          # Analytics engine
+│           ├── mta/                # SMTP handling
+│           ├── worker-processors/  # Background jobs
+│           └── ...                 # 30+ crates
 │
 ├── packages/
-│   ├── db/                  # Database layer
-│   └── lib/                 # Shared utilities
+│   ├── db/                  # Database schema (Drizzle)
+│   ├── lib/                 # Shared TypeScript utils
+│   ├── sdk-node/            # Node.js SDK
+│   ├── sdk-python/          # Python SDK
+│   ├── sdk-go/              # Go SDK
+│   └── ...                  # More SDKs
 │
 ├── tools/
 │   ├── bootstrap.sh         # Development setup
 │   ├── migrate/             # Database migrations
-│   └── verify-routes.js     # Route verification
+│   ├── chaos/               # Chaos testing
+│   └── verify-routes.ts     # Route verification
 │
 └── docs/                    # Documentation
 ```
@@ -99,78 +108,78 @@ apexmail/
 
 ### 1. Purpose-Built Email Infrastructure
 The core email pipeline uses enterprise-grade infrastructure:
-- PostgreSQL for data storage
-- Redis for caching and queues
-- High-performance email delivery pipeline
+- PostgreSQL for data storage with row-level security
+- Redis for caching and rate limiting
+- Rust for high-performance request handling
 - Minimal external dependencies for core operations
 
 ### 2. Pluggable Integrations
 All optional integrations are adapter-based:
-```typescript
-// Example: Billing adapter
-interface BillingAdapter {
-  createCustomer(data: CustomerData): Promise<Customer>;
-  createSubscription(customerId: string, plan: Plan): Promise<Subscription>;
+```rust
+// Example: Storage adapter trait
+pub trait StorageAdapter: Send + Sync {
+    async fn store(&self, key: &str, data: &[u8]) -> Result<()>;
+    async fn retrieve(&self, key: &str) -> Result<Vec<u8>>;
 }
 
-// Stripe implementation (optional)
-class StripeAdapter implements BillingAdapter { ... }
+// S3 implementation (optional)
+impl StorageAdapter for S3Adapter { ... }
 
-// Null implementation (billing disabled)
-class NullBillingAdapter implements BillingAdapter { ... }
+// Local filesystem (development)
+impl StorageAdapter for LocalAdapter { ... }
 ```
 
 ### 3. Thin Interface Pattern
-All external dependencies wrapped in internal interfaces:
+All external dependencies wrapped in internal interfaces via Rust crates:
 ```
-packages/lib/
-├── logger/     # Wraps pino
-├── crypto/     # Wraps Node crypto
-├── storage/    # Wraps S3/local
-├── http/       # Wraps fetch
-└── cache/      # Wraps Redis
+services/mail-server/crates/
+├── apexmail-db/      # Database abstraction
+├── apexmail-lib/     # Shared utilities
+├── rate-limiter/     # Redis-backed rate limiting
+├── dns-resolver/     # DNS lookups
+└── mail-common/      # Email types
 ```
 
 ### 4. Schema-First Development
-- API schemas defined with Zod
+- API schemas defined in OpenAPI
 - Database schemas with typed migrations
-- Startup fingerprint validation
+- Startup health validation
 
 ## Data Flow
 
 ### Email Sending Flow
 ```
-1. API receives send request
+1. API receives send request (tracking-service)
 2. Validation (syntax, MX, suppression)
-3. Write to outbox (transactional)
-4. Worker picks up job
+3. Write to PostgreSQL queue
+4. Worker processor picks up job
 5. Render template
-6. Queue to Postfix
+6. Send via SMTP
 7. Track delivery events
 8. Update status
 ```
 
 ### Event Collection Flow
 ```
-1. Postfix sends email
+1. Email sent via SMTP
 2. Recipient opens/clicks
 3. Tracking service logs event
 4. Event written to PostgreSQL
-5. CDC syncs to ClickHouse
-6. Analytics queries served
+5. Analytics crate aggregates data
+6. Dashboard queries via API
 ```
 
 ## Security Model
 
 - All traffic TLS 1.2+
-- JWT authentication with refresh tokens
-- RBAC with granular permissions
-- Audit logging with cryptographic signing
+- API key authentication
+- Row-level security in PostgreSQL
+- Audit logging
 - Secret rotation with encryption at rest
 
 ### Email Authentication Stack
 
-ApexMail implements comprehensive email authentication beyond basic SPF/DKIM/DMARC:
+ApexMail implements comprehensive email authentication:
 
 | Protocol | RFC | Purpose |
 |----------|-----|---------|
@@ -186,16 +195,15 @@ See [Email Authentication Guide](../security/email-authentication.md) for implem
 
 ## Scalability
 
-- Horizontal scaling via stateless services
+- Horizontal scaling via stateless Rust service
 - PostgreSQL read replicas for queries
 - Redis cluster for high availability
-- Postfix cluster with IP pooling
-- Worker autoscaling based on queue depth
+- Connection pooling via deadpool
 
 ## Related Documentation
 
-- [Control Plane Isolation](./control-plane-isolation.md) - Security boundaries
-- [Analytics & Data Science](./analytics-data-science.md) - ML modules (STO, Churn, NLP)
 - [Data Flow](./data-flow.md) - Message lifecycle
+- [Queue System](./queue-system.md) - PostgreSQL-native queues
+- [MTA Configuration](./mta-configuration.md) - SMTP handling
 - [Email Authentication](../security/email-authentication.md) - ARC, MTA-STS, BIMI, TLSRPT
 - [Inbox Placement Testing](../user-guide/inbox-placement-testing.md) - Deliverability monitoring

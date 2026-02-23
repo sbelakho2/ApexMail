@@ -56,7 +56,7 @@ All changes to:
 
 Changes touching the following areas require **2 approving reviews**:
 
-- Authentication and session management (`apps/api/src/auth/`).
+- Authentication and session management.
 - Authorisation and RBAC logic.
 - Cryptographic operations (hashing, encryption, key management).
 - Data access layer (direct database queries, ORM model changes).
@@ -104,13 +104,17 @@ Developer branch
 
 | Check | Tool | Blocking |
 |-------|------|----------|
-| Linting | ESLint | ✅ Yes |
-| Type checking | TypeScript (`tsc --noEmit`) | ✅ Yes |
-| Unit tests | Vitest | ✅ Yes |
+| Linting (TypeScript) | ESLint | ✅ Yes |
+| Linting (Rust) | `cargo clippy` | ✅ Yes |
+| Type checking (TypeScript) | `tsc --noEmit` | ✅ Yes |
+| Type checking (Rust) | `cargo check` | ✅ Yes |
+| Unit tests (TypeScript) | Vitest | ✅ Yes |
+| Unit tests (Rust) | `cargo test` | ✅ Yes |
 | Integration tests | Vitest + test database | ✅ Yes |
-| Dependency audit | `pnpm audit` / Snyk | ✅ Yes (critical/high) |
+| Dependency audit (TS) | `pnpm audit` / Snyk | ✅ Yes (critical/high) |
+| Dependency audit (Rust) | `cargo audit` | ✅ Yes (critical/high) |
 | Container image scan | Trivy | ✅ Yes (critical/high) |
-| Build | Turbo (`turbo build`) | ✅ Yes |
+| Build | Turbo + Cargo | ✅ Yes |
 
 ### 5.3 Staging Validation
 

@@ -4,6 +4,8 @@
 
 Accepted
 
+**Implementation Note (2026-02):** The TypeScript examples in this ADR are historical. Implementation has been migrated to Rust using `metrics_exporter_prometheus` and `tracing` crates. See [monitoring.md](../operations/monitoring.md) for current metrics documentation.
+
 ## Date
 
 2024-01-19
@@ -168,19 +170,18 @@ global:
   scrape_interval: 15s
 
 scrape_configs:
-  - job_name: 'apexmail-api'
+  - job_name: 'apexmail-tracking'
     static_configs:
-      - targets: ['api:3000']
+      - targets: ['tracking:9092']
     metrics_path: /metrics
     
-  - job_name: 'apexmail-worker'
+  - job_name: 'postgres'
     static_configs:
-      - targets: ['worker:3000']
-    metrics_path: /metrics
-    
-  - job_name: 'postfix'
+      - targets: ['postgres-exporter:9187']
+        
+  - job_name: 'redis'
     static_configs:
-      - targets: ['postfix-exporter:9154']
+      - targets: ['redis-exporter:9121']
 ```
 
 ### Pillar 3: Structured Logging

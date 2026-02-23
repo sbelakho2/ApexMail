@@ -441,6 +441,7 @@ impl SubmissionSession {
             .tls_acceptor
             .as_ref()
             .ok_or_else(|| anyhow!("TLS acceptor not configured"))?;
+        let acceptor = acceptor.clone();
 
         self.send_response(220, "Ready to start TLS").await?;
 

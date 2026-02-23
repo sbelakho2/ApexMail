@@ -592,9 +592,70 @@ impl CalendarEventBuilder {
             url: self.url,
             categories: self.categories,
             priority: None,
-            recurrence: None, // TODO: parse RRULE string
+            recurrence: self.rrule.as_ref().and_then(|s| parse_rrule(s)),
         })
     }
+}
+
+/// Parse an RRULE string into a RecurrenceRule struct.
+/// Example: "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE,FR;COUNT=10"
+fn parse_rrule(rrule: &str) -> Option<RecurrenceRule> {
+    // Remove the "RRULE:" prefix if present
+    let s = rrule.strip_prefix("RRULE:").unwrap_or(rrule);
+
+    let mut freq = None;
+    let mut interval = None;
+    let mut count = None;
+    let mut until = None;
+    let mut by_day = None;
+    let mut by_month = None;
+    let mut by_month_day = None;
+
+    for part in s.split(';') {
+        let mut kv = part.splitn(2, '=');
+        let key = kv.next()?;
+        let value = kv.next().unwrap_or("");
+
+        match key.to_uppercase().as_str() {
+            "FREQ" => freq = Some(value.to_uppercase()),
+            "INTERVAL" => interval = value.parse().ok(),
+            "COUNT" => count = value.parse().ok(),
+            "UNTIL" => until = Some(value.to_string()),
+            "BYDAY" => {
+                by_day = Some(value.split(',').map(|s| s.trim().to_uppercase()).collect());
+            }
+            "BYMONTH" => {
+                by_month = Some(
+                    value
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<u32>().ok())
+                        .collect()
+                );
+            }
+            "BYMONTHDAY" => {
+                by_month_day = Some(
+                    value
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<i32>().ok())
+                        .collect()
+                );
+            }
+            _ => {} // Ignore unknown properties
+        }
+    }
+
+    // FREQ is required
+    let freq = freq?;
+
+    Some(RecurrenceRule {
+        freq,
+        interval,
+        count,
+        until,
+        by_day,
+        by_month,
+        by_month_day,
+    })
 }
 
 // ── HTML preview ───────────────────────────────────────────────────────────────

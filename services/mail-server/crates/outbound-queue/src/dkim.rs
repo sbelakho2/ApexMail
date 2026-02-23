@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
 use rsa::pkcs1v15::SigningKey;
-use rsa::signature::Signer;
+use rsa::signature::{Signer, SignatureEncoding};
 use sha2::{Sha256, Digest};
 use tracing::debug;
 

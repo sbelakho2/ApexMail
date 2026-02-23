@@ -1,5 +1,7 @@
 # ApexMail AI — 3-Model Pipeline Architecture
 
+> **Implementation Note (2026-02):** AI capabilities are implemented in Rust crates at `services/mail-server/crates/ai-service/` and `services/mail-server/crates/ai-embeddings/`. TypeScript interfaces below are design specifications; actual implementation is Rust.
+
 ## Overview
 
 The ApexMail assistant uses a three-stage pipeline for every user interaction. This design separates _planning_ from _generation_ from _verification_, enabling each stage to be tested, swapped, and improved independently.

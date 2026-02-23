@@ -377,4 +377,3 @@ See [API Documentation](../api/endpoints/analytics.md) for full endpoint referen
 
 - [Email Authentication](./email-authentication.md) - ARC, MTA-STS, BIMI
 - [Inbox Placement Testing](../user-guide/inbox-placement-testing.md)
-- [Deliverability Best Practices](../operations/deliverability.md)

@@ -4,6 +4,8 @@
 
 Accepted
 
+> **Implementation Note (2026-02):** Backend services now use Rust. Testing is split: TypeScript tests (Vitest/Playwright) for Next.js apps, `cargo test` for Rust crates. Integration tests are in `services/mail-server/crates/integration-tests/`.
+
 ## Date
 
 2024-01-16

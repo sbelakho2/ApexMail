@@ -4,6 +4,8 @@
 
 Accepted
 
+> **Implementation Note (2026-02):** Security controls are implemented in the Rust tracking service. The TypeScript examples below are conceptual designs; actual implementation uses Rust with the `crypto`, `jsonwebtoken`, and rate-limiting crates.
+
 ## Date
 
 2024-01-20

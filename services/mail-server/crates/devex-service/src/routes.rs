@@ -1,0 +1,219 @@
+//! Axum HTTP routes for the DevEx service.
+//!
+//! Mirrors the Hono routes defined in `apps/devex/src/routes/devex.ts`.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
+use serde::Serialize;
+
+use crate::config::DevExConfig;
+use crate::onboarding::OnboardingService;
+use crate::openapi::OpenApiGenerator;
+use crate::sdk_manager::SdkManager;
+use crate::versioning::VersionRegistry;
+use crate::webhook_tester::WebhookTester;
+
+// ── Shared application state ─────────────────────────────────────────────────
+
+/// Shared state injected into every handler via `State<AppState>`.
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<DevExConfig>,
+    pub versions: Arc<VersionRegistry>,
+    pub sdk_manager: Arc<SdkManager>,
+    pub openapi: Arc<OpenApiGenerator>,
+    pub onboarding: Arc<OnboardingService>,
+    pub webhook_tester: Arc<WebhookTester>,
+}
+
+impl AppState {
+    /// Build `AppState` from a `DevExConfig`.
+    pub fn from_config(cfg: DevExConfig) -> Self {
+        let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
+        let webhook_tester = WebhookTester::new(cfg.webhook_signing_secret.clone());
+        Self {
+            config: Arc::new(cfg),
+            versions: Arc::new(VersionRegistry::new()),
+            sdk_manager: Arc::new(SdkManager::new()),
+            openapi: Arc::new(openapi),
+            onboarding: Arc::new(OnboardingService::new()),
+            webhook_tester: Arc::new(webhook_tester),
+        }
+    }
+}
+
+// ── Router factory ───────────────────────────────────────────────────────────
+
+/// Build the complete axum `Router` for the DevEx service.
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/versions", get(handle_versions))
+        .route("/sdks", get(handle_sdks))
+        .route("/webhooks/test", axum::routing::post(handle_webhook_test))
+        .route("/openapi.json", get(handle_openapi))
+        .route("/onboarding/checklist", get(handle_onboarding_checklist))
+        .route("/health", get(handle_health))
+        .with_state(state)
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────────────
+
+/// GET /versions — list all API versions.
+async fn handle_versions(State(state): State<AppState>) -> impl IntoResponse {
+    let versions = state.versions.list_versions();
+    let current = &state.config.current_api_version;
+    Json(serde_json::json!({
+        "current": current,
+        "versions": versions,
+    }))
+}
+
+/// GET /sdks — list available SDKs.
+async fn handle_sdks(State(state): State<AppState>) -> impl IntoResponse {
+    let sdks = state.sdk_manager.list_sdks();
+    let items: Vec<serde_json::Value> = sdks
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "language": s.language,
+                "name": s.language.display_name(),
+                "package_name": s.package_name,
+                "latest_version": s.latest_version,
+                "install_command": s.install_command,
+                "package_manager": s.language.package_manager(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "sdks": items }))
+}
+
+/// Request body for POST /webhooks/test.
+#[derive(serde::Deserialize)]
+pub struct WebhookTestRequest {
+    pub url: String,
+    #[serde(default = "default_event_type")]
+    pub event_type: String,
+}
+
+fn default_event_type() -> String {
+    "email.delivered".into()
+}
+
+/// POST /webhooks/test — fire a test webhook.
+async fn handle_webhook_test(
+    State(state): State<AppState>,
+    Json(body): Json<WebhookTestRequest>,
+) -> impl IntoResponse {
+    match state
+        .webhook_tester
+        .send_test_webhook(&body.url, &body.event_type)
+        .await
+    {
+        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /openapi.json — return the OpenAPI spec.
+async fn handle_openapi(State(state): State<AppState>) -> impl IntoResponse {
+    let spec = state.openapi.generate_spec();
+    Json(spec)
+}
+
+/// GET /onboarding/checklist — return the onboarding checklist.
+async fn handle_onboarding_checklist(State(state): State<AppState>) -> impl IntoResponse {
+    // In a full implementation the tenant_id would come from auth middleware.
+    let checklist = state.onboarding.get_checklist("default");
+    Json(checklist)
+}
+
+/// Health response.
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    service: &'static str,
+}
+
+/// GET /health — basic health check.
+async fn handle_health() -> impl IntoResponse {
+    Json(HealthResponse {
+        status: "healthy",
+        service: "devex",
+    })
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        AppState::from_config(DevExConfig::default())
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["service"], "devex");
+    }
+
+    #[tokio::test]
+    async fn test_versions_endpoint() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/versions")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["current"], "2024-01");
+        assert!(json["versions"].as_array().unwrap().len() >= 5);
+    }
+
+    #[tokio::test]
+    async fn test_sdks_endpoint() {
+        let app = build_router(test_state());
+        let req = Request::builder()
+            .uri("/sdks")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let sdks = json["sdks"].as_array().unwrap();
+        assert_eq!(sdks.len(), 6);
+    }
+}

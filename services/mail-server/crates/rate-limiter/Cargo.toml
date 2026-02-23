@@ -1,0 +1,23 @@
+[package]
+name = "apexmail-rate-limiter"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reusable rate limiting: governor-based in-memory, sliding window, token bucket"
+
+[dependencies]
+governor = { workspace = true }
+nonzero_ext = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

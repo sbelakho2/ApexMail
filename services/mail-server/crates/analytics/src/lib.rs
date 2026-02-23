@@ -1,6 +1,7 @@
 pub mod config;
 pub mod types;
 pub mod query_engine;
+pub mod clickhouse_engine;
 pub mod compaction;
 pub mod reconciliation;
 pub mod send_time_optimizer;

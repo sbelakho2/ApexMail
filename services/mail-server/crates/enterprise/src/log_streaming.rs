@@ -1,4 +1,3 @@
-use chrono::Utc;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use sqlx::PgPool;
@@ -342,6 +341,7 @@ pub fn hmac_sign(key: &[u8], data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_gzip_compress_decompress() {

@@ -401,12 +401,12 @@ paths:
         Register a webhook endpoint to receive real-time event notifications.
         
         Available events:
-        - `email.sent` - Email accepted for delivery
-        - `email.delivered` - Email delivered to recipient
-        - `email.bounced` - Email bounced
-        - `email.complained` - Recipient marked as spam
-        - `email.opened` - Email opened (if tracking enabled)
-        - `email.clicked` - Link clicked (if tracking enabled)
+        - `message.sent` - Message accepted for delivery
+        - `message.delivered` - Message delivered to recipient
+        - `message.bounced` - Message bounced
+        - `message.complained` - Recipient marked as spam
+        - `message.opened` - Message opened (if tracking enabled)
+        - `message.clicked` - Link clicked (if tracking enabled)
       tags:
         - Webhooks
       requestBody:
@@ -969,12 +969,12 @@ components:
           items:
             type: string
             enum:
-              - email.sent
-              - email.delivered
-              - email.bounced
-              - email.complained
-              - email.opened
-              - email.clicked
+              - message.sent
+              - message.delivered
+              - message.bounced
+              - message.complained
+              - message.opened
+              - message.clicked
           minItems: 1
 
     UpdateWebhookRequest:
@@ -988,12 +988,12 @@ components:
           items:
             type: string
             enum:
-              - email.sent
-              - email.delivered
-              - email.bounced
-              - email.complained
-              - email.opened
-              - email.clicked
+              - message.sent
+              - message.delivered
+              - message.bounced
+              - message.complained
+              - message.opened
+              - message.clicked
         active:
           type: boolean
 

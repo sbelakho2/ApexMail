@@ -120,9 +120,9 @@ Configuration lives in `deploy/prometheus.yml`.
 
 ### Metrics Endpoint Rules
 
-1. Every ApexMail service exposes a `/metrics` endpoint using the `prom-client` library.
+1. The Rust tracking service exposes a `/metrics` endpoint using the `metrics_exporter_prometheus` crate on port 9092.
 2. The metrics endpoint is bound to the **private network interface only** — not exposed publicly.
-3. Default metrics (Node.js process metrics) are enabled.
+3. Default process metrics (memory, CPU) are enabled.
 4. Metrics endpoints MUST respond in < 1 s. Heavy computation is pre-aggregated.
 
 ---

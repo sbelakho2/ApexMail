@@ -1,0 +1,17 @@
+[package]
+name = "pattern-matcher"
+description = "Reusable aho-corasick pattern matching for bot detection and spam rules"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aho-corasick = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

@@ -17,6 +17,7 @@ import {
     ArrowUpDown,
     ChevronLeft,
     ChevronRight,
+    Loader2,
 } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent } from '@/components/ui/card';
@@ -49,71 +50,39 @@ import {
 } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn, formatNumber, formatPercent, formatRelativeTime } from '@/lib/utils';
+import { useCampaigns, useDeleteCampaign, type Campaign, type CampaignStats } from '@/hooks/use-api';
 
-// Mock campaigns data
-const mockCampaigns = [
-    {
-        id: '1',
-        name: 'Summer Sale Announcement',
-        subject: '☀️ Summer Sale is HERE! Up to 50% off',
-        status: 'sent' as const,
-        listName: 'All Subscribers',
-        sentAt: new Date(1737000000000 - 2 * 60 * 60 * 1000).toISOString(),
-        stats: { sent: 12458, openRate: 28.4, clickRate: 4.2, bounceRate: 0.8 },
-    },
-    {
-        id: '2',
-        name: 'Weekly Newsletter #42',
-        subject: 'This Week in Tech: AI Updates & More',
-        status: 'sent' as const,
-        listName: 'Newsletter',
-        sentAt: new Date(1737000000000 - 24 * 60 * 60 * 1000).toISOString(),
-        stats: { sent: 34521, openRate: 22.1, clickRate: 2.8, bounceRate: 1.2 },
-    },
-    {
-        id: '3',
-        name: 'Product Launch Teaser',
-        subject: 'Something big is coming...',
-        status: 'scheduled' as const,
-        listName: 'VIP Customers',
-        scheduledAt: new Date(1737000000000 + 24 * 60 * 60 * 1000).toISOString(),
-        stats: { sent: 0, openRate: 0, clickRate: 0, bounceRate: 0 },
-    },
-    {
-        id: '4',
-        name: 'Re-engagement Campaign',
-        subject: 'We miss you! Come back for 20% off',
-        status: 'sending' as const,
-        listName: 'Inactive Users',
-        sentAt: new Date(1737000000000).toISOString(),
-        stats: { sent: 4521, openRate: 18.5, clickRate: 1.9, bounceRate: 2.1 },
-    },
-    {
-        id: '5',
-        name: 'Black Friday Preview',
-        subject: 'Early access to Black Friday deals',
-        status: 'draft' as const,
-        listName: 'All Subscribers',
-        stats: { sent: 0, openRate: 0, clickRate: 0, bounceRate: 0 },
-    },
-    {
-        id: '6',
-        name: 'Holiday Gift Guide',
-        subject: '🎁 The Ultimate Holiday Gift Guide',
-        status: 'draft' as const,
-        listName: 'VIP Customers',
-        stats: { sent: 0, openRate: 0, clickRate: 0, bounceRate: 0 },
-    },
-    {
-        id: '7',
-        name: 'Year in Review',
-        subject: 'Your 2024 Year in Review',
-        status: 'paused' as const,
-        listName: 'All Subscribers',
-        sentAt: new Date(1737000000000 - 5 * 24 * 60 * 60 * 1000).toISOString(),
-        stats: { sent: 8234, openRate: 15.2, clickRate: 1.1, bounceRate: 0.9 },
-    },
-];
+// Campaign UI type with computed fields for display
+interface CampaignDisplay {
+    id: string;
+    name: string;
+    subject: string;
+    status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'paused';
+    listName: string;
+    sentAt?: string;
+    scheduledAt?: string;
+    stats: { sent: number; openRate: number; clickRate: number; bounceRate: number };
+}
+
+// Transform API campaign to display format
+function toCampaignDisplay(c: Campaign): CampaignDisplay {
+    const stats = c.stats || { sent: 0, delivered: 0, opens: 0, uniqueOpens: 0, clicks: 0, uniqueClicks: 0, bounces: 0, complaints: 0, unsubscribes: 0, openRate: 0, clickRate: 0, bounceRate: 0 };
+    return {
+        id: c.id,
+        name: c.name,
+        subject: c.subject,
+        status: c.status,
+        listName: c.listId ? `List ${c.listId.slice(0, 8)}` : 'No list',
+        sentAt: c.sentAt,
+        scheduledAt: c.scheduledAt,
+        stats: {
+            sent: stats.sent,
+            openRate: stats.openRate,
+            clickRate: stats.clickRate,
+            bounceRate: stats.bounceRate ?? (stats.bounces && stats.sent ? (stats.bounces / stats.sent) * 100 : 0),
+        },
+    };
+}
 
 const statusStyles = {
     sent: { label: 'Sent', variant: 'success' as const, icon: Send },
@@ -124,6 +93,7 @@ const statusStyles = {
 };
 
 export default function CampaignsPage() {
+    const [page, setPage] = React.useState(1);
     const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
     const [statusFilter, setStatusFilter] = React.useState<string>('all');
     const [searchQuery, setSearchQuery] = React.useState('');
@@ -132,9 +102,19 @@ export default function CampaignsPage() {
     const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
     const [campaignToDelete, setCampaignToDelete] = React.useState<string | null>(null);
 
+    // Fetch campaigns from API
+    const { data: campaignsData, error, isLoading, mutate } = useCampaigns(page, 100);
+    const deleteCampaign = useDeleteCampaign(campaignToDelete || '');
+
+    // Transform API data to display format
+    const campaigns = React.useMemo(() => {
+        if (!campaignsData?.data) return [];
+        return campaignsData.data.map(toCampaignDisplay);
+    }, [campaignsData]);
+
     // Filter and sort campaigns
     const filteredCampaigns = React.useMemo(() => {
-        let result = mockCampaigns;
+        let result = campaigns;
 
         // Filter by status
         if (statusFilter !== 'all') {
@@ -167,7 +147,7 @@ export default function CampaignsPage() {
         });
 
         return result;
-    }, [statusFilter, searchQuery, sortField, sortOrder]);
+    }, [campaigns, statusFilter, searchQuery, sortField, sortOrder]);
 
     const toggleSelectAll = () => {
         if (selectedIds.length === filteredCampaigns.length) {
@@ -197,20 +177,45 @@ export default function CampaignsPage() {
         setDeleteDialogOpen(true);
     };
 
-    const confirmDelete = () => {
-        // In production, this would call the API
-        void campaignToDelete; // Use the variable to satisfy linter
+    const confirmDelete = async () => {
+        if (campaignToDelete) {
+            try {
+                await deleteCampaign.trigger();
+                mutate(); // Refresh list
+            } catch (err) {
+                console.error('Failed to delete campaign:', err);
+            }
+        }
         setDeleteDialogOpen(false);
         setCampaignToDelete(null);
     };
 
     const statusCounts = React.useMemo(() => {
-        const counts: Record<string, number> = { all: mockCampaigns.length };
-        mockCampaigns.forEach((c) => {
+        const counts: Record<string, number> = { all: campaigns.length };
+        campaigns.forEach((c) => {
             counts[c.status] = (counts[c.status] || 0) + 1;
         });
         return counts;
-    }, []);
+    }, [campaigns]);
+
+    // Loading state
+    if (isLoading) {
+        return (
+            <div className="flex items-center justify-center min-h-[400px]">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+        );
+    }
+
+    // Error state
+    if (error) {
+        return (
+            <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
+                <p className="text-destructive">Failed to load campaigns</p>
+                <Button onClick={() => mutate()}>Retry</Button>
+            </div>
+        );
+    }
 
     return (
         <div className="space-y-6">
@@ -460,14 +465,24 @@ export default function CampaignsPage() {
                 {/* Pagination */}
                 <div className="flex items-center justify-between border-t px-4 py-4">
                     <p className="text-sm text-muted-foreground">
-                        Showing {filteredCampaigns.length} of {mockCampaigns.length} campaigns
+                        Showing {filteredCampaigns.length} of {campaigns.length} campaigns
                     </p>
                     <div className="flex items-center gap-2">
-                        <Button variant="outline" size="sm" disabled>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={page <= 1}
+                            onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        >
                             <ChevronLeft className="h-4 w-4" />
                             Previous
                         </Button>
-                        <Button variant="outline" size="sm" disabled>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!campaignsData || page >= campaignsData.totalPages}
+                            onClick={() => setPage((p) => p + 1)}
+                        >
                             Next
                             <ChevronRight className="h-4 w-4" />
                         </Button>

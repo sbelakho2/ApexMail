@@ -1,0 +1,55 @@
+[package]
+name = "billing-service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "ApexMail billing service – usage metering, plan management, quota enforcement, invoices"
+
+[[bin]]
+name = "billing-service"
+path = "src/bin/server.rs"
+
+[dependencies]
+apexmail-lib = { path = "../apexmail-lib" }
+apexmail-db = { path = "../apexmail-db" }
+
+# Async runtime
+tokio.workspace = true
+futures.workspace = true
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+
+# CLI / config
+clap.workspace = true
+dotenvy.workspace = true
+
+# Logging & Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+
+# Database
+sqlx.workspace = true
+
+# Redis
+deadpool-redis.workspace = true
+redis.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

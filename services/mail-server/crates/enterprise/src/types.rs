@@ -85,6 +85,24 @@ pub struct SSOLoginRedirect {
     pub request_id: String,
 }
 
+/// OIDC state stored during login flow
+#[derive(Debug, Clone)]
+pub struct OidcStateData {
+    pub code_verifier: String,
+    pub domain: String,
+    pub tenant_id: Option<Uuid>,
+}
+
+/// OIDC state row from database
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OidcStateRow {
+    pub state: String,
+    pub code_verifier: String,
+    pub domain: String,
+    pub tenant_id: Uuid,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SSOCallbackResult {
     pub session: SSOSessionInfo,
@@ -542,6 +560,12 @@ pub struct IPReputation {
     pub complaint_rate: f64,
     pub blocklisted: bool,
     pub emails_sent_total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvailableIpCount {
+    pub total: i64,
+    pub by_region: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

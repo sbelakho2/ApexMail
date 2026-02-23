@@ -48,7 +48,7 @@ All DNS records are managed via the **Zone.ee control panel or API** — manual 
 
 ## 3. DNS-Based Failover
 
-Zone.ee does not provide health-check-based DNS failover natively. Failover is managed by the **HA service** (`apps/ha/`):
+Zone.ee does not provide health-check-based DNS failover natively. Failover is managed by the **HA service** in the Rust mail-server:
 
 1. HA service monitors health endpoints on both Finland and Germany servers.
 2. On detected failure, HA service updates the A/AAAA records via Zone.ee API.

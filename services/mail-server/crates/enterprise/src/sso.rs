@@ -1,5 +1,6 @@
 use chrono::{Duration, Utc};
 use rand::Rng;
+use redis::AsyncCommands;
 use sha2::{Sha256, Digest};
 use sqlx::PgPool;
 use tracing::info;
@@ -8,15 +9,22 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::types::*;
 
+pub type RedisPool = deadpool_redis::Pool;
+
 /// SSO Service: SAML 2.0 + OIDC authentication
 pub struct SSOService {
     db: PgPool,
+    redis: Option<RedisPool>,
     config: Config,
 }
 
 impl SSOService {
     pub fn new(db: PgPool, config: Config) -> Self {
-        Self { db, config }
+        Self { db, redis: None, config }
+    }
+
+    pub fn with_redis(db: PgPool, redis: RedisPool, config: Config) -> Self {
+        Self { db, redis: Some(redis), config }
     }
 
     /// Configure SSO for a tenant (SAML or OIDC)
@@ -120,6 +128,34 @@ impl SSOService {
         let client_id = config.oidc_client_id.unwrap_or_default();
         let redirect_uri = self.config.sso.oidc.redirect_uri.clone();
 
+        // Store state + code_verifier in Redis with 10-minute TTL
+        if let Some(ref redis) = self.redis {
+            let mut conn = redis.get().await.map_err(|e| format!("Redis connection: {e}"))?;
+            let key = format!("oidc_state:{}", state);
+            let value = serde_json::json!({
+                "code_verifier": code_verifier,
+                "domain": domain,
+                "tenant_id": config.tenant_id.to_string(),
+                "created_at": Utc::now().timestamp(),
+            });
+            let _: () = conn.set_ex(&key, value.to_string(), 600)
+                .await
+                .map_err(|e| format!("Redis set: {e}"))?;
+        } else {
+            // Fallback: store in DB for environments without Redis
+            sqlx::query(
+                "INSERT INTO sso_oidc_state (state, code_verifier, domain, tenant_id, expires_at)
+                 VALUES ($1, $2, $3, $4, NOW() + INTERVAL '10 minutes')"
+            )
+            .bind(&state)
+            .bind(&code_verifier)
+            .bind(domain)
+            .bind(config.tenant_id)
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("Store OIDC state: {e}"))?;
+        }
+
         let redirect_url = format!(
             "{}/authorize?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
             issuer,
@@ -131,9 +167,46 @@ impl SSOService {
         );
 
         info!(domain = domain, "OIDC login initiated");
-        // In production, store state + code_verifier in Redis with TTL
-        let _ = code_verifier; // Used in production for token exchange
         Ok(ApiResult::ok(SSOLoginRedirect { redirect_url, request_id: state }))
+    }
+
+    /// Validate and retrieve OIDC state for token exchange
+    pub async fn validate_oidc_state(&self, state: &str) -> Result<Option<OidcStateData>, String> {
+        // Try Redis first
+        if let Some(ref redis) = self.redis {
+            let mut conn = redis.get().await.map_err(|e| format!("Redis connection: {e}"))?;
+            let key = format!("oidc_state:{}", state);
+            let value: Option<String> = conn.get(&key).await.map_err(|e| format!("Redis get: {e}"))?;
+            
+            if let Some(json) = value {
+                // Delete the state (single-use)
+                let _: () = conn.del(&key).await.map_err(|e| format!("Redis del: {e}"))?;
+                
+                let parsed: serde_json::Value = serde_json::from_str(&json)
+                    .map_err(|e| format!("Parse state: {e}"))?;
+                
+                return Ok(Some(OidcStateData {
+                    code_verifier: parsed["code_verifier"].as_str().unwrap_or("").to_string(),
+                    domain: parsed["domain"].as_str().unwrap_or("").to_string(),
+                    tenant_id: parsed["tenant_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()),
+                }));
+            }
+        }
+        
+        // Fallback: check DB
+        let row = sqlx::query_as::<_, OidcStateRow>(
+            "DELETE FROM sso_oidc_state WHERE state = $1 AND expires_at > NOW() RETURNING *"
+        )
+        .bind(state)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Get OIDC state: {e}"))?;
+        
+        Ok(row.map(|r| OidcStateData {
+            code_verifier: r.code_verifier,
+            domain: r.domain,
+            tenant_id: Some(r.tenant_id),
+        }))
     }
 
     /// Handle OIDC callback

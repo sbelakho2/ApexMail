@@ -1,6 +1,8 @@
 # Queue System Architecture
 
 > **ApexMail** — PostgreSQL-native job queue with LISTEN/NOTIFY wakeups, batch processing, and multi-worker safety.
+>
+> **Implementation Note (2026-02):** Queue processing is implemented in Rust (`services/mail-server/crates/queue-provider/`). TypeScript code examples below are pseudo-code illustrating the algorithm. Node.js-specific metrics (V8 heap, event loop) should be read as process memory metrics for Rust.
 
 ---
 

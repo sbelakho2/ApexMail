@@ -1,0 +1,22 @@
+[package]
+name = "load-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+apexmail-lib = { path = "../apexmail-lib" }
+billing-service = { path = "../billing-service" }
+ai-service = { path = "../ai-service" }
+sales-autopilot = { path = "../sales-autopilot" }
+pattern-matcher = { path = "../pattern-matcher" }
+apexmail-rate-limiter = { path = "../rate-limiter" }
+observability-service = { path = "../observability-service" }
+ops-service = { path = "../ops-service" }
+devex-service = { path = "../devex-service" }
+compliance = { path = "../compliance" }
+
+tokio = { workspace = true, features = ["full", "test-util"] }
+rand = { workspace = true }
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true

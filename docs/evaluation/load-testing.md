@@ -1,10 +1,12 @@
 # Load Testing Strategy
 
 > Internal document — Bel Consulting OÜ
+>
+> **Implementation Note (2026-02):** Load tests have been migrated to Rust and are located in `services/mail-server/crates/load-tests/`.
 
 ## Overview
 
-This document defines the load-testing strategy for ApexMail. Every release that touches the API, worker, MTA, or tracking hot-paths **must** pass the gate tests described here before promotion to production.
+This document defines the load-testing strategy for ApexMail. Every release that touches the tracking service hot-paths **must** pass the gate tests described here before promotion to production.
 
 ---
 
@@ -12,22 +14,22 @@ This document defines the load-testing strategy for ApexMail. Every release that
 
 | Tool | Purpose |
 |------|---------|
-| **k6** (Grafana) | Primary load generator — scriptable in JS, Prometheus-native output |
-| **k6-operator** | Run distributed tests from multiple Hetzner regions when single-machine throughput is insufficient |
+| **Rust load-tests crate** | Primary load generator — native Rust with async/await |
+| **Criterion** | Microbenchmarks for hot paths |
 | **Prometheus + Grafana** | Real-time observation during test runs (dedicated `load-test` dashboard) |
 
-All test scripts live in `tools/load-tests/` and are version-controlled alongside application code.
+All test scripts live in `services/mail-server/crates/load-tests/` and are version-controlled alongside application code.
 
-### k6 Configuration Defaults
+### Running Load Tests
 
-```javascript
-export const options = {
-  thresholds: {
-    http_req_duration: ['p(95)<200', 'p(99)<500'],
-    http_req_failed:   ['rate<0.001'],
-  },
-  scenarios: { /* per-test */ },
-};
+```bash
+cd services/mail-server
+
+# Run all load tests
+cargo test -p load-tests --release
+
+# Run specific benchmark
+cargo bench -p load-tests
 ```
 
 ---
@@ -36,7 +38,7 @@ export const options = {
 
 ### 1. API Throughput
 
-Exercises the Hono API server under sustained load.
+Exercises the Rust tracking service under sustained load.
 
 | Parameter | Target |
 |-----------|--------|
@@ -48,46 +50,12 @@ Exercises the Hono API server under sustained load.
 
 **Endpoints under test:**
 
-- `POST /v1/contacts` — contact creation
-- `POST /v1/campaigns/:id/send` — campaign trigger
-- `GET  /v1/campaigns` — list with pagination
-- `GET  /v1/analytics/overview` — analytics aggregation
-- `POST /v1/webhooks/inbound` — inbound webhook ingestion
+- `POST /v1/messages` — message sending
+- `GET /v1/messages` — list with pagination
+- `GET /health` — health check
+- `GET /ready` — readiness check
 
-### 2. Email Sending Pipeline
-
-End-to-end: API → queue → worker → MTA.
-
-| Parameter | Target |
-|-----------|--------|
-| Injection rate | 5 000 messages / second |
-| Queue processing latency | < 10 s from enqueue to MTA hand-off |
-| Worker error rate | < 0.01 % |
-| MTA connection pool utilisation | < 80 % |
-
-Seed the database with 1 M contacts split across 50 tenants before running.
-
-### 3. Webhook Delivery
-
-Simulates outbound webhook dispatching at scale.
-
-| Parameter | Target |
-|-----------|--------|
-| Concurrent deliveries | 2 000 |
-| Delivery p95 | < 2 s (includes DNS + TLS to mock endpoint) |
-| Retry storm | Inject 50 % 5xx from mock; confirm back-off and no queue starvation |
-
-### 4. Concurrent Users — Control Plane & Web
-
-Browser-level load for the Next.js control-plane and marketing site.
-
-| Parameter | Target |
-|-----------|--------|
-| Concurrent sessions | 500 |
-| Page load p95 | < 1.5 s (nginx cache warm) |
-| SSR render p95 | < 400 ms |
-
-### 5. Tracking Pixel & Click Tracking
+### 2. Tracking Pixel & Click Tracking
 
 High-volume GET requests through the tracking service.
 
@@ -95,7 +63,23 @@ High-volume GET requests through the tracking service.
 |-----------|--------|
 | Request rate | 10 000 rps |
 | p95 latency | < 50 ms |
-| Data loss | 0 — every event must reach the analytics pipeline |
+| Data loss | 0 — every event must reach the database |
+
+**Endpoints under test:**
+
+- `GET /t/{tracking_id}` — open pixel
+- `GET /c/{tracking_id}` — click redirect
+- `POST /u/{token}` — unsubscribe
+
+### 3. Concurrent Users — Control Plane & Web
+
+Browser-level load for the Next.js control-plane and web apps.
+
+| Parameter | Target |
+|-----------|--------|
+| Concurrent sessions | 500 |
+| Page load p95 | < 1.5 s (nginx cache warm) |
+| SSR render p95 | < 400 ms |
 
 ---
 
@@ -104,14 +88,15 @@ High-volume GET requests through the tracking service.
 1. **Dedicated load-test server** — Hetzner Cloud ARM server in the same region as staging.
 2. **Isolated database** — Separate PostgreSQL instance restored from anonymised staging snapshot.
 3. **Redis** — Dedicated instance; flush before each run.
-4. **MTA sink** — Local SMTP sink (e.g. `smtp-sink` from Postfix) to avoid real deliveries.
-5. **Mock webhook receiver** — Express server logging requests with configurable failure rates.
+4. **Mock SMTP** — Mailpit or smtp-sink for capturing emails without real delivery.
 
 ```bash
-# Spin up the environment
-cd tools/load-tests
-./setup-env.sh          # provisions via hcloud CLI
-k6 run scenarios/api-throughput.js --out prometheus
+# Spin up infrastructure
+docker compose up -d postgres redis
+
+# Run load tests
+cd services/mail-server
+cargo test -p load-tests --release -- --nocapture
 ```
 
 ---
@@ -130,22 +115,20 @@ Baselines are the **regression detection** reference. Any future run that degrad
 
 ## Regression Detection
 
-Integrated into CI via a dedicated GitHub Actions workflow:
+Integrated into CI via GitHub Actions workflow:
 
 ```yaml
 # .github/workflows/load-test.yml (excerpt)
 jobs:
   load-gate:
-    runs-on: self-hosted          # Hetzner runner
+    runs-on: self-hosted  # Hetzner runner
     steps:
-      - uses: grafana/k6-action@v0.3
-        with:
-          filename: tools/load-tests/scenarios/api-throughput.js
-          flags: --out json=results.json
-      - run: node tools/load-tests/compare-baseline.js results.json
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          cd services/mail-server
+          cargo test -p load-tests --release -- --nocapture
 ```
-
-`compare-baseline.js` exits non-zero when any threshold breaches the 10 % regression window.
 
 ### When to Run
 
@@ -166,22 +149,23 @@ Panels:
 
 - Request rate & error rate (time series)
 - Latency heatmap (p50 / p95 / p99)
-- Worker queue depth & processing latency
 - PostgreSQL active connections & query duration
 - Redis ops/sec & memory usage
-- MTA throughput & connection pool
+- Tracking service memory & CPU usage
 
 ---
 
-## Reporting
+## Metrics Observed
 
-After every full-suite run, generate a Markdown report:
+The tracking service exposes Prometheus metrics on port 9092:
 
-```bash
-node tools/load-tests/generate-report.js results/ > docs/evaluation/reports/$(date +%F).md
-```
-
-Include: scenario, pass/fail, key metrics vs baseline, Grafana snapshot link, and any anomalies.
+| Metric | Description |
+|--------|-------------|
+| `http_requests_total` | Total HTTP requests |
+| `http_request_duration_seconds` | Request latency histogram |
+| `tracking_opens_total` | Open pixel requests |
+| `tracking_clicks_total` | Click tracking requests |
+| `db_pool_connections` | Active database connections |
 
 ---
 
@@ -195,4 +179,4 @@ Include: scenario, pass/fail, key metrics vs baseline, Grafana snapshot link, an
 
 ---
 
-*Last updated: 2026-02-09*
+*Last updated: 2026-02-23*

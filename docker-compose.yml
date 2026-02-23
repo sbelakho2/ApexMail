@@ -84,108 +84,6 @@ services:
           memory: 128M
 
   # ===========================================================================
-  # API SERVER
-  # ===========================================================================
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      NODE_ENV: ${NODE_ENV:-production}
-      PORT: 3000
-      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}
-      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
-      # SECURITY: These secrets MUST be set in production
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
-      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:?API_KEY_HASH_SECRET must be set}
-      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://tracking:3001}
-    ports:
-      - "${API_PORT:-3000}:3000"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    networks:
-      - apexmail
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-        reservations:
-          memory: 256M
-
-  # ===========================================================================
-  # WORKER
-  # ===========================================================================
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      NODE_ENV: ${NODE_ENV:-production}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-apexmail}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-apexmail}
-      REDIS_URL: redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379
-      # SMTP Configuration
-      SMTP_HOST: ${SMTP_HOST:-mailpit}
-      SMTP_PORT: ${SMTP_PORT:-1025}
-      SMTP_SECURE: ${SMTP_SECURE:-false}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASS: ${SMTP_PASS:-}
-      SMTP_RATE_LIMIT: ${SMTP_RATE_LIMIT:-10}
-      # IP Rate Limiting
-      IP_RATE_LIMITING_ENABLED: ${IP_RATE_LIMITING_ENABLED:-true}
-      SENDING_IP_ADDRESS: ${SENDING_IP_ADDRESS:-}
-      IP_HOURLY_LIMIT: ${IP_HOURLY_LIMIT:-2500}
-      # Tracking
-      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-http://tracking:3001}
-      TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
-      # Warmup
-      WARMUP_ENABLED: ${WARMUP_ENABLED:-false}
-      # Metrics
-      METRICS_ENABLED: true
-      METRICS_PORT: 9090
-    ports:
-      - "${WORKER_METRICS_PORT:-9090}:9090"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/metrics || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    networks:
-      - apexmail
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-        reservations:
-          memory: 256M
-
-  # ===========================================================================
   # TRACKING SERVER
   # ===========================================================================
   tracking:
@@ -197,6 +95,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clickhouse:
         condition: service_healthy
     environment:
       # ── Required ──────────────────────────────────────────────────────────
@@ -224,6 +124,12 @@ services:
       METRICS_PORT: 9092
       RUST_LOG: ${RUST_LOG:-info,tracking_service=debug}
       RUST_BACKTRACE: ${RUST_BACKTRACE:-0}
+      # ── ClickHouse analytics ──────────────────────────────────────────────
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_MAX_CONNECTIONS: ${CLICKHOUSE_MAX_CONNECTIONS:-20}
     ports:
       - "${TRACKING_PORT:-3001}:3001"
       - "${TRACKING_METRICS_PORT:-9092}:9092"
@@ -265,6 +171,42 @@ services:
       - apexmail
     profiles:
       - dev
+
+  # ===========================================================================
+  # CLICKHOUSE (OLAP Analytics)
+  # ===========================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: apexmail-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-127.0.0.1:9000}:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - apexmail
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
 
   # ===========================================================================
   # PROMETHEUS (Optional metrics collection)
@@ -326,6 +268,8 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  clickhouse_data:
+  clickhouse_logs:
   prometheus_data:
   grafana_data:
 

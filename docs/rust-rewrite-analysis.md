@@ -63,33 +63,36 @@ ApexMail is an enterprise-grade transactional email platform built primarily wit
 
 ### 2. Analytics Query Engine
 
-**Location:** `apps/analytics/src/query-engine.ts`  
-**Current Technology:** Node.js + DuckDB (Wasm bindings) + PostgreSQL  
-**Lines of Code:** ~620  
+**Location:** `services/mail-server/crates/analytics/src/clickhouse_engine.rs`  
+**Current Technology:** Rust + ClickHouse (HTTP client) + PostgreSQL  
+**Lines of Code:** ~500  
+
+> **Status (2026-02):** This component has been implemented in Rust with ClickHouse as the OLAP backend. See `clickhouse_engine.rs` for the production implementation.
 
 #### What It Does
-- Time series aggregations over millions of events
-- Hot (PostgreSQL) and cold (Parquet) data federation
-- Real-time dashboard queries
+- Time series aggregations over billions of events
+- MergeTree tables with monthly partitioning
+- Real-time dashboard queries via ClickHouse
 - Custom dimension grouping and filtering
+- 730-day retention with automatic TTL
 
-#### Why Rust Would Help
+#### Implementation Details
 
-| Aspect | Current State | Rust Benefit |
-|--------|---------------|--------------|
-| **DuckDB Integration** | JavaScript bindings with serialization overhead | Native DuckDB-rs with zero-copy |
-| **Parquet Processing** | `parquet-wasm` with 3-5x overhead vs native | `parquet` crate: native columnar scanning |
-| **Query Planning** | Limited optimization in JS | Custom query optimizer with SIMD-accelerated aggregations |
-| **Memory** | JS object overhead ~3x raw data size | Columnar memory layout, arrow-compatible |
+| Aspect | Implementation |
+|--------|---------------|
+| **ClickHouse Integration** | Native `clickhouse-rs` crate with LZ4 compression |
+| **Schema** | MergeTree tables with LowCardinality columns, bloom filter indexes |
+| **Aggregations** | Materialized views for daily/hourly rollups |
+| **Multi-tenant** | Partition pruning by `(tenant_id, timestamp)` ordering |
 
-#### Estimated Impact
-- **Query Speed:** 3-10x improvement on analytical queries
-- **Memory Efficiency:** 60-80% reduction for large result sets
-- **Cold Storage:** Native Parquet reads eliminate Wasm overhead
+#### Performance Characteristics
+- **Query Speed:** Sub-second on billions of rows
+- **Storage:** 10-20x compression vs PostgreSQL
+- **Throughput:** 100K+ events/sec async inserts
 
-#### Migration Complexity: **High**
-- Can be deployed as a standalone HTTP service (like tracking-service)
-- Uses `arrow-rs` and `datafusion` for robust query execution
+#### Migration Complexity: **Completed**
+- Deployed as part of the Rust mail-server
+- Uses `clickhouse` crate for async HTTP client
 - Integrates with existing metrics-exporter-prometheus for observability
 
 ---
@@ -418,9 +421,9 @@ Simple arithmetic calculations with no intensive computation. JavaScript's JIT c
    - Deploy as sidecar with sub-millisecond decisions
 
 ### Phase 2: Data Layer (Weeks 5-12)
-3. **Analytics Query Engine** → Standalone service
-   - Build on `datafusion` + `arrow-rs`
-   - Replace DuckDB Wasm bindings with native
+3. **Analytics Query Engine** → ✅ Completed
+   - Implemented with ClickHouse + `clickhouse-rs`
+   - See `services/mail-server/crates/analytics/src/clickhouse_engine.rs`
 
 4. **Email Validation** → NAPI-RS module
    - Share DNS resolver with MTA

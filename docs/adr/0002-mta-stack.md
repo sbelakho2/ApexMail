@@ -3,6 +3,8 @@
 ## Status
 Accepted
 
+> **Implementation Note (2026-02):** The MTA is implemented as a Rust crate (`services/mail-server/crates/mta/`). Postfix is not deployed as a separate container. SMTP handling is native Rust.
+
 ## Date
 2024-01-15
 

@@ -1,9 +1,11 @@
 //! Chaos engineering service — experiment lifecycle, safety monitoring, metric snapshots.
 
 use chrono::Utc;
+use observability_service::metrics_collector::MetricsCollector;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
+use sysinfo::System;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -22,6 +24,7 @@ pub struct ChaosEngineeringService {
     pool: PgPool,
     config: Arc<Config>,
     running_experiments: Arc<RwLock<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
+    metrics: Option<Arc<MetricsCollector>>,
 }
 
 impl ChaosEngineeringService {
@@ -30,6 +33,17 @@ impl ChaosEngineeringService {
             pool,
             config,
             running_experiments: Arc::new(RwLock::new(HashMap::new())),
+            metrics: None,
+        }
+    }
+
+    /// Create with a metrics collector for real metric capture.
+    pub fn with_metrics(pool: PgPool, config: Arc<Config>, metrics: Arc<MetricsCollector>) -> Self {
+        Self {
+            pool,
+            config,
+            running_experiments: Arc::new(RwLock::new(HashMap::new())),
+            metrics: Some(metrics),
         }
     }
 
@@ -96,9 +110,10 @@ impl ChaosEngineeringService {
         let pool_clone = self.pool.clone();
         let safety_checks = experiment_config.safety_checks.clone();
         let duration_ms = experiment_config.parameters.duration_ms;
+        let metrics_clone = self.metrics.clone();
 
         tokio::spawn(async move {
-            Self::monitor_experiment(pool_clone, id, safety_checks, duration_ms, abort_rx, metrics_before).await;
+            Self::monitor_experiment(pool_clone, id, safety_checks, duration_ms, abort_rx, metrics_before, metrics_clone).await;
         });
 
         let experiment = Experiment {
@@ -129,6 +144,7 @@ impl ChaosEngineeringService {
         duration_ms: u64,
         mut abort_rx: tokio::sync::watch::Receiver<bool>,
         metrics_before: MetricSnapshot,
+        metrics_collector: Option<Arc<MetricsCollector>>,
     ) {
         let start = std::time::Instant::now();
         let duration = std::time::Duration::from_millis(duration_ms);
@@ -137,7 +153,7 @@ impl ChaosEngineeringService {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(SAFETY_CHECK_INTERVAL_MS)) => {
                     // Check safety thresholds
-                    let current = Self::capture_metrics_static().await;
+                    let current = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
                     for check in &safety_checks {
                         if check.abort_on_failure {
                             let value = Self::get_metric_value(&current, &check.check_type);
@@ -167,7 +183,7 @@ impl ChaosEngineeringService {
 
                     // Check duration
                     if start.elapsed() >= duration {
-                        let after = Self::capture_metrics_static().await;
+                        let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
                         let _ = Self::complete_experiment_static(
                             &pool, experiment_id, ExperimentStatus::Completed,
                             Some(metrics_before), Some(current), Some(after),
@@ -178,7 +194,7 @@ impl ChaosEngineeringService {
                 }
                 _ = abort_rx.changed() => {
                     if *abort_rx.borrow() {
-                        let after = Self::capture_metrics_static().await;
+                        let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
                         let _ = Self::complete_experiment_static(
                             &pool, experiment_id, ExperimentStatus::Aborted,
                             Some(metrics_before), None, Some(after),
@@ -302,19 +318,72 @@ impl ChaosEngineeringService {
     // ── Metrics ────────────────────────────────────────────
 
     async fn capture_metrics(&self) -> MetricSnapshot {
-        Self::capture_metrics_static().await
+        Self::capture_metrics_with_collector(self.metrics.as_ref()).await
     }
 
-    async fn capture_metrics_static() -> MetricSnapshot {
-        // In production, these would query Prometheus / internal metrics
+    /// Capture real metrics from the metrics collector and system.
+    async fn capture_metrics_with_collector(collector: Option<&Arc<MetricsCollector>>) -> MetricSnapshot {
+        // Get system metrics (CPU and memory)
+        let mut sys = System::new();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        
+        // CPU usage as fraction (0.0 to 1.0)
+        let cpu_count = sys.cpus().len().max(1) as f32;
+        let cpu_usage = sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_count / 100.0;
+        
+        // Memory usage as fraction
+        let total_mem = sys.total_memory();
+        let used_mem = sys.used_memory();
+        let memory_usage = if total_mem > 0 {
+            used_mem as f64 / total_mem as f64
+        } else {
+            0.0
+        };
+
+        // Get application metrics from collector if available
+        let (error_rate, latency_p50, latency_p99, throughput) = if let Some(mc) = collector {
+            let summaries = mc.get_summary();
+            
+            // Look up known metric names
+            let error_rate = summaries.iter()
+                .find(|m| m.name == "error_rate" || m.name == "errors_total")
+                .map(|m| m.value)
+                .unwrap_or(0.0);
+            
+            let requests_total = summaries.iter()
+                .find(|m| m.name == "requests_total" || m.name == "http_requests_total")
+                .map(|m| m.value)
+                .unwrap_or(0.0);
+            
+            // Estimate throughput from requests counter (simplified - real impl would diff over time)
+            let throughput = requests_total.min(10000.0); // Cap at reasonable value
+            
+            // Look for latency histogram metrics
+            let latency_p50 = summaries.iter()
+                .find(|m| m.name == "latency_p50" || m.name.contains("latency"))
+                .map(|m| m.value * 1000.0) // Convert to ms if in seconds
+                .unwrap_or(0.0);
+            
+            let latency_p99 = summaries.iter()
+                .find(|m| m.name == "latency_p99")
+                .map(|m| m.value * 1000.0)
+                .unwrap_or(latency_p50 * 3.0); // Estimate p99 from p50
+            
+            (error_rate, latency_p50, latency_p99, throughput)
+        } else {
+            // No collector, return zeros for app metrics (system metrics still real)
+            (0.0, 0.0, 0.0, 0.0)
+        };
+
         MetricSnapshot {
             timestamp: Utc::now(),
-            error_rate: 0.0,
-            latency_p50_ms: 10.0,
-            latency_p99_ms: 50.0,
-            throughput_rps: 1000.0,
-            cpu_usage: 0.3,
-            memory_usage: 0.5,
+            error_rate,
+            latency_p50_ms: latency_p50,
+            latency_p99_ms: latency_p99,
+            throughput_rps: throughput,
+            cpu_usage: cpu_usage as f64,
+            memory_usage,
         }
     }
 
