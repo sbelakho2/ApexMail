@@ -2,29 +2,89 @@
 //!
 //! Uses an exponential ramp-up curve so that sending volume roughly doubles
 //! each day until the target volume is reached.
+//!
+//! State is persisted to PostgreSQL via the ip_pool_addresses table.
 
 use dashmap::DashMap;
+use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::types::WarmupSchedule;
 
 /// Manages IP warmup schedules with an exponential volume ramp-up.
+/// Persists state to database for crash recovery.
 #[derive(Debug, Clone)]
 pub struct IpWarmupManager {
+    db: PgPool,
+    /// In-memory cache for fast lookups (write-through to DB).
     schedules: Arc<DashMap<String, WarmupSchedule>>,
 }
 
 impl IpWarmupManager {
-    pub fn new() -> Self {
+    pub fn new(db: PgPool) -> Self {
         Self {
+            db,
+            schedules: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Create an in-memory-only manager for testing.
+    #[cfg(test)]
+    pub fn new_in_memory() -> Self {
+        Self {
+            db: PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
             schedules: Arc::new(DashMap::new()),
         }
     }
 
     /// Create a warmup schedule for `ip` targeting `target_volume` over `total_days`.
-    ///
-    /// The schedule starts at day 0 with a small volume and exponentially ramps up.
-    pub fn create_schedule(&self, ip: impl Into<String>, target_volume: u64, total_days: u32) -> WarmupSchedule {
+    /// Persists to database for crash recovery.
+    pub async fn create_schedule(
+        &self,
+        ip: impl Into<String>,
+        target_volume: u64,
+        total_days: u32,
+    ) -> Result<WarmupSchedule, sqlx::Error> {
+        let ip = ip.into();
+        let current_volume = self.compute_volume(target_volume, 0, total_days);
+        let schedule = WarmupSchedule {
+            ip: ip.clone(),
+            current_volume,
+            target_volume,
+            day: 0,
+            total_days,
+        };
+
+        // Persist to database - update existing or insert new
+        sqlx::query(
+            "INSERT INTO ip_pool_addresses (id, pool_id, ip_address, warmup_enabled, warmup_day, daily_limit, created_at, updated_at)
+             VALUES ($1, 'default', $2::inet, true, $3, $4, NOW(), NOW())
+             ON CONFLICT (ip_address) DO UPDATE SET
+                warmup_day = EXCLUDED.warmup_day,
+                daily_limit = EXCLUDED.daily_limit,
+                warmup_enabled = true,
+                updated_at = NOW()",
+        )
+        .bind(format!("warmup_{}", ip.replace('.', "_")))
+        .bind(&ip)
+        .bind(schedule.day as i32)
+        .bind(current_volume as i32)
+        .execute(&self.db)
+        .await?;
+
+        // Update cache
+        self.schedules.insert(ip, schedule.clone());
+        Ok(schedule)
+    }
+
+    /// Create a warmup schedule synchronously (for backwards compatibility in tests).
+    #[cfg(test)]
+    pub fn create_schedule_sync(
+        &self,
+        ip: impl Into<String>,
+        target_volume: u64,
+        total_days: u32,
+    ) -> WarmupSchedule {
         let ip = ip.into();
         let current_volume = self.compute_volume(target_volume, 0, total_days);
         let schedule = WarmupSchedule {
@@ -47,9 +107,34 @@ impl IpWarmupManager {
         })
     }
 
-    /// List all registered warmup schedules.
+    /// List all registered warmup schedules from cache.
     pub fn list_schedules(&self) -> Vec<WarmupSchedule> {
         self.schedules.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Load schedules from database into cache.
+    pub async fn load_from_db(&self) -> Result<(), sqlx::Error> {
+        let rows = sqlx::query_as::<_, (String, i32, Option<i32>)>(
+            "SELECT ip_address::text, warmup_day, daily_limit
+             FROM ip_pool_addresses WHERE warmup_enabled = true",
+        )
+        .fetch_all(&self.db)
+        .await?;
+
+        for (ip, day, limit) in rows {
+            // Estimate total_days and target_volume from current state
+            let total_days = 14u32; // default warmup period
+            let target_volume = limit.map(|l| l as u64 * 100).unwrap_or(100_000);
+            let schedule = WarmupSchedule {
+                ip: ip.clone(),
+                current_volume: limit.unwrap_or(1) as u64,
+                target_volume,
+                day: day as u32,
+                total_days,
+            };
+            self.schedules.insert(ip, schedule);
+        }
+        Ok(())
     }
 
     /// Returns `true` if the warmup for `ip` is complete (current day >= total days).
@@ -61,7 +146,34 @@ impl IpWarmupManager {
     }
 
     /// Advance the schedule for `ip` by one day, updating `current_volume`.
-    pub fn advance_day(&self, ip: &str) -> bool {
+    pub async fn advance_day(&self, ip: &str) -> Result<bool, sqlx::Error> {
+        if let Some(mut entry) = self.schedules.get_mut(ip) {
+            let s = entry.value_mut();
+            if s.day < s.total_days {
+                s.day += 1;
+                s.current_volume = self.compute_volume(s.target_volume, s.day, s.total_days);
+
+                // Persist to database
+                sqlx::query(
+                    "UPDATE ip_pool_addresses
+                     SET warmup_day = $2, daily_limit = $3, updated_at = NOW()
+                     WHERE ip_address = $1::inet",
+                )
+                .bind(ip)
+                .bind(s.day as i32)
+                .bind(s.current_volume as i32)
+                .execute(&self.db)
+                .await?;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Advance day synchronously (for backwards compatibility in tests).
+    #[cfg(test)]
+    pub fn advance_day_sync(&self, ip: &str) -> bool {
         if let Some(mut entry) = self.schedules.get_mut(ip) {
             let s = entry.value_mut();
             if s.day < s.total_days {
@@ -88,20 +200,14 @@ impl IpWarmupManager {
     }
 }
 
-impl Default for IpWarmupManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_create_schedule() {
-        let mgr = IpWarmupManager::new();
-        let s = mgr.create_schedule("1.2.3.4", 100_000, 14);
+        let mgr = IpWarmupManager::new_in_memory();
+        let s = mgr.create_schedule_sync("1.2.3.4", 100_000, 14);
         assert_eq!(s.day, 0);
         assert_eq!(s.target_volume, 100_000);
         assert!(s.current_volume >= 1);
@@ -110,8 +216,8 @@ mod tests {
 
     #[test]
     fn test_exponential_ramp() {
-        let mgr = IpWarmupManager::new();
-        mgr.create_schedule("10.0.0.1", 50_000, 10);
+        let mgr = IpWarmupManager::new_in_memory();
+        mgr.create_schedule_sync("10.0.0.1", 50_000, 10);
 
         let v0 = mgr.get_daily_volume("10.0.0.1", 0).unwrap();
         let v5 = mgr.get_daily_volume("10.0.0.1", 5).unwrap();
@@ -124,14 +230,14 @@ mod tests {
 
     #[test]
     fn test_warmup_complete() {
-        let mgr = IpWarmupManager::new();
-        mgr.create_schedule("10.0.0.2", 10_000, 3);
+        let mgr = IpWarmupManager::new_in_memory();
+        mgr.create_schedule_sync("10.0.0.2", 10_000, 3);
 
         assert!(!mgr.is_warmup_complete("10.0.0.2"));
 
-        mgr.advance_day("10.0.0.2"); // day 1
-        mgr.advance_day("10.0.0.2"); // day 2
-        mgr.advance_day("10.0.0.2"); // day 3
+        mgr.advance_day_sync("10.0.0.2"); // day 1
+        mgr.advance_day_sync("10.0.0.2"); // day 2
+        mgr.advance_day_sync("10.0.0.2"); // day 3
 
         assert!(mgr.is_warmup_complete("10.0.0.2"));
     }

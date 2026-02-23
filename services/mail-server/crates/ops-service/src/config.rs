@@ -13,6 +13,8 @@ pub struct OpsConfig {
     pub warmup_default_days: u32,
     /// TCP port the HTTP server listens on.
     pub port: u16,
+    /// PostgreSQL connection URL.
+    pub database_url: String,
 }
 
 impl Default for OpsConfig {
@@ -22,6 +24,7 @@ impl Default for OpsConfig {
             incident_auto_resolve_mins: 120,
             warmup_default_days: 14,
             port: 4400,
+            database_url: "postgres://localhost/apexmail".to_string(),
         }
     }
 }
@@ -34,6 +37,7 @@ impl OpsConfig {
     /// - `OPS_INCIDENT_AUTO_RESOLVE_MINS`
     /// - `OPS_WARMUP_DEFAULT_DAYS`
     /// - `OPS_PORT`
+    /// - `DATABASE_URL`
     pub fn from_env() -> Self {
         let default = Self::default();
         Self {
@@ -53,6 +57,8 @@ impl OpsConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(default.port),
+            database_url: std::env::var("DATABASE_URL")
+                .unwrap_or(default.database_url),
         }
     }
 }

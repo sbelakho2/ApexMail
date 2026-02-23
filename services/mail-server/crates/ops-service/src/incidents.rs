@@ -1,31 +1,116 @@
 //! Incident management with lifecycle tracking.
 //!
-//! All state is held in-memory behind a [`parking_lot::RwLock`].
+//! State is persisted to PostgreSQL via the status_page_incidents table.
+//! An in-memory cache is maintained for fast reads.
 
 use chrono::Utc;
 use parking_lot::RwLock;
+use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use apexmail_db::repos::incidents::IncidentRepo;
 use crate::types::{Incident, IncidentSeverity, IncidentStatus, TimelineEntry};
 
-/// Thread-safe incident manager.
+/// Thread-safe incident manager with database persistence.
 #[derive(Debug, Clone)]
 pub struct IncidentManager {
-    incidents: Arc<RwLock<Vec<Incident>>>,
+    db: PgPool,
+    /// In-memory cache for fast reads (write-through).
+    cache: Arc<RwLock<Vec<Incident>>>,
     timelines: Arc<RwLock<Vec<(Uuid, TimelineEntry)>>>,
 }
 
 impl IncidentManager {
-    pub fn new() -> Self {
+    pub fn new(db: PgPool) -> Self {
         Self {
-            incidents: Arc::new(RwLock::new(Vec::new())),
+            db,
+            cache: Arc::new(RwLock::new(Vec::new())),
+            timelines: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Create a new in-memory-only manager for testing without database.
+    #[cfg(test)]
+    pub fn new_in_memory() -> Self {
+        // Create a dummy pool that won't be used
+        Self {
+            db: PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
+            cache: Arc::new(RwLock::new(Vec::new())),
             timelines: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
     /// Create a new incident and return its id.
-    pub fn create_incident(
+    /// Persists to database and updates cache.
+    pub async fn create_incident(
+        &self,
+        title: impl Into<String>,
+        severity: IncidentSeverity,
+        affected_services: Vec<String>,
+    ) -> Result<Uuid, sqlx::Error> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let title = title.into();
+
+        // Map severity to impact string for database
+        let impact = match severity {
+            IncidentSeverity::P1 => "critical",
+            IncidentSeverity::P2 => "major",
+            IncidentSeverity::P3 => "minor",
+            IncidentSeverity::P4 => "none",
+        };
+
+        // Persist to database
+        IncidentRepo::create(
+            &self.db,
+            &id.to_string(),
+            &title,
+            "investigating", // IncidentStatus::Open maps to "investigating"
+            impact,
+            &affected_services,
+        )
+        .await?;
+
+        // Add timeline entry
+        let update_id = Uuid::new_v4();
+        IncidentRepo::add_update(
+            &self.db,
+            &update_id.to_string(),
+            &id.to_string(),
+            "investigating",
+            "Incident created",
+            "system",
+        )
+        .await?;
+
+        let incident = Incident {
+            id,
+            title,
+            severity,
+            status: IncidentStatus::Open,
+            started_at: now,
+            resolved_at: None,
+            affected_services,
+        };
+
+        // Update cache
+        self.cache.write().push(incident);
+        self.timelines.write().push((
+            id,
+            TimelineEntry {
+                timestamp: now,
+                status: IncidentStatus::Open,
+                message: "Incident created".into(),
+            },
+        ));
+
+        Ok(id)
+    }
+
+    /// Create a new incident synchronously (for backwards compatibility in tests).
+    #[cfg(test)]
+    pub fn create_incident_sync(
         &self,
         title: impl Into<String>,
         severity: IncidentSeverity,
@@ -42,7 +127,7 @@ impl IncidentManager {
             resolved_at: None,
             affected_services,
         };
-        self.incidents.write().push(incident);
+        self.cache.write().push(incident);
         self.timelines.write().push((
             id,
             TimelineEntry {
@@ -55,9 +140,67 @@ impl IncidentManager {
     }
 
     /// Update the status of an existing incident.
-    pub fn update_status(&self, id: Uuid, new_status: IncidentStatus, message: impl Into<String>) -> bool {
-        let mut incidents = self.incidents.write();
-        if let Some(inc) = incidents.iter_mut().find(|i| i.id == id) {
+    pub async fn update_status(
+        &self,
+        id: Uuid,
+        new_status: IncidentStatus,
+        message: impl Into<String>,
+    ) -> Result<bool, sqlx::Error> {
+        let message = message.into();
+        let status_str = match new_status {
+            IncidentStatus::Open => "investigating",
+            IncidentStatus::Investigating => "investigating",
+            IncidentStatus::Identified => "identified",
+            IncidentStatus::Monitoring => "monitoring",
+            IncidentStatus::Resolved => "resolved",
+        };
+        let resolved = new_status == IncidentStatus::Resolved;
+
+        // Update in database
+        let result = IncidentRepo::update_status(&self.db, &id.to_string(), status_str, resolved).await?;
+
+        if result.is_some() {
+            // Add timeline entry
+            let update_id = Uuid::new_v4();
+            IncidentRepo::add_update(
+                &self.db,
+                &update_id.to_string(),
+                &id.to_string(),
+                status_str,
+                &message,
+                "system",
+            )
+            .await?;
+
+            // Update cache
+            let mut cache = self.cache.write();
+            if let Some(inc) = cache.iter_mut().find(|i| i.id == id) {
+                inc.status = new_status;
+                if resolved {
+                    inc.resolved_at = Some(Utc::now());
+                }
+            }
+
+            self.timelines.write().push((
+                id,
+                TimelineEntry {
+                    timestamp: Utc::now(),
+                    status: new_status,
+                    message,
+                },
+            ));
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Update status synchronously (for backwards compatibility in tests).
+    #[cfg(test)]
+    pub fn update_status_sync(&self, id: Uuid, new_status: IncidentStatus, message: impl Into<String>) -> bool {
+        let mut cache = self.cache.write();
+        if let Some(inc) = cache.iter_mut().find(|i| i.id == id) {
             inc.status = new_status;
             if new_status == IncidentStatus::Resolved {
                 inc.resolved_at = Some(Utc::now());
@@ -77,13 +220,19 @@ impl IncidentManager {
     }
 
     /// Convenience wrapper: resolve an incident.
-    pub fn resolve(&self, id: Uuid, message: impl Into<String>) -> bool {
-        self.update_status(id, IncidentStatus::Resolved, message)
+    pub async fn resolve(&self, id: Uuid, message: impl Into<String>) -> Result<bool, sqlx::Error> {
+        self.update_status(id, IncidentStatus::Resolved, message).await
+    }
+
+    /// Resolve synchronously (for backwards compatibility in tests).
+    #[cfg(test)]
+    pub fn resolve_sync(&self, id: Uuid, message: impl Into<String>) -> bool {
+        self.update_status_sync(id, IncidentStatus::Resolved, message)
     }
 
     /// List all incidents that are **not** resolved.
     pub fn list_active(&self) -> Vec<Incident> {
-        self.incidents
+        self.cache
             .read()
             .iter()
             .filter(|i| i.status != IncidentStatus::Resolved)
@@ -91,12 +240,55 @@ impl IncidentManager {
             .collect()
     }
 
-    /// Retrieve an incident by id.
-    pub fn get_by_id(&self, id: Uuid) -> Option<Incident> {
-        self.incidents.read().iter().find(|i| i.id == id).cloned()
+    /// List active incidents from database (async).
+    pub async fn list_active_from_db(&self) -> Result<Vec<Incident>, sqlx::Error> {
+        let db_incidents = IncidentRepo::list_active(&self.db).await?;
+        Ok(db_incidents
+            .into_iter()
+            .map(|i| Incident {
+                id: Uuid::parse_str(&i.id).unwrap_or_default(),
+                title: i.title,
+                severity: IncidentSeverity::P2, // Default, not stored in DB schema
+                status: match i.status.as_str() {
+                    "investigating" => IncidentStatus::Investigating,
+                    "identified" => IncidentStatus::Identified,
+                    "monitoring" => IncidentStatus::Monitoring,
+                    "resolved" => IncidentStatus::Resolved,
+                    _ => IncidentStatus::Open,
+                },
+                started_at: i.created_at,
+                resolved_at: i.resolved_at,
+                affected_services: i.affected_components,
+            })
+            .collect())
     }
 
-    /// Return the timeline entries for a given incident.
+    /// Retrieve an incident by id from cache.
+    pub fn get_by_id(&self, id: Uuid) -> Option<Incident> {
+        self.cache.read().iter().find(|i| i.id == id).cloned()
+    }
+
+    /// Retrieve an incident by id from database (async).
+    pub async fn get_by_id_from_db(&self, id: Uuid) -> Result<Option<Incident>, sqlx::Error> {
+        let db_incident = IncidentRepo::get_by_id(&self.db, &id.to_string()).await?;
+        Ok(db_incident.map(|i| Incident {
+            id: Uuid::parse_str(&i.id).unwrap_or_default(),
+            title: i.title,
+            severity: IncidentSeverity::P2,
+            status: match i.status.as_str() {
+                "investigating" => IncidentStatus::Investigating,
+                "identified" => IncidentStatus::Identified,
+                "monitoring" => IncidentStatus::Monitoring,
+                "resolved" => IncidentStatus::Resolved,
+                _ => IncidentStatus::Open,
+            },
+            started_at: i.created_at,
+            resolved_at: i.resolved_at,
+            affected_services: i.affected_components,
+        }))
+    }
+
+    /// Return the timeline entries for a given incident from cache.
     pub fn get_timeline(&self, id: Uuid) -> Vec<TimelineEntry> {
         self.timelines
             .read()
@@ -105,11 +297,30 @@ impl IncidentManager {
             .map(|(_, e)| e.clone())
             .collect()
     }
-}
 
-impl Default for IncidentManager {
-    fn default() -> Self {
-        Self::new()
+    /// Load incidents from database into cache on startup.
+    pub async fn load_from_db(&self) -> Result<(), sqlx::Error> {
+        let db_incidents = IncidentRepo::list(&self.db, 1000, 0).await?;
+        let mut cache = self.cache.write();
+        cache.clear();
+        for i in db_incidents {
+            cache.push(Incident {
+                id: Uuid::parse_str(&i.id).unwrap_or_default(),
+                title: i.title,
+                severity: IncidentSeverity::P2, // Default
+                status: match i.status.as_str() {
+                    "investigating" => IncidentStatus::Investigating,
+                    "identified" => IncidentStatus::Identified,
+                    "monitoring" => IncidentStatus::Monitoring,
+                    "resolved" => IncidentStatus::Resolved,
+                    _ => IncidentStatus::Open,
+                },
+                started_at: i.created_at,
+                resolved_at: i.resolved_at,
+                affected_services: i.affected_components,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -119,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_create_and_list_active() {
-        let mgr = IncidentManager::new();
-        let id = mgr.create_incident("DB outage", IncidentSeverity::P1, vec!["db".into()]);
+        let mgr = IncidentManager::new_in_memory();
+        let id = mgr.create_incident_sync("DB outage", IncidentSeverity::P1, vec!["db".into()]);
 
         let active = mgr.list_active();
         assert_eq!(active.len(), 1);
@@ -130,10 +341,10 @@ mod tests {
 
     #[test]
     fn test_update_status() {
-        let mgr = IncidentManager::new();
-        let id = mgr.create_incident("Slow API", IncidentSeverity::P3, vec!["api".into()]);
+        let mgr = IncidentManager::new_in_memory();
+        let id = mgr.create_incident_sync("Slow API", IncidentSeverity::P3, vec!["api".into()]);
 
-        let ok = mgr.update_status(id, IncidentStatus::Investigating, "Looking into it");
+        let ok = mgr.update_status_sync(id, IncidentStatus::Investigating, "Looking into it");
         assert!(ok);
 
         let inc = mgr.get_by_id(id).unwrap();
@@ -142,10 +353,10 @@ mod tests {
 
     #[test]
     fn test_resolve_removes_from_active() {
-        let mgr = IncidentManager::new();
-        let id = mgr.create_incident("High latency", IncidentSeverity::P2, vec!["api".into()]);
+        let mgr = IncidentManager::new_in_memory();
+        let id = mgr.create_incident_sync("High latency", IncidentSeverity::P2, vec!["api".into()]);
 
-        mgr.resolve(id, "Fixed");
+        mgr.resolve_sync(id, "Fixed");
         let active = mgr.list_active();
         assert!(active.is_empty());
 
@@ -156,10 +367,10 @@ mod tests {
 
     #[test]
     fn test_timeline() {
-        let mgr = IncidentManager::new();
-        let id = mgr.create_incident("Disk full", IncidentSeverity::P1, vec!["storage".into()]);
-        mgr.update_status(id, IncidentStatus::Identified, "Root cause found");
-        mgr.resolve(id, "Disk cleaned");
+        let mgr = IncidentManager::new_in_memory();
+        let id = mgr.create_incident_sync("Disk full", IncidentSeverity::P1, vec!["storage".into()]);
+        mgr.update_status_sync(id, IncidentStatus::Identified, "Root cause found");
+        mgr.resolve_sync(id, "Disk cleaned");
 
         let tl = mgr.get_timeline(id);
         assert_eq!(tl.len(), 3);

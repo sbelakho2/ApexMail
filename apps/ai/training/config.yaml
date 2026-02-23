@@ -1,0 +1,81 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# ApexMail AI — QLoRA Training Configuration
+# Target: Qwen3-Next-80B-A3B-Instruct (MoE ~80B total, ~3B active)
+# Hardware: 4× NVIDIA B200 (183 GB each) — FSDP sharding
+# ──────────────────────────────────────────────────────────────────────────────
+
+model:
+  base: "/workspace/models/Qwen3-Next-80B-A3B-Instruct"
+  revision: "main"
+  trust_remote_code: true
+  torch_dtype: "bfloat16"
+  attn_implementation: "eager"          # MoE model — use eager attention
+
+quantisation:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: true
+
+lora:
+  r: 128
+  alpha: 256
+  dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - in_proj_qkvz
+    - in_proj_ba
+    - out_proj
+    - shared_expert.gate_proj
+    - shared_expert.up_proj
+    - shared_expert.down_proj
+
+training:
+  num_train_epochs: 3
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4        # effective batch = 2 * 4 * 4 GPUs = 32
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+  optim: "paged_adamw_8bit"
+  bf16: true
+  tf32: true
+  max_seq_length: 4096
+  packing: true
+  logging_steps: 10
+  eval_strategy: "steps"
+  eval_steps: 100
+  save_strategy: "steps"
+  save_steps: 100
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  report_to: "tensorboard"
+  seed: 42
+  dataloader_num_workers: 4
+  dataloader_pin_memory: true
+
+dataset:
+  train_file: "data/train.jsonl"
+  val_file: "data/val.jsonl"
+
+paths:
+  output_dir: "output"
+  logs_dir: "logs"
+
+evaluation:
+  golden_set: "data/golden_qa.jsonl"
+  max_new_tokens: 512
+  temperature: 0.1
+  top_p: 0.9

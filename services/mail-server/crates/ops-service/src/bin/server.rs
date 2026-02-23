@@ -16,12 +16,28 @@ async fn main() {
     let config = OpsConfig::from_env();
     info!(?config, "ops-service starting");
 
+    // Connect to database
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&config.database_url)
+        .await
+        .expect("failed to connect to database");
+
     let state = AppState {
+        db: db.clone(),
         health: HealthChecker::new(1000),
-        incidents: IncidentManager::new(),
+        incidents: IncidentManager::new(db.clone()),
         slo: SloTracker::new(),
-        warmup: IpWarmupManager::new(),
+        warmup: IpWarmupManager::new(db),
     };
+
+    // Load existing state from database
+    if let Err(e) = state.incidents.load_from_db().await {
+        tracing::warn!(?e, "Failed to load incidents from database");
+    }
+    if let Err(e) = state.warmup.load_from_db().await {
+        tracing::warn!(?e, "Failed to load warmup schedules from database");
+    }
 
     let app = router(state);
 

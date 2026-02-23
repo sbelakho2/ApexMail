@@ -217,8 +217,15 @@ impl FeedbackLoopServer {
                 break;
             } else if cmd.starts_with("RSET") || cmd.starts_with("NOOP") {
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
+            } else if cmd.starts_with("VRFY") || cmd.starts_with("EXPN") {
+                // Avoid leaking recipient validity.
+                let _ = write_line(&mut stream, "252 Cannot VRFY user, but will accept message and attempt delivery\r\n").await;
+            } else if cmd.starts_with("HELP") {
+                let _ = write_line(&mut stream, "214 Supported: EHLO HELO MAIL RCPT DATA RSET NOOP QUIT\r\n").await;
+            } else if cmd.starts_with("STARTTLS") {
+                let _ = write_line(&mut stream, "454 TLS not available on this endpoint\r\n").await;
             } else {
-                let _ = write_line(&mut stream, "502 Not implemented\r\n").await;
+                let _ = write_line(&mut stream, "500 Syntax error, command unrecognized\r\n").await;
             }
         }
     }

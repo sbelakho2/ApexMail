@@ -70,13 +70,15 @@ struct CreateIncidentResponse {
 async fn create_incident(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateIncidentPayload>,
-) -> (StatusCode, Json<CreateIncidentResponse>) {
-    let id = state.incidents.create_incident(
+) -> Result<(StatusCode, Json<CreateIncidentResponse>), StatusCode> {
+    match state.incidents.create_incident(
         payload.title,
         payload.severity,
         payload.affected_services,
-    );
-    (StatusCode::CREATED, Json(CreateIncidentResponse { id }))
+    ).await {
+        Ok(id) => Ok((StatusCode::CREATED, Json(CreateIncidentResponse { id }))),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn get_slos(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -203,16 +205,15 @@ mod tests {
             });
 
         AppState {
-            db,
+            db: db.clone(),
             health: HealthChecker::new(100),
-            incidents: IncidentManager::new(),
+            incidents: IncidentManager::new(db.clone()),
             slo: SloTracker::new(),
-            warmup: IpWarmupManager::new(),
+            warmup: IpWarmupManager::new(db),
         }
     }
 
     #[tokio::test]
-    #[ignore] // Requires database
     async fn test_get_health_checks() {
         let app = router(test_state().await);
         let req = Request::builder()
@@ -225,7 +226,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database
     async fn test_create_and_list_incidents() {
         let state = test_state().await;
         let app = router(state);
@@ -248,7 +248,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires database
     async fn test_get_status_page() {
         let app = router(test_state().await);
         let req = Request::builder()

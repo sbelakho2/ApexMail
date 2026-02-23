@@ -206,6 +206,43 @@ pub struct Campaign {
     pub updated_at: DateTime<Utc>,
 }
 
+// ─── Status Page Incidents ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct StatusPageIncident {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub impact: String,
+    pub affected_components: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct StatusPageIncidentUpdate {
+    pub id: String,
+    pub incident_id: String,
+    pub status: String,
+    pub body: String,
+    pub author: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// ─── ISP Warmup Schedules ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct IspWarmupSchedule {
+    pub id: String,
+    pub isp_name: String,
+    pub mx_patterns: serde_json::Value,
+    pub warmup_schedule: serde_json::Value,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +324,35 @@ mod tests {
         };
         assert!(d.spf_verified);
         assert!(!d.mta_sts_verified);
+    }
+
+    #[test]
+    fn test_status_page_incident() {
+        let i = StatusPageIncident {
+            id: "inc_test".into(),
+            title: "Database outage".into(),
+            status: "investigating".into(),
+            impact: "major".into(),
+            affected_components: vec!["database".into()],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved_at: None,
+        };
+        assert_eq!(i.status, "investigating");
+    }
+
+    #[test]
+    fn test_isp_warmup_schedule() {
+        let s = IspWarmupSchedule {
+            id: "isp_test".into(),
+            isp_name: "Gmail".into(),
+            mx_patterns: serde_json::json!(["*.google.com"]),
+            warmup_schedule: serde_json::json!([50, 100, 200]),
+            notes: Some("Test schedule".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(s.isp_name, "Gmail");
     }
 
     #[test]

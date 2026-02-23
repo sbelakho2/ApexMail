@@ -40,7 +40,7 @@ MOCK_TOOL_RESULTS = {
     "search_events": '{"events": [{"message_id": "msg_test1", "status": "delivered", "opened": false}]}',
     "get_suppression_status": '{"email": "test@example.com", "suppressed": true, "reason": "unsubscribe"}',
     "list_webhooks": '{"webhooks": [{"id": "wh_1", "url": "https://example.com/webhook", "status": "failing", "last_status_code": 404}]}',
-    "get_usage_stats": '{"plan": "Scale", "emails": {"used": 425000, "limit": 500000}, "api_calls": {"used": 3200000, "limit": 5000000}, "days_remaining": 10}',
+    "get_usage_stats": '{"plan": "Scale", "emails": {"used": 425000, "limit": 2000000}, "api_calls": {"used": 3200000, "limit": 20000000}, "days_remaining": 10}',
     "get_deliverability_report": '{"overall_score": 62, "delivery_rate": 92.0, "bounce_rate": 4.7, "complaint_rate": 0.13}',
     "check_blocklist": '{"ip": "198.51.100.12", "listings": [{"blocklist": "Spamhaus SBL", "listed": true}]}',
     "get_analytics_dashboard": '{"emails_sent": 1450000, "delivery_rate": 99.0, "bounce_rate": 0.5}',
@@ -93,6 +93,11 @@ def check_test(test: dict, response: str) -> TestResult:
     one_of = test.get("must_contain_one_of", [])
     if one_of and not any(phrase.lower() in response.lower() for phrase in one_of):
         failures.append(f"MISSING at least one of: {one_of}")
+
+    # must_contain_any — alias for must_contain_one_of
+    any_of = test.get("must_contain_any", [])
+    if any_of and not any(phrase.lower() in response.lower() for phrase in any_of):
+        failures.append(f"MISSING at least one of: {any_of}")
 
     # must_not_contain — NONE should be present
     for phrase in test.get("must_not_contain", []):
@@ -303,6 +308,7 @@ def dry_run_checks():
             has_checks = (
                 "must_contain" in test or
                 "must_contain_one_of" in test or
+                "must_contain_any" in test or
                 "must_not_contain" in test or
                 "must_match_regex" in test or
                 "tool_call_check" in test or
@@ -340,7 +346,7 @@ def dry_run_checks():
 def main():
     parser = argparse.ArgumentParser(description="ApexMail Agent Test Runner v2")
     parser.add_argument("--adapter", type=str, help="Path to LoRA adapter directory")
-    parser.add_argument("--base-model", type=str, default="/workspace/models/Qwen3-8B",
+    parser.add_argument("--base-model", type=str, default="/workspace/models/Qwen3-Next-80B-A3B-Instruct",
                         help="Path to base model")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--full", action="store_true", help="Run on all 4 GPUs in parallel")

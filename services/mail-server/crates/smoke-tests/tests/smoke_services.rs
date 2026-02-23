@@ -347,8 +347,8 @@ mod ops_tests {
 
     #[test]
     fn test_ops_warmup() {
-        let mgr = ops_service::warmup::IpWarmupManager::new();
-        let schedule = mgr.create_schedule("192.168.1.1", 100_000, 14);
+        let mgr = ops_service::warmup::IpWarmupManager::new_in_memory();
+        let schedule = mgr.create_schedule_sync("192.168.1.1", 100_000, 14);
         assert_eq!(schedule.ip, "192.168.1.1");
         assert_eq!(schedule.target_volume, 100_000);
         assert_eq!(schedule.day, 0);

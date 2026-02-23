@@ -101,14 +101,14 @@ fn fuzz_health_check_states() {
 #[test]
 fn fuzz_warmup_schedule_valid() {
     // Warmup calculations must always produce valid volumes (>= 0).
-    let manager = IpWarmupManager::new();
+    let manager = IpWarmupManager::new_in_memory();
     let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
         let ip = format!("192.168.{}.{}", rng.gen_range(0..=255u8), rng.gen_range(1..=255u8));
         let target: u64 = rng.gen_range(1..10_000_000);
         let days: u32 = rng.gen_range(1..60);
 
-        let schedule = manager.create_schedule(&ip, target, days);
+        let schedule = manager.create_schedule_sync(&ip, target, days);
         assert!(
             schedule.current_volume >= 1,
             "Day 0 volume should be >= 1, got {} for target={target}, days={days}",
@@ -123,7 +123,7 @@ fn fuzz_warmup_schedule_valid() {
         // Advance through all days and verify monotonic increase
         let mut prev_volume = schedule.current_volume;
         for _ in 0..days {
-            manager.advance_day(&ip);
+            manager.advance_day_sync(&ip);
         }
 
         // After advancing total_days, volume should equal target

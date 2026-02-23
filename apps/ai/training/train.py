@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ApexMail AI — Qwen 2.5-7B-Instruct QLoRA Fine-Tuning
+ApexMail AI — Qwen3-Next-80B-A3B-Instruct QLoRA Fine-Tuning
 
-Trains a QLoRA adapter on Qwen 2.5-7B-Instruct using SFTTrainer.
-Designed for a single A100-40 GB / A6000-48 GB on vast.ai.
+Trains a QLoRA adapter on Qwen3-Next-80B-A3B-Instruct (MoE ~80B, ~3B active) using SFTTrainer.
+Designed for 4× NVIDIA B200 (183 GB each) on vast.ai.
 
 Workflow:
     1. generate_dataset.py  → data/{train,val,test}.jsonl
@@ -90,7 +90,7 @@ def create_tokenizer(cfg: dict) -> AutoTokenizer:
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         padding_side="right",
     )
-    # Qwen 2.5 uses <|endoftext|> as EOS and <|im_end|> as chat turn end.
+    # Qwen3 uses <|endoftext|> as EOS and <|im_end|> as chat turn end.
     # Ensure pad token is set (required for batched training).
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -99,7 +99,7 @@ def create_tokenizer(cfg: dict) -> AutoTokenizer:
 
 
 def create_model(cfg: dict) -> AutoModelForCausalLM:
-    """Load Qwen 2.5-7B-Instruct in 4-bit QLoRA mode."""
+    """Load Qwen3-Next-80B-A3B-Instruct in 4-bit QLoRA mode."""
     model_cfg = cfg["model"]
     quant_cfg = cfg["quantisation"]
 
@@ -282,9 +282,9 @@ def main(
     resume: str | None = typer.Option(None, help="Resume from checkpoint path"),
     no_eval: bool = typer.Option(False, help="Skip post-training eval"),
 ) -> None:
-    """Fine-tune Qwen 2.5-7B-Instruct with QLoRA."""
+    """Fine-tune Qwen3-Next-80B-A3B-Instruct with QLoRA."""
     console.print(Panel(
-        "[bold]ApexMail AI — Qwen 2.5-7B-Instruct QLoRA Training[/bold]\n"
+        "[bold]ApexMail AI — Qwen3-Next-80B QLoRA Training[/bold]\n"
         "Fine-tuning for email marketing support assistant",
         border_style="cyan",
     ))
@@ -369,7 +369,7 @@ def main(
         dataloader_num_workers=train_cfg.get("dataloader_num_workers", 4),
         dataloader_pin_memory=train_cfg.get("dataloader_pin_memory", True),
         logging_dir=paths["logs_dir"],
-        run_name=f"apexmail-qwen7b-{ts}",
+        run_name=f"apexmail-qwen3-80b-{ts}",
     )
 
     # ── Trainer ──────────────────────────────────────────────────────────

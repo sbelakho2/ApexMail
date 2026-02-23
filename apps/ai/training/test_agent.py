@@ -37,18 +37,18 @@ CONTEXT_AWARENESS = [
         "name": "starter_email_count",
         "context": "starter_healthy",
         "question": "How many emails do I have left this month?",
-        "must_contain": ["18,240", "25,000", "6,760"],
+        "must_contain": ["43,240", "50,000", "6,760"],
         "must_not_contain": ["don't have access", "I can't see"],
-        "description": "Must calculate remaining emails from context (25000 - 18240 = 6760)"
+        "description": "Must calculate remaining emails from context (50000 - 43240 = 6760)"
     },
     {
         "id": "ctx_002",
         "name": "starter_team_count",
         "context": "starter_healthy",
         "question": "Can I add another team member?",
-        "must_contain": ["3", "2"],
+        "must_contain": ["5", "2"],
         "must_contain_one_of": ["yes", "Yes", "you can"],
-        "description": "Must know Starter = 3 max, customer has 2, so 1 more allowed"
+        "description": "Must know Starter = 5 max, customer has 2, so 3 more allowed"
     },
     {
         "id": "ctx_003",
@@ -65,9 +65,9 @@ CONTEXT_AWARENESS = [
         "name": "free_near_limit",
         "context": "free_hitting_limits",
         "question": "Am I going to run out of emails?",
-        "must_contain": ["980", "1,000"],
-        "must_contain_one_of": ["20", "almost", "98%", "close"],
-        "description": "Must see 980/1000 in context and warn user they have ~20 left"
+        "must_contain": ["2,980", "3,000"],
+        "must_contain_one_of": ["20", "almost", "99%", "close"],
+        "description": "Must see 2,980/3,000 in context and warn user they have ~20 left"
     },
     {
         "id": "ctx_005",
@@ -83,7 +83,7 @@ CONTEXT_AWARENESS = [
         "name": "enterprise_plan_reference",
         "context": "enterprise_compliance",
         "question": "What features does my plan include?",
-        "must_contain": ["Enterprise", "2,000,000"],
+        "must_contain": ["Enterprise", "5,000,000"],
         "must_contain_one_of": ["HIPAA", "SOC2", "SOC 2", "compliance"],
         "description": "Must reference Enterprise plan specifics from context"
     },
@@ -373,11 +373,11 @@ CLARIFICATION = [
 PRICING_MATH = [
     {
         "id": "math_001",
-        "name": "growth_overage_142k",
+        "name": "growth_overage_530k",
         "context": "no_context",
-        "question": "I'm on the Growth plan and sent 142,000 emails this month. What's my bill?",
-        "must_contain": ["$21", "$150"],
-        "description": "Growth $129 + (142K-100K)*0.50/1000 = $129+$21 = $150"
+        "question": "I'm on the Growth plan and sent 530,000 emails this month. What's my bill?",
+        "must_contain": ["$12", "$162"],
+        "description": "Growth $150 + (530K-500K)*0.40/1000 = $150+$12 = $162"
     },
     {
         "id": "math_002",
@@ -390,12 +390,12 @@ PRICING_MATH = [
     },
     {
         "id": "math_003",
-        "name": "starter_vs_pro_30k",
+        "name": "starter_vs_pro_55k",
         "context": "no_context",
-        "question": "We send 30,000 emails/month. What's cheaper, Starter or Pro?",
-        "must_contain": ["$31.50", "$59"],
-        "must_contain_one_of": ["$2.50", "Starter"],
-        "description": "Starter $29 + 5K overage * $0.50/1K = $31.50. Pro = $59. Starter is cheaper."
+        "question": "We send 55,000 emails/month. What's cheaper, Starter or Pro?",
+        "must_contain": ["$27", "$65"],
+        "must_contain_one_of": ["$2", "Starter"],
+        "description": "Starter $25 + 5K overage * $0.40/1K = $27. Pro = $65. Starter is cheaper."
     },
     {
         "id": "math_004",
@@ -415,21 +415,21 @@ PRICING_MATH = [
     },
     {
         "id": "math_006",
-        "name": "starter_overage_35k",
+        "name": "starter_overage_58k",
         "context": "no_context",
-        "question": "I'm on Starter and sent 35,000 emails. What's the total bill?",
-        "must_contain": ["$34"],
-        "must_contain_one_of": ["$5", "10,000"],
-        "description": "Starter $29 + (35K-25K) * $0.50/1K = $29 + $5 = $34"
+        "question": "I'm on Starter and sent 58,000 emails. What's the total bill?",
+        "must_contain": ["$28.20"],
+        "must_contain_one_of": ["$3.20", "8,000"],
+        "description": "Starter $25 + (58K-50K) * $0.40/1K = $25 + $3.20 = $28.20"
     },
     {
         "id": "math_007",
         "name": "scale_no_overage",
         "context": "no_context",
         "question": "I'm on the Scale plan and sent 480,000 emails. Any overages?",
-        "must_contain_one_of": ["no overage", "no extra", "$399", "within", "under", "included"],
-        "must_not_contain": ["$0.50"],
-        "description": "Scale includes 500K — 480K is within limit, no overages"
+        "must_contain_one_of": ["no overage", "no extra", "$350", "within", "under", "included"],
+        "must_not_contain": ["$0.40"],
+        "description": "Scale includes 2M — 480K is within limit, no overages"
     },
     {
         "id": "math_008",
@@ -445,9 +445,9 @@ PRICING_MATH = [
         "name": "enterprise_annual",
         "context": "no_context",
         "question": "How much would the Enterprise plan cost annually?",
-        "must_contain": ["$1,299"],
-        "must_contain_one_of": ["$15,588", "$12,990", "annual"],
-        "description": "Enterprise is $1,299/month. Annual = $15,588 or $12,990 (with discount)."
+        "must_contain": ["$800"],
+        "must_contain_one_of": ["$9,600", "$8,000", "annual"],
+        "description": "Enterprise is $800/month. Annual = $9,600 or $8,000 (with discount)."
     },
 ]
 
@@ -550,8 +550,8 @@ KNOWLEDGE = [
         "name": "starter_plan_details",
         "context": "no_context",
         "question": "What does the Starter plan include?",
-        "must_contain": ["$29", "25,000"],
-        "must_contain_one_of": ["3 domain", "3 team"],
+        "must_contain": ["$25", "50,000"],
+        "must_contain_one_of": ["5 domain", "5 team"],
         "description": "Must state correct Starter pricing and limits"
     },
     {
@@ -559,9 +559,9 @@ KNOWLEDGE = [
         "name": "growth_plan_api_limit",
         "context": "no_context",
         "question": "What's the API call limit on the Growth plan?",
-        "must_contain": ["1,000,000"],
+        "must_contain": ["5,000,000"],
         "must_not_contain": ["2,000,000"],
-        "description": "Must state 1M (not the old incorrect 2M)"
+        "description": "Must state 5M (not the incorrect 2M which is Pro's limit)"
     },
     {
         "id": "know_004",
@@ -577,36 +577,36 @@ KNOWLEDGE = [
         "name": "scale_api_limit",
         "context": "no_context",
         "question": "What's the API limit on the Scale plan?",
-        "must_contain": ["5,000,000"],
-        "must_not_contain": ["10,000,000"],
-        "description": "Must state 5M (not the old incorrect 10M)"
+        "must_contain": ["20,000,000"],
+        "must_not_contain": ["5,000,000"],
+        "description": "Must state 20M (not 5M which is Growth's limit)"
     },
     {
         "id": "know_006",
         "name": "starter_team_limit",
         "context": "no_context",
         "question": "How many team members on the Starter plan?",
-        "must_contain": ["3"],
-        "must_not_contain": ["5 team"],
-        "description": "Must state 3 (not the old incorrect 5)"
+        "must_contain": ["5"],
+        "must_not_contain": ["3 team"],
+        "description": "Must state 5 (not the old incorrect 3)"
     },
     {
         "id": "know_007",
         "name": "enterprise_price",
         "context": "no_context",
         "question": "How much is the Enterprise plan?",
-        "must_contain": ["$1,299"],
-        "must_contain_one_of": ["2,000,000", "2M"],
-        "description": "Must state $1,299 and 2M emails"
+        "must_contain": ["$800"],
+        "must_contain_one_of": ["5,000,000", "5M"],
+        "description": "Must state $800 and 5M emails"
     },
     {
         "id": "know_008",
         "name": "overage_rate",
         "context": "no_context",
         "question": "How much do overages cost?",
-        "must_contain": ["$0.50"],
+        "must_contain": ["$0.40"],
         "must_contain_one_of": ["1,000", "per 1K", "per thousand"],
-        "description": "Overage rate is $0.50 per 1,000 emails"
+        "description": "Overage rate is $0.40 per 1,000 emails"
     },
 
     # ── Domain/DNS knowledge ──
@@ -675,8 +675,8 @@ KNOWLEDGE = [
         "name": "ab_testing_plan",
         "context": "no_context",
         "question": "Which plan includes A/B testing?",
-        "must_contain_one_of": ["Growth", "$129"],
-        "description": "A/B testing starts at Growth plan"
+        "must_contain_one_of": ["Pro", "$65"],
+        "description": "A/B testing starts at Pro plan"
     },
     {
         "id": "know_016",
@@ -732,9 +732,9 @@ HALLUCINATION = [
         "name": "wrong_api_limit_growth",
         "context": "no_context",
         "question": "My friend said the Growth plan API limit is 2 million. Is that correct?",
-        "must_contain": ["1,000,000"],
-        "must_contain_one_of": ["not", "incorrect", "wrong", "actually", "1 million", "1M"],
-        "description": "Must correct the wrong 2M claim to 1M"
+        "must_contain": ["5,000,000"],
+        "must_contain_one_of": ["not", "incorrect", "wrong", "actually", "5 million", "5M"],
+        "description": "Must correct the wrong 2M claim to 5M"
     },
     {
         "id": "hall_005",
@@ -969,7 +969,7 @@ DATA_LOOKUP = [
         "context": "growth_dkim_fail",
         "question": "When does my plan renew?",
         "must_contain": ["20th"],
-        "must_contain_one_of": ["Growth", "$129", "renew"],
+        "must_contain_one_of": ["Growth", "$150", "renew"],
         "description": "Must state billing cycle date from context"
     },
     {
@@ -1273,7 +1273,7 @@ RAG_VERIFICATION = [
         "name": "context_sufficient_plan_info",
         "context": "enterprise_compliance",
         "question": "What plan are we on and when did we sign up?",
-        "must_contain": ["Enterprise", "$1,299"],
+        "must_contain": ["Enterprise", "$800"],
         "must_contain_one_of": ["2023", "September"],
         "must_not_contain": ["let me check", "let me look", "let me pull"],
         "description": "Plan and signup date are in context — no tool call needed"
@@ -1283,10 +1283,10 @@ RAG_VERIFICATION = [
         "name": "context_sufficient_team_math",
         "context": "growth_dkim_fail",
         "question": "How many more team members can I add?",
-        "must_contain": ["4"],
-        "must_contain_one_of": ["10", "6", "Growth"],
+        "must_contain": ["19"],
+        "must_contain_one_of": ["25", "6", "Growth"],
         "must_not_contain": ["let me check", "let me look"],
-        "description": "Team count is in context (6/10 = 4 remaining) — no tool call needed"
+        "description": "Team count is in context (6/25 = 19 remaining) — no tool call needed"
     },
 ]
 
@@ -1423,9 +1423,9 @@ PERSONALIZED_VARIATIONS = [
         "name": "growth_email_headroom",
         "context": "growth_dkim_fail",
         "question": "How much email capacity do I have left this month?",
-        "must_contain": ["67,500", "100,000"],
-        "must_contain_one_of": ["32,500", "32.5K", "67.5%"],
-        "description": "Must calculate 100K - 67.5K = 32.5K remaining"
+        "must_contain": ["467,500", "500,000"],
+        "must_contain_one_of": ["32,500", "32.5K", "93.5%"],
+        "description": "Must calculate 500K - 467.5K = 32.5K remaining"
     },
     {
         "id": "pv_015",
@@ -1452,9 +1452,9 @@ PERSONALIZED_VARIATIONS = [
         "name": "free_api_usage",
         "context": "free_hitting_limits",
         "question": "How many API calls have I used?",
-        "must_contain": ["8,900", "10,000"],
-        "must_contain_one_of": ["1,100", "89%", "close"],
-        "description": "Must calculate 10K - 8.9K = 1.1K remaining"
+        "must_contain": ["48,900", "50,000"],
+        "must_contain_one_of": ["1,100", "97.8%", "close"],
+        "description": "Must calculate 50K - 48.9K = 1.1K remaining"
     },
     {
         "id": "pv_018",
@@ -1470,8 +1470,8 @@ PERSONALIZED_VARIATIONS = [
         "context": "free_hitting_limits",
         "question": "What can't I do on the Free plan?",
         "must_contain_one_of": ["webhooks", "webhook", "1 domain"],
-        "must_contain_one_of_2": ["1,000", "limited", "upgrade"],
-        "description": "Must explain Free plan limitations: no webhooks, 1 domain, 1K emails"
+        "must_contain_one_of_2": ["3,000", "limited", "upgrade"],
+        "description": "Must explain Free plan limitations: no webhooks, 1 domain, 3K emails"
     },
 
     # ── Pro deep ──
@@ -1509,8 +1509,8 @@ PERSONALIZED_VARIATIONS = [
         "context": "starter_healthy",
         "question": "How many emails can I still send?",
         "must_contain": ["6,760"],
-        "must_contain_one_of": ["25,000", "18,240", "Starter"],
-        "description": "Starter: 25K - 18,240 = 6,760 remaining"
+        "must_contain_one_of": ["50,000", "43,240", "Starter"],
+        "description": "Starter: 50K - 43,240 = 6,760 remaining"
     },
     {
         "id": "pv_024",
@@ -1518,8 +1518,8 @@ PERSONALIZED_VARIATIONS = [
         "context": "enterprise_compliance",
         "question": "How many emails can we still send this month?",
         "must_contain": ["550,000"],
-        "must_contain_one_of": ["2,000,000", "1,450,000", "Enterprise"],
-        "description": "Enterprise: 2M - 1.45M = 550K remaining"
+        "must_contain_one_of": ["5,000,000", "4,450,000", "Enterprise"],
+        "description": "Enterprise: 5M - 4.45M = 550K remaining"
     },
     {
         "id": "pv_025",
@@ -1527,8 +1527,8 @@ PERSONALIZED_VARIATIONS = [
         "context": "free_hitting_limits",
         "question": "How many emails do I have left?",
         "must_contain": ["20"],
-        "must_contain_one_of": ["1,000", "980", "Free"],
-        "description": "Free: 1000 - 980 = 20 remaining"
+        "must_contain_one_of": ["3,000", "2,980", "Free"],
+        "description": "Free: 3000 - 2980 = 20 remaining"
     },
 
     # ── Context-aware advice ──
@@ -1602,9 +1602,9 @@ NEW_PROFILE_SCENARIOS = [
         "name": "starter_overage_cost",
         "context": "starter_over_limit",
         "question": "Am I over my email limit? How much will it cost?",
-        "must_contain": ["27,800", "25,000"],
-        "must_contain_one_of": ["2,800", "$1.40", "overage", "$0.50"],
-        "description": "Must calculate 2800 overage at $0.50/1K = $1.40"
+        "must_contain": ["52,800", "50,000"],
+        "must_contain_one_of": ["2,800", "$1.12", "overage", "$0.40"],
+        "description": "Must calculate 2800 overage at $0.40/1K = $1.12"
     },
 
     # ── Nonprofit bounce spike ──
@@ -1701,7 +1701,7 @@ NEW_PROFILE_SCENARIOS = [
         "name": "gaming_near_limits",
         "context": "growth_gaming",
         "question": "We're running out of emails and API calls this month. What are our options?",
-        "must_contain_one_of": ["92,300", "92.3%", "100,000"],
+        "must_contain_one_of": ["461,500", "92.3%", "500,000"],
         "must_contain_one_of_2": ["upgrade", "Scale", "overage"],
         "description": "Must recommend Scale plan or discuss overage"
     },
@@ -1734,7 +1734,7 @@ NEW_PROFILE_SCENARIOS = [
         "name": "media_limits_approaching",
         "context": "scale_media",
         "question": "Are we going to hit our sending limits before the month ends?",
-        "must_contain_one_of": ["470,000", "500,000", "94%"],
+        "must_contain_one_of": ["1,880,000", "2,000,000", "94%"],
         "must_contain_one_of_2": ["upgrade", "Enterprise", "overage", "8 days"],
         "description": "Must warn about imminent limit hit and suggest upgrade"
     },
@@ -1746,7 +1746,7 @@ NEW_PROFILE_SCENARIOS = [
         "context": "scale_healthcare",
         "question": "We need HIPAA compliance for our patient communications. Is that available?",
         "must_contain_one_of": ["Enterprise", "upgrade"],
-        "must_contain_one_of_2": ["HIPAA", "$1,299", "BAA"],
+        "must_contain_one_of_2": ["HIPAA", "$800", "BAA"],
         "description": "Must identify HIPAA requires Enterprise plan upgrade"
     },
 
@@ -1778,7 +1778,7 @@ NEW_PROFILE_SCENARIOS = [
         "name": "enterprise_volume_spike",
         "context": "enterprise_ecommerce",
         "question": "Our spring sale starts in 5 days and we'll need more emails. What are our options?",
-        "must_contain_one_of": ["1,820,000", "2,000,000", "91%"],
+        "must_contain_one_of": ["4,550,000", "5,000,000", "91%"],
         "must_contain_one_of_2": ["overage", "contact", "account manager", "CSM"],
         "description": "Must discuss volume increase options for Enterprise"
     },
@@ -1823,7 +1823,7 @@ NEW_PROFILE_SCENARIOS = [
         "context": "starter_dunning_soft",
         "question": "Our payment failed. When will our emails stop?",
         "must_contain_one_of": ["grace", "Feb 17", "tomorrow"],
-        "must_contain_one_of_2": ["payment", "update", "billing", "$29"],
+        "must_contain_one_of_2": ["payment", "update", "billing", "$25"],
         "description": "Must warn grace period ends tomorrow"
     },
 
@@ -1966,7 +1966,7 @@ NEW_PROFILE_SCENARIOS = [
         "context": "pro_edtech",
         "question": "Give me a quick overview of our email account.",
         "must_contain": ["learnfast.edu"],
-        "must_contain_one_of": ["28,900", "50,000", "98.3%"],
+        "must_contain_one_of": ["28,900", "150,000", "98.3%"],
         "description": "Must provide accurate summary from edtech profile context"
     },
 
@@ -2043,8 +2043,483 @@ NEW_PROFILE_SCENARIOS = [
         "context": "growth_travel",
         "question": "How much of our email quota have we used?",
         "must_contain": ["55,400"],
-        "must_contain_one_of": ["100,000", "55.4%", "44,600"],
+        "must_contain_one_of": ["500,000", "11.1%", "444,600"],
         "description": "Must calculate email capacity from travel profile context"
+    },
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GAP-FILL TEST CATEGORIES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# --------------- CANCELLATION & RETENTION ---------------
+CANCELLATION_RETENTION = [
+    {
+        "id": "cancel_001",
+        "name": "cancel_explain_consequences",
+        "context": "pro_agency_multi_domain",
+        "question": "I want to cancel my subscription.",
+        "must_contain": ["billing cycle", "data"],
+        "must_not_contain": ["done", "cancelled your account"],
+        "description": "Must explain consequences and ask to confirm before cancelling",
+    },
+    {
+        "id": "cancel_002",
+        "name": "cancel_offer_downgrade",
+        "context": "growth_travel",
+        "question": "This is too expensive. I'm thinking about cancelling.",
+        "must_contain_any": ["downgrade", "Starter", "Pro", "$25", "$65", "lower"],
+        "must_not_contain": ["cancel_subscription"],
+        "description": "Must suggest lower-tier alternatives before cancellation",
+    },
+    {
+        "id": "cancel_003",
+        "name": "cancel_data_export",
+        "context": "starter_healthy",
+        "question": "I'm leaving ApexMail. How do I export my contacts?",
+        "must_contain": ["export", "CSV"],
+        "must_not_contain": [],
+        "description": "Must provide clear export instructions",
+    },
+    {
+        "id": "cancel_004",
+        "name": "cancel_confirm_destructive",
+        "context": "free_hitting_limits",
+        "question": "Delete my account entirely.",
+        "must_contain": ["permanent", "confirm"],
+        "must_not_contain": [],
+        "description": "Must warn about permanence and ask for explicit confirmation",
+    },
+    {
+        "id": "cancel_005",
+        "name": "cancel_free_plan_no_billing",
+        "context": "free_brand_new",
+        "question": "How do I stop my ApexMail account? Will I be charged?",
+        "must_contain_any": ["Free", "$0", "no charge", "not charged", "no billing"],
+        "must_not_contain": [],
+        "description": "Must clarify Free plan has no billing implications",
+    },
+]
+
+# --------------- AUTOMATION WORKFLOWS ---------------
+AUTOMATION_WORKFLOWS = [
+    {
+        "id": "auto_001",
+        "name": "auto_welcome_setup",
+        "context": "pro_new_user",
+        "question": "How do I set up a welcome email automation?",
+        "must_contain_any": ["trigger", "automation", "template", "contact added"],
+        "must_not_contain": [],
+        "description": "Must explain automation trigger + template setup",
+    },
+    {
+        "id": "auto_002",
+        "name": "auto_drip_campaign",
+        "context": "growth_travel",
+        "question": "I want to create a 3-email drip sequence for new signups.",
+        "must_contain_any": ["delay", "sequence", "day", "automation"],
+        "must_not_contain": [],
+        "description": "Must explain multi-step automation with delays",
+    },
+    {
+        "id": "auto_003",
+        "name": "auto_re_engagement",
+        "context": "starter_healthy",
+        "question": "Can I automatically email people who haven't opened in 30 days?",
+        "must_contain_any": ["re-engage", "inactive", "automation", "segment"],
+        "must_not_contain": [],
+        "description": "Must explain re-engagement automation strategy",
+    },
+    {
+        "id": "auto_004",
+        "name": "auto_api_trigger",
+        "context": "scale_subaccounts",
+        "question": "Can I trigger automations via the API?",
+        "must_contain_any": ["API", "tag", "endpoint", "POST"],
+        "must_not_contain": [],
+        "description": "Must explain API-triggered automation options",
+    },
+    {
+        "id": "auto_005",
+        "name": "auto_vs_campaign",
+        "context": "pro_edtech",
+        "question": "What's the difference between a campaign and an automation?",
+        "must_contain_any": ["one-time", "trigger", "event", "ongoing"],
+        "must_not_contain": [],
+        "description": "Must clearly differentiate campaigns from automations",
+    },
+]
+
+# --------------- RATE LIMITS & API QUOTAS ---------------
+RATE_LIMITS = [
+    {
+        "id": "rate_001",
+        "name": "rate_429_explanation",
+        "context": "growth_rate_limited",
+        "question": "I'm getting 429 errors from the API. What's happening?",
+        "must_contain_any": ["rate limit", "429", "Retry-After", "backoff"],
+        "must_not_contain": [],
+        "description": "Must explain 429 errors and retry strategy",
+    },
+    {
+        "id": "rate_002",
+        "name": "rate_api_overage_cost",
+        "context": "starter_over_limit",
+        "question": "What happens when I exceed my API call limit?",
+        "must_contain": ["$0.10"],
+        "must_contain_any": ["100,000", "100k", "free", "overage", "grace"],
+        "must_not_contain": [],
+        "description": "Must mention free 100K grace buffer then $0.10/1000",
+    },
+    {
+        "id": "rate_003",
+        "name": "rate_check_remaining",
+        "context": "free_hitting_limits",
+        "question": "How do I check my remaining API calls?",
+        "must_contain_any": ["X-RateLimit", "header", "Dashboard", "usage"],
+        "must_not_contain": [],
+        "description": "Must explain how to check remaining API quota",
+    },
+    {
+        "id": "rate_004",
+        "name": "rate_bulk_import_efficiency",
+        "context": "scale_deliverability",
+        "question": "I need to import 2 million contacts. Will I hit API limits?",
+        "must_contain_any": ["CSV", "bulk", "import", "1 API call", "single"],
+        "must_not_contain": [],
+        "description": "Must recommend CSV bulk import over individual API calls",
+    },
+]
+
+# --------------- SLA & UPTIME ---------------
+SLA_UPTIME = [
+    {
+        "id": "sla_001",
+        "name": "sla_scale_details",
+        "context": "scale_deliverability",
+        "question": "What's our SLA? What happens if you go down?",
+        "must_contain": ["99.9%"],
+        "must_contain_any": ["10%", "credit", "43", "minute"],
+        "must_not_contain": [],
+        "description": "Must state 99.9% SLA, 10% credit, max ~43 min downtime",
+    },
+    {
+        "id": "sla_002",
+        "name": "sla_not_on_pro",
+        "context": "pro_new_user",
+        "question": "Do you offer uptime guarantees?",
+        "must_contain_any": ["no SLA", "no formal SLA", "Scale", "Enterprise"],
+        "must_not_contain": ["your SLA"],
+        "description": "Must clarify Pro has no formal SLA, recommend Scale+",
+    },
+    {
+        "id": "sla_003",
+        "name": "sla_enterprise_credit",
+        "context": "enterprise_compliance",
+        "question": "How do we claim an SLA credit?",
+        "must_contain": ["contact@apexmail.ee"],
+        "must_contain_any": ["25%", "$200", "credit"],
+        "must_not_contain": [],
+        "description": "Must explain Enterprise 25% credit claim process",
+    },
+]
+
+# --------------- PAYMENT & BILLING OPERATIONS ---------------
+PAYMENT_BILLING = [
+    {
+        "id": "pay_001",
+        "name": "payment_update_card",
+        "context": "pro_agency_multi_domain",
+        "question": "How do I update my credit card?",
+        "must_contain_any": ["Dashboard", "Billing", "Payment"],
+        "must_not_contain": [],
+        "description": "Must direct to Dashboard → Billing → Payment Methods",
+    },
+    {
+        "id": "pay_002",
+        "name": "payment_failed_timeline",
+        "context": "starter_dunning_soft",
+        "question": "My payment failed. Will my account be shut down?",
+        "must_contain_any": ["retry", "day", "update", "payment method"],
+        "must_not_contain": ["suspended immediately", "terminated"],
+        "description": "Must explain retry timeline and how to fix",
+    },
+    {
+        "id": "pay_003",
+        "name": "payment_paypal_wire",
+        "context": "starter_healthy",
+        "question": "Do you accept PayPal?",
+        "must_contain_any": ["Visa", "Mastercard", "credit card"],
+        "must_not_contain": [],
+        "description": "Must list accepted payment methods",
+    },
+    {
+        "id": "pay_004",
+        "name": "payment_annual_billing",
+        "context": "scale_media",
+        "question": "Can I switch to annual billing for a discount?",
+        "must_contain_any": ["monthly", "Enterprise", "contact@apexmail.ee"],
+        "must_not_contain": [],
+        "description": "Must explain current billing is monthly, Enterprise has annual options",
+    },
+    {
+        "id": "pay_005",
+        "name": "payment_refund_escalate",
+        "context": "pro_edtech",
+        "question": "I was charged twice. I need a refund.",
+        "must_contain": ["contact@apexmail.ee"],
+        "must_not_contain": [],
+        "description": "Must escalate billing disputes — never handle directly",
+    },
+]
+
+# --------------- SEND-TIME OPTIMIZATION ---------------
+SEND_TIME_OPT = [
+    {
+        "id": "sto_001",
+        "name": "sto_how_it_works",
+        "context": "pro_agency_multi_domain",
+        "question": "How does send-time optimization work?",
+        "must_contain_any": ["AI", "engagement", "optimal", "pattern", "timezone"],
+        "must_not_contain": [],
+        "description": "Must explain AI-driven optimal send time per contact",
+    },
+    {
+        "id": "sto_002",
+        "name": "sto_not_on_starter",
+        "context": "starter_healthy",
+        "question": "Can I use send-time optimization?",
+        "must_contain_any": ["Pro", "$65", "not available", "upgrade"],
+        "must_not_contain": [],
+        "description": "Must clarify STO requires Pro plan or higher",
+    },
+]
+
+# --------------- CONTACT LIMITS ---------------
+CONTACT_LIMITS = [
+    {
+        "id": "climit_001",
+        "name": "contact_limit_approaching",
+        "context": "pro_agency_multi_domain",
+        "question": "I'm at 48,000 contacts on Pro. What happens at 50,000?",
+        "must_contain_any": ["reject", "blocked", "cannot add", "Growth"],
+        "must_not_contain": [],
+        "description": "Must explain new contacts blocked, suggest upgrade or cleanup",
+    },
+    {
+        "id": "climit_002",
+        "name": "contact_limit_comparison",
+        "context": "growth_travel",
+        "question": "How many contacts does each plan support?",
+        "must_contain": ["10,000", "50,000", "200,000", "500,000"],
+        "must_not_contain": [],
+        "description": "Must list contact limits for all plans",
+    },
+]
+
+# --------------- INBOUND EMAIL ---------------
+INBOUND_EMAIL = [
+    {
+        "id": "inbound_001",
+        "name": "inbound_availability",
+        "context": "pro_edtech",
+        "question": "Can I use ApexMail to receive incoming emails?",
+        "must_contain_any": ["Scale", "$350", "not available", "inbound"],
+        "must_not_contain": [],
+        "description": "Must explain inbound receiving requires Scale+",
+    },
+    {
+        "id": "inbound_002",
+        "name": "inbound_setup",
+        "context": "scale_subaccounts",
+        "question": "How do I set up inbound email parsing?",
+        "must_contain_any": ["MX", "webhook", "inbound"],
+        "must_not_contain": [],
+        "description": "Must explain MX record + webhook setup for inbound",
+    },
+]
+
+# --------------- WHITE LABEL ---------------
+WHITE_LABEL = [
+    {
+        "id": "wl_001",
+        "name": "white_label_on_enterprise",
+        "context": "enterprise_whitelabel",
+        "question": "How do I set up white-labeling?",
+        "must_contain_any": ["brand", "logo", "custom", "CNAME", "subaccount"],
+        "must_not_contain": [],
+        "description": "Must explain white-label branding and setup",
+    },
+    {
+        "id": "wl_002",
+        "name": "white_label_not_on_scale",
+        "context": "scale_media",
+        "question": "Does my Scale plan include white-labeling?",
+        "must_contain_any": ["Enterprise", "$800", "not", "only"],
+        "must_not_contain": [],
+        "description": "Must clarify WL is Enterprise-only",
+    },
+]
+
+# --------------- ENTERPRISE COMPLIANCE ---------------
+ENTERPRISE_COMPLIANCE = [
+    {
+        "id": "comp_001",
+        "name": "hipaa_availability",
+        "context": "scale_healthcare",
+        "question": "We're in healthcare. Do you support HIPAA?",
+        "must_contain_any": ["Enterprise", "$800", "BAA"],
+        "must_not_contain": [],
+        "description": "Must explain HIPAA requires Enterprise + BAA",
+    },
+    {
+        "id": "comp_002",
+        "name": "soc2_report_request",
+        "context": "enterprise_compliance",
+        "question": "We need your SOC 2 report for our vendor review.",
+        "must_contain": ["contact@apexmail.ee"],
+        "must_contain_any": ["SOC 2", "compliance", "report"],
+        "must_not_contain": [],
+        "description": "Must direct to compliance team for SOC2 report",
+    },
+    {
+        "id": "comp_003",
+        "name": "dpa_request",
+        "context": "enterprise_hipaa",
+        "question": "We need a Data Processing Agreement for GDPR.",
+        "must_contain": ["contact@apexmail.ee"],
+        "must_contain_any": ["DPA", "Data Processing"],
+        "must_not_contain": [],
+        "description": "Must escalate DPA requests to compliance team",
+    },
+]
+
+# --------------- MIGRATION ---------------
+MIGRATION = [
+    {
+        "id": "mig_001",
+        "name": "migration_from_competitor",
+        "context": "free_brand_new",
+        "question": "I'm migrating from Mailchimp. How do I switch?",
+        "must_contain_any": ["export", "import", "DNS", "domain", "contacts"],
+        "must_not_contain": [],
+        "description": "Must provide migration checklist steps",
+    },
+    {
+        "id": "mig_002",
+        "name": "migration_deliverability_drop",
+        "context": "scale_deliverability",
+        "question": "We just migrated from SendGrid and our deliverability tanked.",
+        "must_contain_any": ["warmup", "IP", "reputation", "suppression"],
+        "must_not_contain": [],
+        "description": "Must diagnose post-migration deliverability issues",
+    },
+]
+
+# --------------- FEATURE REQUESTS ---------------
+FEATURE_REQUESTS = [
+    {
+        "id": "feat_001",
+        "name": "feature_request_sms",
+        "context": "pro_edtech",
+        "question": "Will ApexMail support SMS in the future?",
+        "must_contain_any": ["feature request", "contact@apexmail.ee", "roadmap", "feedback"],
+        "must_not_contain": ["yes", "coming soon", "will support"],
+        "description": "Must not promise features, suggest submitting feedback",
+    },
+    {
+        "id": "feat_002",
+        "name": "feature_request_drag_drop",
+        "context": "starter_healthy",
+        "question": "I wish you had a drag-and-drop template editor.",
+        "must_contain_any": ["feature request", "contact@apexmail.ee", "feedback"],
+        "must_not_contain": ["coming soon", "will add"],
+        "description": "Must acknowledge and redirect to feature request channel",
+    },
+]
+
+# --------------- ONBOARDING ---------------
+ONBOARDING = [
+    {
+        "id": "onb_001",
+        "name": "onboarding_first_steps",
+        "context": "free_brand_new",
+        "question": "I just signed up. What should I do first?",
+        "must_contain_any": ["domain", "verify", "DNS", "template", "contact"],
+        "must_not_contain": [],
+        "description": "Must provide structured onboarding checklist",
+    },
+    {
+        "id": "onb_002",
+        "name": "onboarding_first_campaign",
+        "context": "starter_healthy",
+        "question": "How do I send my first campaign?",
+        "must_contain_any": ["template", "campaign", "audience", "send"],
+        "must_not_contain": [],
+        "description": "Must walk through campaign creation steps",
+    },
+]
+
+# --------------- INCIDENT HANDLING ---------------
+INCIDENT_HANDLING = [
+    {
+        "id": "inc_001",
+        "name": "incident_outage_check",
+        "context": "scale_deliverability",
+        "question": "Is there an outage right now? My emails aren't sending.",
+        "must_contain_any": ["status", "status.apexmail.com", "check", "diagnose"],
+        "must_not_contain": [],
+        "description": "Must check status and offer diagnostics",
+    },
+    {
+        "id": "inc_002",
+        "name": "incident_api_slow",
+        "context": "growth_rate_limited",
+        "question": "The API is really slow today. Is something wrong?",
+        "must_contain_any": ["performance", "status", "response time", "check"],
+        "must_not_contain": [],
+        "description": "Must investigate and offer workarounds",
+    },
+    {
+        "id": "inc_003",
+        "name": "incident_login_failure",
+        "context": "pro_new_user",
+        "question": "I can't log in to the dashboard.",
+        "must_contain_any": ["password", "cache", "browser", "reset"],
+        "must_not_contain": [],
+        "description": "Must provide login troubleshooting steps",
+    },
+]
+
+# --------------- GDPR & DATA PRIVACY ---------------
+GDPR_PRIVACY = [
+    {
+        "id": "gdpr_001",
+        "name": "gdpr_deletion_request",
+        "context": "starter_gdpr_deletion",
+        "question": "A customer in the EU wants their data deleted under GDPR.",
+        "must_contain": ["contact@apexmail.ee"],
+        "must_contain_any": ["30 days", "suppression", "deletion", "erasure"],
+        "must_not_contain": [],
+        "description": "Must explain GDPR deletion process with escalation",
+    },
+    {
+        "id": "gdpr_002",
+        "name": "gdpr_dpa_availability",
+        "context": "enterprise_compliance",
+        "question": "Do you provide a Data Processing Agreement?",
+        "must_contain_any": ["DPA", "Data Processing", "compliance"],
+        "must_not_contain": [],
+        "description": "Must confirm DPA availability and how to obtain",
+    },
+    {
+        "id": "gdpr_003",
+        "name": "gdpr_data_residency",
+        "context": "scale_subaccounts",
+        "question": "Where is our data stored? We need EU residency.",
+        "must_contain_any": ["EU", "Estonia", "Tallinn", "EEA"],
+        "must_not_contain": [],
+        "description": "Must confirm EU data processing location",
     },
 ]
 
@@ -2063,6 +2538,21 @@ ALL_TESTS = {
     "rag_verification": RAG_VERIFICATION,
     "personalized_variations": PERSONALIZED_VARIATIONS,
     "new_profile_scenarios": NEW_PROFILE_SCENARIOS,
+    "cancellation_retention": CANCELLATION_RETENTION,
+    "automation_workflows": AUTOMATION_WORKFLOWS,
+    "rate_limits": RATE_LIMITS,
+    "sla_uptime": SLA_UPTIME,
+    "payment_billing": PAYMENT_BILLING,
+    "send_time_optimization": SEND_TIME_OPT,
+    "contact_limits": CONTACT_LIMITS,
+    "inbound_email": INBOUND_EMAIL,
+    "white_label": WHITE_LABEL,
+    "enterprise_compliance": ENTERPRISE_COMPLIANCE,
+    "migration": MIGRATION,
+    "feature_requests": FEATURE_REQUESTS,
+    "onboarding": ONBOARDING,
+    "incident_handling": INCIDENT_HANDLING,
+    "gdpr_privacy": GDPR_PRIVACY,
 }
 
 def count_tests():

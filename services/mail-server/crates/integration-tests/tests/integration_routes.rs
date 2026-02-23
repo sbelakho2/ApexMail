@@ -196,18 +196,28 @@ mod ops {
     use ops_service::slo::SloTracker;
     use ops_service::warmup::IpWarmupManager;
 
-    fn app() -> axum::Router {
+    async fn app() -> axum::Router {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://localhost/apexmail_test".to_string()
+            }))
+            .await
+            .expect("Failed to connect to test database");
+
         router(AppState {
+            db: db.clone(),
             health: HealthChecker::new(100),
-            incidents: IncidentManager::new(),
+            incidents: IncidentManager::new(db.clone()),
             slo: SloTracker::new(),
-            warmup: IpWarmupManager::new(),
+            warmup: IpWarmupManager::new(db),
         })
     }
 
     #[tokio::test]
     async fn health_checks_returns_200() {
         let resp = app()
+            .await
             .oneshot(
                 Request::get("/health/checks")
                     .body(Body::empty())
@@ -223,6 +233,7 @@ mod ops {
     #[tokio::test]
     async fn status_page_returns_200() {
         let resp = app()
+            .await
             .oneshot(Request::get("/status").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -232,6 +243,7 @@ mod ops {
     #[tokio::test]
     async fn slos_list_returns_200() {
         let resp = app()
+            .await
             .oneshot(Request::get("/slos").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -248,6 +260,7 @@ mod ops {
             "affected_services": ["api-server"]
         });
         let resp = app()
+            .await
             .oneshot(
                 Request::post("/incidents")
                     .header("content-type", "application/json")
