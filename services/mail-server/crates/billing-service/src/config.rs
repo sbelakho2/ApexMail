@@ -25,7 +25,7 @@ pub struct BillingConfig {
     pub estonia_vat_rate: u32,
     /// Overage rate per email in cents ($0.40 / 1 000 = 0.04 cents).
     #[serde(default = "default_overage_rate_cents")]
-    pub overage_rate_per_email_cents: f64,
+    pub overage_rate_per_email_millicents: i64,
 }
 
 fn default_listen_addr() -> String {
@@ -40,8 +40,8 @@ fn default_metering_flush_interval_ms() -> u64 {
 fn default_vat_rate() -> u32 {
     22
 }
-fn default_overage_rate_cents() -> f64 {
-    0.04
+fn default_overage_rate_cents() -> i64 {
+    40
 }
 
 impl Default for BillingConfig {
@@ -54,7 +54,7 @@ impl Default for BillingConfig {
             metering_flush_interval_ms: default_metering_flush_interval_ms(),
             service_auth_token: String::new(),
             estonia_vat_rate: default_vat_rate(),
-            overage_rate_per_email_cents: default_overage_rate_cents(),
+            overage_rate_per_email_millicents: default_overage_rate_cents(),
         }
     }
 }
@@ -64,8 +64,8 @@ impl Default for BillingConfig {
 pub struct PaygEmailTier {
     /// Upper bound (exclusive) of emails in this tier.
     pub up_to: u64,
-    /// Price per email in **cents**.
-    pub price_per_email: f64,
+    /// Price per email in **millicents** (1/1000 of a cent).
+    pub price_per_email_millicents: i64,
 }
 
 /// Pay-as-you-go pricing configuration (all amounts in cents).
@@ -81,10 +81,10 @@ impl Default for PaygPricing {
     fn default() -> Self {
         Self {
             email_tiers: vec![
-                PaygEmailTier { up_to: 10_000, price_per_email: 0.10 },
-                PaygEmailTier { up_to: 100_000, price_per_email: 0.08 },
-                PaygEmailTier { up_to: 1_000_000, price_per_email: 0.05 },
-                PaygEmailTier { up_to: u64::MAX, price_per_email: 0.03 },
+                PaygEmailTier { up_to: 10_000, price_per_email_millicents: 100 },
+                PaygEmailTier { up_to: 100_000, price_per_email_millicents: 80 },
+                PaygEmailTier { up_to: 1_000_000, price_per_email_millicents: 50 },
+                PaygEmailTier { up_to: u64::MAX, price_per_email_millicents: 30 },
             ],
             free_api_calls_per_month: 100_000,
             price_per_thousand_api_calls: 10,
@@ -95,8 +95,8 @@ impl Default for PaygPricing {
 impl PaygPricing {
     /// Calculate PAYG cost for a given email + API-call volume.
     /// Returns `(email_cost, api_cost, total)` all in cents.
-    pub fn calculate(&self, emails_sent: u64, api_calls: u64) -> (f64, f64, f64) {
-        let mut email_cost: f64 = 0.0;
+    pub fn calculate(&self, emails_sent: u64, api_calls: u64) -> (i64, i64, i64) {
+        let mut email_cost_millicents: i64 = 0;
         let mut remaining = emails_sent;
         let mut prev_up_to: u64 = 0;
 
@@ -106,21 +106,18 @@ impl PaygPricing {
             }
             let tier_width = tier.up_to.saturating_sub(prev_up_to);
             let applicable = remaining.min(tier_width);
-            email_cost += applicable as f64 * tier.price_per_email;
+            email_cost_millicents += (applicable as i64) * tier.price_per_email_millicents;
             remaining -= applicable;
             prev_up_to = tier.up_to;
         }
 
         let billable_api = api_calls.saturating_sub(self.free_api_calls_per_month);
-        let api_cost = ((billable_api + 999) / 1000) as f64
-            * self.price_per_thousand_api_calls as f64;
+        let api_cost_cents = ((billable_api + 999) / 1000) as i64
+            * self.price_per_thousand_api_calls as i64;
 
-        let total = email_cost + api_cost;
-        (
-            (email_cost * 100.0).round() / 100.0,
-            (api_cost * 100.0).round() / 100.0,
-            (total * 100.0).round() / 100.0,
-        )
+        let email_cost_cents = (email_cost_millicents + 500) / 1000;
+        let total = email_cost_cents + api_cost_cents;
+        (email_cost_cents, api_cost_cents, total)
     }
 }
 
@@ -144,9 +141,9 @@ mod tests {
     fn payg_zero_usage() {
         let pricing = PaygPricing::default();
         let (email, api, total) = pricing.calculate(0, 0);
-        assert_eq!(email, 0.0);
-        assert_eq!(api, 0.0);
-        assert_eq!(total, 0.0);
+        assert_eq!(email, 0);
+        assert_eq!(api, 0);
+        assert_eq!(total, 0);
     }
 
     #[test]
@@ -154,7 +151,7 @@ mod tests {
         let pricing = PaygPricing::default();
         let (email, _api, _total) = pricing.calculate(5_000, 0);
         // 5 000 * 0.10 = 500.0 cents
-        assert!((email - 500.0).abs() < 0.01);
+        assert_eq!(email, 500);
     }
 
     #[test]
@@ -162,7 +159,7 @@ mod tests {
         let pricing = PaygPricing::default();
         // 100 000 free + 2 000 billable → ceil(2000/1000)*10 = 20 cents
         let (_email, api, _total) = pricing.calculate(0, 102_000);
-        assert!((api - 20.0).abs() < 0.01);
+        assert_eq!(api, 20);
     }
 
     #[test]
@@ -170,8 +167,8 @@ mod tests {
         let pricing = PaygPricing::default();
         let (email, api, total) = pricing.calculate(10_000, 100_000);
         // 10k emails at 0.10 = 1000 cents, api free tier → 0
-        assert!((email - 1000.0).abs() < 0.01);
-        assert_eq!(api, 0.0);
-        assert!((total - 1000.0).abs() < 0.01);
+        assert_eq!(email, 1000);
+        assert_eq!(api, 0);
+        assert_eq!(total, 1000);
     }
 }

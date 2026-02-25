@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatDate, truncate, cn } from '../../lib/utils';
 
 /**
@@ -45,10 +45,62 @@ export default function CRMPipelinePage() {
     const [loading, setLoading] = useState(true);
     const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
     const [draggedLead, setDraggedLead] = useState<Lead | null>(null);
+    const modalRef = useRef<HTMLDivElement>(null);
+    const lastFocusedElementRef = useRef<HTMLElement | null>(null);
 
     useEffect(() => {
         loadLeads();
     }, []);
+
+    useEffect(() => {
+        if (!selectedLead) return;
+
+        lastFocusedElementRef.current = document.activeElement as HTMLElement | null;
+        const timer = window.setTimeout(() => {
+            const focusables = modalRef.current?.querySelectorAll<HTMLElement>(
+                'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+            );
+            if (focusables && focusables.length > 0) {
+                focusables[0].focus();
+            } else {
+                modalRef.current?.focus();
+            }
+        }, 0);
+
+        return () => {
+            window.clearTimeout(timer);
+            lastFocusedElementRef.current?.focus();
+        };
+    }, [selectedLead]);
+
+    function handleModalKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+        if (e.key === 'Escape') {
+            setSelectedLead(null);
+            return;
+        }
+
+        if (e.key !== 'Tab') return;
+
+        const focusables = modalRef.current?.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (!focusables || focusables.length === 0) {
+            e.preventDefault();
+            return;
+        }
+
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+
+        if (e.shiftKey && active === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }
 
     async function loadLeads() {
         try {
@@ -116,10 +168,10 @@ export default function CRMPipelinePage() {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted/50 shadow-sm transition-colors">
+                    <button type="button" className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted/50 shadow-sm transition-colors">
                         Export CSV
                     </button>
-                    <button className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
+                    <button type="button" className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
                         + Add Lead
                     </button>
                 </div>
@@ -158,9 +210,15 @@ export default function CRMPipelinePage() {
                                             aria-label={`Lead: ${lead.companyName}, Score: ${lead.score}`}
                                             className={cn(
                                                 'bg-card rounded-xl p-4 shadow-sm border border-border cursor-pointer',
-                                                'hover:shadow-md transition-all duration-200 group',
+                                                'hover:shadow-md transition-all duration-200 group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:border-primary/40',
                                                 draggedLead?.id === lead.id && 'opacity-50'
                                             )}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter' || e.key === ' ') {
+                                                    e.preventDefault();
+                                                    setSelectedLead(lead);
+                                                }
+                                            }}
                                         >
                                             <div className="flex items-start justify-between mb-2">
                                                 <div className="font-semibold text-foreground text-sm line-clamp-1 group-hover:text-primary transition-colors">
@@ -200,8 +258,21 @@ export default function CRMPipelinePage() {
 
             {/* Lead Detail Modal */}
             {selectedLead && (
-                <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedLead(null)} role="dialog" aria-modal="true" aria-labelledby="lead-modal-title">
-                    <div className="bg-card rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-border" onClick={(e) => e.stopPropagation()}>
+                <div
+                    className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50"
+                    onClick={() => setSelectedLead(null)}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="lead-modal-title"
+                    tabIndex={-1}
+                    onKeyDown={handleModalKeyDown}
+                >
+                    <div
+                        ref={modalRef}
+                        className="bg-card rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-border"
+                        onClick={(e) => e.stopPropagation()}
+                        tabIndex={-1}
+                    >
                         <div className="flex items-start justify-between mb-6 border-b border-border pb-4">
                             <div>
                                 <h2 id="lead-modal-title" className="text-xl font-bold text-foreground">{selectedLead.companyName}</h2>
@@ -210,6 +281,7 @@ export default function CRMPipelinePage() {
                                 </a>
                             </div>
                             <button 
+                                type="button"
                                 onClick={() => setSelectedLead(null)} 
                                 className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
                                 aria-label="Close modal"
@@ -251,13 +323,13 @@ export default function CRMPipelinePage() {
                         </div>
 
                         <div className="flex gap-3">
-                            <button className="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 shadow-md transition-all hover:shadow-lg">
+                            <button type="button" className="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 shadow-md transition-all hover:shadow-lg">
                                 Add to Campaign
                             </button>
-                            <button className="px-4 py-2.5 bg-card border border-border text-foreground rounded-xl font-medium hover:bg-muted shadow-sm">
+                            <button type="button" className="px-4 py-2.5 bg-card border border-border text-foreground rounded-xl font-medium hover:bg-muted shadow-sm">
                                 Edit
                             </button>
-                            <button className="px-4 py-2.5 bg-card border border-destructive/20 text-destructive rounded-xl font-medium hover:bg-destructive/10 shadow-sm">
+                            <button type="button" className="px-4 py-2.5 bg-card border border-destructive/20 text-destructive rounded-xl font-medium hover:bg-destructive/10 shadow-sm">
                                 Delete
                             </button>
                         </div>

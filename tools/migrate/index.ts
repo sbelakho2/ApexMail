@@ -193,7 +193,37 @@ class MigrationEngine {
                 }
 
                 const startTime = Date.now();
+                const noTransaction = migration.sql.includes('-- no-transaction');
 
+                if (noTransaction) {
+                    // Run without transaction wrapper (required for CREATE INDEX CONCURRENTLY)
+                    // Split into individual statements and execute separately
+                    const statements = migration.sql
+                        .split(/;\s*$/m)
+                        .map(s => s.trim())
+                        .filter(s => s.length > 0 && !s.startsWith('--'));
+                    try {
+                        for (const stmt of statements) {
+                            await client.query(stmt);
+                        }
+
+                        await client.query(
+                            `INSERT INTO _migrations (version, name, checksum, execution_time_ms)
+                             VALUES ($1, $2, $3, $4)`,
+                            [
+                                migration.version,
+                                migration.name,
+                                migration.checksum,
+                                Date.now() - startTime,
+                            ]
+                        );
+
+                        this.log(`✓ Applied ${migration.version} (${Date.now() - startTime}ms) [no-transaction]`);
+                        applied++;
+                    } catch (error) {
+                        throw error;
+                    }
+                } else {
                 await client.query('BEGIN');
                 try {
                     await client.query(migration.sql);
@@ -215,6 +245,7 @@ class MigrationEngine {
                 } catch (error) {
                     await client.query('ROLLBACK');
                     throw error;
+                }
                 }
             }
 

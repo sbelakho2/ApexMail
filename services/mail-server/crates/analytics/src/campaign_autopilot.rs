@@ -1,7 +1,6 @@
 //! Campaign autopilot – Thompson sampling with Beta-Bernoulli model.
 
 use rand::Rng;
-use tracing::debug;
 
 use crate::types::*;
 
@@ -43,7 +42,7 @@ impl CampaignAutopilot {
         }
 
         // Monte Carlo: compute selection probabilities
-        let selection_probs = monte_carlo_selection_probs(&arms);
+        let selection_probs = monte_carlo_selection_probs(&arms).await;
 
         // Credible intervals
         let intervals: Vec<(f64, f64)> = arms
@@ -105,7 +104,7 @@ impl CampaignAutopilot {
         campaign_id: &str,
     ) -> anyhow::Result<OptimizationReport> {
         let arms = self.load_arms(campaign_id).await?;
-        let selection_probs = monte_carlo_selection_probs(&arms);
+        let selection_probs = monte_carlo_selection_probs(&arms).await;
         let intervals: Vec<(f64, f64)> = arms
             .iter()
             .map(|a| credible_interval_95(a.state.alpha, a.state.beta))
@@ -116,7 +115,7 @@ impl CampaignAutopilot {
         let best_arm = selection_probs
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
             .unwrap_or(0);
 
@@ -207,31 +206,40 @@ fn box_muller_normal(rng: &mut impl Rng) -> f64 {
 }
 
 /// Monte Carlo selection probabilities.
-pub fn monte_carlo_selection_probs(arms: &[TemplateArm]) -> Vec<f64> {
+/// #192: Use spawn_blocking to avoid blocking the async runtime
+/// with 10,000 synchronous iterations.
+pub async fn monte_carlo_selection_probs(arms: &[TemplateArm]) -> Vec<f64> {
     if arms.is_empty() {
         return vec![];
     }
 
-    let mut wins = vec![0_usize; arms.len()];
-    let mut rng = rand::thread_rng();
+    let arms_owned: Vec<(f64, f64)> = arms.iter().map(|a| (a.state.alpha, a.state.beta)).collect();
+    let len = arms_owned.len();
 
-    for _ in 0..MONTE_CARLO_SAMPLES {
-        let mut best_idx = 0;
-        let mut best_val = f64::NEG_INFINITY;
+    tokio::task::spawn_blocking(move || {
+        let mut wins = vec![0_usize; len];
+        let mut rng = rand::thread_rng();
 
-        for (i, arm) in arms.iter().enumerate() {
-            let sample = sample_beta(&mut rng, arm.state.alpha, arm.state.beta);
-            if sample > best_val {
-                best_val = sample;
-                best_idx = i;
+        for _ in 0..MONTE_CARLO_SAMPLES {
+            let mut best_idx = 0;
+            let mut best_val = f64::NEG_INFINITY;
+
+            for (i, &(alpha, beta)) in arms_owned.iter().enumerate() {
+                let sample = sample_beta(&mut rng, alpha, beta);
+                if sample > best_val {
+                    best_val = sample;
+                    best_idx = i;
+                }
             }
+            wins[best_idx] += 1;
         }
-        wins[best_idx] += 1;
-    }
 
-    wins.iter()
-        .map(|&w| w as f64 / MONTE_CARLO_SAMPLES as f64)
-        .collect()
+        wins.iter()
+            .map(|&w| w as f64 / MONTE_CARLO_SAMPLES as f64)
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|_| vec![1.0 / len as f64; len])
 }
 
 /// 95% credible interval using normal approximation to Beta.
@@ -265,7 +273,7 @@ pub fn compute_expected_regret(arms: &[TemplateArm]) -> f64 {
 }
 
 /// Check if experiment has converged (one arm dominates >95%).
-fn is_converged(arms: &[TemplateArm], selection_probs: &[f64]) -> bool {
+fn is_converged(_arms: &[TemplateArm], selection_probs: &[f64]) -> bool {
     selection_probs.iter().any(|&p| p > 0.95)
 }
 
@@ -366,8 +374,8 @@ mod tests {
         assert!(regret > 0.1);
     }
 
-    #[test]
-    fn test_monte_carlo_clear_winner() {
+    #[tokio::test]
+    async fn test_monte_carlo_clear_winner() {
         let arms = vec![
             TemplateArm {
                 template_id: "strong".into(),
@@ -378,12 +386,12 @@ mod tests {
                 state: BanditState { alpha: 10.0, beta: 100.0, trials: 110, successes: 10 },
             },
         ];
-        let probs = monte_carlo_selection_probs(&arms);
+        let probs = monte_carlo_selection_probs(&arms).await;
         assert!(probs[0] > 0.95);
     }
 
-    #[test]
-    fn test_convergence_check() {
+    #[tokio::test]
+    async fn test_convergence_check() {
         let arms = vec![
             TemplateArm {
                 template_id: "a".into(),
@@ -394,12 +402,12 @@ mod tests {
                 state: BanditState { alpha: 5.0, beta: 100.0, trials: 105, successes: 5 },
             },
         ];
-        let probs = monte_carlo_selection_probs(&arms);
+        let probs = monte_carlo_selection_probs(&arms).await;
         assert!(is_converged(&arms, &probs));
     }
 
-    #[test]
-    fn test_no_convergence_equal_arms() {
+    #[tokio::test]
+    async fn test_no_convergence_equal_arms() {
         let arms = vec![
             TemplateArm {
                 template_id: "a".into(),
@@ -410,7 +418,7 @@ mod tests {
                 state: BanditState { alpha: 5.0, beta: 5.0, trials: 10, successes: 5 },
             },
         ];
-        let probs = monte_carlo_selection_probs(&arms);
+        let probs = monte_carlo_selection_probs(&arms).await;
         assert!(!is_converged(&arms, &probs));
     }
 }

@@ -3,15 +3,14 @@
 //! Leverages `mail-auth` for the heavy lifting (DNS‑based checks, crypto) and adds
 //! caching, policy evaluation, and the `AuthenticationResults` header builder.
 
-use std::collections::HashSet;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::TokioAsyncResolver;
 
 use crate::config::EmailAuthConfig;
 
@@ -110,10 +109,14 @@ pub struct DmarcAlignment {
 /// Stateful email authenticator with DNS caching.
 pub struct EmailAuthenticator {
     resolver: Resolver,
+    /// #120: Dedicated DNS resolver for DMARC TXT lookups.
+    dns_resolver: TokioAsyncResolver,
     config: EmailAuthConfig,
     hostname: String,
     /// Domain → SPF evaluation cache (TTL 5 min).
     spf_cache: Cache<String, SpfVerdict>,
+    /// #120: Domain → DMARC policy cache (TTL 5 min).
+    dmarc_cache: Cache<String, DmarcPolicy>,
 }
 
 impl EmailAuthenticator {
@@ -122,16 +125,30 @@ impl EmailAuthenticator {
         let resolver =
             Resolver::new_system_conf().map_err(|e| anyhow::anyhow!("resolver: {e}"))?;
 
+        // #120: Shared DNS resolver for DMARC TXT lookups (avoids per-call allocation)
+        let dns_resolver = TokioAsyncResolver::tokio(
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
+
         let spf_cache = Cache::builder()
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(300))
             .build();
 
+        // #120: DMARC policy cache – avoids repeated TXT lookups
+        let dmarc_cache = Cache::builder()
+            .max_capacity(5_000)
+            .time_to_live(Duration::from_secs(300))
+            .build();
+
         Ok(Self {
             resolver,
+            dns_resolver,
             config,
             hostname,
             spf_cache,
+            dmarc_cache,
         })
     }
 
@@ -152,20 +169,22 @@ impl EmailAuthenticator {
         // Parse message synchronously (AuthenticatedMessage::parse is sync)
         let authenticated_msg = AuthenticatedMessage::parse(raw_message);
 
-        // Run SPF check
-        let spf = self.check_spf(client_ip, helo_hostname, mail_from, &from_domain).await;
-
-        // DKIM verification
-        let dkim_outcomes = if let Some(ref auth_msg) = authenticated_msg {
-            self.check_dkim(auth_msg).await
-        } else {
-            vec![DkimOutcome {
-                result: DkimVerdict::None,
-                domain: from_domain.clone(),
-                selector: String::new(),
-                explanation: Some("Failed to parse message for DKIM".into()),
-            }]
-        };
+        // #121: Run SPF + DKIM concurrently using tokio::join!
+        let (spf, dkim_outcomes) = tokio::join!(
+            self.check_spf(client_ip, helo_hostname, mail_from, &from_domain),
+            async {
+                if let Some(ref auth_msg) = authenticated_msg {
+                    self.check_dkim(auth_msg).await
+                } else {
+                    vec![DkimOutcome {
+                        result: DkimVerdict::None,
+                        domain: from_domain.clone(),
+                        selector: String::new(),
+                        explanation: Some("Failed to parse message for DKIM".into()),
+                    }]
+                }
+            }
+        );
 
         // DMARC evaluation
         let dmarc = self.check_dmarc(&from_domain, &spf, &dkim_outcomes).await;
@@ -223,8 +242,9 @@ impl EmailAuthenticator {
         mail_from: &str,
         from_domain: &str,
     ) -> SpfOutcome {
-        // Check cache
-        let cache_key = format!("{client_ip}:{from_domain}");
+        // #122: Cache key includes helo + mail_from (not just domain) so SPF results
+        // are correct for empty MAIL FROM (HELO identity) and per-sender subdomains
+        let cache_key = format!("{client_ip}:{helo}:{mail_from}");
         if let Some(cached) = self.spf_cache.get(&cache_key) {
             return SpfOutcome {
                 result: cached,
@@ -279,13 +299,17 @@ impl EmailAuthenticator {
         let spf_aligned = spf.result == SpfVerdict::Pass;
         let dkim_aligned = dkim.iter().any(|d| d.result == DkimVerdict::Pass);
 
-        // DMARC evaluation: passes if either SPF or DKIM passes and aligns
-        let (result, policy) = if spf_aligned || dkim_aligned {
-            (DmarcVerdict::Pass, DmarcPolicy::None)
-        } else if spf.result == SpfVerdict::Fail && !dkim_aligned {
-            (DmarcVerdict::Fail, DmarcPolicy::Quarantine)
+        // #120: Fetch actual DMARC policy from DNS (p=reject/quarantine/none)
+        let policy = self.lookup_dmarc_policy(from_domain).await;
+
+        // DMARC passes if either SPF or DKIM passes with alignment
+        let result = if spf_aligned || dkim_aligned {
+            DmarcVerdict::Pass
         } else {
-            (DmarcVerdict::None, DmarcPolicy::None)
+            match policy {
+                DmarcPolicy::None => DmarcVerdict::None,
+                _ => DmarcVerdict::Fail,
+            }
         };
 
         DmarcOutcome {
@@ -296,6 +320,50 @@ impl EmailAuthenticator {
                 spf: spf_aligned,
                 dkim: dkim_aligned,
             },
+        }
+    }
+
+    /// #120: Look up DMARC DNS TXT record and parse p= policy, with fallback to parent domain.
+    async fn lookup_dmarc_policy(&self, domain: &str) -> DmarcPolicy {
+        if let Some(cached) = self.dmarc_cache.get(domain) {
+            return cached;
+        }
+
+        let policy = match self.fetch_dmarc_txt(domain).await {
+            Some(p) => p,
+            None => {
+                // Try organizational/parent domain if subdomain record absent
+                if let Some(dot_idx) = domain.find('.') {
+                    let parent = &domain[dot_idx + 1..];
+                    if parent.contains('.') {
+                        self.fetch_dmarc_txt(parent).await.unwrap_or(DmarcPolicy::None)
+                    } else {
+                        DmarcPolicy::None
+                    }
+                } else {
+                    DmarcPolicy::None
+                }
+            }
+        };
+
+        self.dmarc_cache.insert(domain.to_string(), policy);
+        policy
+    }
+
+    /// Fetch and parse a single _dmarc.{domain} TXT record.
+    async fn fetch_dmarc_txt(&self, domain: &str) -> Option<DmarcPolicy> {
+        let dmarc_domain = format!("_dmarc.{domain}");
+        match self.dns_resolver.txt_lookup(&dmarc_domain).await {
+            Ok(lookup) => {
+                for record in lookup.iter() {
+                    let txt = record.to_string();
+                    if let Some(policy) = parse_dmarc_policy_record(&txt) {
+                        return Some(policy);
+                    }
+                }
+                None
+            }
+            Err(_) => None,
         }
     }
 
@@ -396,6 +464,25 @@ fn verdict_str_dmarc(v: DmarcVerdict) -> &'static str {
     }
 }
 
+/// #120: Parse p= policy from a raw DMARC TXT record string.
+fn parse_dmarc_policy_record(txt: &str) -> Option<DmarcPolicy> {
+    let trimmed = txt.trim();
+    if !trimmed.starts_with("v=DMARC1") {
+        return None;
+    }
+    for part in trimmed.split(';') {
+        let kv = part.trim();
+        if let Some(val) = kv.strip_prefix("p=") {
+            return Some(match val.trim().to_lowercase().as_str() {
+                "reject" => DmarcPolicy::Reject,
+                "quarantine" => DmarcPolicy::Quarantine,
+                _ => DmarcPolicy::None,
+            });
+        }
+    }
+    None
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -403,15 +490,40 @@ mod tests {
     use super::*;
 
     fn test_authenticator(config: EmailAuthConfig, hostname: &str) -> EmailAuthenticator {
-        // Use system resolver – tests only call should_accept / build_auth_results_header
-        // which never touch the resolver.
         let resolver = Resolver::new_system_conf().expect("system resolver");
+        let dns_resolver = TokioAsyncResolver::tokio(
+            ResolverConfig::default(),
+            ResolverOpts::default(),
+        );
         EmailAuthenticator {
             resolver,
+            dns_resolver,
             config,
             hostname: hostname.into(),
             spf_cache: Cache::builder().max_capacity(10).build(),
+            dmarc_cache: Cache::builder().max_capacity(10).build(),
         }
+    }
+
+    #[test]
+    fn test_parse_dmarc_policy_reject() {
+        let record = "v=DMARC1; p=reject; rua=mailto:dmarc@example.com";
+        assert_eq!(parse_dmarc_policy_record(record), Some(DmarcPolicy::Reject));
+    }
+
+    #[test]
+    fn test_parse_dmarc_policy_quarantine() {
+        assert_eq!(parse_dmarc_policy_record("v=DMARC1; p=quarantine"), Some(DmarcPolicy::Quarantine));
+    }
+
+    #[test]
+    fn test_parse_dmarc_policy_none() {
+        assert_eq!(parse_dmarc_policy_record("v=DMARC1; p=none"), Some(DmarcPolicy::None));
+    }
+
+    #[test]
+    fn test_parse_dmarc_policy_invalid() {
+        assert_eq!(parse_dmarc_policy_record("not a dmarc record"), None);
     }
 
     #[test]

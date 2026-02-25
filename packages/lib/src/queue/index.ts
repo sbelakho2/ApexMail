@@ -74,7 +74,7 @@ export interface QueueProvider {
   dequeue<T>(queue: string, options?: DequeueOptions): Promise<Result<QueueJob<T>[], Error>>;
   complete(jobId: string): Promise<Result<void, Error>>;
   fail(jobId: string, error: Error): Promise<Result<void, Error>>;
-  retry(jobId: string, delaySeconds?: number): Promise<Result<void, Error>>;
+  retry(jobId: string, delaySeconds?: number, options?: { resetAttempt?: boolean }): Promise<Result<void, Error>>;
   deadLetter(jobId: string, reason: string): Promise<Result<void, Error>>;
   getStats(queue: string): Promise<Result<QueueStats, Error>>;
   purge(queue: string): Promise<Result<number, Error>>;
@@ -179,7 +179,8 @@ export class PostgresQueueProvider implements QueueProvider {
         metadata: string;
       }>(
         `UPDATE queue_jobs
-         SET locked_until = $3, attempts = attempts + 1
+         SET locked_until = $3,
+           attempts = attempts + CASE WHEN locked_until IS NULL THEN 1 ELSE 0 END
          WHERE id IN (
            SELECT id FROM queue_jobs
            WHERE queue = $1
@@ -294,15 +295,16 @@ export class PostgresQueueProvider implements QueueProvider {
     }
   }
 
-  async retry(jobId: string, delaySeconds = 0): Promise<Result<void, Error>> {
+  async retry(jobId: string, delaySeconds = 0, options: { resetAttempt?: boolean } = {}): Promise<Result<void, Error>> {
     const client = await this.pool.connect();
     
     try {
       const scheduledAt = new Date(Date.now() + delaySeconds * 1000);
-      
+
+      const resetClause = options.resetAttempt ? ', attempts = GREATEST(attempts - 1, 0)' : '';
       await client.query(
         `UPDATE queue_jobs 
-         SET locked_until = NULL, scheduled_at = $2
+         SET locked_until = NULL, scheduled_at = $2${resetClause}
          WHERE id = $1`,
         [jobId, scheduledAt]
       );
@@ -474,7 +476,8 @@ export class FairQueueScheduler {
         this.tenantCounts.set(tenantId, currentCount + 1);
       } else {
         // Return job to queue with small delay (priority boost for fairness)
-        await this.queue.retry(job.id, 1);
+        const delaySeconds = Math.max(1, Math.ceil(this.windowMs / 1000));
+        await this.queue.retry(job.id, delaySeconds, { resetAttempt: true });
       }
     }
 

@@ -39,7 +39,7 @@ impl SloTracker {
     pub fn evaluate(&self, name: &str, total: u64, errors: u64) -> Option<SloEvaluation> {
         self.definitions.get(name).map(|slo| {
             let actual = if total == 0 {
-                100.0
+                0.0
             } else {
                 (1.0 - errors as f64 / total as f64) * 100.0
             };

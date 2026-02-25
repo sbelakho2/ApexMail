@@ -48,6 +48,8 @@ dotenvy = { workspace = true }
 regex = { workspace = true }
 aho-corasick = { workspace = true }
 moka = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

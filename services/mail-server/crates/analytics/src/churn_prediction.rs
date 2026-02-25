@@ -1,7 +1,6 @@
 //! Churn prediction – RFM signals, sigmoid mapping, engagement velocity.
 
 use chrono::{Duration, Utc};
-use tracing::debug;
 
 use crate::types::*;
 
@@ -65,7 +64,7 @@ impl ChurnPredictionEngine {
         .bind(email)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %email, "complaint count query failed"); (0,) });
         let complaint_score = (complaint_count as f64).min(3.0) / 3.0;
         signals.push(ChurnSignal {
             name: "complaint".into(),
@@ -80,7 +79,7 @@ impl ChurnPredictionEngine {
         .bind(email)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %email, "bounce count query failed"); (0,) });
         let bounce_score = (bounce_count as f64).min(5.0) / 5.0;
         signals.push(ChurnSignal {
             name: "bounce".into(),
@@ -124,13 +123,13 @@ impl ChurnPredictionEngine {
         let sixty_ago = now - Duration::days(60);
 
         let (recent_count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $1",
+            "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2",
         )
         .bind(email)
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %email, "compute_decay recent_count query failed"); (0,) });
 
         let (prev_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2 AND timestamp < $3",
@@ -140,7 +139,7 @@ impl ChurnPredictionEngine {
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %email, "compute_decay prev_count query failed"); (0,) });
 
         if prev_count == 0 {
             return Ok(if recent_count > 0 { 0.0 } else { 0.5 });
@@ -163,7 +162,7 @@ impl ChurnPredictionEngine {
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %email, "engagement_velocity current query failed"); (0,) });
 
         let (previous,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM events WHERE recipient = $1 AND event_type IN ('opened','clicked') AND timestamp >= $2 AND timestamp < $3",
@@ -173,7 +172,7 @@ impl ChurnPredictionEngine {
         .bind(thirty_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .unwrap_or_else(|e| { tracing::warn!(error = %e, email = %email, "engagement_velocity previous query failed"); (0,) });
 
         if previous == 0 {
             return Ok(if current > 0 { 1.0 } else { 0.0 });

@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use deadpool_redis::{Config as RedisConfig, Runtime};
 use sqlx::postgres::PgPoolOptions;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use worker_processors::{
@@ -30,7 +30,9 @@ async fn main() -> Result<()> {
     info!("Starting ApexMail Worker (Rust)");
 
     // Load configuration from environment
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    // Fix #61: Return proper error instead of panicking.
+    let database_url = env::var("DATABASE_URL")
+        .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable must be set"))?;
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
     // Create database pool
@@ -49,10 +51,12 @@ async fn main() -> Result<()> {
     info!("Connected to Redis");
 
     // Load concurrency from env
-    let concurrency = env::var("WORKER_CONCURRENCY")
+    // Fix #84: Validate concurrency is at least 1 to ensure jobs are processed.
+    let concurrency: usize = env::var("WORKER_CONCURRENCY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+        .unwrap_or(10)
+        .max(1);
 
     let poll_interval = Duration::from_secs(
         env::var("WORKER_POLL_INTERVAL")
@@ -76,6 +80,10 @@ async fn main() -> Result<()> {
         .unwrap_or(true);
 
     let mut handles = vec![];
+    let mut analytics_processor: Option<Arc<AnalyticsProcessor>> = None;
+    let mut email_processor: Option<Arc<EmailProcessor>> = None;
+    let mut reply_processor: Option<Arc<ReplyHandler>> = None;
+    let mut webhook_processor: Option<Arc<WebhookProcessor>> = None;
 
     // Start analytics processor
     if run_analytics {
@@ -96,6 +104,7 @@ async fn main() -> Result<()> {
                 error!(error = %e, "Analytics processor failed");
             }
         }));
+        analytics_processor = Some(processor);
         info!("Analytics processor started");
     }
 
@@ -111,7 +120,7 @@ async fn main() -> Result<()> {
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(true),
             username: env::var("SMTP_USERNAME").ok(),
-            password: env::var("SMTP_PASSWORD").ok(),
+            password: env::var("SMTP_PASSWORD").ok().map(zeroize::Zeroizing::new),
             ..Default::default()
         };
 
@@ -135,6 +144,7 @@ async fn main() -> Result<()> {
                         error!(error = %e, "Email processor failed");
                     }
                 }));
+                email_processor = Some(processor);
                 info!("Email processor started");
             }
             Err(e) => {
@@ -162,6 +172,7 @@ async fn main() -> Result<()> {
                 error!(error = %e, "Reply handler failed");
             }
         }));
+        reply_processor = Some(processor);
         info!("Reply handler started");
     }
 
@@ -186,6 +197,7 @@ async fn main() -> Result<()> {
                         error!(error = %e, "Webhook processor failed");
                     }
                 }));
+                webhook_processor = Some(processor);
                 info!("Webhook processor started");
             }
             Err(e) => {
@@ -201,9 +213,37 @@ async fn main() -> Result<()> {
 
     info!("Shutting down...");
 
-    // All processors will exit gracefully when their tasks are cancelled
-    for handle in handles {
-        handle.abort();
+    // Fix #85: Signal graceful shutdown before awaiting task completion.
+    if let Some(processor) = &analytics_processor {
+        if let Err(e) = processor.stop().await {
+            warn!(error = %e, "Failed to stop analytics processor");
+        }
+    }
+    if let Some(processor) = &email_processor {
+        if let Err(e) = processor.stop().await {
+            warn!(error = %e, "Failed to stop email processor");
+        }
+    }
+    if let Some(processor) = &reply_processor {
+        if let Err(e) = processor.stop().await {
+            warn!(error = %e, "Failed to stop reply handler");
+        }
+    }
+    if let Some(processor) = &webhook_processor {
+        if let Err(e) = processor.stop().await {
+            warn!(error = %e, "Failed to stop webhook processor");
+        }
+    }
+
+    let shutdown_timeout = Duration::from_secs(10);
+    let join_all = async {
+        for handle in handles {
+            let _ = handle.await;
+        }
+    };
+
+    if tokio::time::timeout(shutdown_timeout, join_all).await.is_err() {
+        warn!("Shutdown timed out; some processor tasks may still be running");
     }
 
     info!("Worker stopped");

@@ -35,7 +35,7 @@ export default defineConfig({
         {
             command: 'pnpm --filter @apexmail/web dev',
             url: 'http://localhost:3000',
-            reuseExistingServer: false,
+            reuseExistingServer: true,
             timeout: 120000,
             env: {
                 ...process.env,
@@ -48,7 +48,7 @@ export default defineConfig({
         {
             command: 'pnpm --filter @apexmail/control-plane dev',
             url: 'http://localhost:3020',
-            reuseExistingServer: false,
+            reuseExistingServer: true,
             timeout: 120000,
             env: {
                 ...process.env,

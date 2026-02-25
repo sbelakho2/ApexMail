@@ -12,6 +12,8 @@ pub struct StoredMessage {
     pub id: Uuid,
     pub account_id: Uuid,
     pub mailbox_id: Uuid,
+    /// Monotonic per-mailbox UID for IMAP-style access.
+    pub uid: i64,
     pub message_id: String,
     pub from_address: String,
     pub from_name: Option<String>,
@@ -86,6 +88,7 @@ pub struct Mailbox {
     pub mailbox_type: MailboxType,
     pub total_messages: i64,
     pub unread_messages: i64,
+    pub uidnext: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

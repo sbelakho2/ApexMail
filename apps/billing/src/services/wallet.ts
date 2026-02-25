@@ -68,7 +68,8 @@ export class WalletService {
       currency: string;
       updated_at: Date;
     }>(
-      `SELECT * FROM wallets WHERE tenant_id = $1`,
+      `SELECT tenant_id, balance, reserved, currency, updated_at
+       FROM wallets WHERE tenant_id = $1`,
       [tenantId]
     );
 

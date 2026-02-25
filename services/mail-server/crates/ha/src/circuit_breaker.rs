@@ -112,6 +112,8 @@ impl CircuitBreakerService {
                 if elapsed >= circuit.config.timeout_ms {
                     circuit.state = CircuitState::HalfOpen;
                     circuit.half_open_calls = 0;
+                    circuit.success_count = 0;
+                    circuit.failure_count = 0;
                     circuit.state_changed_at = Utc::now();
                     info!(circuit = circuit_name, "Circuit transitioned to half-open");
                     Ok(true)

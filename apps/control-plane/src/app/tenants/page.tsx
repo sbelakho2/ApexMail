@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { formatNumber, formatDate, formatCurrency, cn, getRiskColor } from '../../lib/utils';
+import { formatNumber, formatDate, formatCurrency, cn, getRiskColor, getStatusChipClasses } from '../../lib/utils';
 
 /**
  * Tenants Overview - Platform-wide tenant management
@@ -47,13 +47,6 @@ const PLAN_COLORS: Record<string, string> = {
     enterprise: 'bg-primary text-primary-foreground shadow-sm',
 };
 
-const STATUS_COLORS: Record<string, string> = {
-    active: 'bg-success/10 text-success border border-success/20',
-    suspended: 'bg-destructive/10 text-destructive border border-destructive/20',
-    churned: 'bg-muted text-muted-foreground border border-border',
-    trialing: 'bg-info/10 text-info border border-info/20',
-};
-
 export default function TenantsPage() {
     const [tenants, setTenants] = useState<Tenant[]>([]);
     const [loading, setLoading] = useState(true);
@@ -61,6 +54,12 @@ export default function TenantsPage() {
     const [searchQuery, setSearchQuery] = useState('');
     const [filterPlan, setFilterPlan] = useState('');
     const [filterStatus, setFilterStatus] = useState('');
+    const [currentRole] = useState<'viewer' | 'operator' | 'admin' | 'owner'>('operator');
+    const [virtualStart, setVirtualStart] = useState(0);
+
+    const canExecuteTenantActions = currentRole === 'owner' || currentRole === 'admin';
+    const VIRTUAL_ROWS = 30;
+    const ROW_HEIGHT = 74;
 
     useEffect(() => {
         loadTenants();
@@ -110,6 +109,9 @@ export default function TenantsPage() {
 
     const totalMRR = tenants.filter(t => t.status === 'active').reduce((acc, t) => acc + t.billing.mrr, 0);
     const activeTenants = tenants.filter(t => t.status === 'active').length;
+    const virtualizedTenants = filteredTenants.slice(virtualStart, virtualStart + VIRTUAL_ROWS);
+    const topSpacer = virtualStart * ROW_HEIGHT;
+    const bottomSpacer = Math.max(0, (filteredTenants.length - (virtualStart + virtualizedTenants.length)) * ROW_HEIGHT);
 
     if (loading) {
         return (
@@ -181,7 +183,14 @@ export default function TenantsPage() {
 
             {/* Tenant List */}
             <div className="bg-card rounded-lg border border-border shadow-sm">
-                <div className="overflow-x-auto">
+                <div
+                    className="overflow-x-auto overflow-y-auto max-h-[70vh]"
+                    onScroll={(event) => {
+                        const target = event.currentTarget;
+                        const nextStart = Math.max(0, Math.floor(target.scrollTop / ROW_HEIGHT) - 5);
+                        if (nextStart !== virtualStart) setVirtualStart(nextStart);
+                    }}
+                >
                     <table className="w-full">
                         <thead className="sticky top-0 z-10">
                             <tr className="border-b border-border text-left bg-muted/50">
@@ -196,7 +205,19 @@ export default function TenantsPage() {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border">
-                            {filteredTenants.map(tenant => (
+                            {filteredTenants.length === 0 && (
+                                <tr>
+                                    <td colSpan={8} className="px-4 py-10 text-center text-sm text-muted-foreground">
+                                        No tenants found. For onboarding-first admin accounts, tenant rows appear after the first workspace signup completes.
+                                    </td>
+                                </tr>
+                            )}
+                            {topSpacer > 0 && (
+                                <tr aria-hidden="true" className="border-0">
+                                    <td colSpan={8} style={{ height: `${topSpacer}px` }} />
+                                </tr>
+                            )}
+                            {virtualizedTenants.map(tenant => (
                                 <tr key={tenant.id} className="hover:bg-muted/50 transition-colors">
                                     <td className="px-4 py-4">
                                         <div className="font-medium text-foreground">{tenant.name}</div>
@@ -208,7 +229,7 @@ export default function TenantsPage() {
                                         </span>
                                     </td>
                                     <td className="px-4 py-4">
-                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', STATUS_COLORS[tenant.status])}>
+                                        <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', getStatusChipClasses(tenant.status))}>
                                             {tenant.status}
                                         </span>
                                     </td>
@@ -242,10 +263,28 @@ export default function TenantsPage() {
                                             >
                                                 Risk
                                             </Link>
+                                            <button
+                                                onClick={() => toggleSuspension(tenant.id)}
+                                                disabled={!canExecuteTenantActions}
+                                                className={cn(
+                                                    'text-sm font-medium min-w-[44px] min-h-[44px] inline-flex items-center justify-center px-2 rounded',
+                                                    canExecuteTenantActions
+                                                        ? 'text-warning hover:text-warning/80'
+                                                        : 'text-muted-foreground cursor-not-allowed opacity-60'
+                                                )}
+                                                title={canExecuteTenantActions ? '' : 'Only admin/owner can suspend or unsuspend tenants'}
+                                            >
+                                                {tenant.status === 'suspended' ? 'Unsuspend' : 'Suspend'}
+                                            </button>
                                         </div>
                                     </td>
                                 </tr>
                             ))}
+                            {bottomSpacer > 0 && (
+                                <tr aria-hidden="true" className="border-0">
+                                    <td colSpan={8} style={{ height: `${bottomSpacer}px` }} />
+                                </tr>
+                            )}
                         </tbody>
                     </table>
                 </div>

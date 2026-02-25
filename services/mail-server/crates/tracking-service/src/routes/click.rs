@@ -125,10 +125,10 @@ fn determine_redirect_url(
         if let Some(url) = &d.original_url {
             return url.clone();
         }
-    }
-    if let Some(r) = r_param {
-        // F-211: decodeURIComponent equivalent — percent-decode only
-        return percent_decode(r).unwrap_or_else(|| fallback.to_owned());
+        if let Some(r) = r_param {
+            // F-211: decodeURIComponent equivalent — percent-decode only
+            return percent_decode(r).unwrap_or_else(|| fallback.to_owned());
+        }
     }
     fallback.to_owned()
 }

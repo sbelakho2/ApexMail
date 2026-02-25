@@ -43,7 +43,6 @@ sha2.workspace = true
 dashmap.workspace = true
 moka.workspace = true
 rand.workspace = true
-lazy_static = "1.4"
 
 # CLI / Config
 clap.workspace = true

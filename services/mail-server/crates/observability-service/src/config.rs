@@ -175,7 +175,7 @@ impl ObservabilityConfig {
 
         let default = Self::default();
 
-        Self {
+        let config = Self {
             port: env_or("OBSERVABILITY_PORT", &default.port.to_string())
                 .parse()
                 .unwrap_or(default.port),
@@ -261,7 +261,45 @@ impl ObservabilityConfig {
             log_retention_days: env_or("LOG_RETENTION_DAYS", "30")
                 .parse()
                 .unwrap_or(30),
+        };
+        if let Err(err) = config.validate() {
+            panic!("Invalid observability config: {err}");
         }
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("OBSERVABILITY_PORT must be > 0".into());
+        }
+        if self.db_port == 0 {
+            return Err("DB_PORT must be > 0".into());
+        }
+        if self.db_pool_max == 0 {
+            return Err("DB_POOL_MAX must be > 0".into());
+        }
+        if self.redis_port == 0 {
+            return Err("REDIS_PORT must be > 0".into());
+        }
+        if self.metrics.prometheus_port == 0 {
+            return Err("PROMETHEUS_PORT must be > 0".into());
+        }
+        if self.metrics.aggregation_interval_ms == 0 {
+            return Err("METRICS_INTERVAL must be > 0".into());
+        }
+        if !(0.0..=1.0).contains(&self.tracing.sample_rate) {
+            return Err("TRACE_SAMPLE_RATE must be between 0.0 and 1.0".into());
+        }
+        if self.logging.max_message_length == 0 {
+            return Err("LOG_MAX_LENGTH must be > 0".into());
+        }
+        if self.alerting.cooldown_minutes == 0 {
+            return Err("ALERT_COOLDOWN must be > 0".into());
+        }
+        if self.log_retention_days == 0 {
+            return Err("LOG_RETENTION_DAYS must be > 0".into());
+        }
+        Ok(())
     }
 }
 

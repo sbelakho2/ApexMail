@@ -70,10 +70,33 @@ export default function IPWarmerPage() {
     const [newWarmupDay, setNewWarmupDay] = useState(0);
     const [activeTab, setActiveTab] = useState<'pools' | 'schedules'>('pools');
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+    const [actionProgress, setActionProgress] = useState<Record<string, number>>({});
+    const [ipSearch, setIpSearch] = useState('');
+    const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+    const [isStale, setIsStale] = useState(false);
 
     useEffect(() => {
         loadData();
     }, []);
+
+    useEffect(() => {
+        const refreshInterval = setInterval(() => {
+            loadData();
+            if (selectedPool) {
+                loadPoolIPs(selectedPool);
+            }
+        }, 30000);
+
+        const staleInterval = setInterval(() => {
+            if (!lastRefreshedAt) return;
+            setIsStale(Date.now() - new Date(lastRefreshedAt).getTime() > 60000);
+        }, 5000);
+
+        return () => {
+            clearInterval(refreshInterval);
+            clearInterval(staleInterval);
+        };
+    }, [selectedPool, lastRefreshedAt]);
 
     useEffect(() => {
         if (toast) {
@@ -89,6 +112,8 @@ export default function IPWarmerPage() {
             const data = await response.json();
             setPools(data.pools);
             setSchedules(data.schedules);
+            setLastRefreshedAt(new Date().toISOString());
+            setIsStale(false);
         } catch (err) {
             console.error('Failed to load warmup data:', err);
         } finally {
@@ -103,6 +128,8 @@ export default function IPWarmerPage() {
             if (!response.ok) throw new Error(`Failed to fetch pool IPs: ${response.status}`);
             const data = await response.json();
             setPoolIPs(data.ips?.[pool.id] || []);
+            setLastRefreshedAt(new Date().toISOString());
+            setIsStale(false);
         } catch (err) {
             console.error('Failed to load pool IPs:', err);
             setPoolIPs([]);
@@ -113,11 +140,29 @@ export default function IPWarmerPage() {
         setToast({ message, type });
     }, []);
 
+    async function executeWarmupAction(endpoint: string, payload?: Record<string, unknown>) {
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload ? JSON.stringify(payload) : undefined,
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+            throw new Error(errorBody || `Request failed with status ${response.status}`);
+        }
+
+        return response.json().catch(() => null);
+    }
+
     async function handleStartWarmup(ip: IPWarmupInfo) {
+        if (ip.status !== 'inactive' || actionLoading === 'advance') return;
         setActionLoading(ip.id);
+        setActionProgress(prev => ({ ...prev, [ip.id]: 20 }));
         try {
-            // In production: POST to /api/warmup/ip/{ipAddress}/start
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await executeWarmupAction(`/api/warmup/ip/${ip.ipAddress}/start`);
+            setActionProgress(prev => ({ ...prev, [ip.id]: 85 }));
             
             setPoolIPs(prev => prev.map(i => 
                 i.id === ip.id ? { 
@@ -128,44 +173,72 @@ export default function IPWarmerPage() {
                     dailyLimit: schedules.default?.schedule[0] || 100,
                 } : i
             ));
+            setActionProgress(prev => ({ ...prev, [ip.id]: 100 }));
             showToast(`Warmup started for ${ip.ipAddress}`, 'success');
-        } catch {
-            showToast('Failed to start warmup', 'error');
+        } catch (error) {
+            showToast(`Failed to start warmup: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
         } finally {
+            setTimeout(() => {
+                setActionProgress(prev => {
+                    const next = { ...prev };
+                    delete next[ip.id];
+                    return next;
+                });
+            }, 600);
             setActionLoading(null);
         }
     }
 
     async function handlePauseWarmup(ip: IPWarmupInfo) {
+        if (ip.status !== 'active' || actionLoading === 'advance') return;
         setActionLoading(ip.id);
+        setActionProgress(prev => ({ ...prev, [ip.id]: 20 }));
         try {
-            // In production: POST to /api/warmup/ip/{ipAddress}/pause
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await executeWarmupAction(`/api/warmup/ip/${ip.ipAddress}/pause`);
+            setActionProgress(prev => ({ ...prev, [ip.id]: 85 }));
             
             setPoolIPs(prev => prev.map(i => 
                 i.id === ip.id ? { ...i, status: 'paused' as const } : i
             ));
+            setActionProgress(prev => ({ ...prev, [ip.id]: 100 }));
             showToast(`Warmup paused for ${ip.ipAddress}`, 'success');
-        } catch {
-            showToast('Failed to pause warmup', 'error');
+        } catch (error) {
+            showToast(`Failed to pause warmup: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
         } finally {
+            setTimeout(() => {
+                setActionProgress(prev => {
+                    const next = { ...prev };
+                    delete next[ip.id];
+                    return next;
+                });
+            }, 600);
             setActionLoading(null);
         }
     }
 
     async function handleResumeWarmup(ip: IPWarmupInfo) {
+        if (ip.status !== 'paused' || actionLoading === 'advance') return;
         setActionLoading(ip.id);
+        setActionProgress(prev => ({ ...prev, [ip.id]: 20 }));
         try {
-            // In production: POST to /api/warmup/ip/{ipAddress}/start
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await executeWarmupAction(`/api/warmup/ip/${ip.ipAddress}/resume`);
+            setActionProgress(prev => ({ ...prev, [ip.id]: 85 }));
             
             setPoolIPs(prev => prev.map(i => 
                 i.id === ip.id ? { ...i, status: 'active' as const } : i
             ));
+            setActionProgress(prev => ({ ...prev, [ip.id]: 100 }));
             showToast(`Warmup resumed for ${ip.ipAddress}`, 'success');
-        } catch {
-            showToast('Failed to resume warmup', 'error');
+        } catch (error) {
+            showToast(`Failed to resume warmup: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
         } finally {
+            setTimeout(() => {
+                setActionProgress(prev => {
+                    const next = { ...prev };
+                    delete next[ip.id];
+                    return next;
+                });
+            }, 600);
             setActionLoading(null);
         }
     }
@@ -179,10 +252,12 @@ export default function IPWarmerPage() {
         });
         if (!confirmed) return;
         
+        if (actionLoading === 'advance') return;
         setActionLoading(ip.id);
+        setActionProgress(prev => ({ ...prev, [ip.id]: 20 }));
         try {
-            // In production: POST to /api/warmup/ip/{ipAddress}/reset
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await executeWarmupAction(`/api/warmup/ip/${ip.ipAddress}/reset`);
+            setActionProgress(prev => ({ ...prev, [ip.id]: 85 }));
             
             setPoolIPs(prev => prev.map(i => 
                 i.id === ip.id ? { 
@@ -197,23 +272,44 @@ export default function IPWarmerPage() {
                     utilizationPercent: 0,
                 } : i
             ));
+            setActionProgress(prev => ({ ...prev, [ip.id]: 100 }));
             showToast(`Warmup reset for ${ip.ipAddress}`, 'success');
-        } catch {
-            showToast('Failed to reset warmup', 'error');
+        } catch (error) {
+            showToast(`Failed to reset warmup: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
         } finally {
+            setTimeout(() => {
+                setActionProgress(prev => {
+                    const next = { ...prev };
+                    delete next[ip.id];
+                    return next;
+                });
+            }, 600);
             setActionLoading(null);
         }
     }
 
     async function handleSetWarmupDay() {
         if (!selectedIP) return;
+        if (actionLoading === 'advance') return;
+
+        const schedule = schedules.default?.schedule || [];
+        const currentLimit = schedule[Math.min(selectedIP.warmupDay, schedule.length - 1)] || selectedIP.dailyLimit;
+        const newLimitPreview = schedule[Math.min(newWarmupDay, schedule.length - 1)] || currentLimit;
+        const delta = newLimitPreview - currentLimit;
+
+        const confirmed = await dialog.confirm({
+            title: 'Confirm Warmup Day Change',
+            message: `IP ${selectedIP.ipAddress}: Day ${selectedIP.warmupDay} → Day ${newWarmupDay}. Daily limit ${formatNumber(currentLimit)} → ${formatNumber(newLimitPreview)} (${delta >= 0 ? '+' : ''}${formatNumber(delta)}). Continue?`,
+            confirmLabel: 'Apply Change',
+        });
+        if (!confirmed) return;
         
         setActionLoading(selectedIP.id);
+        setActionProgress(prev => ({ ...prev, [selectedIP.id]: 20 }));
         try {
-            // In production: POST to /api/warmup/ip/{ipAddress}/day with { day: newWarmupDay }
-            await new Promise(resolve => setTimeout(resolve, 500));
-            
-            const schedule = schedules.default?.schedule || [];
+            await executeWarmupAction(`/api/warmup/ip/${selectedIP.ipAddress}/day`, { day: newWarmupDay });
+            setActionProgress(prev => ({ ...prev, [selectedIP.id]: 85 }));
+
             const newLimit = schedule[Math.min(newWarmupDay, schedule.length - 1)] || 100;
             const nextLimit = newWarmupDay < schedule.length - 1 ? schedule[newWarmupDay + 1] : null;
             
@@ -226,12 +322,22 @@ export default function IPWarmerPage() {
                     nextDayLimit: nextLimit,
                 } : i
             ));
+            setActionProgress(prev => ({ ...prev, [selectedIP.id]: 100 }));
             showToast(`Warmup day set to ${newWarmupDay} for ${selectedIP.ipAddress}`, 'success');
             setShowSetDayModal(false);
             setSelectedIP(null);
-        } catch {
-            showToast('Failed to set warmup day', 'error');
+        } catch (error) {
+            showToast(`Failed to set warmup day: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
         } finally {
+            setTimeout(() => {
+                setActionProgress(prev => {
+                    const next = { ...prev };
+                    if (selectedIP) {
+                        delete next[selectedIP.id];
+                    }
+                    return next;
+                });
+            }, 600);
             setActionLoading(null);
         }
     }
@@ -246,10 +352,8 @@ export default function IPWarmerPage() {
         
         setActionLoading('advance');
         try {
-            // In production: POST to /api/warmup/advance
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            await executeWarmupAction('/api/warmup/advance');
             
-            // Simulate advancement
             setPoolIPs(prev => prev.map(ip => {
                 if (ip.status !== 'active' || ip.isFullyWarmed) return ip;
                 if (ip.utilizationPercent < 75) return ip; // Need 75% utilization to advance
@@ -272,8 +376,8 @@ export default function IPWarmerPage() {
             
             showToast('Daily advancement completed successfully', 'success');
             loadData(); // Refresh pool stats
-        } catch {
-            showToast('Failed to run daily advancement', 'error');
+        } catch (error) {
+            showToast(`Failed to run daily advancement: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
         } finally {
             setActionLoading(null);
         }
@@ -291,6 +395,11 @@ export default function IPWarmerPage() {
     const totalCapacity = pools.reduce((acc, p) => acc + p.totalDailyLimit, 0);
     const totalSent = pools.reduce((acc, p) => acc + p.totalDailySent, 0);
     const overallUtilization = totalCapacity > 0 ? Math.round((totalSent / totalCapacity) * 100) : 0;
+    const filteredPoolIPs = poolIPs.filter(ip => {
+        const query = ipSearch.trim().toLowerCase();
+        if (!query) return true;
+        return ip.ipAddress.toLowerCase().includes(query) || ip.status.toLowerCase().includes(query);
+    });
 
     if (loading) {
         return (
@@ -304,7 +413,10 @@ export default function IPWarmerPage() {
         <div className="max-w-7xl mx-auto">
             {/* Toast Notification */}
             {toast && (
-                <div className={cn(
+                <div
+                    role={toast.type === 'error' ? 'alert' : 'status'}
+                    aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+                    className={cn(
                     'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all transform',
                     toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
                 )}>
@@ -322,6 +434,12 @@ export default function IPWarmerPage() {
                     <p className="text-muted-foreground mt-1">
                         Manage IP warmup schedules and track progress
                     </p>
+                    {isStale && (
+                        <p className="text-xs text-warning mt-1">Data may be stale. Auto-refresh is active every 30s.</p>
+                    )}
+                    {lastRefreshedAt && (
+                        <p className="text-xs text-muted-foreground mt-1">Last refreshed: {timeAgo(lastRefreshedAt)}</p>
+                    )}
                 </div>
                 <button
                     onClick={handleTriggerAdvancement}
@@ -344,6 +462,12 @@ export default function IPWarmerPage() {
                     )}
                 </button>
             </div>
+
+            {actionLoading === 'advance' && (
+                <div className="mb-4 rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs text-warning">
+                    Daily advancement job is running. Per-IP actions are temporarily locked.
+                </div>
+            )}
 
             {/* Global Stats */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -416,6 +540,11 @@ export default function IPWarmerPage() {
                     {/* Pools List */}
                     <div className="lg:col-span-1 space-y-3">
                         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">IP Pools</h2>
+                        {pools.length === 0 && (
+                            <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+                                No IP pools are configured yet. Create a pool to start warmup management.
+                            </div>
+                        )}
                         {pools.map(pool => (
                             <button
                                 key={pool.id}
@@ -468,6 +597,13 @@ export default function IPWarmerPage() {
                                     <p className="text-sm text-muted-foreground mt-1">
                                         {selectedPool.activeIPs} active IPs • {formatNumber(selectedPool.totalDailyLimit)} daily capacity
                                     </p>
+                                    <input
+                                        type="text"
+                                        value={ipSearch}
+                                        onChange={(event) => setIpSearch(event.target.value)}
+                                        placeholder="Search IP/status"
+                                        className="mt-3 w-full max-w-xs px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                    />
                                 </div>
                                 
                                 <div className="overflow-x-auto">
@@ -483,10 +619,25 @@ export default function IPWarmerPage() {
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-border">
-                                            {poolIPs.map(ip => {
+                                            {filteredPoolIPs.length === 0 && (
+                                                <tr>
+                                                    <td colSpan={6} className="px-4 py-8 text-center text-sm text-muted-foreground">
+                                                        {poolIPs.length === 0
+                                                            ? 'No IPs found in this pool yet.'
+                                                            : 'No IPs match the current search filter.'}
+                                                    </td>
+                                                </tr>
+                                            )}
+                                            {filteredPoolIPs.map(ip => {
                                                 const statusConfig = STATUS_CONFIG[ip.status] || STATUS_CONFIG.inactive;
                                                 const maxDay = schedules.default?.maxDay || 14;
                                                 const progressPercent = Math.round((ip.warmupDay / maxDay) * 100);
+                                                const isActionLocked = actionLoading === 'advance';
+                                                const canStart = ip.status === 'inactive' && !isActionLocked;
+                                                const canPause = ip.status === 'active' && !isActionLocked;
+                                                const canResume = ip.status === 'paused' && !isActionLocked;
+                                                const canSetDay = !isActionLocked;
+                                                const canReset = !isActionLocked;
                                                 
                                                 return (
                                                     <tr key={ip.id} className="hover:bg-muted/50 transition-colors">
@@ -541,6 +692,11 @@ export default function IPWarmerPage() {
                                                             <div className="text-xs text-muted-foreground">
                                                                 {formatNumber(ip.dailySent)}/{formatNumber(ip.dailyLimit)}
                                                             </div>
+                                                            {ip.status === 'active' && !ip.isFullyWarmed && ip.utilizationPercent < 75 && (
+                                                                <div className="text-[11px] text-warning mt-1">
+                                                                    Cannot auto-advance: utilization below 75% target.
+                                                                </div>
+                                                            )}
                                                         </td>
                                                         <td className="px-4 py-3">
                                                             <div className="text-sm font-medium text-foreground">
@@ -551,13 +707,16 @@ export default function IPWarmerPage() {
                                                                     Next: {formatNumber(ip.nextDayLimit)}
                                                                 </div>
                                                             )}
+                                                            <div className="text-[11px] text-muted-foreground mt-1">
+                                                                Schedule: current {formatNumber(ip.dailyLimit)} / next {formatNumber(ip.nextDayLimit || ip.dailyLimit)}
+                                                            </div>
                                                         </td>
                                                         <td className="px-4 py-3 text-right">
                                                             <div className="flex items-center justify-end gap-1">
                                                                 {ip.status === 'inactive' ? (
                                                                     <button
                                                                         onClick={() => handleStartWarmup(ip)}
-                                                                        disabled={actionLoading === ip.id}
+                                                                        disabled={actionLoading === ip.id || !canStart}
                                                                         className="px-2.5 py-1 text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 rounded transition-colors disabled:opacity-50"
                                                                     >
                                                                         Start
@@ -565,7 +724,7 @@ export default function IPWarmerPage() {
                                                                 ) : ip.status === 'paused' ? (
                                                                     <button
                                                                         onClick={() => handleResumeWarmup(ip)}
-                                                                        disabled={actionLoading === ip.id}
+                                                                        disabled={actionLoading === ip.id || !canResume}
                                                                         className="px-2.5 py-1 text-xs font-medium text-emerald-foreground bg-emerald-600 hover:bg-emerald-600/90 rounded transition-colors disabled:opacity-50"
                                                                     >
                                                                         Resume
@@ -573,7 +732,7 @@ export default function IPWarmerPage() {
                                                                 ) : (
                                                                     <button
                                                                         onClick={() => handlePauseWarmup(ip)}
-                                                                        disabled={actionLoading === ip.id}
+                                                                        disabled={actionLoading === ip.id || !canPause}
                                                                         className="px-2.5 py-1 text-xs font-medium text-amber-700 bg-amber-100/50 hover:bg-amber-100 border border-amber-200 rounded transition-colors disabled:opacity-50"
                                                                     >
                                                                         Pause
@@ -581,7 +740,7 @@ export default function IPWarmerPage() {
                                                                 )}
                                                                 <button
                                                                     onClick={() => openSetDayModal(ip)}
-                                                                    disabled={actionLoading === ip.id}
+                                                                    disabled={actionLoading === ip.id || !canSetDay}
                                                                     className="px-2.5 py-1 text-xs font-medium text-muted-foreground bg-muted hover:bg-muted/80 rounded transition-colors disabled:opacity-50"
                                                                     title="Set warmup day manually"
                                                                 >
@@ -589,13 +748,22 @@ export default function IPWarmerPage() {
                                                                 </button>
                                                                 <button
                                                                     onClick={() => handleResetWarmup(ip)}
-                                                                    disabled={actionLoading === ip.id}
+                                                                    disabled={actionLoading === ip.id || !canReset}
                                                                     className="px-2.5 py-1 text-xs font-medium text-destructive bg-destructive/10 hover:bg-destructive/20 rounded transition-colors disabled:opacity-50"
                                                                     title="Reset warmup to Day 0"
                                                                 >
                                                                     Reset
                                                                 </button>
                                                             </div>
+                                                            {actionProgress[ip.id] !== undefined && (
+                                                                <div className="mt-2 w-24 ml-auto">
+                                                                    <div className="h-1.5 rounded bg-muted overflow-hidden">
+                                                                        <svg width="100%" height="100%" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+                                                                            <rect x="0" y="0" width={Math.max(0, Math.min(actionProgress[ip.id], 100))} height="6" className="fill-primary" />
+                                                                        </svg>
+                                                                    </div>
+                                                                </div>
+                                                            )}
                                                         </td>
                                                     </tr>
                                                 );
@@ -728,6 +896,20 @@ export default function IPWarmerPage() {
                                 <div className="text-xs text-muted-foreground mb-1">New Daily Limit</div>
                                 <div className="text-lg font-bold text-foreground">
                                     {formatNumber(schedules.default?.schedule[Math.min(newWarmupDay, schedules.default.schedule.length - 1)] || 100)} emails/day
+                                </div>
+                                <div className="text-xs text-muted-foreground mt-1">
+                                    Current day: {selectedIP.warmupDay} ({formatNumber(schedules.default?.schedule[Math.min(selectedIP.warmupDay, schedules.default.schedule.length - 1)] || selectedIP.dailyLimit)})
+                                </div>
+                                <div className="mt-2 h-1.5 bg-muted rounded-full overflow-hidden">
+                                    <svg width="100%" height="100%" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true">
+                                        <rect
+                                            x="0"
+                                            y="0"
+                                            width={Math.max(0, Math.min(Math.round((newWarmupDay / (schedules.default?.maxDay || 14)) * 100), 100))}
+                                            height="6"
+                                            className="fill-primary"
+                                        />
+                                    </svg>
                                 </div>
                             </div>
                             <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 text-xs text-warning">

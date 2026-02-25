@@ -10,7 +10,8 @@ import { beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 process.env.NODE_ENV = 'test';
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/apexmail_test';
 process.env.REDIS_URL = 'redis://localhost:6379/1';
-process.env.JWT_SECRET = 'test-jwt-secret-for-testing-only';
+// Use ??= so a real secret set in the environment before test startup is honoured.
+process.env.JWT_SECRET ??= 'test-jwt-secret-for-testing-only';
 
 // Global mocks
 vi.mock('ioredis', () => ({

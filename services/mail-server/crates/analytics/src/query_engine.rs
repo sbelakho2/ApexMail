@@ -1,7 +1,6 @@
 //! Query engine – time-series, aggregations, funnel analysis, deliverability.
 
 use sqlx::PgPool;
-use tracing::debug;
 
 use crate::types::*;
 
@@ -25,13 +24,9 @@ impl QueryEngine {
             "timestamp >= $2".to_string(),
             "timestamp < $3".to_string(),
         ];
-        if let Some(ref types) = query.event_types {
-            if !types.is_empty() {
-                conditions.push(format!(
-                    "event_type = ANY(ARRAY[{}])",
-                    types.iter().map(|t| format!("'{t}'")).collect::<Vec<_>>().join(",")
-                ));
-            }
+        let has_event_filter = query.event_types.as_ref().map_or(false, |t| !t.is_empty());
+        if has_event_filter {
+            conditions.push("event_type = ANY($5::text[])".to_string());
         }
         let where_clause = conditions.join(" AND ");
 
@@ -39,13 +34,17 @@ impl QueryEngine {
             "SELECT {trunc} as period, COUNT(*) as value FROM events WHERE {where_clause} GROUP BY period ORDER BY period LIMIT $4"
         );
 
-        let rows = sqlx::query_as::<_, (String, i64)>(&sql)
+        let mut q = sqlx::query_as::<_, (String, i64)>(&sql)
             .bind(&query.tenant_id)
             .bind(query.start_date)
             .bind(query.end_date)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+            .bind(limit);
+        if let Some(ref types) = query.event_types {
+            if !types.is_empty() {
+                q = q.bind(types);
+            }
+        }
+        let rows = q.fetch_all(&self.pool).await?;
 
         Ok(rows
             .into_iter()

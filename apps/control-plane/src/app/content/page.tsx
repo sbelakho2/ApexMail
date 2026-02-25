@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, Suspense } from 'react';
-import { cn, timeAgo } from '../../lib/utils';
+import { cn, formatDateOnly, timeAgo } from '../../lib/utils';
 import { useSearchParams } from 'next/navigation';
 import { useDialog } from '../../components/ui/confirm-dialog';
 
@@ -163,6 +163,7 @@ function ContentPageContent() {
                     </p>
                 </div>
                 <button 
+                    type="button"
                     onClick={() => setIsCreating(true)}
                     className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors"
                 >
@@ -271,7 +272,7 @@ function ContentPageContent() {
                                             )}
                                             {item.scheduledFor && item.status === 'scheduled' && (
                                                 <span className="text-warning">
-                                                    Scheduled for {new Date(item.scheduledFor).toLocaleDateString()}
+                                                    Scheduled for {formatDateOnly(item.scheduledFor)}
                                                 </span>
                                             )}
                                             {item.views !== undefined && item.status === 'published' && (
@@ -310,7 +311,7 @@ function ContentPageContent() {
                                             </button>
                                         )}
                                         <div className="relative group">
-                                            <button className="p-1.5 text-muted-foreground hover:text-foreground transition-colors">
+                                            <button type="button" aria-label="Content item actions" className="p-1.5 text-muted-foreground hover:text-foreground transition-colors">
                                                 ⋮
                                             </button>
                                             <div className="absolute right-0 top-full mt-1 w-40 bg-popover border border-border rounded-lg shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">

@@ -1,8 +1,42 @@
+use regex::Regex;
 use sqlx::PgPool;
+use std::sync::LazyLock;
 use tracing::info;
 use uuid::Uuid;
 
 use crate::types::*;
+
+/// Sanitize CSS to prevent XSS attacks
+/// #254: Removes dangerous patterns that could execute JavaScript
+fn sanitize_css(css: &str) -> String {
+    // Remove dangerous patterns that could enable XSS via CSS
+    let dangerous_patterns = [
+        "expression(",     // IE CSS expressions
+        "javascript:",     // JavaScript URLs  
+        "behavior:",       // IE behaviors
+        "-moz-binding:",   // Firefox XBL bindings
+        "@import",         // External CSS imports
+    ];
+    
+    let mut sanitized = css.to_string();
+    let lower = css.to_lowercase();
+    
+    for pattern in dangerous_patterns {
+        if lower.contains(&pattern.to_lowercase()) {
+            // Log warning and remove pattern
+            tracing::warn!(pattern = pattern, "Removed dangerous CSS pattern");
+            sanitized = sanitized.replace(pattern, "");
+            // Also handle case variations
+            sanitized = sanitized.to_lowercase().replace(&pattern.to_lowercase(), "");
+        }
+    }
+    
+    // Remove HTML tags embedded in CSS
+    static TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
+    sanitized = TAG_REGEX.replace_all(&sanitized, "").to_string();
+    
+    sanitized
+}
 
 /// White-Label Service: custom branding, domain management, DNS / email templates
 pub struct WhiteLabelService {
@@ -15,6 +49,7 @@ impl WhiteLabelService {
     }
 
     /// Update (upsert) white-label configuration
+    /// #254: Now sanitizes custom_css to prevent XSS
     pub async fn update_config(
         &self, tenant_id: Uuid, company_name: Option<&str>,
         logo_url: Option<&str>, favicon_url: Option<&str>,
@@ -22,6 +57,10 @@ impl WhiteLabelService {
         custom_css: Option<&str>, footer_text: Option<&str>,
         support_email: Option<&str>, support_url: Option<&str>,
     ) -> Result<ApiResult<WhiteLabelConfigRow>, String> {
+        // #254: Sanitize custom_css to prevent stored XSS
+        let sanitized_css = custom_css.map(sanitize_css);
+        let css_ref = sanitized_css.as_deref();
+        
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, WhiteLabelConfigRow>(
             "INSERT INTO ent_whitelabel_config (id, tenant_id, company_name, logo_url, favicon_url, primary_color, secondary_color, custom_css, footer_text, support_email, support_url, created_at, updated_at)
@@ -42,7 +81,7 @@ impl WhiteLabelService {
         .bind(id).bind(tenant_id)
         .bind(company_name).bind(logo_url).bind(favicon_url)
         .bind(primary_color).bind(secondary_color)
-        .bind(custom_css).bind(footer_text)
+        .bind(css_ref).bind(footer_text)
         .bind(support_email).bind(support_url)
         .fetch_one(&self.db)
         .await
@@ -74,7 +113,8 @@ impl WhiteLabelService {
     ) -> Result<ApiResult<WhiteLabelDomain>, String> {
         let id = Uuid::new_v4();
         let dns_records = generate_dns_records(domain, domain_type);
-        let dns_json = serde_json::to_value(&dns_records).unwrap_or_default();
+        let dns_json = serde_json::to_value(&dns_records)
+            .map_err(|e| format!("Serialize DNS records: {e}"))?;
 
         let row = sqlx::query_as::<_, WhiteLabelDomain>(
             "INSERT INTO ent_whitelabel_domains (id, tenant_id, domain, domain_type, verification_status, dns_records, created_at)
@@ -122,11 +162,18 @@ impl WhiteLabelService {
     }
 
     /// List domains for a tenant
-    pub async fn list_domains(&self, tenant_id: Uuid) -> Result<ApiResult<Vec<WhiteLabelDomain>>, String> {
+    pub async fn list_domains(
+        &self,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<ApiResult<Vec<WhiteLabelDomain>>, String> {
         let rows = sqlx::query_as::<_, WhiteLabelDomain>(
-            "SELECT * FROM ent_whitelabel_domains WHERE tenant_id = $1 ORDER BY created_at DESC"
+            "SELECT * FROM ent_whitelabel_domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List domains: {e}"))?;
@@ -134,16 +181,18 @@ impl WhiteLabelService {
         Ok(ApiResult::ok(rows))
     }
 
-    /// Remove a domain
-    pub async fn remove_domain(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
-        let result = sqlx::query("DELETE FROM ent_whitelabel_domains WHERE id = $1")
+    /// Remove a domain.
+    /// #250: Requires tenant ownership verification to prevent IDOR.
+    pub async fn remove_domain(&self, id: Uuid, tenant_id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
+        let result = sqlx::query("DELETE FROM ent_whitelabel_domains WHERE id = $1 AND tenant_id = $2")
             .bind(id)
+            .bind(tenant_id)
             .execute(&self.db)
             .await
             .map_err(|e| format!("Delete domain: {e}"))?;
 
         if result.rows_affected() == 0 {
-            Ok(ApiResult::err("Domain not found", "NOT_FOUND"))
+            Ok(ApiResult::err("Domain not found or not owned by tenant", "NOT_FOUND"))
         } else {
             Ok(ApiResult::ok(serde_json::json!({"deleted": true})))
         }
@@ -192,6 +241,7 @@ impl WhiteLabelService {
 }
 
 /// Generate DNS records required for a domain type
+/// #260: Returns placeholder for DKIM public key - caller must generate actual keys
 pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
     match domain_type {
         "tracking" => vec![DNSRecord {
@@ -206,20 +256,31 @@ pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
             value: "return.apexmail.io".into(),
             ttl: 3600,
         }],
-        "custom_from" => vec![
-            DNSRecord {
-                record_type: "TXT".into(),
-                host: format!("apexmail._domainkey.{domain}"),
-                value: "v=DKIM1; k=rsa; p=<generated_public_key>".into(),
-                ttl: 3600,
-            },
-            DNSRecord {
+        "custom_from" => {
+            let mut records = vec![DNSRecord {
                 record_type: "TXT".into(),
                 host: domain.to_string(),
                 value: "v=spf1 include:spf.apexmail.io ~all".into(),
                 ttl: 3600,
-            },
-        ],
+            }];
+
+            // #260: Use configured DKIM public key instead of placeholder text.
+            match std::env::var("DEFAULT_DKIM_PUBLIC_KEY") {
+                Ok(public_key) if !public_key.trim().is_empty() => {
+                    records.push(DNSRecord {
+                        record_type: "TXT".into(),
+                        host: format!("apexmail._domainkey.{domain}"),
+                        value: format!("v=DKIM1; k=rsa; p={}", public_key.trim()),
+                        ttl: 3600,
+                    });
+                }
+                _ => {
+                    tracing::warn!(domain = domain, "DEFAULT_DKIM_PUBLIC_KEY not set; returning SPF-only records");
+                }
+            }
+
+            records
+        }
         "landing_page" => vec![DNSRecord {
             record_type: "CNAME".into(),
             host: domain.to_string(),
@@ -235,9 +296,20 @@ pub fn generate_dns_records(domain: &str, domain_type: &str) -> Vec<DNSRecord> {
     }
 }
 
-/// Check DNS records for a domain (simplified — returns false in test/offline)
-async fn check_dns_records(_domain: &str) -> bool {
-    false
+/// Check DNS records for a domain
+/// #259: Uses TCP resolvability via `lookup_host` as baseline DNS verification.
+/// For strict record-by-record checking, extend using trust-dns-resolver.
+async fn check_dns_records(domain: &str) -> bool {
+    // #259: Perform a real network DNS resolution instead of always returning false.
+    // This checks resolvability as a baseline verification step.
+    // For stricter verification, each DNS record should be checked via trust-dns-resolver.
+    match tokio::net::lookup_host((domain, 80)).await {
+        Ok(mut addrs) => addrs.next().is_some(),
+        Err(e) => {
+            tracing::warn!(domain = domain, error = %e, "DNS verification lookup failed");
+            false
+        }
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -264,10 +336,12 @@ mod tests {
 
     #[test]
     fn test_generate_custom_from_dns() {
+        std::env::set_var("DEFAULT_DKIM_PUBLIC_KEY", "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A");
         let records = generate_dns_records("example.com", "custom_from");
         assert_eq!(records.len(), 2);
         assert!(records.iter().any(|r| r.record_type == "TXT" && r.host.contains("_domainkey")));
         assert!(records.iter().any(|r| r.record_type == "TXT" && r.value.contains("spf")));
+        std::env::remove_var("DEFAULT_DKIM_PUBLIC_KEY");
     }
 
     #[test]

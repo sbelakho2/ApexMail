@@ -1,22 +1,20 @@
 //! HTTP routes for the template renderer service.
 
 use axum::{
-    extract::{Json, Path, State},
+    extract::{Json, State},
     http::StatusCode,
     routing::{get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::config::RendererConfig;
 use crate::plaintext::html_to_plaintext;
 use crate::sandbox::Sandbox;
 use crate::transpiler;
 use crate::types::{
-    RenderMetadata, RenderOptions, RenderResult, TemplateError, ValidationResult,
-    STARTER_TEMPLATE,
+    RenderMetadata, RenderOptions, RenderResult, TemplateError, STARTER_TEMPLATE,
 };
 use crate::cache::TemplateCache;
 

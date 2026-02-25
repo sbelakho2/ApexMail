@@ -37,9 +37,12 @@ export function ConsentLedger() {
  >
  <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">
  {/* Header */}
- <div className="flex items-center gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50/50">
- <Database className="w-4 h-4 text-surface-500" />
- <span className="text-xs font-medium text-surface-600 font-mono">Consent Ledger Entry</span>
+ <div className="flex items-center justify-between gap-2 px-6 py-4 border-b border-surface-200 bg-surface-50/50">
+   <div className="flex items-center gap-2">
+     <Database className="w-4 h-4 text-surface-500" aria-hidden="true" />
+     <span className="text-xs font-medium text-surface-600 font-mono">Consent Ledger Entry</span>
+   </div>
+   <span className="text-[10px] text-amber-700 font-medium px-2 py-0.5 rounded bg-amber-50 border border-amber-200">Illustrative</span>
  </div>
  <div className="bg-surface-950 overflow-hidden">
  <CodeBlock code={ledgerCode} language="json" />

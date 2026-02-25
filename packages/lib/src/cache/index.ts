@@ -52,9 +52,10 @@ export interface CacheProvider {
  */
 export class RedisCacheProvider implements CacheProvider {
   private readonly client: Redis;
-  private readonly subscriber: Redis;
+  private subscriber: Redis | null = null;
   private readonly prefix: string;
   private readonly logger: Logger;
+  private readonly redisConfig: RedisOptions;
   private connected = false;
   private readonly subscriptions: Map<string, (message: string) => void> = new Map();
 
@@ -81,8 +82,9 @@ export class RedisCacheProvider implements CacheProvider {
       ...options,
     };
 
+    this.redisConfig = redisConfig;
+
     this.client = new Redis(redisConfig);
-    this.subscriber = new Redis(redisConfig);
 
     this.client.on('connect', () => {
       this.connected = true;
@@ -98,12 +100,20 @@ export class RedisCacheProvider implements CacheProvider {
       this.logger.warn('Redis connection closed');
     });
 
-    this.subscriber.on('message', (channel, message) => {
+  }
+
+  private getSubscriber(): Redis {
+    if (this.subscriber) return this.subscriber;
+
+    const subscriber = new Redis(this.redisConfig);
+    subscriber.on('message', (channel, message) => {
       const handler = this.subscriptions.get(channel);
       if (handler) {
         handler(message);
       }
     });
+    this.subscriber = subscriber;
+    return subscriber;
   }
 
   private key(k: string): string {
@@ -275,16 +285,22 @@ export class RedisCacheProvider implements CacheProvider {
 
   async subscribe(channel: string, handler: (message: string) => void): Promise<void> {
     this.subscriptions.set(channel, handler);
-    await this.subscriber.subscribe(channel);
+    const subscriber = this.getSubscriber();
+    await subscriber.subscribe(channel);
   }
 
   async unsubscribe(channel: string): Promise<void> {
     this.subscriptions.delete(channel);
-    await this.subscriber.unsubscribe(channel);
+    if (this.subscriber) {
+      await this.subscriber.unsubscribe(channel);
+    }
   }
 
   async disconnect(): Promise<void> {
-    await this.subscriber.quit();
+    if (this.subscriber) {
+      await this.subscriber.quit();
+      this.subscriber = null;
+    }
     await this.client.quit();
     this.connected = false;
   }
@@ -460,8 +476,9 @@ export class InMemoryCacheProvider implements CacheProvider {
 
   async keys(pattern: string): Promise<string[]> {
     const fullPattern = this.key(pattern);
+    const escaped = fullPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(
-      '^' + fullPattern.replace(/\*/g, '.*').replace(/\?/g, '.') + '$'
+      '^' + escaped.replace(/\\\*/g, '.*').replace(/\\\?/g, '.') + '$'
     );
     
     const result: string[] = [];

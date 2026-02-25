@@ -1,10 +1,13 @@
 use axum::{
     extract::{Path, Query, State},
+    middleware,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put, delete},
     Json, Router,
 };
+use axum::http::header::AUTHORIZATION;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -26,6 +29,7 @@ use crate::whitelabel::WhiteLabelService;
 
 pub struct AppState {
     pub db: PgPool,
+    pub config: Config,
     pub sso: SSOService,
     pub compliance: ComplianceService,
     pub log_streaming: LogStreamingService,
@@ -40,6 +44,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(db: PgPool, config: Config) -> Self {
         Self {
+            config: config.clone(),
             sso: SSOService::new(db.clone(), config.clone()),
             compliance: ComplianceService::new(db.clone()),
             log_streaming: LogStreamingService::new(db.clone()),
@@ -63,6 +68,48 @@ impl AppState {
 }
 
 type S = Arc<AppState>;
+
+#[derive(Debug, Deserialize)]
+struct JwtClaims {
+    #[serde(rename = "exp")]
+    _exp: usize,
+}
+
+async fn auth_middleware(
+    State(state): State<S>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> impl IntoResponse {
+    let path = req.uri().path();
+    if path == "/health" || path == "/readiness" || path.starts_with("/sso/login/") || path == "/sso/validate" {
+        return next.run(req).await;
+    }
+
+    let token = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let Some(token) = token else {
+        return err_json(StatusCode::UNAUTHORIZED, "Missing bearer token").into_response();
+    };
+
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+
+    if jsonwebtoken::decode::<JwtClaims>(
+        token,
+        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &validation,
+    )
+    .is_err()
+    {
+        return err_json(StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
+    }
+
+    next.run(req).await
+}
 
 // ── Request body types ─────────────────────────────────────────────────
 
@@ -168,6 +215,11 @@ pub struct DedicatedIPBody {
 pub struct BYOIPBody {
     pub tenant_id: Uuid,
     pub cidr_block: String,
+}
+
+#[derive(Deserialize)]
+pub struct BYOIPVerifyBody {
+    pub verification_token: String,
 }
 
 #[derive(Deserialize)]
@@ -319,9 +371,13 @@ pub struct QBRGoalUpdateBody {
 
 // ── Router ─────────────────────────────────────────────────────────────
 
+/// Create the enterprise API router.
+///
+/// # Security Note (#249)
+/// This router must be wrapped with authentication middleware before deployment.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        // Health
+        // Health (unauthenticated)
         .route("/health", get(health_check))
         .route("/readiness", get(readiness_check))
         // SSO
@@ -399,7 +455,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/whitelabel/domains", post(whitelabel_add_domain))
         .route("/whitelabel/domains/:id/verify", post(whitelabel_verify_domain))
         .route("/whitelabel/domains/tenant/:tenant_id", get(whitelabel_list_domains))
-        .route("/whitelabel/domains/:id", delete(whitelabel_remove_domain))
+        .route("/whitelabel/domains/:tenant_id/:id", delete(whitelabel_remove_domain))
         .route("/whitelabel/email-templates", put(whitelabel_update_templates))
         .route("/whitelabel/email-templates/:tenant_id", get(whitelabel_get_templates))
         // QBR
@@ -411,6 +467,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/qbr/:id/feedback", post(qbr_feedback))
         .route("/qbr/:id/goals", put(qbr_update_goal))
         .route("/qbr/benchmarks", get(qbr_benchmarks))
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
 }
 
@@ -422,6 +479,14 @@ fn ok_json<T: serde::Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>
 
 fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
     (status, Json(serde_json::json!({"error": msg})))
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
+}
+
+fn clamp_offset(offset: i64) -> i64 {
+    offset.clamp(0, 100_000)
 }
 
 fn service_result<T: serde::Serialize>(result: Result<crate::types::ApiResult<T>, String>) -> (StatusCode, Json<serde_json::Value>) {
@@ -471,14 +536,37 @@ async fn sso_oidc_login(State(state): State<S>, Path(domain): Path<String>) -> i
 }
 
 #[derive(Deserialize)]
-pub struct SessionQuery { pub token: Option<String> }
+pub struct SessionQuery { 
+    /// Deprecated: Use Authorization header instead
+    pub token: Option<String> 
+}
 
-async fn sso_validate_session(State(state): State<S>, Query(q): Query<SessionQuery>) -> impl IntoResponse {
-    let token = match &q.token {
-        Some(t) => t.as_str(),
-        None => return err_json(StatusCode::BAD_REQUEST, "Missing token parameter"),
+/// Validate an SSO session
+/// #251: Now accepts token from Authorization header (preferred) or query param (deprecated)
+async fn sso_validate_session(
+    State(state): State<S>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<SessionQuery>
+) -> impl IntoResponse {
+    // #251: Prefer token from Authorization header to avoid URL logging/Referer leaks
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+        .or(q.token);
+    
+    let token = match token {
+        Some(t) => t,
+        None => return err_json(StatusCode::BAD_REQUEST, "Missing token in Authorization header or query parameter"),
     };
-    match state.sso.validate_session(token).await {
+    
+    // Log warning if using deprecated query parameter
+    if headers.get(axum::http::header::AUTHORIZATION).is_none() {
+        tracing::warn!("SSO session validation using deprecated query parameter - use Authorization header");
+    }
+    
+    match state.sso.validate_session(&token).await {
         Ok(Some(session)) => ok_json(serde_json::to_value(session).unwrap_or_default()),
         Ok(None) => err_json(StatusCode::UNAUTHORIZED, "Invalid or expired session"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -523,7 +611,9 @@ async fn compliance_log_audit(State(state): State<S>, Json(body): Json<AuditLogB
 }
 
 async fn compliance_get_audit_logs(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<AuditFilterParams>) -> impl IntoResponse {
-    service_result(state.compliance.get_audit_logs(tenant_id, q.action.as_deref(), q.resource_type.as_deref(), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await)
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.compliance.get_audit_logs(tenant_id, q.action.as_deref(), q.resource_type.as_deref(), limit, offset).await)
 }
 
 async fn compliance_data_access(State(state): State<S>, Json(body): Json<DataAccessBody>) -> impl IntoResponse {
@@ -629,8 +719,14 @@ async fn ip_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRespon
     service_result(state.private_deploy.get_dedicated_ip(id).await)
 }
 
-async fn ip_list(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.private_deploy.list_dedicated_ips(tenant_id).await)
+async fn ip_list(
+    State(state): State<S>,
+    Path(tenant_id): Path<Uuid>,
+    Query(q): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.private_deploy.list_dedicated_ips(tenant_id, limit, offset).await)
 }
 
 async fn ip_reputation(State(state): State<S>, Path(ip_address): Path<String>) -> impl IntoResponse {
@@ -641,8 +737,12 @@ async fn byoip_register(State(state): State<S>, Json(body): Json<BYOIPBody>) -> 
     service_result(state.private_deploy.register_byoip(body.tenant_id, &body.cidr_block).await)
 }
 
-async fn byoip_verify(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.private_deploy.verify_byoip(id).await)
+async fn byoip_verify(
+    State(state): State<S>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<BYOIPVerifyBody>,
+) -> impl IntoResponse {
+    service_result(state.private_deploy.verify_byoip(id, &body.verification_token).await)
 }
 
 // ── Sub-account Handlers ───────────────────────────────────────────────
@@ -668,7 +768,9 @@ async fn sub_account_delete(State(state): State<S>, Path(id): Path<Uuid>) -> imp
 }
 
 async fn sub_account_list(State(state): State<S>, Path(parent_id): Path<Uuid>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
-    service_result(state.sub_accounts.list(parent_id, q.status.as_deref(), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await)
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.sub_accounts.list(parent_id, q.status.as_deref(), limit, offset).await)
 }
 
 async fn sub_account_suspend(State(state): State<S>, Path(id): Path<Uuid>, Json(body): Json<SubAccountSuspendBody>) -> impl IntoResponse {
@@ -701,7 +803,9 @@ async fn ticket_update(State(state): State<S>, Path(id): Path<Uuid>, Json(body):
 }
 
 async fn ticket_list(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
-    service_result(state.support.list_tickets(tenant_id, q.status.as_deref(), q.priority.as_deref(), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await)
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.support.list_tickets(tenant_id, q.status.as_deref(), q.priority.as_deref(), limit, offset).await)
 }
 
 async fn comment_add(State(state): State<S>, Path(ticket_id): Path<Uuid>, Json(body): Json<CommentBody>) -> impl IntoResponse {
@@ -741,7 +845,9 @@ async fn template_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl Into
 }
 
 async fn template_list(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<StatusFilterParams>) -> impl IntoResponse {
-    service_result(state.templates.list_submissions(tenant_id, q.status.as_deref(), q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await)
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.templates.list_submissions(tenant_id, q.status.as_deref(), limit, offset).await)
 }
 
 async fn template_approve(State(state): State<S>, Path(id): Path<Uuid>, Json(body): Json<TemplateReviewBody>) -> impl IntoResponse {
@@ -787,12 +893,22 @@ async fn whitelabel_verify_domain(State(state): State<S>, Path(id): Path<Uuid>) 
     service_result(state.whitelabel.verify_domain(id).await)
 }
 
-async fn whitelabel_list_domains(State(state): State<S>, Path(tenant_id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.whitelabel.list_domains(tenant_id).await)
+async fn whitelabel_list_domains(
+    State(state): State<S>,
+    Path(tenant_id): Path<Uuid>,
+    Query(q): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.whitelabel.list_domains(tenant_id, limit, offset).await)
 }
 
-async fn whitelabel_remove_domain(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    service_result(state.whitelabel.remove_domain(id).await)
+async fn whitelabel_remove_domain(
+    State(state): State<S>,
+    Path((tenant_id, id)): Path<(Uuid, Uuid)>
+) -> impl IntoResponse {
+    // #250: Now requires tenant_id for ownership verification
+    service_result(state.whitelabel.remove_domain(id, tenant_id).await)
 }
 
 async fn whitelabel_update_templates(State(state): State<S>, Json(body): Json<EmailTemplateBody>) -> impl IntoResponse {
@@ -818,7 +934,9 @@ async fn qbr_get(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoRespo
 }
 
 async fn qbr_list(State(state): State<S>, Path(tenant_id): Path<Uuid>, Query(q): Query<PaginationParams>) -> impl IntoResponse {
-    service_result(state.qbr.list(tenant_id, q.limit.unwrap_or(50), q.offset.unwrap_or(0)).await)
+    let limit = clamp_limit(q.limit.unwrap_or(50), 200);
+    let offset = clamp_offset(q.offset.unwrap_or(0));
+    service_result(state.qbr.list(tenant_id, limit, offset).await)
 }
 
 async fn qbr_generate(State(state): State<S>, Path(id): Path<Uuid>) -> impl IntoResponse {

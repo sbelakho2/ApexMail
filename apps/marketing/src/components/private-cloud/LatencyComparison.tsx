@@ -7,56 +7,33 @@ import { Gauge, Zap, Globe } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
 interface LatencyData {
-  provider: string;
+  label: string;
   scenario: string;
-  latency: number;
+  description: string;
+  relativeWidth: number; // percentage of bar width for illustration
   color: string;
 }
 
-const latencyComparisons: LatencyData[] = [
-  { provider: 'ApexMail Private', scenario: 'Same VPC', latency: 0.3, color: 'bg-primary-600' },
-  { provider: 'ApexMail Private', scenario: 'Same Region', latency: 2.1, color: 'bg-primary-600' },
-  { provider: 'SendGrid', scenario: 'External API', latency: 45, color: 'bg-surface-200' },
-  { provider: 'AWS SES', scenario: 'Same Region', latency: 12, color: 'bg-surface-300' },
-  { provider: 'Mailchimp', scenario: 'External API', latency: 120, color: 'bg-surface-200' },
+// Illustrative deployment scenarios — not real-time measurements.
+// Actual latency depends on your VPC topology, region, and network conditions.
+const latencyScenarios: LatencyData[] = [
+  { label: 'Private Cloud', scenario: 'Same VPC', description: 'Sub-millisecond — app and API share the same network fabric', relativeWidth: 2, color: 'bg-primary-600' },
+  { label: 'Private Cloud', scenario: 'Same Region', description: 'Low single-digit milliseconds — minimal cross-AZ hops', relativeWidth: 8, color: 'bg-primary-500' },
+  { label: 'Shared Cloud', scenario: 'Cross-region API', description: 'Tens to hundreds of milliseconds — public internet traversal', relativeWidth: 65, color: 'bg-surface-300' },
+  { label: 'Third-party SaaS', scenario: 'External HTTPS API', description: 'Variable — DNS, TLS handshake, and internet routing added', relativeWidth: 100, color: 'bg-surface-200' },
 ];
 
 export function LatencyComparison() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
-  const [animatedValues, setAnimatedValues] = useState<number[]>(latencyComparisons.map(() => 0));
+  const [animated, setAnimated] = useState(false);
+  const prefersReducedMotion = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   useEffect(() => {
     if (inView) {
-      const timers = latencyComparisons.map((data, index) => {
-        return setTimeout(() => {
-          const duration = 1000;
-          const startTime = Date.now();
-          
-          const animate = () => {
-            const elapsed = Date.now() - startTime;
-            const progress = Math.min(elapsed / duration, 1);
-            const eased = 1 - Math.pow(1 - progress, 3);
-            
-            setAnimatedValues((prev) => {
-              const newValues = [...prev];
-              newValues[index] = data.latency * eased;
-              return newValues;
-            });
-
-            if (progress < 1) {
-              requestAnimationFrame(animate);
-            }
-          };
-
-          requestAnimationFrame(animate);
-        }, index * 200);
-      });
-
-      return () => timers.forEach(clearTimeout);
+      const t = setTimeout(() => setAnimated(true), prefersReducedMotion ? 0 : 300);
+      return () => clearTimeout(t);
     }
-  }, [inView]);
-
-  const maxLatency = Math.max(...latencyComparisons.map((d) => d.latency));
+  }, [inView, prefersReducedMotion]);
 
   return (
     <section ref={ref} className="py-20 lg:py-32 relative bg-white">
@@ -87,6 +64,14 @@ export function LatencyComparison() {
             When your application and email infrastructure share the same network, 
             API communication is nearly instantaneous.
           </motion.p>
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={inView ? { opacity: 1 } : {}}
+            transition={{ delay: 0.3 }}
+            className="text-xs text-surface-400 max-w-xl mx-auto mt-3"
+          >
+            Illustrative deployment scenarios. Actual latency depends on your network topology and region.
+          </motion.p>
         </div>
 
         <motion.div
@@ -95,25 +80,25 @@ export function LatencyComparison() {
           transition={{ delay: 0.3 }}
           className="bg-white border border-surface-200 shadow-sm rounded-lg p-8"
         >
-          {/* Latency Chart */}
-          <div className="space-y-8">
-            {latencyComparisons.map((data, index) => (
-              <div key={`${data.provider}-${data.scenario}`} className="space-y-2">
-                <div className="flex justify-between items-center text-sm">
-                  <div className="flex items-center gap-3">
-                    <span className="text-surface-900 font-semibold">{data.provider}</span>
-                    <span className="text-xs text-surface-500 font-medium">{data.scenario}</span>
+          {/* Latency illustration — relative bar widths only, not numeric measurements */}
+          <div className="space-y-8" aria-label="Relative latency comparison by deployment scenario">
+            {latencyScenarios.map((data, index) => (
+              <div key={`${data.label}-${data.scenario}`} className="space-y-2">
+                <div className="flex justify-between items-start gap-4 text-sm">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-surface-900 font-semibold">{data.label}</span>
+                      <span className="text-xs text-surface-500 font-medium px-1.5 py-0.5 bg-surface-100 rounded">{data.scenario}</span>
+                    </div>
+                    <p className="text-xs text-surface-500 mt-0.5">{data.description}</p>
                   </div>
-                  <span className="text-surface-900 font-mono font-medium">
-                    {animatedValues[index].toFixed(1)}ms
-                  </span>
                 </div>
                 <div className="h-3 bg-surface-100 rounded-full overflow-hidden">
                   <motion.div
                     initial={{ width: 0 }}
-                    animate={inView ? { width: `${(data.latency / maxLatency) * 100}%` } : {}}
-                    transition={{ duration: 1, delay: index * 0.2 }}
-                    className={cn('h-full rounded-full transition-all', data.color)}
+                    animate={animated ? { width: `${data.relativeWidth}%` } : {}}
+                    transition={{ duration: prefersReducedMotion ? 0 : 0.8, delay: prefersReducedMotion ? 0 : index * 0.15 }}
+                    className={cn('h-full rounded-full', data.color)}
                   />
                 </div>
               </div>
@@ -147,18 +132,18 @@ export function LatencyComparison() {
           {[
             {
               icon: Zap,
-              title: '40x Faster',
-              description: 'Compared to standard external API calls',
+              title: 'VPC-Collocated',
+              description: 'App and API within the same private network — no public internet hops',
             },
             {
               icon: Globe,
               title: 'Zero Egress',
-              description: 'Traffic stays within your VPC network',
+              description: 'Traffic stays within your VPC, reducing cost and exposure',
             },
             {
               icon: Gauge,
-              title: 'P99 < 5ms',
-              description: 'Consistent performance for critical paths',
+              title: 'Predictable P99',
+              description: 'No shared-tenant jitter; latency scales with your own infrastructure',
             },
           ].map((item) => (
             <div key={item.title} className="bg-white border border-surface-200 shadow-sm rounded-lg p-8 text-center">

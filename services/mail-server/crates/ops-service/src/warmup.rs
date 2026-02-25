@@ -124,10 +124,11 @@ impl IpWarmupManager {
         for (ip, day, limit) in rows {
             // Estimate total_days and target_volume from current state
             let total_days = 14u32; // default warmup period
-            let target_volume = limit.map(|l| l as u64 * 100).unwrap_or(100_000);
+            let current_volume = limit.unwrap_or(1) as u64;
+            let target_volume = Self::estimate_target_volume(current_volume, day as u32, total_days);
             let schedule = WarmupSchedule {
                 ip: ip.clone(),
-                current_volume: limit.unwrap_or(1) as u64,
+                current_volume,
                 target_volume,
                 day: day as u32,
                 total_days,
@@ -147,28 +148,36 @@ impl IpWarmupManager {
 
     /// Advance the schedule for `ip` by one day, updating `current_volume`.
     pub async fn advance_day(&self, ip: &str) -> Result<bool, sqlx::Error> {
+        let (new_day, new_volume) = if let Some(entry) = self.schedules.get(ip) {
+            let s = entry.value();
+            if s.day >= s.total_days {
+                return Ok(true);
+            }
+            let next_day = s.day + 1;
+            let next_volume = self.compute_volume(s.target_volume, next_day, s.total_days);
+            (next_day, next_volume)
+        } else {
+            return Ok(false);
+        };
+
+        sqlx::query(
+            "UPDATE ip_pool_addresses
+             SET warmup_day = $2, daily_limit = $3, updated_at = NOW()
+             WHERE ip_address = $1::inet",
+        )
+        .bind(ip)
+        .bind(new_day as i32)
+        .bind(new_volume as i32)
+        .execute(&self.db)
+        .await?;
+
         if let Some(mut entry) = self.schedules.get_mut(ip) {
             let s = entry.value_mut();
-            if s.day < s.total_days {
-                s.day += 1;
-                s.current_volume = self.compute_volume(s.target_volume, s.day, s.total_days);
-
-                // Persist to database
-                sqlx::query(
-                    "UPDATE ip_pool_addresses
-                     SET warmup_day = $2, daily_limit = $3, updated_at = NOW()
-                     WHERE ip_address = $1::inet",
-                )
-                .bind(ip)
-                .bind(s.day as i32)
-                .bind(s.current_volume as i32)
-                .execute(&self.db)
-                .await?;
-            }
-            Ok(true)
-        } else {
-            Ok(false)
+            s.day = new_day;
+            s.current_volume = new_volume;
         }
+
+        Ok(true)
     }
 
     /// Advance day synchronously (for backwards compatibility in tests).
@@ -197,6 +206,19 @@ impl IpWarmupManager {
         let denominator = (2.0_f64).powi(total_days as i32) - 1.0;
         let vol = (target as f64 * numerator / denominator).round() as u64;
         vol.max(1) // never send 0
+    }
+
+    fn estimate_target_volume(current_volume: u64, day: u32, total_days: u32) -> u64 {
+        if total_days == 0 || day == 0 {
+            return current_volume.max(1);
+        }
+        let numerator = (2.0_f64).powi(total_days as i32) - 1.0;
+        let denominator = (2.0_f64).powi(day as i32) - 1.0;
+        if denominator <= 0.0 {
+            return current_volume.max(1);
+        }
+        let target = (current_volume as f64 * numerator / denominator).round() as u64;
+        target.max(current_volume.max(1))
     }
 }
 

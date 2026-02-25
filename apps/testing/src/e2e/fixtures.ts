@@ -87,7 +87,7 @@ export const test = base.extend<ApexMailFixtures>({
         const testUser: TestUser = {
             id: 'test-user-1',
             email: 'test@apexmail.test',
-            password: 'testpassword123',
+            password: process.env.E2E_TEST_USER_PASSWORD ?? 'testpassword123',
             name: 'Test User',
         };
         await use(testUser);
@@ -98,7 +98,7 @@ export const test = base.extend<ApexMailFixtures>({
         const adminUser: TestUser = {
             id: 'test-admin-1',
             email: 'admin@apexmail.test',
-            password: 'adminpassword123',
+            password: process.env.E2E_TEST_ADMIN_PASSWORD ?? 'adminpassword123',
             name: 'Test Admin',
             role: 'admin',
         };

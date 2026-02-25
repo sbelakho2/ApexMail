@@ -7,7 +7,7 @@ import { ArrowLeft, Mail } from '@/components/ui/icons';
 /**
  * FIX-065: Forgot Password page
  * Provides a form for users to request a password reset email.
- * Uses /api/v1/auth/forgot-password and always shows a success state
+ * Uses /api/auth/forgot-password and always shows a success state
  * to prevent email enumeration.
  */
 export default function ForgotPasswordPage() {
@@ -20,7 +20,7 @@ export default function ForgotPasswordPage() {
         setIsLoading(true);
 
         try {
-            await fetch('/api/v1/auth/forgot-password', {
+            await fetch('/api/auth/forgot-password', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email }),
@@ -52,7 +52,8 @@ export default function ForgotPasswordPage() {
                                 <h1 className="text-xl font-bold text-foreground">Check your email</h1>
                                 <p className="text-sm text-muted-foreground">
                                     If an account exists for <strong>{email}</strong>, we&apos;ve sent a
-                                    password reset link. Check your inbox and spam folder.
+                                    password reset link. Check your inbox and spam folder, and allow a few
+                                    minutes for delivery.
                                 </p>
                                 <p className="text-xs text-muted-foreground pt-4">
                                     Didn&apos;t receive it?{' '}
@@ -85,6 +86,7 @@ export default function ForgotPasswordPage() {
                                         <input
                                             id="reset-email"
                                             type="email"
+                                            autoComplete="email"
                                             required
                                             value={email}
                                             onChange={(e) => setEmail(e.target.value)}

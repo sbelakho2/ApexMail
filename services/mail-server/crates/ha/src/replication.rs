@@ -108,11 +108,12 @@ impl ReplicationService {
             return Err("Invalid slot name".into());
         }
         let query = if slot_type == "logical" {
-            format!("SELECT pg_create_logical_replication_slot('{name}', 'pgoutput')")
+            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')"
         } else {
-            format!("SELECT pg_create_physical_replication_slot('{name}')")
+            "SELECT pg_create_physical_replication_slot($1)"
         };
-        sqlx::query(&query)
+        sqlx::query(query)
+            .bind(name)
             .execute(&self.pool)
             .await
             .map_err(|e| format!("Create slot: {e}"))?;
@@ -126,7 +127,8 @@ impl ReplicationService {
         if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err("Invalid slot name".into());
         }
-        sqlx::query(&format!("SELECT pg_drop_replication_slot('{name}')"))
+        sqlx::query("SELECT pg_drop_replication_slot($1)")
+            .bind(name)
             .execute(&self.pool)
             .await
             .map_err(|e| format!("Drop slot: {e}"))?;

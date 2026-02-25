@@ -123,6 +123,7 @@ export interface MailServerQueueStats {
     failedToday: number;
     bouncedToday: number;
     averageDeliveryTimeMs: number;
+    error?: string;
 }
 
 export interface DeliveryStatus {
@@ -496,7 +497,8 @@ export class MailServerClient {
                 averageDeliveryTimeMs: response.averageDeliveryTimeMs,
             };
         } catch (error) {
-            logger.error('Failed to get queue stats', { error });
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            logger.error('Failed to get queue stats', { error: errorMessage });
             return {
                 pendingCount: 0,
                 sendingCount: 0,
@@ -504,6 +506,7 @@ export class MailServerClient {
                 failedToday: 0,
                 bouncedToday: 0,
                 averageDeliveryTimeMs: 0,
+                error: errorMessage,
             };
         }
     }
@@ -520,7 +523,14 @@ export class MailServerClient {
         if (typeof recipient === 'string') {
             return recipient;
         }
-        return recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
+        if (!recipient.name) {
+            return recipient.email;
+        }
+
+        const escapedName = recipient.name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const needsQuotes = /[()<>@,;:\\".\[\]]|\s/.test(escapedName);
+        const displayName = needsQuotes ? `"${escapedName}"` : escapedName;
+        return `${displayName} <${recipient.email}>`;
     }
     
     private normalizeRecipients(recipients: string | string[] | EmailRecipient[] | undefined): string[] {

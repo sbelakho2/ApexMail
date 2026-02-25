@@ -49,10 +49,17 @@ export function safeJsonStringify(
   space?: number
 ): Result<string, Error> {
   try {
+    const seen = new WeakSet<object>();
     const stringified = JSON.stringify(value, (_key, val) => {
       // Handle BigInt
       if (typeof val === 'bigint') {
         return val.toString();
+      }
+      if (val && typeof val === 'object') {
+        if (seen.has(val as object)) {
+          return '[Circular]';
+        }
+        seen.add(val as object);
       }
       return val;
     }, space);

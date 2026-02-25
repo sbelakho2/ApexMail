@@ -115,6 +115,9 @@ pub async fn update_plan(
 
     let now = Utc::now();
 
+    // Wrap both writes in a transaction for atomicity.
+    let mut tx = pool.begin().await.map_err(SubscriptionError::Db)?;
+
     // Update subscription record.
     sqlx::query(
         r#"
@@ -127,7 +130,7 @@ pub async fn update_plan(
     .bind(new_plan)
     .bind(now)
     .bind(tenant_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(SubscriptionError::Db)?;
 
@@ -136,9 +139,11 @@ pub async fn update_plan(
         .bind(new_plan)
         .bind(now)
         .bind(tenant_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(SubscriptionError::Db)?;
+
+    tx.commit().await.map_err(SubscriptionError::Db)?;
 
     Ok(())
 }

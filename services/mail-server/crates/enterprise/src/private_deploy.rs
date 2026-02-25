@@ -111,12 +111,14 @@ impl PrivateDeployService {
         };
 
         // Update health status in DB
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "UPDATE ent_private_deployments SET last_health_check_at = NOW(), health_status = $2 WHERE id = $1"
         )
         .bind(id).bind(health_status)
         .execute(&self.db)
-        .await;
+        .await {
+            tracing::warn!(deployment_id = %id, error = %e, "Failed to update deployment health status in DB");
+        }
 
         Ok(ApiResult::ok(serde_json::json!({
             "deployment_id": id,
@@ -153,8 +155,12 @@ impl PrivateDeployService {
         region: Option<&str>,
         prefer_warmed: bool,
     ) -> Result<ApiResult<DedicatedIP>, String> {
-        // Use advisory lock to prevent race conditions
-        let lock_id: i64 = tenant_id.as_u128() as i64 % i64::MAX;
+        // #269: Use hash-based lock ID to avoid UUID-to-i64 truncation collision
+        // XOR the upper and lower 64 bits to create a more collision-resistant lock ID
+        let uuid_bytes = tenant_id.as_u128();
+        let upper = (uuid_bytes >> 64) as i64;
+        let lower = uuid_bytes as i64;
+        let lock_id: i64 = upper ^ lower; // XOR gives better distribution than modulo
 
         let mut tx = self.db.begin().await.map_err(|e| format!("Begin transaction: {e}"))?;
 
@@ -184,14 +190,14 @@ impl PrivateDeployService {
              FOR UPDATE SKIP LOCKED"
         };
 
-        let pool_row: Option<(Uuid, std::net::IpAddr, String, Option<String>, String, f64, Option<String>)> =
+        let pool_row: Option<(Uuid, String, String, Option<String>, String, f64, Option<String>)> =
             sqlx::query_as(query)
             .bind(region)
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| format!("Query available pool: {e}"))?;
 
-        let (pool_id, ip_address, ip_region, datacenter, provider, reputation, ptr_record) = match pool_row {
+        let (pool_id, ip_address, ip_region, _datacenter, provider, reputation, ptr_record) = match pool_row {
             Some(row) => row,
             None => {
                 return Ok(ApiResult::err(
@@ -332,11 +338,18 @@ impl PrivateDeployService {
     }
 
     /// List dedicated IPs for a tenant
-    pub async fn list_dedicated_ips(&self, tenant_id: Uuid) -> Result<ApiResult<Vec<DedicatedIP>>, String> {
+    pub async fn list_dedicated_ips(
+        &self,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<ApiResult<Vec<DedicatedIP>>, String> {
         let rows = sqlx::query_as::<_, DedicatedIP>(
-            "SELECT * FROM ent_dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC"
+            "SELECT * FROM ent_dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.db)
         .await
         .map_err(|e| format!("List dedicated IPs: {e}"))?;
@@ -392,19 +405,21 @@ impl PrivateDeployService {
     }
 
     /// Verify BYOIP ownership
-    pub async fn verify_byoip(&self, id: Uuid) -> Result<ApiResult<BYOIPRange>, String> {
+    /// #253: Requires proof-of-control token match before marking verified.
+    pub async fn verify_byoip(&self, id: Uuid, verification_token: &str) -> Result<ApiResult<BYOIPRange>, String> {
         let row = sqlx::query_as::<_, BYOIPRange>(
             "UPDATE ent_byoip_ranges SET status = 'verified', verified_at = NOW()
-             WHERE id = $1 AND status = 'pending_verification' RETURNING *"
+             WHERE id = $1 AND status = 'pending_verification' AND verification_token = $2 RETURNING *"
         )
         .bind(id)
+        .bind(verification_token)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Verify BYOIP: {e}"))?;
 
         match row {
             Some(r) => Ok(ApiResult::ok(r)),
-            None => Ok(ApiResult::err("BYOIP range not found or already verified", "INVALID_STATE")),
+            None => Ok(ApiResult::err("BYOIP verification failed (invalid token or state)", "INVALID_STATE")),
         }
     }
 }
@@ -478,10 +493,21 @@ pub fn calculate_reputation(bounce_rate: f64, complaint_rate: f64, blocklisted: 
     score.max(0.0).min(100.0)
 }
 
+/// Shared HTTP client for health checks — avoids TLS handshake per request
+/// #270: Reuse client instead of creating new one per health check
+fn health_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 async fn check_health_endpoint(url: &str) -> Result<bool, String> {
-    let client = reqwest::Client::new();
-    let resp = client.get(url)
-        .timeout(std::time::Duration::from_secs(10))
+    let resp = health_client().get(url)
         .send()
         .await
         .map_err(|e| format!("Health check failed: {e}"))?;

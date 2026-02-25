@@ -135,9 +135,40 @@ export default function SystemHealthPage() {
         ));
     }
 
-    function restartWorker(workerId: string) {
-        // In production: POST to Ops API
-        dialog.alert({ title: 'Worker Restart', message: `Restart command sent to worker ${workerId}` });
+    async function restartWorker(workerId: string) {
+        const confirmed = await dialog.confirm({
+            title: 'Confirm Command Execution',
+            message: `Restart worker ${workerId}? This action will be recorded in the system audit trail.`,
+            confirmLabel: 'Restart Worker',
+            variant: 'destructive',
+        });
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/system/workers/${workerId}/restart`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    audit: {
+                        action: 'system.worker.restart',
+                        actor: 'operator',
+                        triggeredAt: new Date().toISOString(),
+                    },
+                }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`Restart failed (${response.status})`);
+            }
+
+            await dialog.alert({ title: 'Worker Restart', message: `Restart command sent to worker ${workerId}.` });
+        } catch (error) {
+            await dialog.alert({
+                title: 'Command Failed',
+                message: error instanceof Error ? error.message : 'Failed to execute restart command',
+            });
+        }
     }
 
     const activeAlerts = alerts.filter(a => !a.acknowledged);

@@ -96,6 +96,25 @@ pub struct SecretsConfig {
 impl ComplianceConfig {
     /// Load configuration from environment variables with sane defaults.
     pub fn from_env() -> Self {
+        let node_env = std::env::var("NODE_ENV").unwrap_or_default();
+        let is_production = node_env.eq_ignore_ascii_case("production") || node_env.eq_ignore_ascii_case("prod");
+
+        let auth_token = env_or("COMPLIANCE_AUTH_TOKEN", "");
+        let audit_signing_key = env_or("AUDIT_SIGNING_KEY", "");
+        let secrets_encryption_key = env_or("SECRETS_ENCRYPTION_KEY", "");
+
+        if is_production {
+            if auth_token.trim().is_empty() {
+                panic!("COMPLIANCE_AUTH_TOKEN must be set in production");
+            }
+            if audit_signing_key.trim().is_empty() {
+                panic!("AUDIT_SIGNING_KEY must be set in production");
+            }
+            if secrets_encryption_key.trim().is_empty() {
+                panic!("SECRETS_ENCRYPTION_KEY must be set in production");
+            }
+        }
+
         Self {
             port: env_or("COMPLIANCE_PORT", "3011").parse().unwrap_or(3011),
             database_url: env_or(
@@ -103,7 +122,7 @@ impl ComplianceConfig {
                 "postgres://postgres@localhost:5432/apexmail",
             ),
             redis_url: env_or("REDIS_URL", "redis://localhost:6379"),
-            auth_token: env_or("COMPLIANCE_AUTH_TOKEN", ""),
+            auth_token,
             cors_origin: env_or("CORS_ORIGIN", "*"),
 
             risk: RiskScoringConfig {
@@ -157,7 +176,7 @@ impl ComplianceConfig {
             audit: AuditConfig {
                 retention_days: env_i64("AUDIT_RETENTION_DAYS", 365),
                 hash_chain_enabled: env_or("AUDIT_HASH_CHAIN", "true") == "true",
-                signing_key: env_or("AUDIT_SIGNING_KEY", ""),
+                signing_key: audit_signing_key,
             },
 
             gdpr: GdprConfig {
@@ -177,7 +196,7 @@ impl ComplianceConfig {
             },
 
             secrets: SecretsConfig {
-                encryption_key: env_or("SECRETS_ENCRYPTION_KEY", ""),
+                encryption_key: secrets_encryption_key,
                 rotation_days: env_i64("SECRETS_ROTATION_DAYS", 90),
                 max_versions_to_keep: env_i64("SECRETS_MAX_VERSIONS", 10),
             },

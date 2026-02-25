@@ -10,6 +10,7 @@
  * SECURITY: All user-provided attributes are sanitized to prevent XSS
  */
 
+import { createHash } from 'node:crypto';
 import Handlebars from 'handlebars';
 
 // ============================================================================
@@ -77,6 +78,10 @@ function sanitizeUrl(url: string): string {
 function sanitizeAttr(value: string): string {
     if (!value || typeof value !== 'string') return '';
     return escapeHtml(value);
+}
+
+function hashString(value: string): string {
+    return createHash('sha256').update(value).digest('hex');
 }
 
 // ============================================================================
@@ -482,15 +487,24 @@ export class TemplateEngine {
         context: TemplateContext = {},
         options?: TemplateRenderOptions,
     ): Promise<TemplateRenderResult> {
-        return Promise.race([
-            Promise.resolve(this.render(template, context, options)),
-            new Promise<never>((_, reject) =>
-                setTimeout(
-                    () => reject(new Error('Template rendering timed out')),
-                    TemplateEngine.RENDER_TIMEOUT_MS,
-                ),
-            ),
-        ]);
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+                () => reject(new Error('Template rendering timed out')),
+                TemplateEngine.RENDER_TIMEOUT_MS,
+            );
+        });
+
+        try {
+            return await Promise.race([
+                Promise.resolve(this.render(template, context, options)),
+                timeoutPromise,
+            ]);
+        } finally {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        }
     }
     
     /**
@@ -521,8 +535,17 @@ export class TemplateEngine {
         
         // Step 2: Process Handlebars variables (C-072: cached compilation)
         try {
-            // Include strict flag in cache key so strict vs non-strict compile differently
-            const cacheKey = `${opts.strict ? '1' : '0'}:${html}`;
+            // Include strict flag, helpers, and partials in cache key.
+            const helperKey = opts.helpers
+                ? Object.keys(opts.helpers).sort().join(',')
+                : '';
+            const partialEntries = opts.partials
+                ? Object.entries(opts.partials).sort(([a], [b]) => a.localeCompare(b))
+                : [];
+            const partialKey = partialEntries.length > 0
+                ? hashString(JSON.stringify(partialEntries))
+                : '';
+            const cacheKey = `${opts.strict ? '1' : '0'}:${helperKey}:${partialKey}:${html}`;
             let compiled = this.compiledCache.get(cacheKey);
             if (!compiled) {
                 compiled = this.handlebars.compile(html, {

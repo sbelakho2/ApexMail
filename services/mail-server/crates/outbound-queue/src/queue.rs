@@ -2,8 +2,9 @@
 //!
 //! Persistent queue for outbound emails with retry logic.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use std::time::Duration;
@@ -87,7 +88,8 @@ impl Default for QueueConfig {
 pub struct EmailQueue {
     pool: PgPool,
     config: QueueConfig,
-    smtp_sender: tokio::sync::Mutex<SmtpSender>,
+    /// SMTP sender no longer behind Mutex since send() is &self (#114/#115)
+    smtp_sender: SmtpSender,
     dkim_signer: Option<DkimSigner>,
 }
 
@@ -97,7 +99,7 @@ impl EmailQueue {
         Self {
             pool,
             config,
-            smtp_sender: tokio::sync::Mutex::new(smtp_sender),
+            smtp_sender,
             dkim_signer: None,
         }
     }
@@ -172,7 +174,7 @@ impl EmailQueue {
         .bind(&email.text_body)
         .bind(&email.html_body)
         .bind(&email.headers)
-        .bind(self.config.max_attempts)
+        .bind(email.max_attempts)  // #112: Use the email's own max_attempts, not global config
         .bind(&email.campaign_id)
         .bind(&email.sequence_id)
         .bind(&email.contact_id)
@@ -315,9 +317,17 @@ impl EmailQueue {
         let new_attempts = attempts + 1;
         
         if defer && new_attempts < max_attempts {
-            let delay_index = (new_attempts - 1).min(self.config.retry_delays.len() as i32 - 1) as usize;
-            let delay = self.config.retry_delays[delay_index];
-            let next_retry = Utc::now() + chrono::Duration::from_std(delay).unwrap();
+            // #113: Guard against empty retry_delays causing integer underflow
+            let delay = if self.config.retry_delays.is_empty() {
+                Duration::from_secs(300) // 5 minute default fallback
+            } else {
+                let delay_index = (new_attempts - 1).max(0) as usize;
+                let delay_index = delay_index.min(self.config.retry_delays.len() - 1);
+                self.config.retry_delays[delay_index]
+            };
+            let chrono_delay = chrono::Duration::from_std(delay)
+                .unwrap_or_else(|_| chrono::Duration::seconds(300)); // fallback: 5 minutes
+            let next_retry = Utc::now() + chrono_delay;
             
             sqlx::query(r#"
                 UPDATE email_queue
@@ -367,9 +377,8 @@ impl EmailQueue {
                     .collect()
             });
         
-        // Send via SMTP
-        let mut sender = self.smtp_sender.lock().await;
-        sender.send(
+        // Send via SMTP — no Mutex needed, send() is &self (#114/#115)
+        self.smtp_sender.send(
             &email.from_address,
             &email.to_addresses,
             &email.subject,
@@ -404,7 +413,7 @@ impl EmailQueue {
         }
     }
     
-    /// Process a batch of emails
+    /// Process a batch of emails concurrently (#115)
     async fn process_batch(&self) -> Result<()> {
         let emails = self.fetch_pending(self.config.batch_size as i64).await?;
         
@@ -414,10 +423,18 @@ impl EmailQueue {
         
         info!(count = emails.len(), "Processing email batch");
         
-        for email in &emails {
-            match self.process_email(email).await {
+        // Process emails concurrently instead of sequentially
+        let futures: Vec<_> = emails.iter().map(|email| async {
+            let result = self.process_email(email).await;
+            (email.id, result)
+        }).collect();
+        
+        let results = join_all(futures).await;
+        
+        for (email_id, result) in results {
+            match result {
                 Ok(()) => {
-                    self.mark_sent(&email.id).await?;
+                    self.mark_sent(&email_id).await?;
                 }
                 Err(e) => {
                     let error_str = e.to_string();
@@ -425,7 +442,7 @@ impl EmailQueue {
                         || error_str.contains("connection refused")
                         || error_str.contains("temporarily");
                     
-                    self.mark_failed(&email.id, &error_str, is_temporary).await?;
+                    self.mark_failed(&email_id, &error_str, is_temporary).await?;
                 }
             }
         }

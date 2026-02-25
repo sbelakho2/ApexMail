@@ -160,7 +160,12 @@ pub fn detect_bot(user_agent: String) -> BotDetectionResult {
     let confidence = if matches.is_empty() {
         0.0
     } else if matches.len() == 1 {
-        0.85
+        match matches[0].category.as_str() {
+            "generic" => 0.6,
+            "automation" => 0.7,
+            "preview" => 0.75,
+            _ => 0.85,
+        }
     } else {
         (0.85 + (matches.len() as f64 - 1.0) * 0.05).min(0.99)
     };
@@ -198,12 +203,15 @@ pub fn is_known_bot_pattern(pattern: String) -> bool {
 
 /// Get all known bot patterns grouped by category.
 #[napi]
-pub fn get_bot_patterns() -> String {
-    let mut categories: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+pub fn get_bot_patterns() -> std::collections::HashMap<String, Vec<String>> {
+    let mut categories: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for entry in PATTERNS {
-        categories.entry(entry.category).or_default().push(entry.pattern);
+        categories
+            .entry(entry.category.to_string())
+            .or_default()
+            .push(entry.pattern.to_string());
     }
-    serde_json::to_string(&categories).unwrap_or_else(|_| "{}".to_string())
+    categories
 }
 
 /// Get the total number of known patterns.

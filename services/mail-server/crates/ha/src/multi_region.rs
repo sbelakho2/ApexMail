@@ -3,6 +3,7 @@
 use chrono::Utc;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
 use uuid::Uuid;
 
@@ -14,11 +15,16 @@ use crate::types::{GeoRoutingRule, GeoRoutingRuleRow, RegionInfo, RegionRow,
 pub struct MultiRegionService {
     pool: PgPool,
     config: Arc<Config>,
+    rr_counter: AtomicU64,
 }
 
 impl MultiRegionService {
     pub fn new(pool: PgPool, config: Arc<Config>) -> Self {
-        Self { pool, config }
+        Self {
+            pool,
+            config,
+            rr_counter: AtomicU64::new(0),
+        }
     }
 
     // ── Region CRUD ────────────────────────────────────────
@@ -61,13 +67,15 @@ impl MultiRegionService {
     }
 
     /// Get all regions.
-    pub async fn list_regions(&self) -> Result<Vec<RegionInfo>, String> {
+    pub async fn list_regions(&self, limit: i64, offset: i64) -> Result<Vec<RegionInfo>, String> {
         let rows: Vec<RegionRow> = sqlx::query_as::<_, RegionRow>(
             "SELECT id, name, endpoint, status, role, is_primary, health_score,
                     latency_ms, replication_lag_ms, weight, last_health_check,
                     availability_zone, metadata
-             FROM ha_regions ORDER BY is_primary DESC, name"
+             FROM ha_regions ORDER BY is_primary DESC, name LIMIT $1 OFFSET $2"
         )
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| format!("List regions: {e}"))?;
@@ -109,7 +117,8 @@ impl MultiRegionService {
 
         sqlx::query(
             "UPDATE ha_regions SET health_score=$2, latency_ms=$3, replication_lag_ms=$4,
-             status=$5, last_health_check=NOW() WHERE name=$1"
+             status=CASE WHEN status = 'fenced' THEN status ELSE $5 END,
+             last_health_check=NOW() WHERE name=$1"
         )
         .bind(region_name).bind(health_score).bind(latency_ms)
         .bind(replication_lag_ms).bind(status.to_string())
@@ -137,7 +146,7 @@ impl MultiRegionService {
         &self,
         source_region: Option<&str>,
     ) -> Result<RegionInfo, String> {
-        let regions = self.list_regions().await?;
+        let regions = self.list_regions(10_000, 0).await?;
         let active: Vec<&RegionInfo> = regions.iter()
             .filter(|r| r.status == "active" && r.health_score > 0.0)
             .collect();
@@ -163,7 +172,7 @@ impl MultiRegionService {
             }
             RoutingMode::RoundRobin => {
                 // Use a simple time-based round-robin
-                let idx = (Utc::now().timestamp_millis() as usize) % active.len();
+                let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % active.len();
                 active[idx]
             }
             RoutingMode::LatencyBased => {
@@ -238,11 +247,13 @@ impl MultiRegionService {
         })
     }
 
-    pub async fn list_geo_rules(&self) -> Result<Vec<GeoRoutingRule>, String> {
+    pub async fn list_geo_rules(&self, limit: i64, offset: i64) -> Result<Vec<GeoRoutingRule>, String> {
         let rows: Vec<GeoRoutingRuleRow> = sqlx::query_as::<_, GeoRoutingRuleRow>(
             "SELECT id, name, source_region, target_region, priority, enabled, conditions
-             FROM ha_geo_routing_rules ORDER BY priority"
+             FROM ha_geo_routing_rules ORDER BY priority LIMIT $1 OFFSET $2"
         )
+        .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| format!("List geo rules: {e}"))?;
@@ -322,7 +333,7 @@ impl MultiRegionService {
 
     /// Get current traffic distribution across regions (from Redis metrics).
     pub async fn get_traffic_distribution(&self) -> Result<Vec<TrafficDistribution>, String> {
-        let regions = self.list_regions().await?;
+        let regions = self.list_regions(10_000, 0).await?;
         let total_weight: f64 = regions.iter().map(|r| r.weight.max(1) as f64).sum();
 
         Ok(regions.iter().map(|r| {

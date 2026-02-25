@@ -10,8 +10,6 @@
 # - Replicas for stateless services
 # =============================================================================
 
-version: '3.8'
-
 services:
   # ===========================================================================
   # REVERSE PROXY (TLS termination)
@@ -45,6 +43,7 @@ services:
       resources:
         limits:
           memory: 256M
+          cpus: '0.5'
         reservations:
           memory: 64M
 
@@ -60,16 +59,17 @@ services:
           cpus: '2.0'
         reservations:
           memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   redis:
     # Production: Do NOT expose Redis port to host
     ports: []
     command: >
-      redis-server 
-      --appendonly yes 
-      --maxmemory 1gb 
-      --maxmemory-policy allkeys-lru
-      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+      sh -c "redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru --requirepass \"$REDIS_PASSWORD\""
     deploy:
       resources:
         limits:
@@ -77,10 +77,16 @@ services:
           cpus: '1.0'
         reservations:
           memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   tracking:
     environment:
       RUST_LOG: info
+    ports: []
     deploy:
       replicas: 2
       resources:
@@ -92,7 +98,27 @@ services:
       restart_policy:
         condition: on-failure
         delay: 10s
-        max_attempts: 5
+        max_attempts: 0
+
+  clickhouse:
+    ports: []
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required in production}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
 
 volumes:
   certbot_webroot:

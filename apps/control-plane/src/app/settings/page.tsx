@@ -3,6 +3,70 @@
 import { useState, useEffect, useRef } from 'react';
 import { formatDate, cn } from '../../lib/utils';
 
+function parseIpv4(value: string): number | null {
+    const parts = value.split('.');
+    if (parts.length !== 4) return null;
+    const numbers = parts.map(part => Number(part));
+    if (numbers.some(number => Number.isNaN(number) || number < 0 || number > 255)) return null;
+    return ((numbers[0] << 24) >>> 0) + (numbers[1] << 16) + (numbers[2] << 8) + numbers[3];
+}
+
+function parseCidr(input: string): { network: number; maskBits: number } | null {
+    const [ip, mask] = input.split('/');
+    if (!ip || !mask) return null;
+    const ipValue = parseIpv4(ip);
+    const maskBits = Number(mask);
+    if (ipValue === null || Number.isNaN(maskBits) || maskBits < 0 || maskBits > 32) return null;
+    const maskValue = maskBits === 0 ? 0 : ((0xffffffff << (32 - maskBits)) >>> 0);
+    return { network: ipValue & maskValue, maskBits };
+}
+
+function isValidIpOrCidr(input: string): boolean {
+    const trimmed = input.trim();
+    if (!trimmed) return false;
+    if (trimmed.includes('/')) return parseCidr(trimmed) !== null;
+    return parseIpv4(trimmed) !== null;
+}
+
+function hasCidrOverlap(candidate: string, existing: string[]): string | null {
+    const normalizedCandidate = candidate.trim();
+    const candidateCidr = normalizedCandidate.includes('/') ? parseCidr(normalizedCandidate) : null;
+    const candidateIp = !normalizedCandidate.includes('/') ? parseIpv4(normalizedCandidate) : null;
+
+    for (const current of existing) {
+        if (current === normalizedCandidate) {
+            return `Duplicate entry: ${current}`;
+        }
+
+        const currentCidr = current.includes('/') ? parseCidr(current) : null;
+        const currentIp = !current.includes('/') ? parseIpv4(current) : null;
+
+        if (candidateIp !== null && currentCidr) {
+            const maskValue = currentCidr.maskBits === 0 ? 0 : ((0xffffffff << (32 - currentCidr.maskBits)) >>> 0);
+            if ((candidateIp & maskValue) === currentCidr.network) {
+                return `IP overlaps existing range: ${current}`;
+            }
+        }
+
+        if (candidateCidr && currentIp !== null) {
+            const maskValue = candidateCidr.maskBits === 0 ? 0 : ((0xffffffff << (32 - candidateCidr.maskBits)) >>> 0);
+            if ((currentIp & maskValue) === candidateCidr.network) {
+                return `Range overlaps existing IP: ${current}`;
+            }
+        }
+
+        if (candidateCidr && currentCidr) {
+            const smallestMaskBits = Math.min(candidateCidr.maskBits, currentCidr.maskBits);
+            const smallestMask = smallestMaskBits === 0 ? 0 : ((0xffffffff << (32 - smallestMaskBits)) >>> 0);
+            if ((candidateCidr.network & smallestMask) === (currentCidr.network & smallestMask)) {
+                return `CIDR overlaps existing range: ${current}`;
+            }
+        }
+    }
+
+    return null;
+}
+
 /**
  * Platform Settings - Configure the SaaS platform
  * 
@@ -34,6 +98,15 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
 export default function SettingsPage() {
     const [activeSection, setActiveSection] = useState('access');
     const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+    const [isDirty, setIsDirty] = useState(false);
+    const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+    const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+    const [readOnlyReason, setReadOnlyReason] = useState<string | null>(null);
+    const [saveError, setSaveError] = useState<string | null>(null);
+    const [newIpError, setNewIpError] = useState<string | null>(null);
+    const [isSettingsLoading, setIsSettingsLoading] = useState(true);
+    const [userRole, setUserRole] = useState<'viewer' | 'operator' | 'admin' | 'owner'>('operator');
+    const [snapshot, setSnapshot] = useState('');
 
     // Access Control State
     const [ipWhitelist, setIpWhitelist] = useState(['10.0.0.0/8', '192.168.1.0/24', '203.0.113.50']);
@@ -115,6 +188,21 @@ export default function SettingsPage() {
     // Refs for timeout cleanup (Fix 38)
     const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const hasInitializedRef = useRef(false);
+
+    const canEditHighRiskSettings = userRole === 'owner' || userRole === 'admin';
+    const integrationsMissingCredentials = integrations.some(integration => integration.status !== 'connected');
+
+    const settingsData = {
+        ipWhitelist,
+        mfaRequired,
+        sessionTimeout,
+        emailConfig,
+        tenantDefaults,
+        complianceConfig,
+        backupConfig,
+        aiConfig,
+    };
 
     // Cleanup timeouts on unmount (Fix 38)
     useEffect(() => {
@@ -124,64 +212,207 @@ export default function SettingsPage() {
         };
     }, []);
 
-    // Load saved settings from localStorage on mount (Fix 39)
+    // Load settings from backend source of truth
     useEffect(() => {
-        try {
-            const saved = localStorage.getItem('control-plane-settings');
-            if (saved) {
-                const data = JSON.parse(saved);
-                if (data.ipWhitelist) setIpWhitelist(data.ipWhitelist);
-                if (data.mfaRequired !== undefined) setMfaRequired(data.mfaRequired);
-                if (data.sessionTimeout) setSessionTimeout(data.sessionTimeout);
+        let isMounted = true;
+
+        async function loadSettings() {
+            setIsSettingsLoading(true);
+            setSaveError(null);
+            try {
+                const response = await fetch('/api/v1/operator/settings', { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`Unable to load settings (${response.status})`);
+                }
+                const data = await response.json();
+
+                if (!isMounted) return;
+                if (Array.isArray(data.ipWhitelist)) setIpWhitelist(data.ipWhitelist);
+                if (typeof data.mfaRequired === 'boolean') setMfaRequired(data.mfaRequired);
+                if (typeof data.sessionTimeout === 'number') setSessionTimeout(data.sessionTimeout);
                 if (data.emailConfig) setEmailConfig(prev => ({ ...prev, ...data.emailConfig }));
                 if (data.tenantDefaults) setTenantDefaults(prev => ({ ...prev, ...data.tenantDefaults }));
                 if (data.complianceConfig) setComplianceConfig(prev => ({ ...prev, ...data.complianceConfig }));
                 if (data.backupConfig) setBackupConfig(prev => ({ ...prev, ...data.backupConfig }));
                 if (data.aiConfig) setAiConfig(prev => ({ ...prev, ...data.aiConfig }));
+                if (data.auditMetadata?.updatedAt) {
+                    setLastSavedAt(data.auditMetadata.updatedAt);
+                    setLastSyncedAt(data.auditMetadata.updatedAt);
+                } else {
+                    setLastSyncedAt(new Date().toISOString());
+                }
+                if (typeof data.userRole === 'string') {
+                    setUserRole(data.userRole);
+                }
+                setReadOnlyReason(null);
+            } catch (error) {
+                if (!isMounted) return;
+                setReadOnlyReason('Settings are read-only because backend credentials or API access are unavailable.');
+                setSaveError(error instanceof Error ? error.message : 'Failed to load settings from backend');
+            } finally {
+                if (!isMounted) return;
+                hasInitializedRef.current = true;
+                setIsDirty(false);
+                setIsSettingsLoading(false);
             }
-        } catch {
-            // Ignore invalid localStorage data
         }
+
+        const hash = window.location.hash.replace('#', '');
+        if (hash && SETTINGS_SECTIONS.some(section => section.id === hash)) {
+            setActiveSection(hash);
+        }
+
+        loadSettings();
+
+        return () => {
+            isMounted = false;
+        };
     }, []);
 
-    function save() {
-        setSaveStatus('saving');
+    useEffect(() => {
+        if (!hasInitializedRef.current) return;
+        setIsDirty(true);
+    }, [
+        ipWhitelist,
+        mfaRequired,
+        sessionTimeout,
+        emailConfig,
+        tenantDefaults,
+        complianceConfig,
+        backupConfig,
+        aiConfig,
+    ]);
 
-        // Persist settings to localStorage (Fix 39)
-        try {
-            const settingsData = {
-                ipWhitelist,
-                mfaRequired,
-                sessionTimeout,
-                emailConfig,
-                tenantDefaults,
-                complianceConfig,
-                backupConfig: { ...backupConfig, lastBackup: backupConfig.lastBackup },
-                aiConfig,
-            };
-            localStorage.setItem('control-plane-settings', JSON.stringify(settingsData));
-        } catch {
-            // localStorage might be full or unavailable
+    useEffect(() => {
+        if (!hasInitializedRef.current) return;
+        setSnapshot(JSON.stringify(settingsData));
+    }, [
+        ipWhitelist,
+        mfaRequired,
+        sessionTimeout,
+        emailConfig,
+        tenantDefaults,
+        complianceConfig,
+        backupConfig,
+        aiConfig,
+    ]);
+
+    useEffect(() => {
+        if (!isDirty) return;
+
+        const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+            event.preventDefault();
+            event.returnValue = '';
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [isDirty]);
+
+    async function save() {
+        if (readOnlyReason) {
+            setSaveError(readOnlyReason);
+            return;
         }
 
-        // In production: POST to /api/settings endpoint
-        // fetch('/api/autopilot/settings', { method: 'PUT', body: JSON.stringify(settingsData) })
+        setSaveStatus('saving');
+        setSaveError(null);
 
-        saveTimerRef.current = setTimeout(() => {
+        const changedFields: string[] = [];
+        try {
+            const previous = snapshot ? JSON.parse(snapshot) : null;
+            if (previous) {
+                for (const key of Object.keys(settingsData)) {
+                    if (JSON.stringify((settingsData as Record<string, unknown>)[key]) !== JSON.stringify((previous as Record<string, unknown>)[key])) {
+                        changedFields.push(key);
+                    }
+                }
+            }
+        } catch {
+            changedFields.push('unknown');
+        }
+
+        const payload = {
+            ...settingsData,
+            auditMetadata: {
+                changedAt: new Date().toISOString(),
+                changedByRole: userRole,
+                changedFromSection: activeSection,
+                changedFields,
+            },
+        };
+
+        try {
+            const response = await fetch('/api/v1/operator/settings', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || `Failed to save settings (${response.status})`);
+            }
+
+            try {
+                localStorage.setItem('control-plane-settings-cache', JSON.stringify(payload));
+            } catch {
+                setSaveError('Saved to backend, but local cache write failed.');
+            }
+
             setSaveStatus('saved');
+            setIsDirty(false);
+            const nowIso = new Date().toISOString();
+            setLastSavedAt(nowIso);
+            setLastSyncedAt(nowIso);
+            setSnapshot(JSON.stringify(settingsData));
             resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
-        }, 1000);
+        } catch (error) {
+            setSaveStatus('idle');
+            setSaveError(error instanceof Error ? error.message : 'Failed to save settings');
+        }
+    }
+
+    function changeSection(nextSection: string) {
+        if (nextSection === activeSection) return;
+        if (isDirty && !window.confirm('You have unsaved changes. Leave this section anyway?')) return;
+        setActiveSection(nextSection);
+        if (window.location.hash !== `#${nextSection}`) {
+            window.history.replaceState(null, '', `#${nextSection}`);
+        }
     }
 
     function addIp() {
-        if (newIp && !ipWhitelist.includes(newIp)) {
-            setIpWhitelist([...ipWhitelist, newIp]);
-            setNewIp('');
+        const normalized = newIp.trim();
+        if (!normalized) return;
+        if (!isValidIpOrCidr(normalized)) {
+            setNewIpError('Enter a valid IPv4 address or CIDR range (example: 203.0.113.10 or 10.0.0.0/8).');
+            return;
         }
+        const overlapError = hasCidrOverlap(normalized, ipWhitelist);
+        if (overlapError) {
+            setNewIpError(overlapError);
+            return;
+        }
+        setIpWhitelist([...ipWhitelist, normalized]);
+        setNewIp('');
+        setNewIpError(null);
     }
 
     function removeIp(ip: string) {
         setIpWhitelist(ipWhitelist.filter(i => i !== ip));
+    }
+
+    function navigateHorizontalSection(direction: 'left' | 'right') {
+        const currentIndex = SETTINGS_SECTIONS.findIndex(section => section.id === activeSection);
+        if (currentIndex < 0) return;
+        const nextIndex = direction === 'right'
+            ? Math.min(SETTINGS_SECTIONS.length - 1, currentIndex + 1)
+            : Math.max(0, currentIndex - 1);
+        const nextSection = SETTINGS_SECTIONS[nextIndex];
+        if (nextSection) {
+            changeSection(nextSection.id);
+        }
     }
 
     return (
@@ -192,10 +423,13 @@ export default function SettingsPage() {
                     <p className="text-muted-foreground mt-1">
                         Configure your SaaS platform settings
                     </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                        Last synced with backend: {lastSyncedAt ? formatDate(lastSyncedAt) : 'Not synced yet'}
+                    </p>
                 </div>
                 <button
                     onClick={save}
-                    disabled={saveStatus !== 'idle'}
+                    disabled={saveStatus !== 'idle' || !!readOnlyReason || isSettingsLoading}
                     className={cn(
                         'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                         saveStatus === 'idle' && 'bg-primary text-primary-foreground hover:bg-primary/90',
@@ -209,20 +443,46 @@ export default function SettingsPage() {
                 </button>
             </div>
 
+            {readOnlyReason && (
+                <div className="mb-4 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning">
+                    {readOnlyReason}
+                </div>
+            )}
+
+            {saveError && (
+                <div className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                    {saveError}
+                </div>
+            )}
+
             <div className="flex flex-col lg:flex-row gap-6">
                 {/* Sidebar Navigation - Horizontal scroll on mobile, vertical on desktop */}
                 <div className="w-full lg:w-64 lg:flex-shrink-0">
-                    <nav className="flex lg:flex-col gap-2 lg:gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0 -mx-2.5 lg:mx-0 px-2.5 lg:px-0">
+                    <nav
+                        aria-label="Settings sections"
+                        className="flex lg:flex-col gap-2 lg:gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0 -mx-2.5 lg:mx-0 px-2.5 lg:px-0"
+                        onKeyDown={(event) => {
+                            if (event.key === 'ArrowRight') {
+                                event.preventDefault();
+                                navigateHorizontalSection('right');
+                            }
+                            if (event.key === 'ArrowLeft') {
+                                event.preventDefault();
+                                navigateHorizontalSection('left');
+                            }
+                        }}
+                    >
                         {SETTINGS_SECTIONS.map(section => (
                             <button
                                 key={section.id}
-                                onClick={() => setActiveSection(section.id)}
+                                onClick={() => changeSection(section.id)}
                                 className={cn(
                                     'flex items-center gap-2 lg:gap-3 px-3 lg:px-4 py-2 lg:py-3 rounded-lg text-left transition-colors whitespace-nowrap lg:whitespace-normal flex-shrink-0 lg:flex-shrink lg:w-full',
                                     activeSection === section.id
                                         ? 'bg-primary/10 text-primary font-medium'
                                         : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                                 )}
+                                aria-label={`Open ${section.title} settings`}
                             >
                                 <span className="text-lg lg:text-xl">{section.icon}</span>
                                 <div>
@@ -236,6 +496,21 @@ export default function SettingsPage() {
 
                 {/* Settings Content */}
                 <div className="flex-1 bg-card rounded-xl border border-border p-6 shadow-sm">
+                    <div className="grid gap-3 sm:grid-cols-3 text-xs text-muted-foreground mb-6 p-3 border border-border rounded-lg bg-muted/20">
+                        <div>
+                            <p className="font-semibold uppercase tracking-wide">Created By</p>
+                            <p className="mt-1 text-foreground">Platform System</p>
+                        </div>
+                        <div>
+                            <p className="font-semibold uppercase tracking-wide">Updated By</p>
+                            <p className="mt-1 text-foreground">Operator</p>
+                        </div>
+                        <div>
+                            <p className="font-semibold uppercase tracking-wide">Last Updated</p>
+                            <p className="mt-1 text-foreground">{lastSavedAt ? formatDate(lastSavedAt) : 'Not saved yet'}</p>
+                        </div>
+                    </div>
+
                     {/* Access Control */}
                     {activeSection === 'access' && (
                         <div className="space-y-6">
@@ -268,7 +543,10 @@ export default function SettingsPage() {
                                     <input
                                         type="text"
                                         value={newIp}
-                                        onChange={(e) => setNewIp(e.target.value)}
+                                        onChange={(e) => {
+                                            setNewIp(e.target.value);
+                                            if (newIpError) setNewIpError(null);
+                                        }}
                                         placeholder="10.0.0.0/8 or 192.168.1.1"
                                         className="flex-1 px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
                                     />
@@ -279,6 +557,7 @@ export default function SettingsPage() {
                                         Add IP
                                     </button>
                                 </div>
+                                {newIpError && <p className="mt-2 text-xs text-destructive">{newIpError}</p>}
                             </div>
 
                             {/* MFA */}
@@ -325,6 +604,11 @@ export default function SettingsPage() {
                     {activeSection === 'integrations' && (
                         <div className="space-y-6">
                             <h2 className="text-lg font-bold text-foreground">Integrations</h2>
+                            {integrationsMissingCredentials && (
+                                <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                                    Some integration credentials are missing. Related controls are currently read-only until credentials are configured.
+                                </div>
+                            )}
                             <div className="space-y-4">
                                 {integrations.map(integration => (
                                     <div key={integration.id} className="flex items-center justify-between py-4 border-b border-border last:border-0">
@@ -505,7 +789,11 @@ export default function SettingsPage() {
                                     </div>
                                 </div>
                                 <button
-                                    onClick={() => setAiConfig({ ...aiConfig, enabled: !aiConfig.enabled })}
+                                    onClick={() => {
+                                        if (!canEditHighRiskSettings) return;
+                                        setAiConfig({ ...aiConfig, enabled: !aiConfig.enabled });
+                                    }}
+                                    disabled={!canEditHighRiskSettings || !!readOnlyReason}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
                                         aiConfig.enabled ? 'bg-primary' : 'bg-muted'
@@ -520,6 +808,11 @@ export default function SettingsPage() {
 
                             {aiConfig.enabled && (
                                 <>
+                                    {!canEditHighRiskSettings && (
+                                        <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                                            High-risk AI controls are restricted to admin/owner roles.
+                                        </div>
+                                    )}
                                     {/* Safety toggles */}
                                     <div className="space-y-4 border-t border-border pt-4">
                                         <h3 className="text-sm font-semibold text-foreground">Safety Controls</h3>
@@ -538,6 +831,7 @@ export default function SettingsPage() {
                                                         ...aiConfig,
                                                         [item.key]: !aiConfig[item.key as keyof typeof aiConfig]
                                                     })}
+                                                    disabled={!canEditHighRiskSettings || !!readOnlyReason}
                                                     className={cn(
                                                         'relative w-14 h-7 rounded-full transition-colors',
                                                         aiConfig[item.key as keyof typeof aiConfig] ? 'bg-primary' : 'bg-muted'
@@ -595,8 +889,11 @@ export default function SettingsPage() {
                                             <input
                                                 type="number"
                                                 value={aiConfig.maxAutoActionsPerSession}
-                                                onChange={(e) => setAiConfig({ ...aiConfig, maxAutoActionsPerSession: Number(e.target.value) })}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, maxAutoActionsPerSession: Math.min(50, Math.max(1, Number(e.target.value) || 1)) })}
                                                 className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                                min={1}
+                                                max={50}
+                                                disabled={!canEditHighRiskSettings || !!readOnlyReason}
                                             />
                                         </div>
                                         <div>
@@ -606,8 +903,11 @@ export default function SettingsPage() {
                                             <input
                                                 type="number"
                                                 value={aiConfig.autonomousActionsPerHour}
-                                                onChange={(e) => setAiConfig({ ...aiConfig, autonomousActionsPerHour: Number(e.target.value) })}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, autonomousActionsPerHour: Math.min(500, Math.max(1, Number(e.target.value) || 1)) })}
                                                 className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                                min={1}
+                                                max={500}
+                                                disabled={!canEditHighRiskSettings || !!readOnlyReason}
                                             />
                                         </div>
                                         <div>
@@ -617,8 +917,11 @@ export default function SettingsPage() {
                                             <input
                                                 type="number"
                                                 value={aiConfig.maxAutonomousBillingAmount}
-                                                onChange={(e) => setAiConfig({ ...aiConfig, maxAutonomousBillingAmount: Number(e.target.value) })}
+                                                onChange={(e) => setAiConfig({ ...aiConfig, maxAutonomousBillingAmount: Math.min(10000, Math.max(0, Number(e.target.value) || 0)) })}
                                                 className="w-full px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all"
+                                                min={0}
+                                                max={10000}
+                                                disabled={!canEditHighRiskSettings || !!readOnlyReason}
                                             />
                                         </div>
                                         <div>
@@ -685,6 +988,11 @@ export default function SettingsPage() {
                     {activeSection === 'compliance' && (
                         <div className="space-y-6">
                             <h2 className="text-lg font-bold text-foreground">Compliance Settings</h2>
+                            {!canEditHighRiskSettings && (
+                                <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                                    High-impact compliance controls require admin/owner role.
+                                </div>
+                            )}
                             
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
@@ -723,10 +1031,17 @@ export default function SettingsPage() {
                                             <div className="text-sm text-muted-foreground">{item.desc}</div>
                                         </div>
                                         <button
-                                            onClick={() => setComplianceConfig({
-                                                ...complianceConfig,
-                                                [item.key]: !complianceConfig[item.key as keyof typeof complianceConfig]
-                                            })}
+                                            onClick={() => {
+                                                if (!canEditHighRiskSettings || readOnlyReason) return;
+                                                if ((item.key === 'hipaaMode' || item.key === 'soc2Mode') && !window.confirm(`Confirm ${item.label} change. This action has compliance impact.`)) {
+                                                    return;
+                                                }
+                                                setComplianceConfig({
+                                                    ...complianceConfig,
+                                                    [item.key]: !complianceConfig[item.key as keyof typeof complianceConfig]
+                                                });
+                                            }}
+                                            disabled={!canEditHighRiskSettings || !!readOnlyReason}
                                             className={cn(
                                                 'relative w-14 h-7 rounded-full transition-colors',
                                                 complianceConfig[item.key as keyof typeof complianceConfig] ? 'bg-primary' : 'bg-muted'
@@ -832,6 +1147,27 @@ export default function SettingsPage() {
                                 <button className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
                                     Test DR Failover
                                 </button>
+                            </div>
+
+                            <div className="pt-4 border-t border-border">
+                                <h3 className="text-sm font-semibold text-foreground mb-3">Backup / DR Test History</h3>
+                                <div className="space-y-2">
+                                    {[
+                                        { id: 'run_1', type: 'backup', status: 'success', at: new Date(Date.now() - 1000 * 60 * 90).toISOString() },
+                                        { id: 'run_2', type: 'dr_failover', status: 'success', at: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString() },
+                                        { id: 'run_3', type: 'backup', status: 'failed', at: new Date(Date.now() - 1000 * 60 * 60 * 36).toISOString() },
+                                    ].map(run => (
+                                        <div key={run.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm">
+                                            <span className="text-foreground">{run.type === 'backup' ? 'Backup test run' : 'DR failover simulation'}</span>
+                                            <div className="flex items-center gap-3">
+                                                <span className={cn('text-xs font-medium', run.status === 'success' ? 'text-success' : 'text-destructive')}>
+                                                    {run.status}
+                                                </span>
+                                                <span className="text-xs text-muted-foreground">{formatDate(run.at)}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         </div>
                     )}

@@ -138,6 +138,11 @@ impl MessagesRepo {
         tenant_id: Uuid,
         messages: &[(String, serde_json::Value, String, Option<String>, Option<String>)],
     ) -> Result<Vec<Message>, sqlx::Error> {
+        // #212: Return early on empty input to avoid invalid SQL
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Build a multi-row INSERT dynamically.
         let mut query = String::from(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at) VALUES "

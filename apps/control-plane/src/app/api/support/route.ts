@@ -7,6 +7,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'node:crypto';
 import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -112,7 +113,7 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const msgId = `msg-${crypto.randomUUID()}`;
 
         await query(
             `INSERT INTO support_ticket_messages (id, ticket_id, content, author, author_type, attachments, created_at)

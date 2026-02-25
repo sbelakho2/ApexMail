@@ -61,6 +61,7 @@ mime_guess = "2"
 
 # IDN / Punycode
 idna = "1"
+unicode-normalization = "0.1"
 
 # HTTP client (for ClamAV health + future use)
 reqwest.workspace = true

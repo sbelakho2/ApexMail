@@ -4,7 +4,7 @@
 //! RFC 3463 enhanced status codes, and manages the suppression list.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
@@ -12,10 +12,15 @@ use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::BounceConfig;
+
+// #142: Pre-compiled regex for RFC 3463 enhanced status codes
+static BOUNCE_STATUS_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"[45]\.[0-9]{1,3}\.[0-9]{1,3}").unwrap()
+});
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -90,14 +95,13 @@ impl BounceServer {
         self.shutdown.notify_waiters();
     }
 
-    async fn handle_session(self: Arc<Self>, socket: TcpStream, peer: SocketAddr) {
+    async fn handle_session(self: Arc<Self>, socket: TcpStream, _peer: SocketAddr) {
         let mut stream = BufStream::new(socket);
         let greeting = format!("220 {} Bounce Processor\r\n", self.hostname);
-        if let Err(e) = write_line(&mut stream, &greeting).await {
+        if let Err(_e) = write_line(&mut stream, &greeting).await {
             return;
         }
 
-        let mut mail_from = String::new();
         let mut rcpt_to = Vec::<String>::new();
         let mut line = String::new();
 
@@ -117,7 +121,7 @@ impl BounceServer {
             let cmd = line.trim().to_uppercase();
 
             if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
-                let host = line.split_whitespace().nth(1).unwrap_or("");
+                let _host = line.split_whitespace().nth(1).unwrap_or("");
                 let _ = write_line(&mut stream, &format!("250 {} Hello\r\n", self.hostname)).await;
             } else if cmd.starts_with("MAIL FROM") {
                 let addr = extract_addr(&line);
@@ -125,7 +129,7 @@ impl BounceServer {
                 if !addr.is_empty() && addr != "<>" {
                     let _ = write_line(&mut stream, "550 Bounce MAIL FROM must be null (<>)\r\n").await;
                 } else {
-                    mail_from = addr;
+                    // #145: mail_from validated but not stored (always <> for bounces)
                     let _ = write_line(&mut stream, "250 OK\r\n").await;
                 }
             } else if cmd.starts_with("RCPT TO") {
@@ -175,7 +179,7 @@ impl BounceServer {
                 }
                 rcpt_to.clear();
             } else if cmd.starts_with("RSET") {
-                mail_from.clear();
+                // #145: only clear rcpt_to (mail_from no longer tracked)
                 rcpt_to.clear();
                 let _ = write_line(&mut stream, "250 OK\r\n").await;
             } else if cmd.starts_with("QUIT") {
@@ -273,7 +277,7 @@ impl BounceServer {
             redis::cmd("LPUSH")
                 .arg("mta:webhook_queue")
                 .arg(payload.to_string())
-                .query_async::<String>(&mut *conn)
+                .query_async::<i64>(&mut *conn)  // LPUSH returns list length (i64)
                 .await
                 .ok();
         }
@@ -417,11 +421,27 @@ fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)>
 }
 
 fn extract_status_code(message: &str) -> String {
-    // Look for RFC 3463 enhanced status codes: X.Y.Z
-    let re = regex::Regex::new(r"[45]\.\d{1,3}\.\d{1,3}").unwrap();
-    re.find(message)
-        .map(|m| m.as_str().to_string())
-        .unwrap_or_default()
+    // #142: Use pre-compiled regex (LazyLock)
+    // #143: Only search in DSN header lines (Status:, Diagnostic-Code:) to avoid
+    //       matching codes from the attached original message
+    for line in message.lines() {
+        let trimmed = line.trim().to_lowercase();
+        if trimmed.starts_with("status:") || trimmed.starts_with("diagnostic-code:") {
+            if let Some(m) = BOUNCE_STATUS_RE.find(line) {
+                return m.as_str().to_string();
+            }
+        }
+    }
+    // Fallback: check lines starting with 3-digit SMTP reply codes
+    for line in message.lines() {
+        let trimmed = line.trim();
+        if trimmed.len() >= 3 && trimmed.as_bytes()[..3].iter().all(|b| b.is_ascii_digit()) {
+            if let Some(m) = BOUNCE_STATUS_RE.find(trimmed) {
+                return m.as_str().to_string();
+            }
+        }
+    }
+    String::new()
 }
 
 fn extract_diagnostic_code(message: &str) -> Option<String> {
@@ -445,16 +465,8 @@ fn extract_original_message_id(message: &str) -> Option<String> {
             }
         }
     }
-    // Fallback: look for Message-ID in attached original headers
-    for line in message.lines() {
-        if line.trim().to_lowercase().starts_with("message-id:") {
-            let value = line.split(':').skip(1).collect::<Vec<_>>().join(":").trim().to_string();
-            let cleaned = value.trim_matches(|c| c == '<' || c == '>').to_string();
-            if !cleaned.is_empty() {
-                return Some(cleaned);
-            }
-        }
-    }
+    // #144: Removed generic Message-ID fallback that could match the bounce's own ID.
+    // Only Original-Message-ID / X-Original-Message-ID are reliable for matching.
     None
 }
 

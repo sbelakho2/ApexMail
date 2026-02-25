@@ -3,9 +3,10 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Duration, Utc};
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
@@ -18,7 +19,6 @@ pub struct AuditService {
     db: PgPool,
     #[allow(dead_code)]
     config: SecurityConfig,
-    #[allow(dead_code)]
     signing_key: String,
     buffer: Mutex<Vec<AuditEvent>>,
 }
@@ -40,7 +40,7 @@ impl AuditService {
         let event_clone = event.clone();
 
         {
-            let mut buf = self.buffer.lock().unwrap();
+            let mut buf = self.buffer.lock().await;
             buf.push(event);
 
             if is_critical || buf.len() >= 100 {
@@ -121,17 +121,49 @@ impl AuditService {
 
         let mut previous_hash = String::new();
         for (i, row) in rows.iter().enumerate() {
-            let computed = compute_event_hash(&row.id, &row.event_type, &row.details, &previous_hash);
-            // In a real implementation, we'd compare against stored hash
-            // For now, just verify chain continuity
-            previous_hash = computed;
-            if i > 0 && previous_hash.is_empty() {
+            let stored_previous_hash = row
+                .metadata
+                .get("previous_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let stored_hash = row
+                .metadata
+                .get("hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let stored_sig = row
+                .metadata
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            if i > 0 && stored_previous_hash != previous_hash {
                 return Ok(HashChainResult {
                     valid: false,
                     broken_at: Some(i),
                     entries_checked: rows.len(),
                 });
             }
+
+            let computed = compute_event_hash(&row.id, &row.event_type, &row.details, stored_previous_hash);
+            if computed != stored_hash {
+                return Ok(HashChainResult {
+                    valid: false,
+                    broken_at: Some(i),
+                    entries_checked: rows.len(),
+                });
+            }
+
+            let expected_sig = sign_data(&self.signing_key, stored_hash)?;
+            if expected_sig != stored_sig {
+                return Ok(HashChainResult {
+                    valid: false,
+                    broken_at: Some(i),
+                    entries_checked: rows.len(),
+                });
+            }
+
+            previous_hash = stored_hash.to_string();
         }
 
         Ok(HashChainResult {
@@ -317,7 +349,7 @@ impl AuditService {
     /// Flush remaining buffer.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let events = {
-            let mut buf = self.buffer.lock().unwrap();
+            let mut buf = self.buffer.lock().await;
             buf.drain(..).collect::<Vec<_>>()
         };
         if !events.is_empty() {
@@ -331,6 +363,42 @@ impl AuditService {
     async fn flush_events(&self, events: Vec<AuditEvent>) -> anyhow::Result<()> {
         if events.is_empty() {
             return Ok(());
+        }
+
+        let mut previous_by_org: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut enriched_metadata: Vec<serde_json::Value> = Vec::with_capacity(events.len());
+
+        for event in &events {
+            let org_id = event.organization_id.clone();
+
+            let prev = if let Some(cached) = previous_by_org.get(&org_id) {
+                cached.clone()
+            } else {
+                let row: Option<(Option<String>,)> = sqlx::query_as(
+                    "SELECT metadata->>'hash' FROM iso_audit_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 1",
+                )
+                .bind(&org_id)
+                .fetch_optional(&self.db)
+                .await?;
+                let existing = row.and_then(|r| r.0).unwrap_or_default();
+                previous_by_org.insert(org_id.clone(), existing.clone());
+                existing
+            };
+
+            let hash = compute_event_hash(&event.id, &event.event_type.to_string(), &event.details, &prev);
+            let signature = sign_data(&self.signing_key, &hash)?;
+
+            let mut metadata = event.metadata.clone();
+            let obj = metadata
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("Audit metadata must be an object"))?;
+            obj.insert("previous_hash".to_string(), serde_json::Value::String(prev));
+            obj.insert("hash".to_string(), serde_json::Value::String(hash.clone()));
+            obj.insert("signature".to_string(), serde_json::Value::String(signature));
+
+            previous_by_org.insert(org_id, hash);
+            enriched_metadata.push(metadata);
         }
 
         let mut query = String::from(
@@ -353,7 +421,7 @@ impl AuditService {
         }
 
         let mut q = sqlx::query(&query);
-        for event in &events {
+        for (event, metadata) in events.iter().zip(enriched_metadata.iter()) {
             q = q
                 .bind(&event.id)
                 .bind(&event.organization_id)
@@ -368,7 +436,7 @@ impl AuditService {
                 .bind(&event.resource_id)
                 .bind(&event.action)
                 .bind(&event.details)
-                .bind(&event.metadata)
+                .bind(metadata)
                 .bind(event.timestamp);
         }
 
@@ -379,10 +447,10 @@ impl AuditService {
             Err(e) => {
                 tracing::error!(err = %e, count = events.len(), "Failed to flush audit events");
                 // Requeue events
-                let mut buf = self.buffer.lock().unwrap();
-                for event in events.into_iter().rev() {
-                    buf.insert(0, event);
-                }
+                let mut buf = self.buffer.lock().await;
+                let mut requeue = events;
+                requeue.extend(buf.drain(..));
+                *buf = requeue;
             }
         }
         Ok(())
@@ -466,6 +534,13 @@ fn compute_event_hash(
     hasher.update(details.to_string().as_bytes());
     hasher.update(previous_hash.as_bytes());
     B64.encode(hasher.finalize())
+}
+
+fn sign_data(key: &str, data: &str) -> anyhow::Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Invalid HMAC key: {}", e))?;
+    mac.update(data.as_bytes());
+    Ok(B64.encode(mac.finalize().into_bytes()))
 }
 
 fn export_csv(events: &[AuditEvent]) -> String {
@@ -641,12 +716,13 @@ mod tests {
     #[test]
     fn test_buffer_accumulation() {
         let svc = test_service();
-        {
-            let mut buf = svc.buffer.lock().unwrap();
+        let rt = test_runtime();
+        rt.block_on(async {
+            let mut buf = svc.buffer.lock().await;
             buf.push(svc.create_event("o", None, AuditEventType::DataRead, AuditSeverity::Info, "u", "user", None, None, "read", serde_json::json!({})));
             buf.push(svc.create_event("o", None, AuditEventType::DataRead, AuditSeverity::Info, "u", "user", None, None, "read", serde_json::json!({})));
             assert_eq!(buf.len(), 2);
-        }
+        });
     }
 
     fn test_runtime() -> &'static tokio::runtime::Runtime {

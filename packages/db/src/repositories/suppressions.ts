@@ -3,6 +3,7 @@
  * Handles bounces, complaints, unsubscribes, and manual suppressions
  */
 
+import { createHash } from 'node:crypto';
 import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
@@ -57,9 +58,7 @@ export class SuppressionsRepository {
   private hashEmail(email: string): string {
     // Using SHA-256 for email hashing - normalize first
     const normalizedEmail = email.toLowerCase().trim();
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(normalizedEmail).digest('hex');
+    return createHash('sha256').update(normalizedEmail).digest('hex');
   }
 
   async create(input: CreateSuppressionInput): Promise<Result<Suppression, Error>> {
@@ -741,13 +740,16 @@ export class SuppressionsRepository {
     // Map interval to PostgreSQL date_trunc format
     const truncInterval = options.interval === 'minute' ? 'hour' : options.interval;
 
+    const truncParam = paramIndex++;
+    values.push(truncInterval);
+
     const result = await this.db.query<{
       bucket: Date;
       type: SuppressionType;
       count: string;
     }>(
       `SELECT 
-        DATE_TRUNC('${truncInterval}', created_at) as bucket,
+        DATE_TRUNC($${truncParam}, created_at) as bucket,
         type,
         COUNT(*) as count
        FROM suppressions

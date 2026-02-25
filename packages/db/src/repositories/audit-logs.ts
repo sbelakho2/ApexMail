@@ -647,8 +647,12 @@ export class AuditLogsRepository {
       startDate: Date;
       endDate: Date;
       format: 'json' | 'csv';
+      limit?: number;
+      offset?: number;
     }
   ): Promise<Result<string, Error>> {
+    const limit = Math.max(1, Math.min(options.limit ?? 10000, 100000));
+    const offset = Math.max(0, options.offset ?? 0);
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -666,8 +670,9 @@ export class AuditLogsRepository {
     }>(
       `SELECT * FROM audit_logs 
        WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3
-       ORDER BY timestamp ASC, id ASC`,
-      [tenantId, options.startDate, options.endDate]
+       ORDER BY timestamp ASC, id ASC
+       LIMIT $4 OFFSET $5`,
+      [tenantId, options.startDate, options.endDate, limit, offset]
     );
 
     if (!result.ok) return result;
@@ -731,52 +736,11 @@ export class AuditLogsRepository {
     olderThanDays: number,
     options: { batchSize?: number; tenantId?: string } = {}
   ): Promise<Result<number, Error>> {
-    const batchSize = options.batchSize ?? 1000;
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
-
-    let totalDeleted = 0;
-
-    try {
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const conditions = ['timestamp < $1'];
-        const values: unknown[] = [cutoffDate];
-        let paramIndex = 2;
-
-        if (options.tenantId) {
-          conditions.push(`tenant_id = $${paramIndex++}`);
-          values.push(options.tenantId);
-        }
-
-        values.push(batchSize);
-
-        const result = await this.db.query<{ count: string }>(
-          `WITH deleted AS (
-            DELETE FROM audit_logs
-            WHERE id IN (
-              SELECT id FROM audit_logs
-              WHERE ${conditions.join(' AND ')}
-              LIMIT $${paramIndex}
-            )
-            RETURNING 1
-          ) SELECT COUNT(*) as count FROM deleted`,
-          values
-        );
-
-        if (!result.ok) return result;
-
-        const deletedCount = parseInt(result.value.rows[0]?.count ?? '0', 10);
-        totalDeleted += deletedCount;
-
-        // If we deleted fewer rows than the batch size, we're done
-        if (deletedCount < batchSize) break;
-      }
-
-      return Result.ok(totalDeleted);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    }
+    return Result.err(
+      new Error(
+        'Audit log cleanup is disabled to preserve hash-chain integrity. Use exportForCompliance and archive externally.'
+      )
+    );
   }
 
   private mapRow(row: {

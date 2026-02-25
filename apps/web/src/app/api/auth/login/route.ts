@@ -13,6 +13,8 @@ const loginSchema = z.object({
     email: z.string().email().max(254),
     password: z.string().min(1).max(1000),
     tenantId: z.string().uuid().optional(),
+    rememberMe: z.boolean().optional(),
+    mfaCode: z.string().max(8).optional(),
 });
 
 const USER_SESSION_COOKIE = 'am_session';
@@ -57,13 +59,14 @@ export async function POST(request: NextRequest) {
 
     try {
         const body = await request.json();
-        const { email, password, tenantId } = loginSchema.parse(body);
+        const { email, password, tenantId, rememberMe, mfaCode } = loginSchema.parse(body);
 
         const apiBaseUrl = process.env.API_URL || 'http://localhost:3001';
         const response = await fetch(`${apiBaseUrl}/v1/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password, tenantId }),
+            body: JSON.stringify({ email, password, tenantId, rememberMe, mfaCode }),
+            signal: AbortSignal.timeout(5000),
         });
 
         const data = await response.json();

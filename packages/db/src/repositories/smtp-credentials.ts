@@ -4,9 +4,10 @@
  * Data access for SMTP authentication credentials
  */
 
-import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
-import type { Pool } from 'pg';
+import { randomUUID, randomInt } from 'node:crypto';
 import { ok, err, type Result } from '@apexmail/lib';
+import { hashPassword as hashSecret, verifyPassword as verifySecret } from '@apexmail/lib/crypto';
+import type { DatabasePool } from '../pool.js';
 
 // =============================================================================
 // Types
@@ -29,7 +30,7 @@ export interface SmtpCredentialWithSecret extends SmtpCredential {
 // =============================================================================
 
 export class SmtpCredentialsRepository {
-    constructor(private pool: Pool) {}
+    constructor(private readonly db: DatabasePool) {}
 
     /**
      * Create new SMTP credentials for a tenant
@@ -47,10 +48,10 @@ export class SmtpCredentialsRepository {
         
         // Generate secure random password
         const password = this.generateSecurePassword();
-        const passwordHash = this.hashPassword(password);
+        const passwordHash = await this.hashPassword(password);
 
         try {
-            const result = await this.pool.query<Record<string, unknown>>(
+            const result = await this.db.query<Record<string, unknown>>(
                 `INSERT INTO smtp_credentials (id, tenant_id, username, password_hash)
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT (username) DO NOTHING
@@ -58,11 +59,15 @@ export class SmtpCredentialsRepository {
                 [id, tenantId, finalUsername, passwordHash]
             );
 
-            if (result.rows.length === 0) {
+            if (!result.ok) {
+                return err(result.error);
+            }
+
+            if (result.value.rows.length === 0) {
                 return err(new Error('Username already exists'));
             }
 
-            const row = result.rows[0];
+            const row = result.value.rows[0];
             if (!row) {
                 return err(new Error('Failed to create credentials'));
             }
@@ -81,20 +86,24 @@ export class SmtpCredentialsRepository {
      */
     async verify(username: string, password: string): Promise<Result<{ tenantId: string; credentialId: string }, Error>> {
         try {
-            const result = await this.pool.query<Record<string, unknown>>(
+            const result = await this.db.query<Record<string, unknown>>(
                 `SELECT id, tenant_id, password_hash, is_active
                  FROM smtp_credentials
                  WHERE username = $1`,
                 [username]
             );
 
-            if (result.rows.length === 0) {
-                // Perform dummy hash comparison to prevent timing attacks
-                this.hashPassword(password);
+            if (!result.ok) {
+                return err(result.error);
+            }
+
+            if (result.value.rows.length === 0) {
+                // Perform dummy verification to keep timing similar
+                await verifySecret(password, await this.hashPassword(password));
                 return err(new Error('Invalid credentials'));
             }
 
-            const row = result.rows[0];
+            const row = result.value.rows[0];
             if (!row) {
                 return err(new Error('Invalid credentials'));
             }
@@ -105,17 +114,8 @@ export class SmtpCredentialsRepository {
             }
 
             const storedHash = row.password_hash as string;
-            const providedHash = this.hashPassword(password);
-
-            // Timing-safe comparison
-            const storedBuffer = Buffer.from(storedHash, 'hex');
-            const providedBuffer = Buffer.from(providedHash, 'hex');
-
-            if (storedBuffer.length !== providedBuffer.length) {
-                return err(new Error('Invalid credentials'));
-            }
-
-            if (!timingSafeEqual(storedBuffer, providedBuffer)) {
+            const hashMatch = await verifySecret(password, storedHash);
+            if (!hashMatch) {
                 return err(new Error('Invalid credentials'));
             }
 
@@ -132,7 +132,7 @@ export class SmtpCredentialsRepository {
      * Find all credentials for a tenant
      */
     async findByTenant(tenantId: string): Promise<SmtpCredential[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT id, tenant_id, username, is_active, created_at
              FROM smtp_credentials
              WHERE tenant_id = $1
@@ -140,21 +140,23 @@ export class SmtpCredentialsRepository {
             [tenantId]
         );
 
-        return result.rows.map(row => this.mapRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapRow(row));
     }
 
     /**
      * Find credential by ID
      */
     async findById(id: string, tenantId: string): Promise<SmtpCredential | null> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT id, tenant_id, username, is_active, created_at
              FROM smtp_credentials
              WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return result.rows[0] ? this.mapRow(result.rows[0]) : null;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapRow(result.value.rows[0]) : null;
     }
 
     /**
@@ -162,7 +164,7 @@ export class SmtpCredentialsRepository {
      */
     async setActive(id: string, tenantId: string, isActive: boolean): Promise<Result<SmtpCredential, Error>> {
         try {
-            const result = await this.pool.query<Record<string, unknown>>(
+            const result = await this.db.query<Record<string, unknown>>(
                 `UPDATE smtp_credentials
                  SET is_active = $3
                  WHERE id = $1 AND tenant_id = $2
@@ -170,11 +172,15 @@ export class SmtpCredentialsRepository {
                 [id, tenantId, isActive]
             );
 
-            if (result.rows.length === 0) {
+            if (!result.ok) {
+                return err(result.error);
+            }
+
+            if (result.value.rows.length === 0) {
                 return err(new Error('Credential not found'));
             }
 
-            const row = result.rows[0];
+            const row = result.value.rows[0];
             if (!row) {
                 return err(new Error('Credential not found'));
             }
@@ -190,17 +196,21 @@ export class SmtpCredentialsRepository {
      */
     async regeneratePassword(id: string, tenantId: string): Promise<Result<{ password: string }, Error>> {
         const password = this.generateSecurePassword();
-        const passwordHash = this.hashPassword(password);
+        const passwordHash = await this.hashPassword(password);
 
         try {
-            const result = await this.pool.query(
+            const result = await this.db.query(
                 `UPDATE smtp_credentials
                  SET password_hash = $3
                  WHERE id = $1 AND tenant_id = $2`,
                 [id, tenantId, passwordHash]
             );
 
-            if ((result.rowCount ?? 0) === 0) {
+            if (!result.ok) {
+                return err(result.error);
+            }
+
+            if ((result.value.rowCount ?? 0) === 0) {
                 return err(new Error('Credential not found'));
             }
 
@@ -214,12 +224,13 @@ export class SmtpCredentialsRepository {
      * Delete credentials
      */
     async delete(id: string, tenantId: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `DELETE FROM smtp_credentials WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     /**
@@ -227,7 +238,7 @@ export class SmtpCredentialsRepository {
      * Returns credentials that should be rotated for security.
      */
     async findExpired(maxAgeDays = 90): Promise<SmtpCredential[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+                const result = await this.db.query<Record<string, unknown>>(
             `SELECT id, tenant_id, username, is_active, created_at
              FROM smtp_credentials
              WHERE created_at < NOW() - INTERVAL '1 day' * $1
@@ -236,7 +247,8 @@ export class SmtpCredentialsRepository {
             [maxAgeDays]
         );
 
-        return result.rows.map(row => this.mapRow(row));
+                if (!result.ok) throw result.error;
+                return result.value.rows.map(row => this.mapRow(row));
     }
 
     /**
@@ -247,10 +259,10 @@ export class SmtpCredentialsRepository {
      */
     async rotate(id: string, tenantId: string): Promise<Result<{ password: string }, Error>> {
         const password = this.generateSecurePassword();
-        const passwordHash = this.hashPassword(password);
+        const passwordHash = await this.hashPassword(password);
 
         try {
-            const result = await this.pool.query(
+            const result = await this.db.query(
                 `UPDATE smtp_credentials
                  SET password_hash = $3,
                      created_at = NOW()
@@ -258,7 +270,11 @@ export class SmtpCredentialsRepository {
                 [id, tenantId, passwordHash]
             );
 
-            if ((result.rowCount ?? 0) === 0) {
+            if (!result.ok) {
+                return err(result.error);
+            }
+
+            if ((result.value.rowCount ?? 0) === 0) {
                 return err(new Error('Credential not found or inactive'));
             }
 
@@ -272,12 +288,13 @@ export class SmtpCredentialsRepository {
      * Count credentials for a tenant
      */
     async countByTenant(tenantId: string): Promise<number> {
-        const result = await this.pool.query<{ count: string }>(
+        const result = await this.db.query<{ count: string }>(
             `SELECT COUNT(*)::text as count FROM smtp_credentials WHERE tenant_id = $1`,
             [tenantId]
         );
 
-        return parseInt(result.rows[0]?.count ?? '0', 10);
+        if (!result.ok) throw result.error;
+        return parseInt(result.value.rows[0]?.count ?? '0', 10);
     }
 
     // -------------------------------------------------------------------------
@@ -285,32 +302,20 @@ export class SmtpCredentialsRepository {
     // -------------------------------------------------------------------------
 
     private generateSecurePassword(): string {
-        // Generate a 32-character password with mixed characters
+        // Generate a 32-character password with uniform distribution.
         const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
-        const bytes = Buffer.alloc(32);
-        
-        // Use crypto for secure random bytes
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const crypto = require('node:crypto');
-        crypto.randomFillSync(bytes);
-        
+        const length = 32;
         let password = '';
-        for (let i = 0; i < 32; i++) {
-            const byte = bytes[i];
-            if (byte !== undefined) {
-                password += charset[byte % charset.length];
-            }
+
+        for (let i = 0; i < length; i++) {
+            password += charset[randomInt(0, charset.length)];
         }
-        
+
         return password;
     }
 
-    private hashPassword(password: string): string {
-        // G-198: Use HMAC-SHA-256 instead of plain SHA-256 for proper keyed hashing
-        const salt = process.env.SMTP_PASSWORD_SALT ?? 'apexmail-smtp-default-salt';
-        return createHmac('sha256', salt)
-            .update(password)
-            .digest('hex');
+    private async hashPassword(password: string): Promise<string> {
+        return hashSecret(password);
     }
 
     private mapRow(row: Record<string, unknown>): SmtpCredential {

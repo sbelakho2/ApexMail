@@ -3,11 +3,20 @@
  */
 
 import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import type { BillingEnv, BillingContext } from '../app.js';
 
 export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
+
+  const requireAdmin: MiddlewareHandler<BillingEnv> = async (c, next) => {
+    const isAdmin = c.get('isAdmin');
+    if (!isAdmin) {
+      return c.json({ error: 'Admin access required' }, 403);
+    }
+    return next();
+  };
 
   // Get all plans
   router.get('/', async (c) => {
@@ -136,7 +145,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   });
 
   // Admin: Create plan
-  router.post('/', async (c) => {
+  router.post('/', requireAdmin, async (c) => {
     const body = await c.req.json();
 
     const schema = z.object({
@@ -182,7 +191,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   });
 
   // Admin: Update plan
-  router.patch('/:planId', async (c) => {
+  router.patch('/:planId', requireAdmin, async (c) => {
     const planId = c.req.param('planId');
     const body = await c.req.json();
 
@@ -239,7 +248,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   });
 
   // Admin: Seed default plans
-  router.post('/seed', async (c) => {
+  router.post('/seed', requireAdmin, async (c) => {
     const result = await ctx.plans.initializeDefaultPlans();
 
     if (!result.ok) {

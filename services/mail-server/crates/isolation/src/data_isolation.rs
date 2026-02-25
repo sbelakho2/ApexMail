@@ -23,6 +23,9 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
+static IDENT_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z_][a-z0-9_]{0,62}$").expect("valid identifier regex"));
+
 // ── Data Isolation Service ─────────────────────────────────
 
 pub struct DataIsolationService {
@@ -59,21 +62,32 @@ impl DataIsolationService {
             }
         }
 
-        // For SELECT queries on tenanted tables, ensure workspace filter present
+        // #292: stronger table + predicate checks for SELECT/UPDATE/DELETE with JOIN/CTE-aware parsing.
         let upper = query.to_uppercase();
-        if upper.starts_with("SELECT") {
-            let tenanted_tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
-            for table in tenanted_tables {
-                if upper.contains(&table.to_uppercase())
-                    && !upper.contains("WORKSPACE_ID")
-                    && !upper.contains("ORGANIZATION_ID")
-                {
-                    warn!(
-                        table = table,
-                        "SELECT on tenanted table without workspace filter"
-                    );
-                    return false;
-                }
+        let tenanted_tables = ["EMAILS", "CONTACTS", "TEMPLATES", "CAMPAIGNS", "WEBHOOKS"];
+        let touches_tenanted_table = tenanted_tables.iter().any(|table| {
+            upper.contains(&format!(" FROM {}", table))
+                || upper.contains(&format!(" JOIN {}", table))
+                || upper.contains(&format!(" UPDATE {}", table))
+                || upper.contains(&format!(" INTO {}", table))
+                || upper.contains(&format!(" {} ", table))
+        });
+
+        if touches_tenanted_table {
+            let has_workspace_predicate = upper.contains("WORKSPACE_ID =")
+                || upper.contains("WORKSPACE_ID=")
+                || upper.contains("ORGANIZATION_ID =")
+                || upper.contains("ORGANIZATION_ID=")
+                || upper.contains("CURRENT_SETTING('APP.CURRENT_WORKSPACE_ID')")
+                || upper.contains("CURRENT_SETTING('APP.CURRENT_ORG_ID')");
+
+            if !has_workspace_predicate {
+                warn!(
+                    user_id = ctx.user_id,
+                    workspace_id = ctx.workspace_id,
+                    "Blocked query touching tenanted tables without required workspace/organization predicate"
+                );
+                return false;
             }
         }
 
@@ -113,8 +127,9 @@ impl DataIsolationService {
         table_name: &str,
         schema_name: &str,
     ) -> anyhow::Result<()> {
-        let table = sanitize_sql_ident(table_name);
-        let schema = sanitize_sql_ident(schema_name);
+        // #293: fail-closed identifier validation for dynamic DDL.
+        let table = validate_sql_ident(table_name)?;
+        let schema = validate_sql_ident(schema_name)?;
 
         sqlx::query(&format!(
             r#"ALTER TABLE "{}"."{}" ENABLE ROW LEVEL SECURITY"#,
@@ -340,7 +355,7 @@ impl DataIsolationService {
         action: &str,
         allowed: bool,
     ) {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO iso_access_attempts (id, organization_id, workspace_id, actor_id, target_workspace_id,
              resource, action, allowed, context, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())"
@@ -351,7 +366,16 @@ impl DataIsolationService {
             .bind(resource).bind(action).bind(allowed)
             .bind(serde_json::json!({"isolation_level": ctx.isolation_level.to_string()}))
             .execute(&self.db)
-            .await;
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                actor = %ctx.user_id,
+                target = %target_workspace_id,
+                allowed = allowed,
+                "SECURITY: Failed to record access attempt — audit trail gap"
+            );
+        }
     }
 
     async fn migrate_to_schema(
@@ -458,6 +482,14 @@ fn sanitize_sql_ident(s: &str) -> String {
         .collect()
 }
 
+fn validate_sql_ident(s: &str) -> anyhow::Result<String> {
+    let normalized = s.trim().to_lowercase();
+    if !IDENT_REGEX.is_match(&normalized) {
+        anyhow::bail!("Invalid SQL identifier: {s}");
+    }
+    Ok(normalized)
+}
+
 fn resource_to_table(resource: &str) -> String {
     match resource {
         "email" => "emails".into(),
@@ -466,7 +498,11 @@ fn resource_to_table(resource: &str) -> String {
         "campaign" => "campaigns".into(),
         "webhook" => "webhooks".into(),
         "api_key" => "api_keys".into(),
-        _ => format!("{}s", resource), // pluralize as fallback
+        // Reject unknown resources instead of blindly pluralising user input
+        other => {
+            tracing::error!(resource = %other, "Unknown resource type in data isolation — refusing to guess table name");
+            "__unknown__".into()
+        }
     }
 }
 
@@ -716,7 +752,7 @@ mod tests {
         assert_eq!(resource_to_table("email"), "emails");
         assert_eq!(resource_to_table("contact"), "contacts");
         assert_eq!(resource_to_table("api_key"), "api_keys");
-        assert_eq!(resource_to_table("custom"), "customs");
+        assert_eq!(resource_to_table("custom"), "__unknown__");
     }
 
     #[test]

@@ -253,22 +253,44 @@ pub fn calculate_goal_progress(baseline: f64, target: f64, current: f64) -> f64 
 }
 
 /// Get start/end dates for a quarter (quarter as int: 1-4)
+/// #267-268: Added validation for quarter range and safe date construction
 pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-    let (start_month, end_month) = match quarter {
+    // #268: Validate quarter is 1-4, default to Q1 for invalid values with warning
+    let valid_quarter = if quarter < 1 || quarter > 4 {
+        tracing::warn!(quarter = quarter, "Invalid quarter value, defaulting to Q1");
+        1
+    } else {
+        quarter
+    };
+    
+    let (start_month, end_month) = match valid_quarter {
         1 => (1u32, 4u32),
         2 => (4, 7),
         3 => (7, 10),
-        _ => (10, 1), // Q4
+        4 => (10, 1),
+        _ => unreachable!(), // Already validated
     };
 
+    // #267: Use checked construction to avoid potential panics
     let start = chrono::NaiveDate::from_ymd_opt(year, start_month, 1)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap())
-        .and_hms_opt(0, 0, 0).unwrap();
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .unwrap_or_else(|| {
+            // Fallback: January 1st of the year at midnight
+            chrono::NaiveDate::from_ymd_opt(year, 1, 1)
+                .expect("year out of range")
+                .and_hms_opt(0, 0, 0)
+                .expect("0:0:0 is always valid")
+        });
 
-    let end_year = if quarter == 4 { year + 1 } else { year };
+    let end_year = if valid_quarter == 4 { year + 1 } else { year };
     let end = chrono::NaiveDate::from_ymd_opt(end_year, end_month, 1)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(end_year, 1, 1).unwrap())
-        .and_hms_opt(0, 0, 0).unwrap();
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .unwrap_or_else(|| {
+            chrono::NaiveDate::from_ymd_opt(end_year, 1, 1)
+                .expect("year out of range")
+                .and_hms_opt(0, 0, 0)
+                .expect("0:0:0 is always valid")
+        });
 
     (start.and_utc(), end.and_utc())
 }

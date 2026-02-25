@@ -3,7 +3,8 @@
 //! In-memory log store with level/service filtering, per-level counts, and
 //! error-rate calculation over a sliding window.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 use chrono::{Duration, Utc};
 use parking_lot::RwLock;
@@ -41,19 +42,31 @@ impl LogAggregator {
         service_filter: Option<&str>,
         limit: usize,
     ) -> Vec<LogEntry> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
         let guard = self.entries.read();
-        let mut filtered: Vec<&LogEntry> = guard
-            .iter()
-            .filter(|e| {
-                let level_ok = level_filter.map(|l| e.level >= l).unwrap_or(true);
-                let svc_ok = service_filter
-                    .map(|s| e.service == s)
-                    .unwrap_or(true);
-                level_ok && svc_ok
-            })
-            .collect();
-        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        filtered.into_iter().take(limit).cloned().collect()
+        let mut heap: BinaryHeap<(Reverse<chrono::DateTime<Utc>>, LogEntry)> = BinaryHeap::new();
+
+        for entry in guard.iter() {
+            let level_ok = level_filter.map(|l| entry.level >= l).unwrap_or(true);
+            let svc_ok = service_filter
+                .map(|s| entry.service == s)
+                .unwrap_or(true);
+            if !level_ok || !svc_ok {
+                continue;
+            }
+
+            heap.push((Reverse(entry.timestamp), entry.clone()));
+            if heap.len() > limit {
+                heap.pop();
+            }
+        }
+
+        let mut results: Vec<LogEntry> = heap.into_iter().map(|(_, entry)| entry).collect();
+        results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        results
     }
 
     /// Return the count of log entries grouped by [`LogLevel`].

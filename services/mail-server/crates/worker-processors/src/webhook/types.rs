@@ -108,8 +108,14 @@ impl WebhookJob {
 
     /// Calculate next retry delay with exponential backoff.
     pub fn next_retry_delay_ms(&self) -> i64 {
+        // Fix #71: Validate backoff_multiplier to prevent NaN/Inf or 0.0 (no backoff) 
+        let multiplier = if self.backoff_multiplier.is_finite() && self.backoff_multiplier > 0.0 {
+            self.backoff_multiplier
+        } else {
+            2.0 // Default exponential backoff
+        };
         let delay = self.retry_delay as f64
-            * self.backoff_multiplier.powi((self.attempt - 1).max(0));
+            * multiplier.powi((self.attempt - 1).max(0));
         (delay as i64).min(3600_000) // Cap at 1 hour
     }
 }
@@ -192,7 +198,10 @@ pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_
     }
 
     let truncated = truncate_value(payload, 1024);
-    let serialized = serde_json::to_string(&truncated).unwrap_or_default();
+    let serialized = match serde_json::to_string(&truncated) {
+        Ok(value) => value,
+        Err(_) => return truncated,
+    };
 
     if serialized.len() > max_bytes {
         // Aggressive truncation

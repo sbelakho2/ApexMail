@@ -7,9 +7,10 @@ use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use deadpool_redis::redis::AsyncCommands;
+use deadpool_redis::redis::{self, AsyncCommands};
 
 use crate::config::Environment;
+use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 // ─── Fixed-window rate limiter (middleware function) ────────────
@@ -23,11 +24,11 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Response
 {
-    // Extract tenant_id from the request extensions (set by auth layer).
+    // Extract tenant_id from AuthUser (set by require_auth middleware).
     let tenant_id = req
         .extensions()
-        .get::<uuid::Uuid>()
-        .copied();
+        .get::<AuthUser>()
+        .map(|u| u.tenant_id);
 
     let tenant_key = match tenant_id {
         Some(id) => id.to_string(),
@@ -95,12 +96,16 @@ enum RateLimitOutcome {
     RedisDown,
 }
 
-fn current_window(window_ms: u64) -> u64 {
-    let now = std::time::SystemTime::now()
+// Fix #18: Safe system time that doesn't panic if clock is before epoch.
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    now / window_ms
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn current_window(window_ms: u64) -> u64 {
+    current_time_ms() / window_ms
 }
 
 async fn check_rate_limit(
@@ -118,16 +123,25 @@ async fn check_rate_limit(
             RateLimitOutcome::RedisDown
         })?;
 
-    let count: u64 = conn
-        .incr(key, 1u64)
+    // Fix #17/#19: Atomic Lua script — INCR + EXPIRE in a single round-trip.
+    // This prevents the race where a crash between INCR and EXPIRE leaves
+    // a key without TTL (permanent rate limit).
+    let ttl_secs = (window_ms / 1000).max(1) as i64;
+    let script = redis::Script::new(
+        r#"
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return count
+        "#,
+    );
+    let count: u64 = script
+        .key(key)
+        .arg(ttl_secs)
+        .invoke_async(&mut *conn)
         .await
         .map_err(|_| RateLimitOutcome::RedisDown)?;
-
-    if count == 1 {
-        // First request in this window — set expiry
-        let ttl_secs = (window_ms / 1000).max(1);
-        let _: Result<(), _> = conn.expire(key, ttl_secs as i64).await;
-    }
 
     let reset_at = (current_window(window_ms) + 1) * window_ms;
 
@@ -151,10 +165,7 @@ pub async fn sliding_window_count(
     window_ms: u64,
     max: u64,
 ) -> Result<bool, ()> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now_ms = current_time_ms();
 
     let current = now_ms / window_ms;
     let previous = current.saturating_sub(1);
@@ -165,8 +176,10 @@ pub async fn sliding_window_count(
 
     let mut conn = state.redis.get().await.map_err(|_| ())?;
 
-    let curr_count: u64 = conn.get(&curr_key).await.unwrap_or(0);
-    let prev_count: u64 = conn.get(&prev_key).await.unwrap_or(0);
+    let curr_count: Option<u64> = conn.get(&curr_key).await.map_err(|_| ())?;
+    let prev_count: Option<u64> = conn.get(&prev_key).await.map_err(|_| ())?;
+    let curr_count = curr_count.unwrap_or(0);
+    let prev_count = prev_count.unwrap_or(0);
 
     let estimated =
         (prev_count as f64 * (1.0 - position_in_window)) + curr_count as f64;

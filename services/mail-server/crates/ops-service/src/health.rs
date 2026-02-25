@@ -15,6 +15,7 @@ pub struct HealthChecker {
     history: Arc<DashMap<String, Vec<HealthCheck>>>,
     /// Maximum history entries kept per service.
     max_history: usize,
+    http_client: reqwest::Client,
 }
 
 impl HealthChecker {
@@ -22,6 +23,7 @@ impl HealthChecker {
         Self {
             history: Arc::new(DashMap::new()),
             max_history,
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -31,7 +33,7 @@ impl HealthChecker {
     /// For unit tests, use [`record_check`] to inject synthetic results.
     pub async fn check_service(&self, name: &str, url: &str) -> HealthCheck {
         let start = std::time::Instant::now();
-        let (status, latency_ms) = match reqwest::get(url).await {
+        let (status, latency_ms) = match self.http_client.get(url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 (ServiceStatus::Operational, start.elapsed().as_millis() as u64)
             }

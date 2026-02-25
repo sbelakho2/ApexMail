@@ -1,6 +1,7 @@
 //! Processor configuration types.
 
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 /// Common processor configuration.
 #[derive(Debug, Clone)]
@@ -93,13 +94,14 @@ impl Default for EmailConfig {
 }
 
 /// SMTP configuration.
+/// Fix #76: Using Zeroizing<String> for sensitive credentials to prevent memory leakage.
 #[derive(Debug, Clone)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
     pub secure: bool,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<Zeroizing<String>>,
     pub pool_size: usize,
     pub max_connections: usize,
     pub rate_limit_per_second: u32,
@@ -148,10 +150,11 @@ pub struct TrackingConfig {
 }
 
 impl Default for TrackingConfig {
+    /// Fix #97: Default base_url intentionally invalid to force explicit configuration.
     fn default() -> Self {
         Self {
             enabled: false,
-            base_url: "https://track.example.com".to_string(),
+            base_url: "https://tracking.localhost".to_string(),
             open_pixel_path: "/o".to_string(),
             click_redirect_path: "/c".to_string(),
         }
@@ -230,8 +233,8 @@ pub struct ReplyHandlerConfig {
     pub llm_enabled: bool,
     /// LLM API endpoint.
     pub llm_endpoint: Option<String>,
-    /// LLM API key.
-    pub llm_api_key: Option<String>,
+    /// LLM API key (zeroized for security - fix #76).
+    pub llm_api_key: Option<Zeroizing<String>>,
 }
 
 impl Default for ReplyHandlerConfig {

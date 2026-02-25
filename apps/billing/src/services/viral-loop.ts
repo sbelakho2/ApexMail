@@ -12,7 +12,7 @@ const logger = createLogger();
 
 export interface Attribution {
   id: string;
-  sourceTenatId: string;
+  sourceTenantId: string;
   clickedAt: Date;
   convertedAt: Date | null;
   newTenantId: string | null;

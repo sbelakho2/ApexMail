@@ -16,6 +16,28 @@ CREATE TABLE IF NOT EXISTS sales_pipelines (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_pipelines_tenant ON sales_pipelines(tenant_id);
 
+-- Leads base table (was missing — required before ALTER statements below)
+CREATE TABLE IF NOT EXISTS sales_leads (
+  id VARCHAR(64) PRIMARY KEY,
+  tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  company_name VARCHAR(255) NOT NULL,
+  domain VARCHAR(255) NOT NULL,
+  status VARCHAR(64) NOT NULL DEFAULT 'new',
+  source VARCHAR(255),
+  industry VARCHAR(255),
+  notes TEXT,
+  score INTEGER,
+  contact_email VARCHAR(255),
+  contact_name VARCHAR(255),
+  tags JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_leads_tenant ON sales_leads(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_sales_leads_status ON sales_leads(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_sales_leads_created ON sales_leads(created_at DESC);
+
 -- Leads table alignment (add missing columns)
 ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS website VARCHAR(255);
 ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS email VARCHAR(255);

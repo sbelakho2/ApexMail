@@ -3,16 +3,15 @@
 //! Validates and normalizes international email addresses, checks MX records,
 //! SMTPUTF8 support, and common domain typos.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tracing::{debug, warn};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
+use unicode_normalization::UnicodeNormalization;
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -60,9 +59,13 @@ pub struct EAIService {
     eai_cache: Cache<String, bool>,
 }
 
+static EAI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
 impl EAIService {
     pub fn new(pool: PgPool, redis: deadpool_redis::Pool) -> Self {
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let resolver = EAI_RESOLVER.clone();
         Self {
             pool,
             redis,
@@ -383,11 +386,7 @@ impl EAIService {
 
 /// NFC Unicode normalization (Rust strings are UTF-8; we use unicode-normalization).
 fn unicode_normalize_nfc(s: &str) -> String {
-    // Rust's String is already valid UTF-8. For NFC normalization we use a simple
-    // approach: Rust natively handles Unicode, and most modern systems produce NFC.
-    // For full correctness, the `unicode-normalization` crate should be used,
-    // but for email addresses the difference is negligible.
-    s.to_string()
+    s.nfc().collect()
 }
 
 /// Check if string contains non-ASCII characters.

@@ -55,6 +55,9 @@ pub enum ApiError {
     #[error("{0}")]
     Internal(String),
 
+    #[error("{0}")]
+    ServiceUnavailable(String),
+
     #[error("validation failed")]
     Validation(Vec<String>),
 }
@@ -71,6 +74,7 @@ impl ApiError {
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
         }
     }
@@ -86,6 +90,7 @@ impl ApiError {
             Self::PayloadTooLarge(_) => "PAYLOAD_TOO_LARGE",
             Self::Timeout => "REQUEST_TIMEOUT",
             Self::Internal(_) => "INTERNAL_ERROR",
+            Self::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
             Self::Validation(_) => "VALIDATION_ERROR",
         }
     }
@@ -100,10 +105,18 @@ impl IntoResponse for ApiError {
             None
         };
 
+        let message = match &self {
+            Self::Internal(msg) => {
+                tracing::error!(error = %msg, "Internal API error");
+                "internal server error".to_string()
+            }
+            _ => self.to_string(),
+        };
+
         let body = ErrorBody {
             error: ErrorDetail {
                 code: self.code_str().to_string(),
-                message: self.to_string(),
+                message,
                 details,
             },
         };

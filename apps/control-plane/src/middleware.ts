@@ -252,7 +252,6 @@ export async function middleware(request: NextRequest) {
     const clientIp = getClientIp(request);
     
     // Log all access attempts for audit
-    console.log(`[CONTROL_PLANE_ACCESS] IP=${clientIp} Path=${path} Method=${request.method}`);
     
     // Allow public paths
     if (PUBLIC_PATHS.includes(path) || PUBLIC_PREFIXES.some(prefix => path.startsWith(prefix))) {
@@ -307,7 +306,7 @@ export async function middleware(request: NextRequest) {
     
     if (!sessionToken) {
         // No session, redirect to login
-        console.log(`[CONTROL_PLANE] No session, redirecting to login from ${clientIp}`);
+        console.warn(`[CONTROL_PLANE] No session, redirecting to login from ${clientIp}`);
         return NextResponse.redirect(new URL('/login', request.url));
     }
     

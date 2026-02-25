@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 /// Parsed SMTP command
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SmtpCommand {
     pub verb: String,
     pub args: String,
@@ -12,6 +13,7 @@ pub struct SmtpCommand {
 
 impl SmtpCommand {
     /// Parse an SMTP command line
+    #[allow(dead_code)]
     pub fn parse(line: &str) -> Option<Self> {
         let line = line.trim();
         if line.is_empty() {
@@ -48,11 +50,13 @@ impl SmtpCommand {
     }
     
     /// Get SIZE parameter if present
+    #[allow(dead_code)]
     pub fn get_size(&self) -> Option<usize> {
         self.params.get("SIZE").and_then(|s| s.parse().ok())
     }
     
     /// Get BODY parameter (7BIT, 8BITMIME, BINARYMIME)
+    #[allow(dead_code)]
     pub fn get_body(&self) -> Option<&str> {
         self.params.get("BODY").map(|s| s.as_str())
     }

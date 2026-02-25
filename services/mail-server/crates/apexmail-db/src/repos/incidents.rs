@@ -1,6 +1,5 @@
 //! Status page incidents repository.
 
-use chrono::Utc;
 use sqlx::PgPool;
 
 use crate::types::{StatusPageIncident, StatusPageIncidentUpdate};
@@ -44,11 +43,17 @@ impl IncidentRepo {
     }
 
     /// List all active (non-resolved) incidents.
-    pub async fn list_active(pool: &PgPool) -> Result<Vec<StatusPageIncident>, sqlx::Error> {
+    pub async fn list_active(
+        pool: &PgPool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<StatusPageIncident>, sqlx::Error> {
         sqlx::query_as::<_, StatusPageIncident>(
             "SELECT id, title, status, impact, affected_components, created_at, updated_at, resolved_at \
-             FROM status_page_incidents WHERE resolved_at IS NULL ORDER BY created_at DESC",
+             FROM status_page_incidents WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool)
         .await
     }
@@ -147,6 +152,7 @@ impl IncidentRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_incident_repo_is_stateless() {

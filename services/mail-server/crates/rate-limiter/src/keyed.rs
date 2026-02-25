@@ -141,22 +141,21 @@ impl KeyedRateLimiter {
         );
     }
 
+    // #219: Use entry().or_insert_with() to avoid TOCTOU and unnecessary limiter creation
     fn get_or_create(
         &self,
         key: &str,
     ) -> Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>> {
-        if let Some(limiter) = self.limiters.get(key) {
-            return limiter.value().clone();
-        }
-
-        // Create new limiter for this key
-        let burst = self.config.effective_burst();
-        let quota = Quota::per_second(self.config.requests_per_second).allow_burst(burst);
-        let limiter = Arc::new(RateLimiter::direct(quota));
-
-        self.limiters
+        // Use entry API to avoid race condition between get and insert
+        let limiter = self.limiters
             .entry(key.to_string())
-            .or_insert(limiter.clone());
+            .or_insert_with(|| {
+                let burst = self.config.effective_burst();
+                let quota = Quota::per_second(self.config.requests_per_second).allow_burst(burst);
+                Arc::new(RateLimiter::direct(quota))
+            })
+            .value()
+            .clone();
 
         // Check if we need to evict
         self.maybe_evict();

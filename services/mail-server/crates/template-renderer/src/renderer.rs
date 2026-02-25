@@ -1,10 +1,9 @@
 //! Full template rendering pipeline: transpile → sandbox → render → plaintext.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::cache::TemplateCache;
@@ -83,7 +82,15 @@ impl TemplateRenderer {
         template_id: Uuid,
         options: &RenderOptions,
     ) -> Result<RenderResult, TemplateError> {
-        let cache_key = format!("{}:{}", template_id, options.props);
+        // #191: Hash the props JSON for a stable cache key regardless of key ordering.
+        // serde_json::Value Display can produce different strings for logically-equal JSON.
+        use sha2::{Sha256, Digest};
+        let props_hash = {
+            let canonical = serde_json::to_string(&options.props).unwrap_or_default();
+            let hash = Sha256::digest(canonical.as_bytes());
+            hex::encode(&hash[..16]) // 128-bit hash is sufficient for cache keys
+        };
+        let cache_key = format!("{}:{}", template_id, props_hash);
 
         // Check cache
         if let Some(cached) = self.cache.get(&cache_key) {

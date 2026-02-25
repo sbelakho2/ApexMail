@@ -61,7 +61,9 @@ impl SpfRecord {
 
         for part in &parts[1..] {
             let part = part.to_lowercase();
-            if part.ends_with("all") {
+            // #186: Only match bare `all` (optionally with qualifier prefix),
+            // not `mx:all.example.com` etc.
+            if part == "all" || part == "+all" || part == "-all" || part == "~all" || part == "?all" {
                 all_qualifier = part.chars().next();
                 if all_qualifier == Some('a') {
                     all_qualifier = Some('+'); // bare "all" = +all
@@ -154,9 +156,15 @@ impl DkimRecord {
         })
     }
 
-    /// Whether this is a revoked key (empty public key or "y" flag).
+    /// Whether this is a revoked key (empty public key per RFC 6376 §3.6.1).
+    /// Note: `t=y` means "testing mode" (RFC 6376 §3.6.1), NOT revocation.
     pub fn is_revoked(&self) -> bool {
-        self.public_key.is_empty() || self.flags.contains(&"y".to_string())
+        self.public_key.is_empty()
+    }
+
+    /// Whether this key is in testing mode (t=y flag present per RFC 6376 §3.6.1).
+    pub fn is_testing(&self) -> bool {
+        self.flags.contains(&"y".to_string())
     }
 }
 

@@ -19,8 +19,21 @@ interface ImpersonationInfo {
 export function ImpersonationBanner() {
     const [impersonationInfo, setImpersonationInfo] = useState<ImpersonationInfo | null>(null);
     const [timeRemaining, setTimeRemaining] = useState<string>('');
+    const storageKey = 'apexmail.impersonation.info';
     
     useEffect(() => {
+        try {
+            const persisted = sessionStorage.getItem(storageKey);
+            if (persisted) {
+                const parsed = JSON.parse(persisted) as ImpersonationInfo;
+                if (parsed?.expiresAt && parsed.expiresAt > Date.now()) {
+                    setImpersonationInfo(parsed);
+                }
+            }
+        } catch {
+            // ignore invalid persisted state
+        }
+
         // Check for impersonation session
         const checkImpersonation = async () => {
             try {
@@ -28,11 +41,15 @@ export function ImpersonationBanner() {
                 const data = await response.json();
                 
                 if (data.impersonation) {
-                    setImpersonationInfo({
+                    const nextInfo = {
                         operatorName: data.impersonation.operatorName,
                         tenantId: data.impersonation.tenantId,
                         expiresAt: data.impersonation.exp,
-                    });
+                    };
+                    setImpersonationInfo(nextInfo);
+                    sessionStorage.setItem(storageKey, JSON.stringify(nextInfo));
+                } else {
+                    sessionStorage.removeItem(storageKey);
                 }
             } catch {
                 // Not impersonating or error
@@ -64,6 +81,12 @@ export function ImpersonationBanner() {
     }, [impersonationInfo]);
     
     const handleEndSession = async () => {
+        try {
+            sessionStorage.removeItem(storageKey);
+        } catch {
+            // noop
+        }
+
         try {
             await fetch('/api/auth/impersonate/end', { method: 'POST' });
             window.location.href = '/login';

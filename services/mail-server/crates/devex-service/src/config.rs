@@ -74,7 +74,14 @@ impl DevExConfig {
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_else(|_| vec!["2023-01".into(), "2022-10".into()]);
 
-        Ok(Self {
+        let webhook_signing_secret = env::var("WEBHOOK_SIGNING_SECRET").unwrap_or_default();
+        if node_env != "development" && webhook_signing_secret.trim().is_empty() {
+            return Err(ConfigError::SecurityViolation(
+                "WEBHOOK_SIGNING_SECRET must be set outside development".into(),
+            ));
+        }
+
+        let config = Self {
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -82,7 +89,7 @@ impl DevExConfig {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             database_url: env::var("DATABASE_URL").unwrap_or_default(),
             redis_url: env::var("REDIS_URL").unwrap_or_default(),
-            webhook_signing_secret: env::var("WEBHOOK_SIGNING_SECRET").unwrap_or_default(),
+            webhook_signing_secret,
             cors_origins,
             api_base_url: env::var("API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.apexmail.ee".into()),
@@ -100,7 +107,31 @@ impl DevExConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
             node_env,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.port == 0 {
+            return Err(ConfigError::InvalidValue("PORT must be > 0".into()));
+        }
+        if self.host.trim().is_empty() {
+            return Err(ConfigError::InvalidValue("HOST must not be empty".into()));
+        }
+        if self.node_env != "development" && self.database_url.trim().is_empty() {
+            return Err(ConfigError::MissingVar("DATABASE_URL".into()));
+        }
+        if self.node_env != "development" && self.redis_url.trim().is_empty() {
+            return Err(ConfigError::MissingVar("REDIS_URL".into()));
+        }
+        if self.current_api_version.trim().is_empty() {
+            return Err(ConfigError::InvalidValue("CURRENT_API_VERSION must not be empty".into()));
+        }
+        if !self.is_version_supported(&self.current_api_version) {
+            return Err(ConfigError::InvalidValue("CURRENT_API_VERSION must be supported".into()));
+        }
+        Ok(())
     }
 
     /// Check whether a given API version string is currently supported (not deprecated).

@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
 
@@ -44,6 +44,13 @@ impl AuditLogger {
 
     /// Initialize by loading last hashes from DB.
     pub async fn initialize(&self) -> Result<(), String> {
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_timestamp ON audit_logs (tenant_id, timestamp DESC)",
+        )
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+
         let rows: Vec<(Option<String>, String)> = sqlx::query_as(
             "SELECT tenant_id, hash FROM audit_logs a
              WHERE timestamp = (
@@ -56,7 +63,7 @@ impl AuditLogger {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        let mut map = self.last_hashes.lock().unwrap();
+        let mut map = self.last_hashes.lock().await;
         for (tenant_id, hash) in rows {
             let chain_key = tenant_id.unwrap_or_else(|| "global".into());
             map.insert(chain_key, hash);
@@ -86,7 +93,7 @@ impl AuditLogger {
             .unwrap_or_else(|| "global".into());
 
         let previous_hash = {
-            let map = self.last_hashes.lock().unwrap();
+            let map = self.last_hashes.lock().await;
             map.get(&chain_key).cloned()
         };
 
@@ -107,7 +114,7 @@ impl AuditLogger {
             &previous_hash,
         );
 
-        let signature = self.compute_signature(&hash);
+        let signature = self.compute_signature(&hash)?;
 
         let entry = AuditLogEntry {
             id,
@@ -132,7 +139,7 @@ impl AuditLogger {
 
         // Update last hash cache
         {
-            let mut map = self.last_hashes.lock().unwrap();
+            let mut map = self.last_hashes.lock().await;
             map.insert(chain_key, hash);
         }
 
@@ -338,7 +345,17 @@ impl AuditLogger {
             }
 
             // Verify HMAC signature
-            let expected_sig = self.compute_signature(&entry.hash);
+            let expected_sig = match self.compute_signature(&entry.hash) {
+                Ok(v) => v,
+                Err(e) => {
+                    return ChainValidationResult {
+                        valid: false,
+                        entries_checked: i + 1,
+                        first_invalid_entry: Some(entry.id.clone()),
+                        error: Some(e),
+                    }
+                }
+            };
             if expected_sig != entry.signature {
                 return ChainValidationResult {
                     valid: false,
@@ -435,15 +452,15 @@ impl AuditLogger {
                 for e in &entries {
                     csv.push_str(&format!(
                         "{},{},{},{},{},{},{},{},{}\n",
-                        e.id,
-                        e.tenant_id.as_deref().unwrap_or(""),
-                        e.user_id.as_deref().unwrap_or(""),
-                        e.action,
-                        e.resource,
-                        e.resource_id.as_deref().unwrap_or(""),
-                        e.outcome,
-                        e.timestamp.to_rfc3339(),
-                        e.hash,
+                        csv_escape(&e.id),
+                        csv_escape(e.tenant_id.as_deref().unwrap_or("")),
+                        csv_escape(e.user_id.as_deref().unwrap_or("")),
+                        csv_escape(&e.action.to_string()),
+                        csv_escape(&e.resource.to_string()),
+                        csv_escape(e.resource_id.as_deref().unwrap_or("")),
+                        csv_escape(&e.outcome.to_string()),
+                        csv_escape(&e.timestamp.to_rfc3339()),
+                        csv_escape(&e.hash),
                     ));
                 }
                 Ok(ExportResult {
@@ -623,11 +640,11 @@ impl AuditLogger {
         hex::encode(hasher.finalize())
     }
 
-    fn compute_signature(&self, hash: &str) -> String {
+    fn compute_signature(&self, hash: &str) -> Result<String, String> {
         let mut mac =
-            HmacSha256::new_from_slice(&self.signing_key).expect("HMAC key");
+            HmacSha256::new_from_slice(&self.signing_key).map_err(|e| format!("Invalid HMAC key: {e}"))?;
         mac.update(hash.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
     async fn persist_entry(
@@ -672,6 +689,18 @@ pub struct ExportResult {
     pub data: String,
     pub content_type: String,
     pub filename: String,
+}
+
+fn csv_escape(value: &str) -> String {
+    let mut escaped = value.replace('"', "\"\"");
+    if matches!(escaped.chars().next(), Some('=') | Some('+') | Some('-') | Some('@')) {
+        escaped.insert(0, '\'');
+    }
+    if escaped.contains(',') || escaped.contains('"') || escaped.contains('\n') || escaped.contains('\r') {
+        format!("\"{}\"", escaped)
+    } else {
+        escaped
+    }
 }
 
 // ─── Minimal PDF generator ─────────────────────────────────────
@@ -860,8 +889,8 @@ mod tests {
     #[test]
     fn test_compute_signature_deterministic() {
         let logger = test_logger();
-        let s1 = logger.compute_signature("testhash");
-        let s2 = logger.compute_signature("testhash");
+        let s1 = logger.compute_signature("testhash").unwrap();
+        let s2 = logger.compute_signature("testhash").unwrap();
         assert_eq!(s1, s2);
         assert_eq!(s1.len(), 64); // HMAC-SHA-256 hex
     }
@@ -880,8 +909,8 @@ mod tests {
             signing_key: "different-key-that-is-at-least-32-characters!!".into(),
         });
 
-        let s1 = logger1.compute_signature("samehash");
-        let s2 = logger2.compute_signature("samehash");
+        let s1 = logger1.compute_signature("samehash").unwrap();
+        let s2 = logger2.compute_signature("samehash").unwrap();
         assert_ne!(s1, s2);
     }
 
@@ -905,7 +934,7 @@ mod tests {
             &details, &None, &None, &AuditOutcome::Success, &None,
             &ts, &None,
         );
-        let sig = logger.compute_signature(&hash);
+        let sig = logger.compute_signature(&hash).unwrap();
 
         let entry = AuditLogEntry {
             id: "e1".into(),
@@ -945,7 +974,7 @@ mod tests {
             &details, &None, &None, &AuditOutcome::Success, &None,
             &ts1, &None,
         );
-        let sig1 = logger.compute_signature(&hash1);
+        let sig1 = logger.compute_signature(&hash1).unwrap();
         let entry1 = AuditLogEntry {
             id: "e1".into(), tenant_id: Some("t1".into()),
             user_id: None, session_id: None,
@@ -964,7 +993,7 @@ mod tests {
             &details, &None, &None, &AuditOutcome::Success, &None,
             &ts2, &Some(hash1.clone()),
         );
-        let sig2 = logger.compute_signature(&hash2);
+        let sig2 = logger.compute_signature(&hash2).unwrap();
         let entry2 = AuditLogEntry {
             id: "e2".into(), tenant_id: Some("t1".into()),
             user_id: None, session_id: None,
@@ -993,7 +1022,7 @@ mod tests {
             &details, &None, &None, &AuditOutcome::Success, &None,
             &ts, &None,
         );
-        let sig = logger.compute_signature(&real_hash);
+        let sig = logger.compute_signature(&real_hash).unwrap();
 
         let entry = AuditLogEntry {
             id: "e1".into(), tenant_id: Some("t1".into()),
@@ -1026,7 +1055,7 @@ mod tests {
             &details, &None, &None, &AuditOutcome::Success, &None,
             &ts1, &None,
         );
-        let sig1 = logger.compute_signature(&hash1);
+        let sig1 = logger.compute_signature(&hash1).unwrap();
         let entry1 = AuditLogEntry {
             id: "e1".into(), tenant_id: Some("t1".into()),
             user_id: None, session_id: None,
@@ -1046,7 +1075,7 @@ mod tests {
             &details, &None, &None, &AuditOutcome::Success, &None,
             &ts2, &wrong_prev,
         );
-        let sig2 = logger.compute_signature(&hash2);
+        let sig2 = logger.compute_signature(&hash2).unwrap();
         let entry2 = AuditLogEntry {
             id: "e2".into(), tenant_id: Some("t1".into()),
             user_id: None, session_id: None,
@@ -1117,11 +1146,11 @@ mod tests {
     fn test_last_hash_cache() {
         let logger = test_logger();
         {
-            let mut map = logger.last_hashes.lock().unwrap();
+            let mut map = logger.last_hashes.blocking_lock();
             map.insert("tenant-a".into(), "hash123".into());
         }
         {
-            let map = logger.last_hashes.lock().unwrap();
+            let map = logger.last_hashes.blocking_lock();
             assert_eq!(map.get("tenant-a").unwrap(), "hash123");
         }
     }

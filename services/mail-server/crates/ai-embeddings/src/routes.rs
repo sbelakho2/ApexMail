@@ -6,9 +6,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::config::EmbeddingsConfig;
 use crate::embeddings::EmbeddingService;
@@ -111,7 +110,13 @@ async fn stats_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let stats = state.vector_store.stats();
-    (StatusCode::OK, Json(serde_json::to_value(&stats).unwrap()))
+    match serde_json::to_value(&stats) {
+        Ok(value) => (StatusCode::OK, Json(value)),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": err.to_string()})),
+        ),
+    }
 }
 
 async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
@@ -141,7 +146,7 @@ mod tests {
             store: StoreConfig { max_vectors: 1000, eviction_threshold: 900 },
         };
         let state = Arc::new(AppState {
-            embedding_service: EmbeddingService::new(config.inference.clone()),
+            embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
             vector_store: VectorStore::new(384, 1000, 900),
             config,
         });

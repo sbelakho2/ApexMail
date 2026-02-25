@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { cn, timeAgo } from '../../lib/utils';
+import { cn, timeAgo, getStatusChipClasses } from '../../lib/utils';
 
 export const dynamic = 'force-dynamic';
 
@@ -100,7 +100,9 @@ function SupportPageContent() {
     const [searchQuery, setSearchQuery] = useState('');
     const [replyContent, setReplyContent] = useState('');
     const [sendingReply, setSendingReply] = useState(false);
+    const [triageShortcut, setTriageShortcut] = useState<'none' | 'urgent_unassigned' | 'sla_breach' | 'my_queue'>('none');
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const currentOperator = 'Alex (Support)';
 
     useEffect(() => { loadTickets(); }, []);
     useEffect(() => { if (activeView === 'analytics') loadAnalytics(); }, [activeView]);
@@ -261,6 +263,13 @@ function SupportPageContent() {
         if (searchQuery) {
             const q = searchQuery.toLowerCase();
             if (!t.subject.toLowerCase().includes(q) && !t.tenantName.toLowerCase().includes(q) && !t.tenantEmail?.toLowerCase().includes(q)) return false;
+        }
+        if (triageShortcut === 'urgent_unassigned' && !(t.priority === 'urgent' && !t.assignee)) return false;
+        if (triageShortcut === 'my_queue' && t.assignee !== currentOperator) return false;
+        if (triageShortcut === 'sla_breach') {
+            const openHours = (Date.now() - new Date(t.createdAt).getTime()) / (1000 * 60 * 60);
+            const unresolved = t.status !== 'resolved' && t.status !== 'closed';
+            if (!(unresolved && openHours >= 24)) return false;
         }
         return true;
     });
@@ -589,7 +598,7 @@ function SupportPageContent() {
                         </select>
                         {(filterStatus || filterPriority || filterCategory || searchQuery) && (
                             <button
-                                onClick={() => { setFilterStatus(''); setFilterPriority(''); setFilterCategory(''); setSearchQuery(''); }}
+                                onClick={() => { setFilterStatus(''); setFilterPriority(''); setFilterCategory(''); setSearchQuery(''); setTriageShortcut('none'); }}
                                 className="px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
                             >
                                 Clear Filters
@@ -597,16 +606,56 @@ function SupportPageContent() {
                         )}
                     </div>
 
+                    <div className="flex flex-wrap gap-2 mb-6">
+                        <button
+                            onClick={() => setTriageShortcut(triageShortcut === 'urgent_unassigned' ? 'none' : 'urgent_unassigned')}
+                            className={cn(
+                                'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                triageShortcut === 'urgent_unassigned'
+                                    ? 'bg-destructive/10 text-destructive border-destructive/30'
+                                    : 'bg-muted text-muted-foreground border-border hover:text-foreground'
+                            )}
+                        >
+                            Urgent + Unassigned
+                        </button>
+                        <button
+                            onClick={() => setTriageShortcut(triageShortcut === 'sla_breach' ? 'none' : 'sla_breach')}
+                            className={cn(
+                                'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                triageShortcut === 'sla_breach'
+                                    ? 'bg-warning/10 text-warning border-warning/30'
+                                    : 'bg-muted text-muted-foreground border-border hover:text-foreground'
+                            )}
+                        >
+                            SLA Breach (24h+)
+                        </button>
+                        <button
+                            onClick={() => setTriageShortcut(triageShortcut === 'my_queue' ? 'none' : 'my_queue')}
+                            className={cn(
+                                'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                                triageShortcut === 'my_queue'
+                                    ? 'bg-primary/10 text-primary border-primary/30'
+                                    : 'bg-muted text-muted-foreground border-border hover:text-foreground'
+                            )}
+                        >
+                            My Queue
+                        </button>
+                    </div>
+
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         {/* Ticket List */}
                         <div className="lg:col-span-1 space-y-3 max-h-[calc(100vh-320px)] overflow-y-auto">
                             {filteredTickets.length === 0 ? (
-                                <div className="text-center py-12 text-muted-foreground">No tickets found</div>
+                                <div className="text-center py-12 text-muted-foreground">
+                                    No tickets found. If this is a new admin account, tickets will appear after your first tenant opens support conversations.
+                                </div>
                             ) : (
                                 filteredTickets.map(ticket => {
                                     const statusConfig = STATUS_CONFIG[ticket.status];
                                     const priorityConfig = PRIORITY_CONFIG[ticket.priority];
                                     const categoryConfig = CATEGORY_CONFIG[ticket.category] ?? CATEGORY_CONFIG.general;
+                                    const openHours = (Date.now() - new Date(ticket.createdAt).getTime()) / (1000 * 60 * 60);
+                                    const isSlaBreached = (ticket.status !== 'resolved' && ticket.status !== 'closed') && openHours >= 24;
 
                                     return (
                                         <button
@@ -614,7 +663,8 @@ function SupportPageContent() {
                                             onClick={() => setSelectedTicket(ticket)}
                                             className={cn(
                                                 'w-full text-left bg-card rounded-xl border p-4 transition-all',
-                                                selectedTicket?.id === ticket.id ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-input'
+                                                selectedTicket?.id === ticket.id ? 'border-primary ring-2 ring-primary/20' : 'border-border hover:border-input',
+                                                isSlaBreached && 'border-warning/40 bg-warning/5'
                                             )}
                                         >
                                             <div className="flex items-start justify-between gap-2 mb-2">
@@ -626,11 +676,16 @@ function SupportPageContent() {
                                             <h3 className="font-medium text-foreground mb-1 line-clamp-1">{ticket.subject}</h3>
                                             <p className="text-sm text-muted-foreground mb-2">{ticket.tenantName}</p>
                                             <div className="flex items-center justify-between">
-                                                <span className={cn('px-2.5 py-0.5 rounded text-xs font-medium', statusConfig.bgColor, statusConfig.color)}>
+                                                <span className={cn('px-2.5 py-0.5 rounded text-xs font-medium', getStatusChipClasses(ticket.status))}>
                                                     {statusConfig.label}
                                                 </span>
                                                 <span className="text-xs text-muted-foreground">{timeAgo(ticket.updatedAt)}</span>
                                             </div>
+                                            {isSlaBreached && (
+                                                <div className="mt-2 text-[11px] text-warning font-medium">
+                                                    SLA breach: open for {Math.floor(openHours)}h
+                                                </div>
+                                            )}
                                         </button>
                                     );
                                 })
@@ -654,7 +709,7 @@ function SupportPageContent() {
                                                 className="text-muted-foreground hover:text-foreground lg:hidden">Close</button>
                                         </div>
                                         <div className="flex flex-wrap gap-2 mt-3">
-                                            <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', STATUS_CONFIG[selectedTicket.status].bgColor, STATUS_CONFIG[selectedTicket.status].color)}>
+                                            <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', getStatusChipClasses(selectedTicket.status))}>
                                                 {STATUS_CONFIG[selectedTicket.status].label}
                                             </span>
                                             <span className={cn('px-2.5 py-0.5 rounded-full text-xs font-medium', PRIORITY_CONFIG[selectedTicket.priority].bgColor, PRIORITY_CONFIG[selectedTicket.priority].color)}>

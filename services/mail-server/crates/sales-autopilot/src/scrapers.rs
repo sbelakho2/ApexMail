@@ -71,16 +71,56 @@ impl WebScraper {
     /// This is intentionally conservative: if we cannot parse the
     /// robots.txt, we assume the URL is allowed.
     pub fn is_allowed_by_robots(robots_txt: &str, path: &str) -> bool {
+        let mut in_group = false;
+        let mut group_matches = false;
+        let mut group_has_rules = false;
+        let mut saw_group = false;
+        let mut allowed = true;
+
         for line in robots_txt.lines() {
             let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if let Some(agent) = line.strip_prefix("User-agent:") {
+                let agent = agent.trim().to_lowercase();
+                if in_group && group_has_rules {
+                    group_matches = false;
+                    group_has_rules = false;
+                }
+                in_group = true;
+                saw_group = true;
+                group_matches = group_matches || agent == "*";
+                continue;
+            }
+
+            if !group_matches {
+                continue;
+            }
+
+            group_has_rules = true;
+
             if let Some(disallowed) = line.strip_prefix("Disallow:") {
                 let disallowed = disallowed.trim();
                 if !disallowed.is_empty() && path.starts_with(disallowed) {
-                    return false;
+                    allowed = false;
+                }
+            }
+
+            if let Some(allowed_path) = line.strip_prefix("Allow:") {
+                let allowed_path = allowed_path.trim();
+                if !allowed_path.is_empty() && path.starts_with(allowed_path) {
+                    allowed = true;
                 }
             }
         }
-        true
+
+        if !saw_group {
+            return true;
+        }
+
+        allowed
     }
 }
 

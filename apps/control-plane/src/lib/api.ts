@@ -13,8 +13,8 @@
 
 // FIX-500-036: Removed NEXT_PUBLIC_ prefix — these are server-side only.
 // NEXT_PUBLIC_ exposes values to the client-side JS bundle, leaking internal URLs.
-const AUTOPILOT_API_URL = process.env.AUTOPILOT_API_URL || process.env.NEXT_PUBLIC_AUTOPILOT_API_URL || 'http://localhost:3010';
-const COMPLIANCE_API_URL = process.env.COMPLIANCE_API_URL || process.env.NEXT_PUBLIC_COMPLIANCE_API_URL || 'http://localhost:3011';
+const AUTOPILOT_API_URL = process.env.AUTOPILOT_API_URL || 'http://localhost:3010';
+const COMPLIANCE_API_URL = process.env.COMPLIANCE_API_URL || 'http://localhost:3011';
 
 // Control Plane API key (server-side only)
 const CONTROL_PLANE_API_KEY = process.env.CONTROL_PLANE_API_KEY;

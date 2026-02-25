@@ -48,12 +48,22 @@ impl TemplatesRepo {
         .await
     }
 
-    /// List templates for a tenant.
-    pub async fn list(pool: &PgPool, tenant_id: Uuid) -> Result<Vec<Template>, sqlx::Error> {
+    /// List templates for a tenant with pagination.
+    /// #224: Added limit/offset and excluded html_body for listing (use find_by_id for full)
+    pub async fn list(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Template>, sqlx::Error> {
+        let limit = limit.clamp(1, 100);
+        let offset = offset.max(0);
         sqlx::query_as::<_, Template>(
-            "SELECT * FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC"
+            "SELECT * FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool)
         .await
     }

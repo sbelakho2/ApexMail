@@ -545,13 +545,16 @@ export class EventsRepository {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+    const truncParam = paramIndex++;
+    values.push(truncFn);
+
     const result = await this.db.query<{
       bucket: Date;
       event_type: EventType;
       count: string;
     }>(
       `SELECT 
-        DATE_TRUNC('${truncFn}', timestamp) as bucket,
+        DATE_TRUNC($${truncParam}, timestamp) as bucket,
         event_type,
         COUNT(*) as count
        FROM events
@@ -620,19 +623,34 @@ export class EventsRepository {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
-    const result = await this.db.query<{ count: string }>(
-      `WITH deleted AS (
+    const batchSize = 5000;
+    let totalDeleted = 0;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const result = await this.db.query<{ count: string }>(
+        `WITH deleted AS (
           DELETE FROM events
-          WHERE timestamp < $1
-          RETURNING id
-       )
-       SELECT COUNT(*)::text as count FROM deleted`,
-      [cutoffDate]
-    );
+          WHERE id IN (
+            SELECT id FROM events
+            WHERE timestamp < $1
+            LIMIT $2
+          )
+          RETURNING 1
+        )
+        SELECT COUNT(*)::text as count FROM deleted`,
+        [cutoffDate, batchSize]
+      );
 
-    if (!result.ok) return result;
+      if (!result.ok) return result;
 
-    return Result.ok(parseInt(result.value.rows[0]?.count ?? '0', 10));
+      const deletedCount = parseInt(result.value.rows[0]?.count ?? '0', 10);
+      totalDeleted += deletedCount;
+
+      if (deletedCount < batchSize) break;
+    }
+
+    return Result.ok(totalDeleted);
   }
 
   private mapRow(row: {
@@ -755,13 +773,16 @@ export class EventsRepository {
     // Map interval to PostgreSQL date_trunc format
     const truncInterval = options.interval === 'minute' ? 'hour' : options.interval;
 
+    const truncParam = paramIndex++;
+    values.push(truncInterval);
+
     const result = await this.db.query<{
       bucket: Date;
       event_type: EventType;
       count: string;
     }>(
       `SELECT 
-        DATE_TRUNC('${truncInterval}', e.timestamp) as bucket,
+        DATE_TRUNC($${truncParam}, e.timestamp) as bucket,
         e.event_type,
         COUNT(*) as count
        FROM events e

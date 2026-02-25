@@ -34,12 +34,14 @@ impl CampaignManager {
         template_id: String,
         audience: String,
     ) -> Result<Campaign, SalesError> {
-        let store = self.campaigns.read();
-        let active = store.iter().filter(|c| c.status == CampaignStatus::Active).count();
+        let mut store = self.campaigns.write();
+        let active = store
+            .iter()
+            .filter(|c| c.status == CampaignStatus::Active)
+            .count();
         if active >= self.max_campaigns {
             return Err(SalesError::MaxCampaignsReached(self.max_campaigns));
         }
-        drop(store);
 
         let campaign = Campaign {
             id: Uuid::new_v4(),
@@ -53,7 +55,7 @@ impl CampaignManager {
             created_at: Utc::now(),
         };
 
-        self.campaigns.write().push(campaign.clone());
+        store.push(campaign.clone());
         self.recipients.write().insert(campaign.id, Vec::new());
         Ok(campaign)
     }

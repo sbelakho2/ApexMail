@@ -6,16 +6,17 @@ use std::sync::Arc;
 use axum::{
     extract::{Json, Path, State},
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post},
     Router,
 };
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::services::{
-    attachment::{Attachment, AttachmentService, AttachmentStats},
-    calendar::{Attendee, CalendarMethod, CalendarService, CalendarStatus, Organizer},
+    attachment::{Attachment, AttachmentService},
+    calendar::{Attendee, CalendarMethod, CalendarService, Organizer},
     delivery::{DeliveryService, SMTPResponse},
     eai::EAIService,
 };
@@ -27,11 +28,13 @@ pub struct AppState {
     pub attachment: AttachmentService,
     pub calendar: CalendarService,
     pub delivery: DeliveryService,
+    pub api_key: String,
 }
 
 // ── router ─────────────────────────────────────────────────────────────────────
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let shared = state.clone();
     Router::new()
         // EAI
         .route("/eai/validate", post(eai_validate))
@@ -64,6 +67,32 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health/ready", get(health))
         .route("/health/live", get(health))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(shared, require_api_key))
+}
+
+async fn require_api_key(
+    State(state): State<Arc<AppState>>,
+    mut request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let path = request.uri().path();
+    if path.starts_with("/health") {
+        return Ok(next.run(request).await);
+    }
+
+    if state.api_key.trim().is_empty() {
+        return Ok(next.run(request).await);
+    }
+
+    let provided = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok());
+    if provided != Some(state.api_key.as_str()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(next.run(request).await)
 }
 
 // ── request/response types ─────────────────────────────────────────────────────
@@ -214,10 +243,10 @@ struct AutoResponderRequest {
 async fn eai_validate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EAIValidateRequest>,
-) -> impl IntoResponse {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match state.eai.validate_emails(&req.emails).await {
-        Ok(results) => Json(serde_json::json!({ "results": results })),
-        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+        Ok(results) => Ok(Json(serde_json::json!({ "results": results }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
 
@@ -463,9 +492,13 @@ async fn delivery_history(
 async fn delivery_greylist_check(
     State(state): State<Arc<AppState>>,
     Path(domain): Path<String>,
-) -> Json<serde_json::Value> {
-    let is_known = state.delivery.is_known_greylister(&domain).await;
-    Json(serde_json::json!({ "domain": domain, "known_greylister": is_known }))
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let is_known = state
+        .delivery
+        .is_known_greylister(&domain)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "domain": domain, "known_greylister": is_known })))
 }
 
 // ── Health ─────────────────────────────────────────────────────────────────────

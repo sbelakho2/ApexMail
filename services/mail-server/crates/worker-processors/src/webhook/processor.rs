@@ -43,8 +43,9 @@ pub struct WebhookProcessor {
 impl WebhookProcessor {
     /// Create a new webhook processor.
     pub fn new(db: PgPool, redis: RedisPool, config: WebhookConfig) -> ProcessorResult<Self> {
+        // Fix #67: Use configured request_timeout instead of hardcoded 30s.
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(config.request_timeout)
             .user_agent("ApexMail-Webhook/1.0")
             .build()
             .map_err(|e| ProcessorError::Job(format!("Failed to create HTTP client: {}", e)))?;
@@ -142,7 +143,7 @@ impl WebhookProcessor {
             r#"
             WITH claimed_jobs AS (
                 UPDATE webhook_queue wq
-                SET status = 'processing', locked_until = NOW() + INTERVAL '1 minute', updated_at = NOW()
+                SET status = 'processing', locked_until = NOW() + $2 * INTERVAL '1 second', updated_at = NOW()
                 WHERE wq.id IN (
                     SELECT wq2.id
                     FROM webhook_queue wq2
@@ -170,6 +171,7 @@ impl WebhookProcessor {
             "#,
         )
         .bind(limit as i64)
+        .bind(self.config.base.visibility_timeout.as_secs() as i64) // Fix #68: Use config visibility_timeout
         .fetch_all(&self.db)
         .await?;
 
@@ -180,7 +182,7 @@ impl WebhookProcessor {
     async fn process_job(&self, job: WebhookJob) -> ProcessorResult<()> {
         // Enforce per-tenant concurrency limit
         let tenant_count = {
-            let tenant_jobs = self.tenant_active_jobs.lock().unwrap();
+            let tenant_jobs = self.tenant_active_jobs.lock().unwrap_or_else(|e| e.into_inner());
             *tenant_jobs.get(&job.tenant_id).unwrap_or(&0)
         };
 
@@ -205,7 +207,7 @@ impl WebhookProcessor {
         // Track active job
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
         {
-            let mut tenant_jobs = self.tenant_active_jobs.lock().unwrap();
+            let mut tenant_jobs = self.tenant_active_jobs.lock().unwrap_or_else(|e| e.into_inner());
             *tenant_jobs.entry(job.tenant_id.clone()).or_insert(0) += 1;
         }
 
@@ -215,7 +217,7 @@ impl WebhookProcessor {
         // Decrement counters
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
         {
-            let mut tenant_jobs = self.tenant_active_jobs.lock().unwrap();
+            let mut tenant_jobs = self.tenant_active_jobs.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(count) = tenant_jobs.get_mut(&job.tenant_id) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -318,28 +320,23 @@ impl WebhookProcessor {
         let serialized_payload = serde_json::to_string(&payload)
             .map_err(|e| ProcessorError::Job(format!("Failed to serialize payload: {}", e)))?;
 
-        // Set dedup key before delivery (24h TTL)
-        redis::cmd("SETEX")
-            .arg(&dedup_key)
-            .arg(86400)
-            .arg("1")
-            .query_async::<()>(&mut *conn)
-            .await?;
-
-        // Deliver webhook
+        // Fix #69: Deliver webhook BEFORE setting dedup key to prevent unretryable failures
+        // on crash between SET and HTTP delivery.
         let result = self.deliver_webhook(job, &serialized_payload).await;
 
         // Update circuit breaker
         if result.success {
             circuit_breaker.as_ref().record_success();
+            // Set dedup key AFTER successful delivery (24h TTL)
+            let _ = redis::cmd("SETEX")
+                .arg(&dedup_key)
+                .arg(86400)
+                .arg("1")
+                .query_async::<()>(&mut *conn)
+                .await;
             self.handle_success(job, result).await?;
         } else {
             circuit_breaker.as_ref().record_failure();
-            // Remove dedup key on failure so retries work
-            let _ = redis::cmd("DEL")
-                .arg(&dedup_key)
-                .query_async::<()>(&mut *conn)
-                .await;
             self.handle_failure(job, result).await?;
         }
 
@@ -347,12 +344,30 @@ impl WebhookProcessor {
     }
 
     /// Get or create circuit breaker for a webhook.
+    /// Fix #93: Evict stale circuit breakers when map gets too large.
     fn get_circuit_breaker(&self, webhook_id: &str) -> Arc<CircuitBreaker> {
+        const MAX_CIRCUIT_BREAKERS: usize = 10_000;
         let key = format!("webhook:{}", webhook_id);
-        let mut cbs = self.circuit_breakers.lock().unwrap();
+        let mut cbs = self.circuit_breakers.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(cb) = cbs.get(&key) {
             return Arc::clone(cb);
+        }
+
+        // Evict closed circuit breakers when map grows too large
+        if cbs.len() >= MAX_CIRCUIT_BREAKERS {
+            let stale_keys: Vec<String> = cbs
+                .iter()
+                .filter(|(_, cb)| cb.state() == crate::common::CircuitState::Closed)
+                .map(|(k, _)| k.clone())
+                .take(cbs.len() / 4) // Evict up to 25% of closed entries
+                .collect();
+            for k in &stale_keys {
+                cbs.remove(k);
+            }
+            if stale_keys.is_empty() {
+                tracing::warn!(size = cbs.len(), "Circuit breaker map at capacity with no closed entries to evict");
+            }
         }
 
         let cb = Arc::new(CircuitBreaker::new(
@@ -485,7 +500,7 @@ impl WebhookProcessor {
             "Webhook delivered successfully"
         );
 
-        self.pending_successes.lock().unwrap().push(PendingSuccess {
+        self.pending_successes.lock().unwrap_or_else(|e| e.into_inner()).push(PendingSuccess {
             job: job.clone(),
             result,
         });
@@ -559,7 +574,26 @@ impl WebhookProcessor {
                 "Webhook scheduled for retry"
             );
         } else {
-            // Non-retryable error — fail permanently
+            // Fix #70: Non-retryable error — create delivery record BEFORE deleting job
+            sqlx::query(
+                r#"
+                INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, event_type, payload, status_code, response_time_ms, response_body, attempt, error, delivered_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                "#,
+            )
+            .bind(format!("dlv_{}", uuid::Uuid::new_v4()))
+            .bind(&job.webhook_id)
+            .bind(&job.tenant_id)
+            .bind(&job.event_type)
+            .bind(&job.payload)
+            .bind(result.status_code.map(|c| c as i32))
+            .bind(result.response_time_ms as i64)
+            .bind(&result.response_body)
+            .bind(job.attempt)
+            .bind(error_msg)
+            .execute(&self.db)
+            .await?;
+
             sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
                 .bind(&job.id)
                 .execute(&self.db)
@@ -567,7 +601,7 @@ impl WebhookProcessor {
 
             warn!(
                 job_id = %job.id,
-                "Webhook failed with non-retryable error"
+                "Webhook failed with non-retryable error, recorded in deliveries"
             );
         }
 
@@ -577,7 +611,7 @@ impl WebhookProcessor {
     /// Flush pending successes in a batch transaction.
     async fn flush_pending_successes(&self) {
         let successes: Vec<PendingSuccess> = {
-            let mut pending = self.pending_successes.lock().unwrap();
+            let mut pending = self.pending_successes.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *pending)
         };
 
@@ -590,7 +624,7 @@ impl WebhookProcessor {
             Err(e) => {
                 error!(error = %e, "Failed to begin transaction for batch flush");
                 // Put them back
-                self.pending_successes.lock().unwrap().extend(successes);
+                self.pending_successes.lock().unwrap_or_else(|e| e.into_inner()).extend(successes);
                 return;
             }
         };

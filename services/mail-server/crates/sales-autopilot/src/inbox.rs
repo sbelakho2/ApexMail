@@ -92,6 +92,11 @@ impl InboxManager {
             .collect()
     }
 
+    /// List all messages regardless of category.
+    pub fn list_all(&self) -> Vec<InboxMessage> {
+        self.messages.read().clone()
+    }
+
     /// Mark a message as replied.
     pub fn mark_replied(&self, id: Uuid) -> bool {
         let mut store = self.messages.write();

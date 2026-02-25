@@ -18,6 +18,7 @@ import {
   generateKeyPairSync,
   timingSafeEqual,
   scrypt,
+  scryptSync,
   type ScryptOptions,
 } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -125,11 +126,15 @@ export function verifyHMAC(
   if (expected.length !== signature.length) {
     return false;
   }
-  
-  return timingSafeEqual(
-    Buffer.from(expected, 'hex'),
-    Buffer.from(signature, 'hex')
-  );
+
+  try {
+    return timingSafeEqual(
+      Buffer.from(expected, 'hex'),
+      Buffer.from(signature, 'hex')
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -685,8 +690,7 @@ export function deriveKeySync(
   salt: string | Buffer,
   keyLength: number = AES_256_CBC_KEY_LENGTH
 ): Buffer {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require('node:crypto').scryptSync(password, salt, keyLength);
+  return scryptSync(password, salt, keyLength);
 }
 
 /**
@@ -698,7 +702,6 @@ export function deriveKeyAsync(
   salt: string | Buffer,
   keyLength: number = AES_256_CBC_KEY_LENGTH
 ): Promise<Buffer> {
-  const { scrypt } = require('node:crypto');
   return new Promise<Buffer>((resolve, reject) => {
     scrypt(password, salt, keyLength, (err: Error | null, key: Buffer) => {
       if (err) reject(err);
@@ -719,10 +722,8 @@ export function encryptAES256CBC(
   encryptionKey: string,
   providedSalt?: string | Buffer
 ): string {
-  // SECURITY: Generate a random 16-byte salt if not provided
-  const salt = providedSalt 
-    ? (typeof providedSalt === 'string' ? Buffer.from(providedSalt, 'hex') : providedSalt)
-    : randomBytes(16);
+  // SECURITY: Always generate a random 16-byte salt per operation.
+  const salt = randomBytes(16);
   
   const key = deriveKeySync(encryptionKey, salt, AES_256_CBC_KEY_LENGTH);
   const iv = randomBytes(AES_256_CBC_IV_LENGTH);
@@ -731,8 +732,7 @@ export function encryptAES256CBC(
   encrypted += cipher.final('hex');
   
   // Format: salt:iv:ciphertext (all hex)
-  const saltHex = typeof providedSalt === 'string' ? providedSalt : salt.toString('hex');
-  return saltHex + ':' + iv.toString('hex') + ':' + encrypted;
+  return salt.toString('hex') + ':' + iv.toString('hex') + ':' + encrypted;
 }
 
 /**
@@ -789,7 +789,7 @@ export function decryptAES256CBC(
 // AES-256-GCM Streaming Functions for Backups
 // ============================================
 
-const AES_256_GCM_IV_LENGTH = 16;
+const AES_256_GCM_IV_LENGTH = 12;
 const AES_256_GCM_AUTH_TAG_LENGTH = 16;
 
 /**

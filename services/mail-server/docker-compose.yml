@@ -3,8 +3,6 @@
 # Enterprise-grade email infrastructure with direct SMTP delivery.
 # All emails are sent directly via SMTP with DKIM signing.
 
-version: '3.8'
-
 services:
   # Outbound Queue Service
   # Handles email sending with retry logic
@@ -14,9 +12,9 @@ services:
       dockerfile: Dockerfile
       target: outbound-queue
     ports:
-      - "50052:50052"  # gRPC
+      - "127.0.0.1:50052:50052"  # gRPC
     environment:
-      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
       - FROM_DOMAIN=apexmail.ee
       - DKIM_SELECTOR=apexmail2026
@@ -30,10 +28,21 @@ services:
       - apexmail
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:50052"]
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
       interval: 30s
       timeout: 10s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # SMTP Edge Server (Inbound)
   # Receives incoming emails on port 25
@@ -45,7 +54,7 @@ services:
     ports:
       - "25:25"     # SMTP
     environment:
-      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
       - HOSTNAME=mail.apexmail.ee
       - MAILSTORE_URL=http://mailstore:50051
@@ -62,6 +71,19 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # Submission Server (Authenticated SMTP)
   # For clients to send mail via port 587
@@ -74,7 +96,7 @@ services:
       - "587:587"   # Submission
       - "465:465"   # SMTPS (TLS)
     environment:
-      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
       - HOSTNAME=mail.apexmail.ee
       - OUTBOUND_URL=http://outbound-queue:50052
@@ -95,6 +117,17 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # Mailstore Service
   # Message storage and retrieval
@@ -104,9 +137,9 @@ services:
       dockerfile: Dockerfile
       target: mailstore
     ports:
-      - "50051:50051"  # gRPC
+      - "127.0.0.1:50051:50051"  # gRPC
     environment:
-      - DATABASE_URL=postgres://apexmail:apexmail@postgres:5432/apexmail_mail
+      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
     depends_on:
       postgres:
@@ -115,19 +148,30 @@ services:
       - apexmail
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
       interval: 30s
       timeout: 10s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
     ports:
-      - "5433:5432"  # Different port to avoid conflicts
+      - "127.0.0.1:5433:5432"  # Different port to avoid conflicts
     environment:
       - POSTGRES_USER=apexmail
-      - POSTGRES_PASSWORD=apexmail
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       - POSTGRES_DB=apexmail_mail
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -140,6 +184,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
 
 networks:
   apexmail:

@@ -3,11 +3,20 @@
  */
 
 import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import type { BillingEnv, BillingContext } from '../app.js';
 
 export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
+
+  const requireAdmin: MiddlewareHandler<BillingEnv> = async (c, next) => {
+    const isAdmin = c.get('isAdmin');
+    if (!isAdmin) {
+      return c.json({ error: 'Admin access required' }, 403);
+    }
+    return next();
+  };
 
   // Get all contracts for tenant
   router.get('/contracts', async (c) => {
@@ -87,7 +96,7 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
   });
 
   // Admin: Create contract
-  router.post('/contracts', async (c) => {
+  router.post('/contracts', requireAdmin, async (c) => {
     const tenantId = c.get('tenantId');
     const body = await c.req.json();
 

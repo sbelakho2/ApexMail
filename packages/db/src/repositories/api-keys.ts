@@ -217,13 +217,15 @@ export class ApiKeysRepository {
 
   async verify(key: string, clientIp?: string): Promise<Result<VerifyApiKeyResult, Error>> {
     const parsed = parseApiKey(key);
-    if (!parsed) {
+    if (!parsed.valid || !parsed.prefix) {
       return Result.ok({
         valid: false,
         apiKey: null,
         reason: 'not_found',
       });
     }
+
+    const prefixes = [parsed.prefix, parsed.legacyPrefix].filter((value): value is string => !!value);
 
     // C-074: Look up by prefix + is_active for efficient retrieval.
     // The WHERE clause is ordered so the btree index on (prefix, is_active)
@@ -256,8 +258,8 @@ export class ApiKeysRepository {
       updated_at: Date;
     }>(
       // FIX-500-041: Select only columns needed for verification instead of SELECT *
-      'SELECT id, tenant_id, name, prefix, key_hash, scopes, rate_limit, expires_at, last_used_at, last_used_ip, usage_count, is_active, metadata, created_at, updated_at FROM api_keys WHERE prefix = $1 AND is_active = true',
-      [parsed.prefix]
+      'SELECT id, tenant_id, name, prefix, key_hash, scopes, rate_limit, expires_at, last_used_at, last_used_ip, usage_count, is_active, metadata, created_at, updated_at FROM api_keys WHERE prefix = ANY($1) AND is_active = true',
+      [prefixes]
     );
 
     if (!result.ok) return result;
@@ -541,67 +543,140 @@ export class ApiKeysRepository {
     tenantId: string,
     options?: { gracePeriodMs?: number }
   ): Promise<Result<ApiKeyWithSecret, Error>> {
-    // 1. Look up the existing key to copy its configuration
-    const existingResult = await this.findById(id, tenantId);
-    if (!existingResult.ok) return existingResult as Result<ApiKeyWithSecret, Error>;
-    if (!existingResult.value) {
-      return Result.err(new Error('API key not found'));
-    }
-    const existing = existingResult.value;
+    const client = await this.db.getClient();
+    try {
+      await client.query('BEGIN');
 
-    // 2. Create the replacement key, inheriting all settings
-    const createResult = await this.create({
-      tenantId,
-      userId: existing.userId ?? undefined,
-      name: `${existing.name} (rotated)`,
-      scopes: existing.scopes,
-      rateLimit: existing.rateLimit,
-      allowedIps: existing.allowedIps ?? undefined,
-      allowedDomains: existing.allowedDomains ?? undefined,
-      expiresAt: existing.expiresAt ?? undefined,
-      metadata: {
-        ...existing.metadata,
-        rotatedFromKeyId: id,
-        rotatedAt: new Date().toISOString(),
-      },
-    });
-    if (!createResult.ok) return createResult;
+      // 1. Look up the existing key to copy its configuration
+      const existingResult = await client.query<{
+        id: string;
+        tenant_id: string;
+        user_id: string | null;
+        name: string;
+        prefix: string;
+        key_hash: string;
+        scopes: ApiKeyScope[];
+        rate_limit: number;
+        allowed_ips: string[] | null;
+        allowed_domains: string[] | null;
+        expires_at: Date | null;
+        last_used_at: Date | null;
+        last_used_ip: string | null;
+        usage_count: number;
+        is_active: boolean;
+        metadata: string;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        'SELECT * FROM api_keys WHERE id = $1 AND tenant_id = $2',
+        [id, tenantId]
+      );
 
-    // 3. Retire the old key — either immediately or after a grace period
-    if (options?.gracePeriodMs && options.gracePeriodMs > 0) {
-      const expiresAt = new Date(Date.now() + options.gracePeriodMs);
-      const updateResult = await this.update(id, { expiresAt }, tenantId);
-      if (!updateResult.ok) {
-        this.logger.warn('Failed to set grace-period expiry on old key during rotation', {
-          oldKeyId: id,
-          newKeyId: createResult.value.id,
-          error: updateResult.error.message,
-        });
-      } else {
-        this.logger.info('API key rotated with grace period', {
-          oldKeyId: id,
-          newKeyId: createResult.value.id,
-          gracePeriodMs: options.gracePeriodMs,
-        });
+      const existingRow = existingResult.rows[0];
+      if (!existingRow) {
+        await client.query('ROLLBACK');
+        return Result.err(new Error('API key not found'));
       }
-    } else {
-      // No grace period — revoke immediately
-      const revokeResult = await this.revoke(id, tenantId);
-      if (!revokeResult.ok) {
-        this.logger.warn('Failed to revoke old key during rotation', {
-          oldKeyId: id,
-          newKeyId: createResult.value.id,
-          error: revokeResult.error.message,
-        });
-      } else {
-        this.logger.info('API key rotated (old key revoked immediately)', {
-          oldKeyId: id,
-          newKeyId: createResult.value.id,
-        });
-      }
-    }
 
-    return createResult;
+      const existing = this.mapRow(existingRow);
+
+      // 2. Create the replacement key, inheriting all settings
+      const { key: secretKey, prefix } = generateApiKey();
+      const keyHash = await hashPassword(secretKey);
+      const now = new Date();
+
+      const createResult = await client.query<{
+        id: string;
+        tenant_id: string;
+        user_id: string | null;
+        name: string;
+        prefix: string;
+        key_hash: string;
+        scopes: ApiKeyScope[];
+        rate_limit: number;
+        allowed_ips: string[] | null;
+        allowed_domains: string[] | null;
+        expires_at: Date | null;
+        last_used_at: Date | null;
+        last_used_ip: string | null;
+        usage_count: number;
+        is_active: boolean;
+        metadata: string;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        `INSERT INTO api_keys (
+          id, tenant_id, user_id, name, prefix, key_hash, scopes,
+          rate_limit, allowed_ips, allowed_domains, expires_at,
+          is_active, metadata, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (id) DO NOTHING
+        RETURNING *`,
+        [
+          generateUuid(),
+          tenantId,
+          existing.userId ?? null,
+          `${existing.name} (rotated)`,
+          prefix,
+          keyHash,
+          existing.scopes,
+          existing.rateLimit,
+          existing.allowedIps ?? null,
+          existing.allowedDomains ?? null,
+          existing.expiresAt ?? null,
+          true,
+          JSON.stringify({
+            ...existing.metadata,
+            rotatedFromKeyId: id,
+            rotatedAt: new Date().toISOString(),
+          }),
+          now,
+          now,
+        ]
+      );
+
+      const createdRow = createResult.rows[0];
+      if (!createdRow) {
+        await client.query('ROLLBACK');
+        return Result.err(new Error('Failed to create rotated API key'));
+      }
+
+      // 3. Retire the old key — either immediately or after a grace period
+      if (options?.gracePeriodMs && options.gracePeriodMs > 0) {
+        const expiresAt = new Date(Date.now() + options.gracePeriodMs);
+        const updateResult = await client.query(
+          `UPDATE api_keys SET expires_at = $3, updated_at = NOW()
+           WHERE id = $1 AND tenant_id = $2
+           RETURNING id`,
+          [id, tenantId, expiresAt]
+        );
+        if ((updateResult.rowCount ?? 0) === 0) {
+          await client.query('ROLLBACK');
+          return Result.err(new Error('Failed to set grace period expiry for old API key'));
+        }
+      } else {
+        const revokeResult = await client.query(
+          `UPDATE api_keys SET is_active = false, updated_at = NOW()
+           WHERE id = $1 AND tenant_id = $2
+           RETURNING id`,
+          [id, tenantId]
+        );
+        if ((revokeResult.rowCount ?? 0) === 0) {
+          await client.query('ROLLBACK');
+          return Result.err(new Error('Failed to revoke old API key during rotation'));
+        }
+      }
+
+      await client.query('COMMIT');
+
+      const apiKey = this.mapRow(createdRow);
+      return Result.ok({ ...apiKey, secretKey });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      return Result.err(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      client.release();
+    }
   }
 
   // FIX-500-255: Add RETURNING id + rowCount check

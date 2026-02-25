@@ -282,7 +282,7 @@ export class SlaCreditsService {
       created_at: Date;
     }>(
       `WITH unapplied_breaches AS (
-        SELECT * FROM slo_breaches
+        SELECT id FROM slo_breaches
         WHERE tenant_id = $1 AND applied_at IS NULL
         ORDER BY created_at ASC
         FOR UPDATE
@@ -362,7 +362,9 @@ export class SlaCreditsService {
       credit_amount: number;
       created_at: Date;
     }>(
-      `SELECT * FROM slo_breaches
+      `SELECT id, tenant_id, slo_name, target, actual, period_start, period_end,
+              credit_percentage, credit_amount, created_at
+       FROM slo_breaches
        WHERE tenant_id = $1 AND applied_at IS NULL
        ORDER BY created_at DESC`,
       [tenantId]

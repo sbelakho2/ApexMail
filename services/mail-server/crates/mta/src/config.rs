@@ -353,7 +353,121 @@ impl MtaConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(default_shutdown_timeout()),
         };
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// #155: Validate all config values to catch misconfiguration early.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let mut errors: Vec<String> = Vec::new();
+
+        // --- ports must be 1..=65535 (already u16, but 0 is invalid) ---
+        let port_checks: &[(&str, u16)] = &[
+            ("inbound.port", self.inbound.port),
+            ("inbound.secure_port", self.inbound.secure_port),
+            ("bounce.port", self.bounce.port),
+            ("feedback.port", self.feedback.port),
+            ("health_port", self.health_port),
+            ("metrics.port", self.metrics.port),
+        ];
+        for (name, val) in port_checks {
+            if *val == 0 {
+                errors.push(format!("{name} must be > 0, got {val}"));
+            }
+        }
+
+        // ports must not collide (among enabled listeners)
+        {
+            let mut active_ports: Vec<(&str, u16)> = Vec::new();
+            if self.inbound.enabled {
+                active_ports.push(("inbound.port", self.inbound.port));
+                if self.inbound.tls.enabled {
+                    active_ports.push(("inbound.secure_port", self.inbound.secure_port));
+                }
+            }
+            if self.bounce.enabled {
+                active_ports.push(("bounce.port", self.bounce.port));
+            }
+            if self.feedback.enabled {
+                active_ports.push(("feedback.port", self.feedback.port));
+            }
+            active_ports.push(("health_port", self.health_port));
+            if self.metrics.enabled {
+                active_ports.push(("metrics.port", self.metrics.port));
+            }
+            for i in 0..active_ports.len() {
+                for j in (i + 1)..active_ports.len() {
+                    let (n1, p1) = active_ports[i];
+                    let (n2, p2) = active_ports[j];
+                    if p1 == p2 {
+                        errors.push(format!(
+                            "Port collision: {n1} and {n2} both use port {p1}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // --- numeric bounds ---
+        if self.database.max_connections == 0 {
+            errors.push("database.max_connections must be > 0".into());
+        }
+        if self.inbound.max_message_size == 0 {
+            errors.push("inbound.max_message_size must be > 0".into());
+        }
+        if self.inbound.max_message_size > 100 * 1024 * 1024 {
+            errors.push(format!(
+                "inbound.max_message_size ({}) exceeds 100 MiB safety limit",
+                self.inbound.max_message_size
+            ));
+        }
+        if self.inbound.max_recipients == 0 {
+            errors.push("inbound.max_recipients must be > 0".into());
+        }
+        if self.rate_limit.enabled {
+            if self.rate_limit.max_connections_per_ip == 0 {
+                errors.push("rate_limit.max_connections_per_ip must be > 0".into());
+            }
+            if self.rate_limit.max_messages_per_connection == 0 {
+                errors.push("rate_limit.max_messages_per_connection must be > 0".into());
+            }
+            if self.rate_limit.max_recipients_per_message == 0 {
+                errors.push("rate_limit.max_recipients_per_message must be > 0".into());
+            }
+        }
+        if self.graceful_shutdown_timeout == 0 {
+            errors.push("graceful_shutdown_timeout must be > 0".into());
+        }
+
+        // --- TLS config coherence ---
+        if self.inbound.tls.enabled {
+            if self.inbound.tls.cert_path.is_none() {
+                errors.push("TLS enabled but tls.cert_path is not set".into());
+            }
+            if self.inbound.tls.key_path.is_none() {
+                errors.push("TLS enabled but tls.key_path is not set".into());
+            }
+        }
+
+        // --- required non-empty strings ---
+        if self.database.connection_string.is_empty() {
+            errors.push("database.connection_string must not be empty".into());
+        }
+        if self.redis.url.is_empty() {
+            errors.push("redis.url must not be empty".into());
+        }
+        if self.inbound.enabled && self.inbound.hostname.is_empty() {
+            errors.push("inbound.hostname must not be empty when inbound is enabled".into());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "MTA configuration validation failed:\n  - {}",
+                errors.join("\n  - ")
+            );
+        }
     }
 }
 

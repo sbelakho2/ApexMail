@@ -17,7 +17,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use mail_proto::generated::outbound_service_server::OutboundServiceServer;
-use crate::dkim::{DkimConfig, DkimSigner};
+use crate::dkim::DkimSigner;
 use crate::queue::{EmailQueue, QueueConfig};
 use crate::service::OutboundServiceImpl;
 use crate::smtp_sender::SmtpSender;
@@ -133,8 +133,19 @@ async fn main() -> Result<()> {
         })
         .await?;
     
-    // Wait for processor to finish
-    processor_handle.await?;
+    // #119: Graceful drain — wait for processor to finish in-flight emails with a timeout
+    info!("Waiting for in-flight emails to drain (up to 30s)...");
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        processor_handle,
+    ).await {
+        Ok(Ok(())) => info!("Queue processor drained cleanly"),
+        Ok(Err(e)) => tracing::warn!("Queue processor task panicked: {}", e),
+        Err(_) => tracing::warn!("Queue processor drain timed out after 30s; some emails may still be in-flight"),
+    }
+    
+    // Close database pool gracefully
+    pool.close().await;
     
     info!("Outbound Queue Service stopped");
     Ok(())

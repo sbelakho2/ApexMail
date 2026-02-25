@@ -72,7 +72,7 @@ describe('ApexMail SDK', () => {
                 expect.objectContaining({
                     method: 'POST',
                     headers: expect.objectContaining({
-                        'Authorization': `Bearer ${VALID_TEST_KEY}`,
+                        'X-API-Key': VALID_TEST_KEY,
                         'Content-Type': 'application/json',
                     }),
                 })

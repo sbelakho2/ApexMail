@@ -2,9 +2,8 @@
 
 use dashmap::DashMap;
 use regex::Regex;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use tracing::debug;
 
 use crate::types::*;
 
@@ -25,14 +24,16 @@ const VELOCITY_THRESHOLD: usize = 3;
 /// Max velocity cache entries.
 const VELOCITY_CACHE_MAX: usize = 500_000;
 
-lazy_static::lazy_static! {
-    /// Combined bot UA regex.
-    static ref BOT_UA_RE: Regex = Regex::new(
+/// Combined bot UA regex.
+static BOT_UA_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
         r"(?i)(bot|crawler|spider|slurp|mediapartners|preview|fetch|scan|check|monitor|wget|curl|python-requests|go-http|java/|ahrefsbot|bingbot|yandexbot|baiduspider|duckduckbot|facebot|ia_archiver|semrushbot|mj12bot|dotbot|petalbot|rogerbot|seznambot|exabot)"
-    ).unwrap();
+    ).unwrap()
+});
 
-    /// Known bot IP prefixes (simplified – GCP/AWS crawlers).
-    static ref KNOWN_BOT_PREFIXES: Vec<&'static str> = vec![
+/// Known bot IP prefixes (simplified – GCP/AWS crawlers).
+static KNOWN_BOT_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "66.249.",   // Googlebot
         "64.233.",   // Google
         "207.46.",   // Bing
@@ -42,18 +43,20 @@ lazy_static::lazy_static! {
         "77.88.",    // Yandex
         "141.8.",    // Yandex
         "17.0.",     // Apple
-    ];
+    ]
+});
 
-    /// Suspicious header patterns.
-    static ref SUSPICIOUS_HEADERS: Vec<&'static str> = vec![
-        "x-forwarded-for",
-        "x-scanner",
-        "x-check",
-        "x-probe",
-    ];
-}
+/// Suspicious header patterns.
+static SUSPICIOUS_HEADERS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec!["x-forwarded-for", "x-scanner", "x-check", "x-probe"]
+});
 
 pub struct BotDetectionService {
+    /// #198: In-memory velocity cache is per-process only.
+    /// For multi-replica deployments, consider using Redis with a sliding-window
+    /// counter (e.g., `bot:velocity:{ip}:{minute}`) for shared state.
+    /// Current in-memory approach is acceptable for single-replica or when
+    /// per-replica velocity detection is sufficient (bots typically target all replicas).
     velocity_cache: Arc<DashMap<String, Vec<Instant>>>,
 }
 

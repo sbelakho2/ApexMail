@@ -1,6 +1,6 @@
 //! Email template CRUD routes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -67,6 +67,24 @@ pub struct RenderResponse {
     pub text: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListTemplatesQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default)]
+    pub cursor: Option<i64>,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn create_template(
@@ -118,14 +136,18 @@ async fn create_template(
 async fn list_templates(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(params): Query<ListTemplatesQuery>,
 ) -> Result<Json<Vec<TemplateResponse>>, ApiError> {
     require_scopes(&auth, &["templates:read"])?;
 
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, TemplateRow>(
         "SELECT id, name, subject, html_body, text_body, version, status, created_at, updated_at
-         FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC",
+         FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
+    .bind(clamp_limit(params.limit, 200))
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -227,17 +249,76 @@ async fn render_template(
     }))
 }
 
+/// Fix #37: HTML-escape variable values to prevent stored XSS.
+/// Fix #38: Build output in single pass instead of O(n×m) replacements.
 fn substitute(template: &str, vars: &serde_json::Map<String, serde_json::Value>) -> String {
-    let mut result = template.to_string();
-    for (key, val) in vars {
-        let placeholder = format!("{{{{{key}}}}}");
-        let replacement = match val {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        result = result.replace(&placeholder, &replacement);
+    use std::borrow::Cow;
+    
+    // Build a lookup map for O(1) variable access
+    let lookup: std::collections::HashMap<&str, Cow<str>> = vars
+        .iter()
+        .map(|(k, v)| {
+            let escaped = match v {
+                serde_json::Value::String(s) => Cow::Owned(html_escape(s)),
+                other => Cow::Owned(html_escape(&other.to_string())),
+            };
+            (k.as_str(), escaped)
+        })
+        .collect();
+    
+    // Single pass through template
+    let mut result = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '{' && chars.peek() == Some(&'{') {
+            chars.next(); // consume second '{'
+            // Read variable name until '}}'
+            let mut var_name = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch == '}' {
+                    chars.next();
+                    if chars.peek() == Some(&'}') {
+                        chars.next();
+                        break;
+                    } else {
+                        var_name.push('}');
+                    }
+                } else {
+                    var_name.push(chars.next().unwrap());
+                }
+            }
+            // Look up and substitute
+            if let Some(replacement) = lookup.get(var_name.as_str()) {
+                result.push_str(replacement);
+            } else {
+                // Keep original placeholder if variable not found
+                result.push_str("{{");
+                result.push_str(&var_name);
+                result.push_str("}}");
+            }
+        } else {
+            result.push(c);
+        }
     }
+    
     result
+}
+
+/// HTML-escape a string to prevent XSS.
+fn html_escape(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 // ─── Row types ─────────────────────────────────────────────────

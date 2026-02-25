@@ -38,7 +38,7 @@ impl Default for SalesConfig {
 impl SalesConfig {
     /// Build a config from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
-        Self {
+        let config = Self {
             enrichment_api_url: std::env::var("ENRICHMENT_API_URL")
                 .unwrap_or_else(|_| "https://enrich.apexmail.ee/v1".into()),
             calendar_sync_interval_secs: std::env::var("CALENDAR_SYNC_INTERVAL")
@@ -57,7 +57,33 @@ impl SalesConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+        };
+        if let Err(err) = config.validate() {
+            panic!("Invalid sales-autopilot config: {err}");
         }
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enrichment_api_url.trim().is_empty() {
+            return Err("ENRICHMENT_API_URL must not be empty".into());
+        }
+        if !(self.enrichment_api_url.starts_with("http://") || self.enrichment_api_url.starts_with("https://")) {
+            return Err("ENRICHMENT_API_URL must be http/https".into());
+        }
+        if self.calendar_sync_interval_secs == 0 {
+            return Err("CALENDAR_SYNC_INTERVAL must be > 0".into());
+        }
+        if self.max_campaigns == 0 {
+            return Err("MAX_CAMPAIGNS must be > 0".into());
+        }
+        if self.port == 0 {
+            return Err("SALES_PORT must be > 0".into());
+        }
+        if self.scraper_rpm == 0 {
+            return Err("SCRAPER_RPM must be > 0".into());
+        }
+        Ok(())
     }
 }
 

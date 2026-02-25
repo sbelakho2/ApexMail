@@ -76,13 +76,13 @@ async function seedTestData(): Promise<void> {
             {
                 id: 'test-user-1',
                 email: 'test@apexmail.test',
-                password: 'testpassword123',
+                password: process.env.E2E_TEST_USER_PASSWORD ?? 'testpassword123',
                 name: 'Test User',
             },
             {
                 id: 'test-admin-1',
                 email: 'admin@apexmail.test',
-                password: 'adminpassword123',
+                password: process.env.E2E_TEST_ADMIN_PASSWORD ?? 'adminpassword123',
                 name: 'Test Admin',
                 role: 'admin',
             },

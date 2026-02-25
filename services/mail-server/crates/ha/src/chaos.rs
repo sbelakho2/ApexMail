@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use sysinfo::System;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -111,9 +111,10 @@ impl ChaosEngineeringService {
         let safety_checks = experiment_config.safety_checks.clone();
         let duration_ms = experiment_config.parameters.duration_ms;
         let metrics_clone = self.metrics.clone();
+        let running_clone = self.running_experiments.clone();
 
         tokio::spawn(async move {
-            Self::monitor_experiment(pool_clone, id, safety_checks, duration_ms, abort_rx, metrics_before, metrics_clone).await;
+            Self::monitor_experiment(pool_clone, id, safety_checks, duration_ms, abort_rx, metrics_before, metrics_clone, running_clone).await;
         });
 
         let experiment = Experiment {
@@ -145,6 +146,7 @@ impl ChaosEngineeringService {
         mut abort_rx: tokio::sync::watch::Receiver<bool>,
         metrics_before: MetricSnapshot,
         metrics_collector: Option<Arc<MetricsCollector>>,
+        running_experiments: Arc<RwLock<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
     ) {
         let start = std::time::Instant::now();
         let duration = std::time::Duration::from_millis(duration_ms);
@@ -171,11 +173,14 @@ impl ChaosEngineeringService {
                                     threshold = check.threshold,
                                     "Safety check violated — aborting experiment"
                                 );
-                                let _ = Self::complete_experiment_static(
+                                if let Err(e) = Self::complete_experiment_static(
                                     &pool, experiment_id, ExperimentStatus::Aborted,
                                     Some(metrics_before.clone()), Some(current), None,
                                     vec![format!("Safety check '{}' violated: {} {} {}", check.name, value, check.operator, check.threshold)],
-                                ).await;
+                                ).await {
+                                    error!(experiment_id = %experiment_id, error = %e, "Failed to record experiment abort after safety violation");
+                                }
+                                Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
                                 return;
                             }
                         }
@@ -184,27 +189,41 @@ impl ChaosEngineeringService {
                     // Check duration
                     if start.elapsed() >= duration {
                         let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
-                        let _ = Self::complete_experiment_static(
+                        if let Err(e) = Self::complete_experiment_static(
                             &pool, experiment_id, ExperimentStatus::Completed,
                             Some(metrics_before), Some(current), Some(after),
                             vec![],
-                        ).await;
+                        ).await {
+                            error!(experiment_id = %experiment_id, error = %e, "Failed to record experiment completion");
+                        }
+                        Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
                         return;
                     }
                 }
                 _ = abort_rx.changed() => {
                     if *abort_rx.borrow() {
                         let after = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
-                        let _ = Self::complete_experiment_static(
+                        if let Err(e) = Self::complete_experiment_static(
                             &pool, experiment_id, ExperimentStatus::Aborted,
                             Some(metrics_before), None, Some(after),
                             vec!["Manually aborted".into()],
-                        ).await;
+                        ).await {
+                            error!(experiment_id = %experiment_id, error = %e, "Failed to record manual experiment abort");
+                        }
+                        Self::cleanup_running_experiment(&running_experiments, experiment_id).await;
                         return;
                     }
                 }
             }
         }
+    }
+
+    async fn cleanup_running_experiment(
+        running_experiments: &Arc<RwLock<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
+        experiment_id: Uuid,
+    ) {
+        let mut running = running_experiments.write().await;
+        running.remove(&experiment_id);
     }
 
     async fn complete_experiment_static(

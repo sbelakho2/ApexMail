@@ -8,8 +8,8 @@ BEGIN;
 -- ═══════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS campaigns (
-    id UUID PRIMARY KEY,
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     subject VARCHAR(998),
     list_id UUID,
@@ -34,7 +34,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_campaigns_name_tenant ON campaigns(tenant_
 
 CREATE TABLE IF NOT EXISTS contacts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email VARCHAR(320) NOT NULL,
     first_name VARCHAR(255),
     last_name VARCHAR(255),
@@ -56,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_list ON contacts(tenant_id, list_id) WHE
 
 CREATE TABLE IF NOT EXISTS automations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     trigger_type VARCHAR(50) NOT NULL DEFAULT 'manual'
         CHECK (trigger_type IN ('on_subscribe', 'on_event', 'on_tag', 'on_date', 'on_inactivity', 'on_link_click', 'manual')),

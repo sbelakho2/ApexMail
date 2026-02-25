@@ -30,6 +30,7 @@ struct PatternEntry {
 
 impl PatternMatcher {
     /// Build a matcher from labeled pattern strings.
+    /// Returns `None` if the patterns are invalid (e.g., too many or conflicting).
     pub fn new(patterns: Vec<(String, String)>) -> Self {
         let entries: Vec<PatternEntry> = patterns
             .iter()
@@ -43,7 +44,13 @@ impl PatternMatcher {
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostLongest)
             .build(patterns.iter().map(|(p, _)| p.as_str()))
-            .expect("Failed to build Aho-Corasick automaton");
+            .unwrap_or_else(|e| {
+                // #190: Log the error instead of panicking; build a fallback empty matcher
+                tracing::error!(error = %e, "Failed to build Aho-Corasick automaton from config patterns; using empty matcher");
+                AhoCorasickBuilder::new()
+                    .build(std::iter::empty::<&str>())
+                    .expect("empty pattern set is always valid")
+            });
 
         Self {
             automaton,

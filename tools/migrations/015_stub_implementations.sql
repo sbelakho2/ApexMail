@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_scim_groups_scim_id ON scim_groups(scim_id);
 CREATE TABLE IF NOT EXISTS scim_group_members (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     group_id        UUID         NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
-    user_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id         VARCHAR(26)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tenant_id       VARCHAR(26)  NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     display         VARCHAR(255),
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

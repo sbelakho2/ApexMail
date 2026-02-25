@@ -1,18 +1,23 @@
 //! Domain management routes.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use dns_resolver::DnsLookup;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
+
+static DNS_LOOKUP: LazyLock<DnsLookup> = LazyLock::new(|| {
+    DnsLookup::new().expect("DNS resolver initialization failed")
+});
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -63,6 +68,24 @@ pub struct VerifyResponse {
     pub dmarc_verified: bool,
     pub return_path_verified: bool,
     pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListDomainsQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default)]
+    pub cursor: Option<i64>,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -129,14 +152,18 @@ async fn create_domain(
 async fn list_domains(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(params): Query<ListDomainsQuery>,
 ) -> Result<Json<Vec<DomainResponse>>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, DomainRow>(
         "SELECT id, name, status, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
-         FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC",
+         FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
+    .bind(clamp_limit(params.limit, 200))
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -199,16 +226,13 @@ async fn verify_domain(
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
     // Perform real DNS lookups
-    let dns = DnsLookup::new().map_err(|e| {
-        warn!("Failed to create DNS resolver: {}", e);
-        ApiError::Internal("DNS resolver initialization failed".into())
-    })?;
+    let dns = &*DNS_LOOKUP;
 
     // Check SPF record
     let spf = match dns.lookup_spf(&row.name).await {
         Ok(Some(spf_record)) => {
             // Verify our include is present
-            spf_record.raw().contains("include:spf.apexmail.io")
+            spf_record.raw.contains("include:spf.apexmail.io")
         }
         Ok(None) => false,
         Err(e) => {

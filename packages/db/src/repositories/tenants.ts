@@ -11,7 +11,7 @@ export interface Tenant {
   id: string;
   name: string;
   slug: string;
-  plan: 'free' | 'growth' | 'scale' | 'enterprise';
+  plan: 'free' | 'starter' | 'growth' | 'pro' | 'scale' | 'payg' | 'enterprise';
   status: 'active' | 'suspended' | 'pending';
   settings: TenantSettings;
   metadata: Record<string, unknown>;

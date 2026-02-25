@@ -107,9 +107,28 @@ impl SdkManager {
         requested_api_version: &str,
     ) -> Result<bool, DevExError> {
         let info = self.get_sdk_info(language)?;
-        // Simple check — SDK targets exactly the requested version or newer.
-        Ok(info.api_version == requested_api_version || info.api_version > requested_api_version.to_string())
+        let sdk_version = parse_api_version(&info.api_version).ok_or_else(|| {
+            DevExError::Validation(format!("Invalid SDK API version: {}", info.api_version))
+        })?;
+        let requested_version = parse_api_version(requested_api_version).ok_or_else(|| {
+            DevExError::Validation(format!(
+                "Invalid requested API version: {}",
+                requested_api_version
+            ))
+        })?;
+
+        Ok(sdk_version >= requested_version)
     }
+}
+
+fn parse_api_version(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('-');
+    let year: u32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) {
+        return None;
+    }
+    Some((year, month))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -140,18 +140,19 @@ async fn dashboard(
     .fetch_one(&state.db)
     .await?;
 
-    let total_sent = row.total_sent.max(1);
+    // Fix #46: Handle zero sent properly - return 0 rates instead of artificial 1
+    let total_sent = row.total_sent;
     let total_delivered = row.total_delivered;
 
     Ok(Json(DashboardResponse {
-        total_sent: row.total_sent,
+        total_sent,
         total_delivered,
         total_bounced: row.total_bounced,
         total_opened: events.opened,
         total_clicked: events.clicked,
-        delivery_rate: total_delivered as f64 / total_sent as f64,
-        open_rate: events.opened as f64 / total_delivered.max(1) as f64,
-        click_rate: events.clicked as f64 / total_delivered.max(1) as f64,
+        delivery_rate: if total_sent > 0 { total_delivered as f64 / total_sent as f64 } else { 0.0 },
+        open_rate: if total_delivered > 0 { events.opened as f64 / total_delivered as f64 } else { 0.0 },
+        click_rate: if total_delivered > 0 { events.clicked as f64 / total_delivered as f64 } else { 0.0 },
     }))
 }
 
@@ -165,16 +166,28 @@ async fn volume(
     let from = params.from.unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
     let to = params.to.unwrap_or_else(Utc::now);
 
-    let rows = sqlx::query_as::<_, VolumeRow>(
+    // Fix #42: Map interval to valid SQL date_trunc unit
+    let interval_unit = match params.interval.as_str() {
+        "hour" => "hour",
+        "week" => "week",
+        "month" => "month",
+        _ => "day", // default to day
+    };
+
+    // Use parameterized interval (safe from SQL injection as it's validated above)
+    let query = format!(
         "SELECT
-            date_trunc('day', created_at) as day,
+            date_trunc('{}', created_at) as day,
             COUNT(*) as sent,
             COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
             COUNT(*) FILTER (WHERE status = 'bounced') as bounced
          FROM messages
          WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3
          GROUP BY day ORDER BY day",
-    )
+        interval_unit
+    );
+
+    let rows = sqlx::query_as::<_, VolumeRow>(&query)
     .bind(auth.tenant_id)
     .bind(from)
     .bind(to)
@@ -317,12 +330,37 @@ async fn export(
         .execute(&state.db)
         .await?;
 
-    // Spawn background task to process the export
+    // Fix #44: Spawn background task with catch_unwind to handle panics properly.
     let db = state.db.clone();
     let tenant_id = auth.tenant_id;
     tokio::spawn(async move {
-        if let Err(e) = process_analytics_export(db, job_id, tenant_id, from, to, format).await {
-            tracing::error!(job_id = %job_id, error = %e, "Export job failed");
+        let result = std::panic::AssertUnwindSafe(
+            process_analytics_export(db.clone(), job_id, tenant_id, from, to, format)
+        );
+        match futures::FutureExt::catch_unwind(result).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => {
+                let err_msg = e.to_string();
+                tracing::error!(job_id = %job_id, error = %err_msg, "Export job failed");
+                // Mark job as failed
+                let _ = sqlx::query(
+                    "UPDATE export_jobs SET status = 'failed', error_message = $1, completed_at = NOW() WHERE id = $2"
+                )
+                .bind(&err_msg)
+                .bind(job_id)
+                .execute(&db)
+                .await;
+            },
+            Err(_panic) => {
+                tracing::error!(job_id = %job_id, "Export job panicked");
+                // Mark job as failed due to panic
+                let _ = sqlx::query(
+                    "UPDATE export_jobs SET status = 'failed', error_message = 'internal error (panic)', completed_at = NOW() WHERE id = $1"
+                )
+                .bind(job_id)
+                .execute(&db)
+                .await;
+            }
         }
     });
 
@@ -404,7 +442,7 @@ async fn process_analytics_export(
     // Upload to S3 (using object store pattern)
     let object_key = format!("exports/{}/{}.{}", tenant_id, job_id, extension);
     let download_url = upload_export_to_storage(&object_key, &content, content_type).await?;
-    let expires_at = Utc::now() + chrono::Duration::hours(24);
+    let expires_at = Utc::now() + TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero());
 
     // Update job as completed
     sqlx::query(
@@ -430,11 +468,26 @@ async fn process_analytics_export(
     Ok(())
 }
 
+/// Fix #43: Sanitize value for CSV to prevent formula injection.
+/// Prefixes dangerous characters with a single quote.
 fn escape_csv(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let trimmed = s.trim();
+    // CSV injection prevention: prefix = + - @ with single quote
+    let needs_prefix = matches!(
+        trimmed.chars().next(),
+        Some('=' | '+' | '-' | '@' | '\t' | '\r')
+    );
+    
+    let sanitized = if needs_prefix {
+        format!("'{}", trimmed)
     } else {
-        s.to_string()
+        trimmed.to_string()
+    };
+    
+    if sanitized.contains(',') || sanitized.contains('"') || sanitized.contains('\n') {
+        format!("\"{}\"" , sanitized.replace('"', "\"\""))
+    } else {
+        sanitized
     }
 }
 
@@ -443,9 +496,24 @@ async fn upload_export_to_storage(key: &str, content: &[u8], _content_type: &str
     // For now, generate a presigned-style URL
     // The actual implementation would use object_store crate
 
-    // Create local file for development/testing
-    let export_dir = std::path::PathBuf::from("/tmp/apexmail-exports");
+    // Fix #45: Use secure directory with proper permissions instead of /tmp
+    let export_dir = std::env::var("EXPORT_STORAGE_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            // Use XDG data dir or fallback to a more secure location
+            dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/apexmail"))
+                .join("exports")
+        });
     tokio::fs::create_dir_all(&export_dir).await?;
+    
+    // Set restrictive permissions on the directory (owner only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&export_dir, perms).ok();
+    }
 
     let file_path = export_dir.join(key.replace('/', "_"));
     tokio::fs::write(&file_path, content).await?;

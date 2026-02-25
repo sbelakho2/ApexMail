@@ -57,7 +57,7 @@ export default defineConfig({
     // Shared settings for all the projects below
     use: {
         // Base URL to use in actions like `await page.goto('/')`
-        baseURL: process.env.BASE_URL || 'http://localhost:3000',
+        baseURL: process.env.BASE_URL || 'http://127.0.0.1:3010',
         
         // Collect trace when retrying the failed test
         trace: 'on-first-retry',
@@ -181,18 +181,32 @@ export default defineConfig({
     outputDir: 'reports/artifacts',
     
     // Run local dev server before starting the tests
-    webServer: process.env.CI ? undefined : {
-        command: 'pnpm --filter @apexmail/web dev',
-        url: 'http://localhost:3000',
-        reuseExistingServer: !process.env.CI,
-        timeout: 120000,
-        env: {
-            ...process.env,
-            E2E_TEST_MODE: 'true',
-            E2E_BYPASS_KEY: process.env.E2E_BYPASS_KEY || 'apexmail-e2e-bypass-key',
-            SESSION_SECRET: process.env.SESSION_SECRET || 'test-web-session-secret',
+    webServer: process.env.CI ? undefined : [
+        {
+            command: 'node ./src/visual/mock-api-server.cjs',
+            url: 'http://127.0.0.1:3001/health',
+            reuseExistingServer: true,
+            timeout: 60000,
+            env: {
+                ...process.env,
+                MOCK_API_PORT: '3001',
+            },
         },
-    },
+        {
+            command: 'pnpm --filter @apexmail/web exec next dev -p 3010',
+            url: process.env.BASE_URL || 'http://127.0.0.1:3010',
+            reuseExistingServer: false,
+            timeout: 120000,
+            env: {
+                ...process.env,
+                BASE_URL: process.env.BASE_URL || 'http://127.0.0.1:3010',
+                E2E_TEST_MODE: 'true',
+                E2E_BYPASS_KEY: process.env.E2E_BYPASS_KEY || 'apexmail-e2e-bypass-key',
+                SESSION_SECRET: process.env.SESSION_SECRET || 'test-web-session-secret',
+                API_URL: 'http://127.0.0.1:3001',
+            },
+        },
+    ],
     
     // Global setup/teardown
     globalSetup: './src/e2e/global-setup.ts',

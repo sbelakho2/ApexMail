@@ -3,11 +3,13 @@
  */
 
 import { Hono } from 'hono';
+import { ZodError } from 'zod';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
-import { createDatabase, DatabasePool } from '@apexmail/db';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { ApiKeysRepository, createDatabase, DatabasePool } from '@apexmail/db';
 import { Redis } from 'ioredis';
 import { config, loadConfig } from './config.js';
 import {
@@ -137,7 +139,8 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
       await redis.ping();
       return c.json({ status: 'ready' });
     } catch (error) {
-      return c.json({ status: 'not_ready', error: String(error) }, 503);
+      console.error('Readiness check failed:', error);
+      return c.json({ status: 'not_ready' }, 503);
     }
   });
 
@@ -156,7 +159,8 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
     const token = authHeader.slice(7);
 
     // Verify token (in production, verify JWT or API key)
-    const tokenResult = await verifyToken(ctx, token);
+    const clientIp = getClientIp(c.req.header('x-forwarded-for'), c.req.header('x-real-ip'));
+    const tokenResult = await verifyToken(ctx, token, clientIp);
 
     if (!tokenResult.valid) {
       return c.json({ error: 'Invalid or expired token' }, 401);
@@ -193,8 +197,8 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   app.onError((err, c) => {
     console.error('Billing API Error:', err);
 
-    if (err.name === 'ZodError') {
-      return c.json({ error: 'Validation error', details: err }, 400);
+    if (err instanceof ZodError) {
+      return c.json({ error: 'Validation error', fields: err.issues.map((i) => ({ path: i.path, message: i.message })) }, 400);
     }
 
     return c.json({ error: 'Internal server error' }, 500);
@@ -216,34 +220,27 @@ interface TokenResult {
   adminId?: string;
 }
 
-async function verifyToken(ctx: BillingContext, token: string): Promise<TokenResult> {
+async function verifyToken(ctx: BillingContext, token: string, clientIp?: string): Promise<TokenResult> {
   // Check if it's an API key
   if (token.startsWith('am_')) {
-    const result = await ctx.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string;
-      scopes: string[];
-      admin_access: boolean;
-    }>(
-      `SELECT ak.id, ak.tenant_id, ak.user_id, ak.scopes, t.admin_access
-       FROM api_keys ak
-       JOIN tenants t ON ak.tenant_id = t.id
-       WHERE ak.key_hash = $1 AND ak.revoked_at IS NULL AND ak.expires_at > NOW()`,
-      [hashApiKey(token)]
-    );
-
-    if (!result.ok || result.value.rows.length === 0) {
+    const apiKeysRepo = new ApiKeysRepository(ctx.db);
+    const verifyResult = await apiKeysRepo.verify(token, clientIp);
+    if (!verifyResult.ok || !verifyResult.value.valid || !verifyResult.value.apiKey) {
       return { valid: false, userId: '', isAdmin: false };
     }
 
-    const row = result.value.rows[0]!;
+    const apiKey = verifyResult.value.apiKey;
+    const tenantResult = await ctx.db.query<{ admin_access: boolean }>(
+      'SELECT admin_access FROM tenants WHERE id = $1',
+      [apiKey.tenantId]
+    );
+    const adminAccess = tenantResult.ok && tenantResult.value.rows[0]?.admin_access === true;
     return {
       valid: true,
-      userId: row.user_id,
-      tenantId: row.tenant_id,
-      isAdmin: row.admin_access === true,
-      adminId: row.admin_access ? row.user_id : undefined,
+      userId: apiKey.userId ?? apiKey.id,
+      tenantId: apiKey.tenantId,
+      isAdmin: adminAccess,
+      adminId: adminAccess ? (apiKey.userId ?? apiKey.id) : undefined,
     };
   }
 
@@ -267,10 +264,14 @@ async function verifyToken(ctx: BillingContext, token: string): Promise<TokenRes
   }
 }
 
-function hashApiKey(key: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const crypto = require('crypto');
-  return crypto.createHash('sha256').update(key).digest('hex');
+function getClientIp(xForwardedFor?: string | null, xRealIp?: string | null): string | undefined {
+  if (xForwardedFor) {
+    return xForwardedFor.split(',')[0]?.trim();
+  }
+  if (xRealIp) {
+    return xRealIp.trim();
+  }
+  return undefined;
 }
 
 interface JwtPayload {
@@ -300,17 +301,14 @@ function verifyJwt(token: string): JwtPayload | null {
     }
 
     // Get JWT secret from config - MUST be set in production
-    const jwtSecret = process.env.JWT_SECRET;
+    const jwtSecret = config.jwtSecret;
     if (!jwtSecret) {
       console.error('[JWT] JWT_SECRET not configured');
       return null;
     }
 
     // Compute expected signature
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const crypto = require('crypto');
-    const expectedSignature = crypto
-      .createHmac('sha256', jwtSecret)
+    const expectedSignature = createHmac('sha256', jwtSecret)
       .update(`${headerB64}.${payloadB64}`)
       .digest('base64url');
 
@@ -319,7 +317,7 @@ function verifyJwt(token: string): JwtPayload | null {
     const expectedBuffer = Buffer.from(expectedSignature);
     
     if (sigBuffer.length !== expectedBuffer.length || 
-        !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+        !timingSafeEqual(sigBuffer, expectedBuffer)) {
       console.error('[JWT] Signature verification failed');
       return null;
     }

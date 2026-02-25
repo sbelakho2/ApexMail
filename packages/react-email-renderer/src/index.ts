@@ -84,6 +84,9 @@ const ALLOWED_MODULES: Record<string, unknown> = {
   '@react-email/tailwind': ReactEmailComponents,
 };
 
+const MAX_TEMPLATE_BYTES = 1024 * 1024;
+const MAX_RENDERED_BYTES = 5 * 1024 * 1024;
+
 // ── Core renderer ──────────────────────────────────────────────────────────────
 
 /**
@@ -118,6 +121,12 @@ export async function renderReactEmailTemplate(
       logLevel: 'silent',
     });
     transpiledCode = result.code;
+    if (Buffer.byteLength(transpiledCode, 'utf8') > MAX_TEMPLATE_BYTES) {
+      throw new ReactEmailRenderError(
+        'Template size exceeds the maximum allowed size.',
+        'TEMPLATE_TOO_LARGE',
+      );
+    }
   } catch (err) {
     throw new ReactEmailRenderError(
       `JSX transpilation failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -185,6 +194,12 @@ export async function renderReactEmailTemplate(
       props,
     );
     html = await render(element, { pretty });
+    if (Buffer.byteLength(html, 'utf8') > MAX_RENDERED_BYTES) {
+      throw new ReactEmailRenderError(
+        'Rendered output exceeds the maximum allowed size.',
+        'RENDER_OUTPUT_TOO_LARGE',
+      );
+    }
   } catch (err) {
     throw new ReactEmailRenderError(
       `React rendering failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -222,6 +237,12 @@ function htmlToPlainText(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, ' ')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
+      String.fromCodePoint(parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, num) =>
+      String.fromCodePoint(parseInt(num, 10)),
+    )
     // Collapse multiple blank lines to max two
     .replace(/\n{3,}/g, '\n\n')
     // Trim leading/trailing whitespace
@@ -232,13 +253,11 @@ function htmlToPlainText(html: string): string {
 
 export class ReactEmailRenderError extends Error {
   public readonly code: string;
-  public readonly cause: unknown;
 
   constructor(message: string, code: string, cause?: unknown) {
-    super(message);
+    super(message, cause ? { cause } : undefined);
     this.name = 'ReactEmailRenderError';
     this.code = code;
-    this.cause = cause;
   }
 }
 

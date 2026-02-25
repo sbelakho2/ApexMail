@@ -37,6 +37,22 @@ impl Default for DnsConfig {
 }
 
 impl DnsConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cache_ttl_secs == 0 {
+            return Err("cache_ttl_secs must be > 0".into());
+        }
+        if self.max_cache_entries == 0 {
+            return Err("max_cache_entries must be > 0".into());
+        }
+        if self.negative_ttl_secs == 0 {
+            return Err("negative_ttl_secs must be > 0".into());
+        }
+        if self.query_timeout_ms == 0 {
+            return Err("query_timeout_ms must be > 0".into());
+        }
+        Ok(())
+    }
+
     pub fn cache_ttl(&self) -> Duration {
         Duration::from_secs(self.cache_ttl_secs)
     }

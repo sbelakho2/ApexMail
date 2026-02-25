@@ -3,7 +3,7 @@
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::config::CompactionConfig;
 use crate::types::*;
@@ -13,6 +13,8 @@ pub struct CompactionWorker {
     redis: deadpool_redis::Pool,
     config: CompactionConfig,
     storage_path: String,
+    /// #201: Stores the unique owner value for the distributed lock.
+    lock_owner: tokio::sync::Mutex<Option<String>>,
 }
 
 impl CompactionWorker {
@@ -27,6 +29,7 @@ impl CompactionWorker {
             redis,
             config,
             storage_path,
+            lock_owner: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -78,7 +81,7 @@ impl CompactionWorker {
             }
 
             let count = rows.len() as i64;
-            let (bytes, batch_data) = self.write_jsonl_batch(&rows)?;
+            let (bytes, batch_data) = self.write_jsonl_batch(&rows).await?;
             hasher.update(&batch_data);
             total_bytes += bytes;
 
@@ -116,7 +119,8 @@ impl CompactionWorker {
     }
 
     /// Serialize batch of events to JSONL and write to storage path.
-    fn write_jsonl_batch(&self, rows: &[EventRow]) -> anyhow::Result<(u64, Vec<u8>)> {
+    /// #182: Use tokio::task::spawn_blocking to avoid blocking the Tokio runtime.
+    async fn write_jsonl_batch(&self, rows: &[EventRow]) -> anyhow::Result<(u64, Vec<u8>)> {
         let mut buf = Vec::new();
         for row in rows {
             let line = serde_json::to_vec(row)?;
@@ -127,15 +131,19 @@ impl CompactionWorker {
         if let Some(first) = rows.first() {
             let date = first.timestamp.format("%Y/%m");
             let dir = format!("{}/{}/{}", self.storage_path, first.tenant_id, date);
-            std::fs::create_dir_all(&dir)?;
-
             let filename = format!(
                 "{}/events_{}.jsonl",
                 dir,
                 Utc::now().timestamp_millis()
             );
-            std::fs::write(&filename, &buf)?;
-            debug!("Wrote {filename}");
+            let buf_clone = buf.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(&filename, &buf_clone)?;
+                Ok(())
+            })
+            .await??;
+            debug!("Wrote cold storage batch ({} bytes)", buf.len());
         }
 
         let len = buf.len() as u64;
@@ -143,75 +151,101 @@ impl CompactionWorker {
     }
 
     /// Remove cold storage files older than cold_retention_days.
+    /// #182: Use spawn_blocking to avoid blocking async context.
     async fn cleanup_cold_storage(&self) -> anyhow::Result<()> {
         let cutoff = Utc::now() - Duration::days(self.config.cold_retention_days as i64);
         let cutoff_year_month = cutoff.format("%Y/%m").to_string();
+        let storage_path = self.storage_path.clone();
 
         info!("Cold storage cleanup: removing files before {cutoff_year_month}");
 
-        // Walk the storage directory and remove old year/month dirs
-        if let Ok(entries) = std::fs::read_dir(&self.storage_path) {
-            for entry in entries.flatten() {
-                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                    self.cleanup_tenant_dir(&entry.path(), &cutoff_year_month)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn cleanup_tenant_dir(
-        &self,
-        tenant_dir: &std::path::Path,
-        cutoff_ym: &str,
-    ) -> anyhow::Result<()> {
-        if let Ok(years) = std::fs::read_dir(tenant_dir) {
-            for year_entry in years.flatten() {
-                if let Ok(months) = std::fs::read_dir(year_entry.path()) {
-                    for month_entry in months.flatten() {
-                        let year_name = year_entry
-                            .file_name()
-                            .to_string_lossy()
-                            .to_string();
-                        let month_name = month_entry
-                            .file_name()
-                            .to_string_lossy()
-                            .to_string();
-                        let ym = format!("{year_name}/{month_name}");
-                        if ym.as_str() < cutoff_ym {
-                            info!("Removing old cold storage: {}", month_entry.path().display());
-                            std::fs::remove_dir_all(month_entry.path())?;
-                        }
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            if let Ok(entries) = std::fs::read_dir(&storage_path) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        cleanup_tenant_dir_sync(&entry.path(), &cutoff_year_month)?;
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await?
     }
 
     /// Acquire distributed lock via Redis SET NX EX.
+    /// #201: Store a unique owner value so release_lock only deletes our own lock.
     async fn acquire_lock(&self, key: &str) -> anyhow::Result<bool> {
+        let owner = format!("{}:{}", std::process::id(), Utc::now().timestamp_millis());
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let result: Option<String> = redis::cmd("SET")
             .arg(key)
-            .arg("locked")
+            .arg(&owner)
             .arg("NX")
             .arg("EX")
             .arg(3600_u64)
             .query_async(&mut *conn)
             .await?;
+        if result.is_some() {
+            // Store owner so release_lock can verify
+            self.lock_owner.lock().await.replace(owner);
+        }
         Ok(result.is_some())
     }
 
+    /// Release lock only if we still own it (compare-and-delete via Lua script).
     async fn release_lock(&self, key: &str) -> anyhow::Result<()> {
+        let owner = self.lock_owner.lock().await.take();
+        let owner = match owner {
+            Some(o) => o,
+            None => return Ok(()), // We never acquired the lock
+        };
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        redis::cmd("DEL")
+        // Atomic compare-and-delete
+        let script = r#"
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('DEL', KEYS[1])
+            else
+                return 0
+            end
+        "#;
+        let _: i64 = redis::cmd("EVAL")
+            .arg(script)
+            .arg(1i32)
             .arg(key)
-            .query_async::<()>(&mut *conn)
+            .arg(&owner)
+            .query_async(&mut *conn)
             .await?;
         Ok(())
     }
+}
+
+/// Free-standing directory cleanup (used inside spawn_blocking).
+fn cleanup_tenant_dir_sync(
+    tenant_dir: &std::path::Path,
+    cutoff_ym: &str,
+) -> anyhow::Result<()> {
+    if let Ok(years) = std::fs::read_dir(tenant_dir) {
+        for year_entry in years.flatten() {
+            if let Ok(months) = std::fs::read_dir(year_entry.path()) {
+                for month_entry in months.flatten() {
+                    let year_name = year_entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_string();
+                    let month_name = month_entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_string();
+                    let ym = format!("{year_name}/{month_name}");
+                    if ym.as_str() < cutoff_ym {
+                        info!("Removing old cold storage: {}", month_entry.path().display());
+                        std::fs::remove_dir_all(month_entry.path())?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compute SHA-256 checksum for data.

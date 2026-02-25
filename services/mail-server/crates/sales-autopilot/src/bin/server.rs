@@ -22,7 +22,14 @@ async fn main() {
     let cfg = SalesConfig::from_env();
     tracing::info!(port = cfg.port, max_campaigns = cfg.max_campaigns, "starting sales-autopilot");
 
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/apexmail".into());
+    let db = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("Failed to connect to database");
+
     let state = AppState {
+        db,
         crm: CrmService::new(),
         enrichment: EnrichmentService::new(&cfg.enrichment_api_url),
         campaigns: CampaignManager::new(cfg.max_campaigns),
@@ -32,7 +39,15 @@ async fn main() {
 
     let app = routes::router(state);
     let addr = format!("0.0.0.0:{}", cfg.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(error = %err, addr = %addr, "failed to bind listener");
+            return;
+        }
+    };
     tracing::info!(addr = %addr, "listening");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!(error = %err, "server error");
+    }
 }

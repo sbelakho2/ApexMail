@@ -11,7 +11,7 @@ class ApexMailException extends \RuntimeException
         private readonly int    $statusCode = 0,
         private readonly ?string $apiCode   = null,
     ) {
-        parent::__construct($message);
+        parent::__construct($message, $statusCode);
     }
 
     public function getStatusCode(): int     { return $this->statusCode; }

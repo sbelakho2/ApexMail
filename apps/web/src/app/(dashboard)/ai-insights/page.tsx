@@ -33,8 +33,8 @@ export default function AIInsightsPage() {
 
         // Fetch both dashboard stats and AI insight scores in parallel
         Promise.all([
-            fetch('/api/v1/analytics/dashboard').then(r => r.ok ? r.json() : null).catch(() => null),
-            fetch('/api/v1/analytics/ai/insights').then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch('/v1/analytics/dashboard').then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch('/v1/analytics/ai/insights').then(r => r.ok ? r.json() : null).catch(() => null),
         ]).then(([dashboardJson, aiJson]) => {
             // ── AI Scores ──
             if (aiJson?.insights?.scores) {

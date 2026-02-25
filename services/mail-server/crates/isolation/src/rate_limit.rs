@@ -29,43 +29,45 @@ impl RateLimitService {
         let redis_key = format!("{}:{}", prefix, key);
         let now = Utc::now();
         let window_start = now - Duration::milliseconds(config.window_ms);
-        let now_ms = now.timestamp_millis() as f64;
-        let window_start_ms = window_start.timestamp_millis() as f64;
+        let now_ms = now.timestamp_millis() as i64;
+        let window_start_ms = window_start.timestamp_millis() as i64;
         let member = format!("{}:{}", now_ms, uuid::Uuid::new_v4());
 
         let mut conn = self.redis.get().await?;
 
-        // Atomic: remove old entries, count, add new
-        redis::pipe()
-            .atomic()
-            .cmd("ZREMRANGEBYSCORE")
-            .arg(&redis_key)
-            .arg("-inf")
-            .arg(window_start_ms)
-            .ignore()
-            .cmd("ZCARD")
-            .arg(&redis_key)
-            .cmd("ZADD")
-            .arg(&redis_key)
+        let lua = r#"
+            local key = KEYS[1]
+            local now = tonumber(ARGV[1])
+            local windowStart = tonumber(ARGV[2])
+            local maxRequests = tonumber(ARGV[3])
+            local member = ARGV[4]
+            local windowMs = tonumber(ARGV[5])
+
+            redis.call('ZREMRANGEBYSCORE', key, '-inf', windowStart)
+            local count = tonumber(redis.call('ZCARD', key))
+            if count >= maxRequests then
+                redis.call('PEXPIRE', key, windowMs)
+                return {0, count}
+            end
+
+            redis.call('ZADD', key, now, member)
+            redis.call('PEXPIRE', key, windowMs)
+            return {1, count + 1}
+        "#;
+
+        let result: Vec<i64> = redis::Script::new(lua)
+            .key(&redis_key)
             .arg(now_ms)
+            .arg(window_start_ms)
+            .arg(config.max_requests)
             .arg(&member)
-            .ignore()
-            .cmd("PEXPIRE")
-            .arg(&redis_key)
             .arg(config.window_ms)
-            .ignore()
-            .query_async::<Vec<i64>>(&mut *conn)
+            .invoke_async(&mut *conn)
             .await?;
 
-        // Re-fetch count after add
-        let count: i64 = conn.zcard(&redis_key).await?;
+        let allowed = result.first().copied().unwrap_or(0) == 1;
+        let count = result.get(1).copied().unwrap_or(0);
         let reset_at = now + Duration::milliseconds(config.window_ms);
-
-        let allowed = count <= config.max_requests;
-        if !allowed {
-            // Remove the just-added member if over limit
-            let _: () = conn.zrem(&redis_key, &member).await?;
-        }
 
         let remaining = (config.max_requests - count).max(0);
         let retry_after = if allowed {
@@ -291,14 +293,43 @@ impl RateLimitService {
         workspace_id: &str,
         metric: &str,
         limit: i64,
-        _increment: i64,
+        increment: i64,
     ) -> anyhow::Result<RateLimitResult> {
         let redis_key = format!("workspace:{}:resource:{}", workspace_id, metric);
         let mut conn = self.redis.get().await?;
 
-        let current: Option<i64> = conn.get(&redis_key).await?;
-        let current = current.unwrap_or(0);
-        let allowed = current < limit;
+        let lua = r#"
+            local key = KEYS[1]
+            local increment = tonumber(ARGV[1])
+            local limit = tonumber(ARGV[2])
+
+            if increment < 0 then
+                increment = 0
+            end
+
+            local current = tonumber(redis.call('GET', key) or '0')
+            local projected = current + increment
+
+            if projected > limit then
+                return {0, current}
+            end
+
+            if increment > 0 then
+                current = tonumber(redis.call('INCRBY', key, increment))
+            end
+
+            return {1, current}
+        "#;
+
+        let result: Vec<i64> = redis::Script::new(lua)
+            .key(&redis_key)
+            .arg(increment)
+            .arg(limit)
+            .invoke_async(&mut *conn)
+            .await?;
+
+        let allowed = result.first().copied().unwrap_or(0) == 1;
+        let current = result.get(1).copied().unwrap_or(0);
 
         Ok(RateLimitResult {
             allowed,

@@ -24,6 +24,12 @@ const envSchema = z.object({
   
   // Internal service auth
   SERVICE_AUTH_TOKEN: z.string().min(32),
+
+  // Auth
+  JWT_SECRET: z.string().min(32),
+
+  // CORS
+  CORS_ORIGINS: z.string().optional(),
   
   // Metering
   METERING_BATCH_SIZE: z.string().default('100'),
@@ -78,6 +84,9 @@ export const config = {
   get serviceAuthToken(): string {
     return getConfig().SERVICE_AUTH_TOKEN;
   },
+  get jwtSecret(): string {
+    return getConfig().JWT_SECRET;
+  },
   get port(): number {
     return parseInt(getConfig().PORT, 10) || 3000;
   },
@@ -85,7 +94,13 @@ export const config = {
     return getConfig().HOST;
   },
   get corsOrigins(): string[] {
-    return ['http://localhost:3000', 'https://apexmail.ee'];
+    const raw = getConfig().CORS_ORIGINS;
+    if (raw) {
+      return raw.split(',').map((v) => v.trim()).filter(Boolean);
+    }
+    return getConfig().NODE_ENV === 'development'
+      ? ['http://localhost:3000']
+      : ['https://apexmail.ee'];
   },
   get meteringBatchSize(): number {
     return parseInt(getConfig().METERING_BATCH_SIZE, 10) || 100;

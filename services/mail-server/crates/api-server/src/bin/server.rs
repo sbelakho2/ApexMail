@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
+use reqwest::Client;
 
 use api_server::app::build_app;
 use api_server::config::Config;
@@ -47,11 +48,15 @@ async fn main() -> anyhow::Result<()> {
     let redis_cfg = deadpool_redis::Config::from_url(&config.redis_url());
     let redis = redis_cfg
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .expect("failed to create Redis pool");
+        .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
     tracing::info!("redis pool created");
 
     // ── App state ───────────────────────────────────────────
-    let state = AppStateInner::new(db, redis, config.clone());
+    let http_client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let state = AppStateInner::new(db, redis, config.clone(), http_client);
 
     // ── Build & serve ───────────────────────────────────────
     let app = build_app(state);
@@ -70,17 +75,22 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            tracing::error!(error = %e, "failed to listen for Ctrl+C — shutdown may require SIGKILL");
+            // Fall back to pending so the other branch (SIGTERM) can still work.
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => { sig.recv().await; }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]

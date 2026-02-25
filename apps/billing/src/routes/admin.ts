@@ -20,8 +20,8 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // List all tenants with billing status
   router.get('/tenants', async (c) => {
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query('offset') ?? '0', 10) || 0, 0);
     const status = c.req.query('status');
 
     let query = `
@@ -54,7 +54,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.db.query(query, params);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ tenants: result.value.rows, limit, offset });
@@ -109,7 +109,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value, 201);
@@ -204,7 +204,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.dunning.recordSuccessfulPayment(tenantId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ success: true, message: 'Dunning state reset' });
@@ -274,9 +274,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
     if (!result.ok) {
       // E-181: Log with context so operators can triage and retry
-      const logger = (ctx as any).logger ?? console;
-      const logFn = typeof logger.error === 'function' ? logger.error.bind(logger) : console.error;
-      logFn('E-181: Invoice generation failed', {
+      console.error('E-181: Invoice generation failed', {
         tenantId,
         periodStart: parsed.periodStart,
         periodEnd: parsed.periodEnd,
@@ -320,7 +318,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -347,7 +345,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     `);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -380,7 +378,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     `);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -399,7 +397,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     `);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -432,7 +430,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ report: result.value.rows });
@@ -499,7 +497,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.db.query(query, params);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     if (format === 'json') {
@@ -512,23 +510,27 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     const headers = Object.keys(result.value.rows[0]!);
+    // Sanitize CSV values to prevent formula injection (=, +, -, @, \t, \r)
+    const sanitizeCsvValue = (val: unknown): string => {
+      if (val === null || val === undefined) return '';
+      let s = String(val);
+      if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
     const csvRows = [
       headers.join(','),
       ...result.value.rows.map((row: Record<string, unknown>) =>
-        headers.map(h => {
-          const val = row[h];
-          if (val === null || val === undefined) return '';
-          if (typeof val === 'string' && val.includes(',')) {
-            return `"${val.replace(/"/g, '""')}"`;
-          }
-          return String(val);
-        }).join(',')
+        headers.map(h => sanitizeCsvValue(row[h])).join(',')
       ),
     ];
 
+    const safeDate = (d: string) => d.replace(/[^0-9\-]/g, '');
     return c.text(csvRows.join('\n'), 200, {
       'Content-Type': 'text/csv',
-      'Content-Disposition': `attachment; filename="${type}_${startDate}_${endDate}.csv"`,
+      'Content-Disposition': `attachment; filename="${type}_${safeDate(startDate)}_${safeDate(endDate)}.csv"`,
     });
   });
 

@@ -48,13 +48,23 @@ impl SuppressionsRepo {
         .await
     }
 
-    /// List all suppressions for a tenant.
-    pub async fn list(pool: &PgPool, tenant_id: Uuid) -> Result<Vec<Suppression>, sqlx::Error> {
+    /// List suppressions for a tenant with pagination.
+    /// #221: Added limit/offset parameters to prevent unbounded queries
+    pub async fn list(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Suppression>, sqlx::Error> {
+        let limit = limit.clamp(1, 1000);
+        let offset = offset.max(0);
         sqlx::query_as::<_, Suppression>(
             "SELECT id, tenant_id, email, reason, source, created_at \
-             FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC"
+             FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool)
         .await
     }
@@ -95,6 +105,11 @@ impl SuppressionsRepo {
         tenant_id: Uuid,
         entries: &[(&str, &str, &str)], // (email, reason, source)
     ) -> Result<Vec<Suppression>, sqlx::Error> {
+        // #213: Return early on empty input to avoid invalid SQL
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut query = String::from(
             "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) VALUES "
         );

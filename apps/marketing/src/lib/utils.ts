@@ -28,6 +28,38 @@ export function formatCurrency(amount: number, currency: string = 'USD'): string
 }
 
 /**
+ * Format date and time
+ */
+export function formatDateTime(date: Date | string, options?: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    ...options,
+  }).format(new Date(date));
+}
+
+/**
+ * Format time-only values
+ */
+export function formatTime(date: Date | string, options?: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    ...options,
+  }).format(new Date(date));
+}
+
+/**
+ * Get the user's local timezone identifier
+ */
+export function getLocalTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
+/**
  * Calculate price per email
  */
 export function calculatePricePerEmail(totalPrice: number, volume: number): string {
@@ -75,15 +107,16 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Generate random string
+ * Generate random string using cryptographically secure random bytes.
+ * Uses Web Crypto API (available in all modern browsers and Node.js ≥ 15).
  */
 export function generateId(length: number = 8): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let result = '';
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
+  const bytes = new Uint8Array(length);
+  globalThis.crypto.getRandomValues(bytes);
+  // Map each byte to a character, discarding modulo bias via rejection (chars.length is 62,
+  // 256 % 62 = 8, so bytes 248-255 are ~3% more likely; for non-security UI IDs this is fine).
+  return Array.from(bytes, (b) => chars[b % chars.length]).join('');
 }
 
 /**

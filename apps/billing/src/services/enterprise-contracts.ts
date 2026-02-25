@@ -303,7 +303,11 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM enterprise_contracts WHERE id = $1`,
+      `SELECT id, tenant_id, name, status, start_date, end_date, auto_renew,
+              base_price, committed_volume, overage_rate, annual_prepay_discount,
+              additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
+              signed_at, signed_by, purchase_order_number, created_at, updated_at
+       FROM enterprise_contracts WHERE id = $1`,
       [contractId]
     );
 
@@ -341,7 +345,11 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM enterprise_contracts 
+      `SELECT id, tenant_id, name, status, start_date, end_date, auto_renew,
+              base_price, committed_volume, overage_rate, annual_prepay_discount,
+              additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
+              signed_at, signed_by, purchase_order_number, created_at, updated_at
+       FROM enterprise_contracts 
        WHERE tenant_id = $1 AND status = 'active'
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -676,7 +684,11 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM enterprise_contracts WHERE tenant_id = $1 ORDER BY created_at DESC`,
+      `SELECT id, tenant_id, name, status, start_date, end_date, auto_renew,
+              base_price, committed_volume, overage_rate, annual_prepay_discount,
+              additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
+              signed_at, signed_by, purchase_order_number, created_at, updated_at
+       FROM enterprise_contracts WHERE tenant_id = $1 ORDER BY created_at DESC`,
       [tenantId]
     );
 

@@ -1,7 +1,7 @@
 //! In-memory vector store with LRU eviction and NDJSON persistence.
 
 use std::collections::{BinaryHeap, HashMap};
-use std::cmp::Ordering;
+use std::cmp::{max, Ordering};
 use std::io::{BufRead, Write};
 
 use chrono::Utc;
@@ -144,7 +144,7 @@ impl VectorStore {
 
         // Convert heap to sorted results (highest score first)
         // into_sorted_vec() returns ascending per Ord; our reversed Ord means highest-actual-score first
-        let mut results: Vec<SearchResult> = heap
+        let results: Vec<SearchResult> = heap
             .into_sorted_vec()
             .into_iter()
             .map(|e| SearchResult {
@@ -192,7 +192,7 @@ impl VectorStore {
 
     /// Import vectors from NDJSON reader.
     pub fn import_ndjson<R: BufRead>(&self, reader: R) -> Result<usize, EmbeddingError> {
-        let mut count = 0;
+        let mut parsed = Vec::new();
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -205,15 +205,18 @@ impl VectorStore {
                     expected: self.dimension,
                 });
             }
-            let mut store = self.inner.write();
+            parsed.push(v);
+        }
+        let count = parsed.len();
+        let mut store = self.inner.write();
+        for v in parsed {
             store.vectors.insert(v.id, v);
-            count += 1;
         }
         Ok(count)
     }
 
     fn evict_lru(&self, store: &mut StoreInner) {
-        let target = self.eviction_threshold / 10; // Remove 10%
+        let target = max(1, self.eviction_threshold / 10); // Remove 10%, at least 1
         let mut entries: Vec<(Uuid, chrono::DateTime<Utc>)> = store
             .vectors
             .iter()
@@ -221,7 +224,7 @@ impl VectorStore {
             .collect();
 
         entries.sort_by_key(|(_, ts)| *ts);
-
+        let target = target.min(entries.len());
         for (id, _) in entries.iter().take(target) {
             store.vectors.remove(id);
         }

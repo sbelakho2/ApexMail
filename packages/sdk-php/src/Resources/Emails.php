@@ -34,6 +34,28 @@ class Emails
      */
     public function send(array $params): array
     {
+        if (empty($params['from'])) {
+            throw new \InvalidArgumentException('"from" is required');
+        }
+        if (empty($params['to'])) {
+            throw new \InvalidArgumentException('"to" is required');
+        }
+        if (empty($params['subject'])) {
+            throw new \InvalidArgumentException('"subject" is required');
+        }
+        if (empty($params['html']) && empty($params['text'])) {
+            throw new \InvalidArgumentException('Either "html" or "text" body is required');
+        }
+
+        $this->validateRecipients($params['from'], 'from');
+        $this->validateRecipients($params['to'], 'to');
+        if (!empty($params['cc'])) {
+            $this->validateRecipients($params['cc'], 'cc');
+        }
+        if (!empty($params['bcc'])) {
+            $this->validateRecipients($params['bcc'], 'bcc');
+        }
+
         $idempotencyKey = $params['idempotency_key'] ?? null;
 
         $body = array_filter([
@@ -105,6 +127,21 @@ class Emails
     {
         if ($recips === null) return null;
         return array_map([$this, 'normalizeAddress'], (array) $recips);
+    }
+
+    private function validateRecipients(mixed $recips, string $field): void
+    {
+        $list = (array) $recips;
+        if (count($list) === 0) {
+            throw new \InvalidArgumentException("\"{$field}\" must include at least one recipient");
+        }
+
+        foreach ($list as $recipient) {
+            $email = is_array($recipient) ? ($recipient['email'] ?? null) : $recipient;
+            if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                throw new \InvalidArgumentException("Invalid \"{$field}\" email format: {$email}");
+            }
+        }
     }
 
     private function normalizeSendParams(array $params): array

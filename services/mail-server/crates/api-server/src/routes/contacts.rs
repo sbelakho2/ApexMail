@@ -63,11 +63,17 @@ pub struct ListContactsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
     pub tag: Option<String>,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,13 +141,15 @@ async fn list_contacts(
 ) -> Result<Json<Vec<ContactResponse>>, ApiError> {
     require_scopes(&auth, &["contacts:read"])?;
 
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ContactRow>(
         "SELECT id, email, name, tags, metadata, status, created_at, updated_at
          FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
-    .bind(params.limit.min(200))
-    .bind(params.offset)
+    .bind(clamp_limit(params.limit, 200))
+    // Fix #58: Clamp offset to valid range.
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -224,8 +232,16 @@ async fn bulk_import(
 ) -> Result<Json<BulkImportResponse>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
+    // Fix #53: Limit bulk import size to prevent resource exhaustion.
+    const MAX_BULK_CONTACTS: usize = 10_000;
+    if body.contacts.len() > MAX_BULK_CONTACTS {
+        return Err(ApiError::Validation(vec![
+            format!("maximum {} contacts per import", MAX_BULK_CONTACTS)
+        ]));
+    }
+
     let mut created = 0usize;
-    let mut updated = 0usize;
+    let mut updated = 0usize;  // Fix #52: Track updates properly
     let mut failed = 0usize;
 
     for contact in &body.contacts {
@@ -234,48 +250,43 @@ async fn bulk_import(
             continue;
         }
 
-        let existing = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM contacts WHERE tenant_id = $1 AND email = $2",
+        let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
+        // Fix #52: Use RETURNING with xmax to detect insert vs update.
+        // xmax = 0 means a fresh insert; non-zero means update.
+        let res: Result<Option<i64>, _> = sqlx::query_scalar(
+            r#"INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,'active',NOW(),NOW())
+               ON CONFLICT (tenant_id, email) DO UPDATE SET
+                 name = COALESCE(EXCLUDED.name, contacts.name),
+                 tags = COALESCE(EXCLUDED.tags, contacts.tags),
+                 metadata = COALESCE(EXCLUDED.metadata, contacts.metadata),
+                 updated_at = NOW()
+               RETURNING (xmax::text::bigint)"#,
         )
+        .bind(Uuid::new_v4())
         .bind(auth.tenant_id)
         .bind(&contact.email)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+        .bind(&contact.name)
+        .bind(&tags)
+        .bind(&contact.metadata)
+        .fetch_optional(&state.db)
+        .await;
 
-        if existing > 0 {
-            // Update existing contact
-            let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
-            let _ = sqlx::query(
-                "UPDATE contacts SET name=COALESCE($1, name), tags=COALESCE($2, tags), metadata=COALESCE($3, metadata), updated_at=NOW()
-                 WHERE tenant_id=$4 AND email=$5",
-            )
-            .bind(&contact.name)
-            .bind(&tags)
-            .bind(&contact.metadata)
-            .bind(auth.tenant_id)
-            .bind(&contact.email)
-            .execute(&state.db)
-            .await;
-            updated += 1;
-        } else {
-            let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
-            let res = sqlx::query(
-                "INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,'active',NOW(),NOW())",
-            )
-            .bind(Uuid::new_v4())
-            .bind(auth.tenant_id)
-            .bind(&contact.email)
-            .bind(&contact.name)
-            .bind(&tags)
-            .bind(&contact.metadata)
-            .execute(&state.db)
-            .await;
-
-            match res {
-                Ok(_) => created += 1,
-                Err(_) => failed += 1,
+        match res {
+            Ok(Some(xmax)) => {
+                if xmax == 0 {
+                    created += 1;
+                } else {
+                    updated += 1;
+                }
+            }
+            Ok(None) => {
+                // Shouldn't happen with RETURNING, but count as created
+                created += 1;
+            }
+            Err(e) => {
+                tracing::error!(email = %contact.email, error = %e, "Failed to upsert contact in bulk import");
+                failed += 1;
             }
         }
     }

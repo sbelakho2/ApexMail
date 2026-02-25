@@ -6,11 +6,13 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::LazyLock;
 use std::time::Duration;
+use moka::sync::Cache;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
@@ -46,61 +48,72 @@ impl Default for SmtpSenderConfig {
     }
 }
 
+/// Maximum entries in the MX cache
+const MX_CACHE_MAX: u64 = 10_000;
+/// MX cache TTL (5 minutes, matching typical DNS TTL)
+const MX_CACHE_TTL: Duration = Duration::from_secs(300);
+
+static SMTP_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
 pub struct SmtpSender {
     config: SmtpSenderConfig,
+    #[allow(dead_code)]
     from_domain: String,
     resolver: TokioAsyncResolver,
     dkim_signer: Option<DkimSigner>,
-    mx_cache: HashMap<String, Vec<String>>,
+    /// MX cache with TTL and bounded size (#106/#107)
+    mx_cache: Cache<String, Vec<String>>,
 }
 
 impl SmtpSender {
     /// Create a new SMTP sender with just the from domain
     pub fn new(from_domain: String) -> Self {
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        );
+        let resolver = SMTP_RESOLVER.clone();
         
         Self {
             config: SmtpSenderConfig::default(),
             from_domain,
             resolver,
             dkim_signer: None,
-            mx_cache: HashMap::new(),
+            mx_cache: Cache::builder()
+                .max_capacity(MX_CACHE_MAX)
+                .time_to_live(MX_CACHE_TTL)
+                .build(),
         }
     }
     
     /// Create with custom config
     pub fn with_config(from_domain: String, config: SmtpSenderConfig) -> Self {
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        );
+        let resolver = SMTP_RESOLVER.clone();
         
         Self {
             config,
             from_domain,
             resolver,
             dkim_signer: None,
-            mx_cache: HashMap::new(),
+            mx_cache: Cache::builder()
+                .max_capacity(MX_CACHE_MAX)
+                .time_to_live(MX_CACHE_TTL)
+                .build(),
         }
     }
     
     /// Create with DKIM signer
     pub fn with_dkim(from_domain: String, config: SmtpSenderConfig, dkim_signer: DkimSigner) -> Self {
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        );
+        let resolver = SMTP_RESOLVER.clone();
         
         Self {
             config,
             from_domain,
             resolver,
             dkim_signer: Some(dkim_signer),
-            mx_cache: HashMap::new(),
+            mx_cache: Cache::builder()
+                .max_capacity(MX_CACHE_MAX)
+                .time_to_live(MX_CACHE_TTL)
+                .build(),
         }
     }
     
@@ -111,7 +124,7 @@ impl SmtpSender {
     
     /// Send an email directly via SMTP
     pub async fn send(
-        &mut self,
+        &self,
         from: &str,
         to: &[String],
         subject: &str,
@@ -133,10 +146,13 @@ impl SmtpSender {
         let mut all_rejected = Vec::new();
         let mut last_response = String::new();
         
+        // Generate a single Message-ID for the email (#103: avoid dual generation)
+        let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), self.config.hostname);
+        
         // Send to each domain
         for (domain, recipients) in by_domain {
-            // Build message
-            let message = self.build_message(from, &recipients, subject, text_body, html_body, &headers)?;
+            // Build message with the canonical message_id
+            let message = self.build_message(from, &recipients, subject, text_body, html_body, &headers, &message_id)?;
             
             // Get MX servers for domain
             let mx_servers = self.lookup_mx(&domain).await?;
@@ -170,7 +186,6 @@ impl SmtpSender {
         }
         
         let success = !all_accepted.is_empty();
-        let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), self.config.hostname);
         
         Ok(SmtpSendResult {
             success,
@@ -182,10 +197,10 @@ impl SmtpSender {
     }
     
     /// Look up MX records for a domain
-    async fn lookup_mx(&mut self, domain: &str) -> Result<Vec<String>> {
-        // Check cache first
+    async fn lookup_mx(&self, domain: &str) -> Result<Vec<String>> {
+        // Check cache first (moka handles TTL and eviction)
         if let Some(cached) = self.mx_cache.get(domain) {
-            return Ok(cached.clone());
+            return Ok(cached);
         }
         
         debug!(domain = %domain, "Looking up MX records");
@@ -206,7 +221,7 @@ impl SmtpSender {
             }
         };
         
-        // Cache the result
+        // Cache the result (moka enforces TTL + max capacity)
         self.mx_cache.insert(domain.to_string(), mx_servers.clone());
         
         Ok(mx_servers)
@@ -278,7 +293,9 @@ impl SmtpSender {
             response.clear();
             reader.read_line(&mut response).await?;
             if !response.starts_with("220") {
-                warn!(mx = %mx_host, response = %response.trim(), "STARTTLS rejected, continuing in plaintext");
+                // #108: Do NOT silently fall back to plaintext — that's a security downgrade
+                error!(mx = %mx_host, response = %response.trim(), "STARTTLS rejected by server that advertised it; aborting to prevent security downgrade");
+                return Err(anyhow!("STARTTLS rejected by {}: {}; refusing plaintext downgrade", mx_host, response.trim()));
             } else {
                 // Reunite reader/writer back into the TcpStream
                 let tcp_stream = reader.into_inner().reunite(writer)?;
@@ -388,8 +405,10 @@ impl SmtpSender {
         }
         
         if accepted.is_empty() {
-            // RSET and return
+            // RSET and read response (#104: avoid stream desync)
             writer.write_all(b"RSET\r\n").await?;
+            response.clear();
+            let _ = reader.read_line(&mut response).await;
             return Ok(SmtpSendResult {
                 success: false,
                 message_id: String::new(),
@@ -407,8 +426,20 @@ impl SmtpSender {
             return Err(anyhow!("DATA failed: {}", response.trim()));
         }
         
-        // Send message
-        writer.write_all(message).await?;
+        // Send message with dot-stuffing (RFC 5321 §4.5.2) (#100)
+        // Any line starting with '.' must have it doubled to prevent SMTP smuggling
+        let msg_str = String::from_utf8_lossy(message);
+        let mut first_line = true;
+        for line in msg_str.split("\r\n") {
+            if !first_line {
+                writer.write_all(b"\r\n").await?;
+            }
+            if line.starts_with('.') {
+                writer.write_all(b".").await?;
+            }
+            writer.write_all(line.as_bytes()).await?;
+            first_line = false;
+        }
         
         // End of message
         writer.write_all(b"\r\n.\r\n").await?;
@@ -420,8 +451,10 @@ impl SmtpSender {
         
         let final_response = response.trim().to_string();
         
-        // QUIT
+        // QUIT and read response (#105: avoid leaving server reply in buffer)
         writer.write_all(b"QUIT\r\n").await?;
+        response.clear();
+        let _ = reader.read_line(&mut response).await;
         
         info!(mx = %mx_host, accepted = ?accepted, "Message delivered successfully");
         
@@ -434,6 +467,12 @@ impl SmtpSender {
         })
     }
     
+    /// Sanitize a header value to prevent header injection (#101)
+    /// Strips CR, LF, and NUL bytes that could inject additional headers
+    fn sanitize_header(value: &str) -> String {
+        value.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect()
+    }
+    
     /// Build an RFC 5322 compliant email message
     fn build_message(
         &self,
@@ -443,41 +482,48 @@ impl SmtpSender {
         text_body: Option<&str>,
         html_body: Option<&str>,
         headers: &Option<HashMap<String, String>>,
+        message_id: &str,
     ) -> Result<Vec<u8>> {
         use chrono::Utc;
         
-        let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), self.config.hostname);
         let date = Utc::now().format("%a, %d %b %Y %H:%M:%S %z").to_string();
         
         let mut msg = Vec::new();
         
-        // Required headers
-        msg.extend_from_slice(format!("From: {}\r\n", from).as_bytes());
-        msg.extend_from_slice(format!("To: {}\r\n", to.join(", ")).as_bytes());
-        msg.extend_from_slice(format!("Subject: {}\r\n", subject).as_bytes());
+        // Required headers — sanitize all user-supplied values (#101)
+        let safe_from = Self::sanitize_header(from);
+        let safe_to: Vec<String> = to.iter().map(|t| Self::sanitize_header(t)).collect();
+        let safe_subject = Self::sanitize_header(subject);
+        
+        msg.extend_from_slice(format!("From: {}\r\n", safe_from).as_bytes());
+        msg.extend_from_slice(format!("To: {}\r\n", safe_to.join(", ")).as_bytes());
+        msg.extend_from_slice(format!("Subject: {}\r\n", safe_subject).as_bytes());
         msg.extend_from_slice(format!("Date: {}\r\n", date).as_bytes());
         msg.extend_from_slice(format!("Message-ID: {}\r\n", message_id).as_bytes());
         msg.extend_from_slice(b"MIME-Version: 1.0\r\n");
         
-        // Custom headers
+        // Custom headers — sanitize keys and values (#101)
         if let Some(hdrs) = headers {
             for (key, value) in hdrs {
-                msg.extend_from_slice(format!("{}: {}\r\n", key, value).as_bytes());
+                let safe_key = Self::sanitize_header(key);
+                let safe_value = Self::sanitize_header(value);
+                msg.extend_from_slice(format!("{}: {}\r\n", safe_key, safe_value).as_bytes());
             }
         }
         
         // Body
+        // #102: Use 8bit transfer encoding (honest about the encoding we actually use)
         match (text_body, html_body) {
             (Some(text), Some(html)) => {
                 // Multipart alternative
-                let boundary = format!("----=_Part_{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+                let boundary = format!("----=_Part_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
                 msg.extend_from_slice(format!("Content-Type: multipart/alternative; boundary=\"{}\"\r\n", boundary).as_bytes());
                 msg.extend_from_slice(b"\r\n");
                 
                 // Text part
                 msg.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
                 msg.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n");
-                msg.extend_from_slice(b"Content-Transfer-Encoding: quoted-printable\r\n");
+                msg.extend_from_slice(b"Content-Transfer-Encoding: 8bit\r\n");
                 msg.extend_from_slice(b"\r\n");
                 msg.extend_from_slice(text.as_bytes());
                 msg.extend_from_slice(b"\r\n");
@@ -485,7 +531,7 @@ impl SmtpSender {
                 // HTML part
                 msg.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
                 msg.extend_from_slice(b"Content-Type: text/html; charset=utf-8\r\n");
-                msg.extend_from_slice(b"Content-Transfer-Encoding: quoted-printable\r\n");
+                msg.extend_from_slice(b"Content-Transfer-Encoding: 8bit\r\n");
                 msg.extend_from_slice(b"\r\n");
                 msg.extend_from_slice(html.as_bytes());
                 msg.extend_from_slice(b"\r\n");
@@ -534,7 +580,7 @@ pub async fn send_email(
     let config = SmtpSenderConfig::default();
     let from_domain = from.split('@').nth(1).unwrap_or("apexmail.ee").to_string();
     
-    let mut sender = if let Some(signer) = dkim_signer {
+    let sender = if let Some(signer) = dkim_signer {
         SmtpSender::with_dkim(from_domain, config, signer)
     } else {
         SmtpSender::with_config(from_domain, config)

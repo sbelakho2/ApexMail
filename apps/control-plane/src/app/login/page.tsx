@@ -25,8 +25,30 @@ export default function ControlPlaneLogin() {
     const [mfaCode, setMfaCode] = useState('');
     const [showMfa, setShowMfa] = useState(false);
     const [error, setError] = useState('');
+    const [emailError, setEmailError] = useState('');
+    const [passwordError, setPasswordError] = useState('');
+    const [mfaError, setMfaError] = useState('');
     const [loading, setLoading] = useState(false);
     const [csrfToken, setCsrfToken] = useState<string | null>(null);
+
+    const validateEmail = (value: string) => {
+        if (!value.trim()) return 'Email is required';
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'Enter a valid email address';
+        return '';
+    };
+
+    const validatePassword = (value: string) => {
+        if (!value.trim()) return 'Password is required';
+        if (value.length < 8) return 'Password must be at least 8 characters';
+        return '';
+    };
+
+    const validateMfa = (value: string) => {
+        if (!showMfa) return '';
+        if (!value.trim()) return 'MFA code is required';
+        if (!/^\d{6}$/.test(value)) return 'MFA code must be 6 digits';
+        return '';
+    };
 
     useEffect(() => {
         const controller = new AbortController();
@@ -49,6 +71,17 @@ export default function ControlPlaneLogin() {
         e.preventDefault();
         setError('');
         setLoading(true);
+
+        const nextEmailError = validateEmail(email);
+        const nextPasswordError = validatePassword(password);
+        const nextMfaError = validateMfa(mfaCode);
+        setEmailError(nextEmailError);
+        setPasswordError(nextPasswordError);
+        setMfaError(nextMfaError);
+        if (nextEmailError || nextPasswordError || nextMfaError) {
+            setLoading(false);
+            return;
+        }
 
         if (!csrfToken) {
             setError('Security token missing. Please refresh and try again.');
@@ -136,7 +169,19 @@ export default function ControlPlaneLogin() {
                     {/* Login Card - Uses semantic design tokens */}
                     <div className="bg-card rounded-lg shadow-xl border border-border overflow-hidden">
                         {/* Form */}
-                        <form onSubmit={handleLogin} className="p-8 space-y-5">
+                        <form
+                            onSubmit={handleLogin}
+                            aria-describedby={error || emailError || passwordError || mfaError ? 'control-login-form-errors' : undefined}
+                            className="p-8 space-y-5"
+                        >
+                            {error || emailError || passwordError || mfaError ? (
+                                <div id="control-login-form-errors" className="sr-only" role="alert" aria-live="assertive">
+                                    {error ? `Form error: ${error}. ` : ''}
+                                    {emailError ? `Email error: ${emailError}. ` : ''}
+                                    {passwordError ? `Password error: ${passwordError}. ` : ''}
+                                    {mfaError ? `MFA error: ${mfaError}.` : ''}
+                                </div>
+                            ) : null}
                             {error && (
                                 <div className="bg-destructive/10 border border-destructive/20 text-destructive text-sm rounded-lg p-3 flex items-center gap-2">
                                     <AlertTriangle className="w-4 h-4" />
@@ -153,11 +198,13 @@ export default function ControlPlaneLogin() {
                                     type="email"
                                     value={email}
                                     onChange={(e) => setEmail(e.target.value)}
+                                    onBlur={() => setEmailError(validateEmail(email))}
                                     className="w-full px-4 py-3 min-h-[44px] rounded-sm border border-input focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all placeholder:text-muted-foreground bg-muted/30 text-sm font-medium text-foreground"
                                     placeholder="admin@apexmail.ee"
                                     required
                                     disabled={loading}
                                 />
+                                {emailError ? <p className="text-xs text-destructive" role="alert">{emailError}</p> : null}
                             </div>
 
                             <div className="space-y-2">
@@ -169,11 +216,13 @@ export default function ControlPlaneLogin() {
                                     type="password"
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
+                                    onBlur={() => setPasswordError(validatePassword(password))}
                                     className="w-full px-4 py-3 min-h-[44px] rounded-sm border border-input focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all bg-muted/30 text-foreground"
                                     placeholder="••••••••••••"
                                     required
                                     disabled={loading}
                                 />
+                                {passwordError ? <p className="text-xs text-destructive" role="alert">{passwordError}</p> : null}
                             </div>
 
                             {showMfa && (
@@ -187,6 +236,7 @@ export default function ControlPlaneLogin() {
                                         type="text"
                                         value={mfaCode}
                                         onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                        onBlur={() => setMfaError(validateMfa(mfaCode))}
                                         className="w-full px-4 py-3 min-h-[44px] font-mono text-center text-lg tracking-[0.5em] rounded-sm border border-primary/30 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none bg-card text-foreground"
                                         placeholder="000000"
                                         maxLength={6}
@@ -194,6 +244,7 @@ export default function ControlPlaneLogin() {
                                         disabled={loading}
                                         autoFocus
                                     />
+                                    {mfaError ? <p className="text-xs text-destructive text-center" role="alert">{mfaError}</p> : null}
                                     <p className="text-xs text-muted-foreground text-center font-medium">
                                         Enter the 6-digit code from your authenticator app
                                     </p>

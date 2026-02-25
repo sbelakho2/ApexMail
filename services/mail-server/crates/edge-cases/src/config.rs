@@ -9,6 +9,7 @@ pub struct EdgeCasesConfig {
     pub database_url: String,
     pub redis_url: String,
     pub api_key: String,
+    pub node_env: String,
     pub attachments: AttachmentLimits,
     pub retry: RetryConfig,
     pub loop_detection: LoopDetectionConfig,
@@ -151,6 +152,7 @@ impl Default for EdgeCasesConfig {
             database_url: String::new(),
             redis_url: "redis://127.0.0.1:6379".into(),
             api_key: String::new(),
+            node_env: "development".into(),
             attachments: AttachmentLimits::default(),
             retry: RetryConfig::default(),
             loop_detection: LoopDetectionConfig::default(),
@@ -161,16 +163,24 @@ impl Default for EdgeCasesConfig {
 }
 
 impl EdgeCasesConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
-        Self {
+        let node_env = std::env::var("NODE_ENV").unwrap_or_else(|_| "development".into());
+        let api_key = std::env::var("INTERNAL_API_KEY").unwrap_or_default();
+        if node_env != "development" && api_key.trim().is_empty() {
+            return Err(ConfigError::SecurityViolation(
+                "INTERNAL_API_KEY must be set outside development".into(),
+            ));
+        }
+        Ok(Self {
             port: std::env::var("EDGE_CASES_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4600),
             database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
             redis_url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
-            api_key: std::env::var("INTERNAL_API_KEY").unwrap_or_default(),
+            api_key,
+            node_env,
             attachments: AttachmentLimits::default(),
             retry: RetryConfig::default(),
             loop_detection: LoopDetectionConfig::default(),
@@ -186,8 +196,14 @@ impl EdgeCasesConfig {
                     .map(|v| v != "false" && v != "0")
                     .unwrap_or(true),
             },
-        }
+        })
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("security violation: {0}")]
+    SecurityViolation(String),
 }
 
 #[cfg(test)]

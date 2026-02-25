@@ -15,6 +15,10 @@ pub struct OpsConfig {
     pub port: u16,
     /// PostgreSQL connection URL.
     pub database_url: String,
+    /// Ops API key for authenticating requests.
+    pub ops_api_key: String,
+    /// Environment name (e.g. development, production).
+    pub environment: String,
 }
 
 impl Default for OpsConfig {
@@ -25,6 +29,8 @@ impl Default for OpsConfig {
             warmup_default_days: 14,
             port: 4400,
             database_url: "postgres://localhost/apexmail".to_string(),
+            ops_api_key: "dev-ops-key".to_string(),
+            environment: "development".to_string(),
         }
     }
 }
@@ -40,7 +46,8 @@ impl OpsConfig {
     /// - `DATABASE_URL`
     pub fn from_env() -> Self {
         let default = Self::default();
-        Self {
+        let environment = std::env::var("NODE_ENV").unwrap_or_else(|_| default.environment.clone());
+        let config = Self {
             health_check_interval_secs: std::env::var("OPS_HEALTH_CHECK_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -59,6 +66,41 @@ impl OpsConfig {
                 .unwrap_or(default.port),
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or(default.database_url),
+            ops_api_key: std::env::var("OPS_API_KEY")
+                .unwrap_or(default.ops_api_key),
+            environment,
+        };
+        if let Err(err) = config.validate() {
+            panic!("Invalid ops-service config: {err}");
+        }
+        config.validate_production();
+        config
+    }
+}
+
+impl OpsConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.health_check_interval_secs == 0 {
+            return Err("OPS_HEALTH_CHECK_INTERVAL_SECS must be > 0".into());
+        }
+        if self.incident_auto_resolve_mins == 0 {
+            return Err("OPS_INCIDENT_AUTO_RESOLVE_MINS must be > 0".into());
+        }
+        if self.warmup_default_days == 0 {
+            return Err("OPS_WARMUP_DEFAULT_DAYS must be > 0".into());
+        }
+        if self.port == 0 {
+            return Err("OPS_PORT must be > 0".into());
+        }
+        if self.database_url.trim().is_empty() {
+            return Err("DATABASE_URL must not be empty".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_production(&self) {
+        if self.environment == "production" && (self.ops_api_key.is_empty() || self.ops_api_key == "dev-ops-key") {
+            panic!("OPS_API_KEY must be set to a strong non-default value in production");
         }
     }
 }
@@ -74,6 +116,7 @@ mod tests {
         assert_eq!(cfg.incident_auto_resolve_mins, 120);
         assert_eq!(cfg.warmup_default_days, 14);
         assert_eq!(cfg.port, 4400);
+        assert_eq!(cfg.ops_api_key, "dev-ops-key");
     }
 
     #[test]
@@ -90,5 +133,6 @@ mod tests {
         assert_eq!(cfg.incident_auto_resolve_mins, def.incident_auto_resolve_mins);
         assert_eq!(cfg.warmup_default_days, def.warmup_default_days);
         assert_eq!(cfg.port, def.port);
+        assert_eq!(cfg.ops_api_key, def.ops_api_key);
     }
 }

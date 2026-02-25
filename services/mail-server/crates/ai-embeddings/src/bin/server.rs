@@ -52,8 +52,13 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    if let Err(err) = config.validate() {
+        anyhow::bail!("Invalid embeddings config: {err}");
+    }
+
+    let embedding_service = EmbeddingService::new(config.inference.clone())?;
     let state = Arc::new(AppState {
-        embedding_service: EmbeddingService::new(config.inference.clone()),
+        embedding_service,
         vector_store: VectorStore::new(
             config.inference.dimension,
             config.store.max_vectors,

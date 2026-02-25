@@ -212,23 +212,29 @@ impl SubAccountService {
 }
 
 /// Pure function: volume check logic (extracted for testability)
+/// #265-266: Fixed to properly use parent_headroom and not always return true for shared mode
 pub fn check_volume_logic(
-    mode: &VolumeAllocationMode, volume_used: i64, volume_limit: Option<i64>, _parent_headroom: i64,
+    mode: &VolumeAllocationMode, volume_used: i64, volume_limit: Option<i64>, parent_headroom: i64,
 ) -> bool {
     match mode {
         VolumeAllocationMode::Fixed => {
+            // Fixed mode: strict per-account limit enforcement
             volume_limit.map(|l| volume_used < l).unwrap_or(true)
         }
         VolumeAllocationMode::Shared => {
-            // Shared mode: no hard per-account limit
-            true
+            // #266: Shared mode should check parent's remaining capacity
+            // Don't always return true - respect the parent's headroom
+            parent_headroom > 0
         }
         VolumeAllocationMode::Burst => {
-            // Burst mode: allow up to 120% of limit if parent has headroom
+            // #265: Burst mode: allow up to 120% of limit if parent has headroom
             volume_limit.map(|l| {
                 let burst_limit = (l as f64 * 1.2) as i64;
-                volume_used < burst_limit
-            }).unwrap_or(true)
+                let within_burst = volume_used < burst_limit;
+                // Only allow burst if parent has headroom to cover the extra usage
+                let burst_amount = (volume_used - l).max(0);
+                within_burst && parent_headroom >= burst_amount
+            }).unwrap_or(parent_headroom > 0)
         }
     }
 }

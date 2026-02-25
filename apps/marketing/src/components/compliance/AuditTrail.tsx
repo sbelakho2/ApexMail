@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { ScrollText, Search, Filter, Download, Clock, User, Shield, Database } from '@/components/ui/icons';
 import { useState } from 'react';
-import { cn } from '@/lib/utils';
+import { cn, formatTime, getLocalTimeZone } from '@/lib/utils';
 
 interface AuditEvent {
  id: string;
@@ -17,7 +17,9 @@ interface AuditEvent {
  outcome: 'success' | 'failure' | 'warning';
 }
 
-const mockAuditEvents: AuditEvent[] = [
+// Representative compliance events illustrating the audit trail feature.
+// Not real customer data.
+const demoAuditEvents: AuditEvent[] = [
  {
  id: 'evt_001',
  timestamp: '2024-02-15T14:32:18Z',
@@ -74,8 +76,9 @@ export function AuditTrail() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
  const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
  const [searchQuery, setSearchQuery] = useState('');
+ const timezone = getLocalTimeZone();
 
- const filteredEvents = mockAuditEvents.filter(
+ const filteredEvents = demoAuditEvents.filter(
  (event) =>
  event.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
  event.actor.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -147,6 +150,10 @@ export function AuditTrail() {
  transition={{ delay: 0.2 }}
  >
  <div className="bg-white rounded-lg border border-surface-200 overflow-hidden shadow-sm">
+ {/* Sample data banner */}
+ <div className="px-6 py-2 bg-amber-50 border-b border-amber-100 flex items-center justify-between">
+   <span className="text-[12px] text-amber-700 font-medium">Sample events — illustrating audit trail capabilities</span>
+ </div>
  {/* Search Bar */}
  <div className="p-6 bg-white border-b border-surface-200 flex gap-3">
  <div className="flex-1 relative">
@@ -165,6 +172,10 @@ export function AuditTrail() {
  <button className="p-2 bg-white border border-surface-200 rounded-md text-surface-500 hover:text-primary-600 hover:border-primary-200 transition-all ">
  <Download className="w-4 h-4" />
  </button>
+ </div>
+
+ <div className="px-6 py-2 text-xs text-surface-500 border-b border-surface-100">
+ Times shown in {timezone}
  </div>
 
  {/* Event List */}
@@ -192,7 +203,7 @@ export function AuditTrail() {
                         <span className="text-surface-900 font-medium font-mono text-[13px]">{event.action}</span>
                       </div>
                       <span className="text-[13px] text-surface-500 font-mono">
-                        {new Date(event.timestamp).toLocaleTimeString()}
+                        {formatTime(event.timestamp, { second: '2-digit' })}
                       </span>
                     </div>
                     <div className="text-[14px] text-surface-900 mb-3 leading-relaxed">{event.details}</div>

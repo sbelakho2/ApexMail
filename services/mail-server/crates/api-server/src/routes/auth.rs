@@ -1,6 +1,6 @@
 //! Authentication routes: login, logout, refresh, API key management.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
@@ -75,6 +75,24 @@ pub struct ApiKeyInfo {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListApiKeysQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+    #[serde(default)]
+    pub cursor: Option<i64>,
+}
+
+fn default_limit() -> i64 {
+    50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RefreshRequest {
     pub token: String,
 }
@@ -92,7 +110,7 @@ async fn login(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id, tenant_id, email, name, password_hash, role, status FROM users WHERE email = $1",
+        "SELECT id, tenant_id, email, name, password_hash, role, status FROM users WHERE LOWER(email) = LOWER($1)",
     )
     .bind(&body.email)
     .fetch_optional(&state.db)
@@ -103,8 +121,10 @@ async fn login(
         return Err(ApiError::Forbidden("account is not active".into()));
     }
 
+    // Fix #47: If password_hash cannot be parsed (e.g., SCIM placeholder), treat as invalid credentials
+    // rather than internal error to avoid leaking hash format information.
     let valid = apexmail_lib::crypto::verify_password(&body.password, &user.password_hash)
-        .map_err(|_| ApiError::Internal("password verification error".into()))?;
+        .unwrap_or(false);
 
     if !valid {
         return Err(ApiError::Unauthorized("invalid credentials".into()));
@@ -114,10 +134,35 @@ async fn login(
     let now = Utc::now();
     let exp = now + ChronoDuration::seconds(expiry_secs);
 
+    // Fix #24: Assign scopes based on user role instead of blanket wildcard.
+    let scopes = match user.role.as_str() {
+        "admin" | "owner" => vec!["*".into()],
+        "developer" => vec![
+            "messages:send".into(),
+            "messages:read".into(),
+            "domains:read".into(),
+            "templates:read".into(),
+            "templates:write".into(),
+            "events:read".into(),
+            "analytics:read".into(),
+            "contacts:read".into(),
+            "contacts:write".into(),
+        ],
+        "viewer" => vec![
+            "messages:read".into(),
+            "domains:read".into(),
+            "templates:read".into(),
+            "events:read".into(),
+            "analytics:read".into(),
+            "contacts:read".into(),
+        ],
+        _ => vec!["messages:read".into()],
+    };
+
     let claims = JwtClaims {
         sub: user.id.to_string(),
         tenant_id: user.tenant_id.to_string(),
-        scopes: vec!["*".into()],
+        scopes,
         exp: exp.timestamp(),
         iat: now.timestamp(),
     };
@@ -164,7 +209,14 @@ async fn create_api_key(
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash = apexmail_lib::crypto::hash_api_key(&raw_key);
-    let key_prefix = raw_key[..15.min(raw_key.len())].to_string();
+    // Fix #23: Safely limit prefix length. If key is shorter than 15 chars, store
+    // at most 8 chars (or half the key) to avoid exposing the full key.
+    let prefix_len = if raw_key.len() >= 15 {
+        15
+    } else {
+        raw_key.len().min(8).max(raw_key.len() / 2)
+    };
+    let key_prefix = raw_key[..prefix_len].to_string();
 
     let id = Uuid::new_v4();
     let now = Utc::now();
@@ -203,12 +255,16 @@ async fn create_api_key(
 async fn list_api_keys(
     State(state): State<AppState>,
     auth: AuthUser,
+    Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, ApiError> {
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ApiKeyInfoRow>(
         "SELECT id, name, key_prefix, scopes, last_used_at, created_at
-         FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC",
+         FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
+    .bind(clamp_limit(params.limit, 200))
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -262,9 +318,10 @@ async fn logout(
     _auth: AuthUser,
     Json(body): Json<RefreshRequest>,
 ) -> Result<StatusCode, ApiError> {
-    // Blacklist the token in Redis
-    let token_fragment = &body.token[..16.min(body.token.len())];
-    let key = format!("apexmail:token_blacklist:{token_fragment}");
+    // Blacklist the token in Redis using full-token hash to avoid collisions
+    use sha2::{Sha256, Digest};
+    let hash = hex::encode(Sha256::digest(body.token.as_bytes()));
+    let key = format!("apexmail:token_blacklist:{hash}");
     if let Ok(mut conn) = state.redis.get().await {
         let ttl = state.config.jwt_expiry.as_secs();
         let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
@@ -299,6 +356,25 @@ async fn refresh_token(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+
+    // Fix #21: Reject refresh if the user is no longer active.
+    if user.status != "active" {
+        return Err(ApiError::Forbidden(format!("account is {}", user.status)));
+    }
+
+    // Fix #20: Blacklist the old token so it cannot be reused.
+    {
+        use sha2::{Sha256, Digest};
+        let hash = hex::encode(Sha256::digest(body.token.as_bytes()));
+        let bl_key = format!("apexmail:token_blacklist:{hash}");
+        if let Ok(mut conn) = state.redis.get().await {
+            let ttl = state.config.jwt_expiry.as_secs();
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
+                &mut *conn, &bl_key, "1", ttl,
+            )
+            .await;
+        }
+    }
 
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();

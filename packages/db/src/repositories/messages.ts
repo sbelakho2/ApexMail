@@ -461,7 +461,7 @@ export class MessagesRepository {
     queued:    new Set(['sending', 'failed']),
     sending:   new Set(['sent', 'bounced', 'deferred', 'failed']),
     sent:      new Set(['delivered', 'bounced']),
-    delivered: new Set(['bounced', 'complained'] as Message['status'][]),
+    delivered: new Set(['bounced']),
     bounced:   new Set(),       // terminal
     deferred:  new Set(['sending', 'failed']),
     failed:    new Set(),       // terminal
@@ -1403,13 +1403,16 @@ export class MessagesRepository {
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+    const truncParam = paramIndex++;
+    values.push(truncFn);
+
     const result = await this.db.query<{
       bucket: Date;
       status: string;
       count: string;
     }>(
       `SELECT 
-        DATE_TRUNC('${truncFn}', created_at) as bucket,
+        DATE_TRUNC($${truncParam}, created_at) as bucket,
         status,
         COUNT(*) as count
        FROM messages

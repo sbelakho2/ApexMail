@@ -118,8 +118,8 @@ async fn send_time_optimization(
             .unwrap_or_default()
     };
 
-    // Check cache first
-    let cache_key = format!("send_time:{}:{}", auth.tenant_id, recipient.unwrap_or("all"));
+    // Fix #54: Include timezone in cache key to avoid returning wrong cached results.
+    let cache_key = format!("send_time:{}:{}:{}", auth.tenant_id, recipient.unwrap_or("all"), &tz);
     let cached: Option<(i32, f64)> = sqlx::query_as(
         "SELECT recommended_hour, confidence FROM ai_send_time_cache
          WHERE cache_key = $1 AND expires_at > NOW()"
@@ -188,7 +188,30 @@ async fn subject_analysis(
     let subject = &params.subject;
     let word_count = subject.split_whitespace().count();
     let has_personalization = subject.contains("{{") || subject.contains("{%");
-    let has_emoji = subject.chars().any(|c| c as u32 > 0x1F600);
+    // Fix #55: Proper emoji detection using Unicode emoji ranges.
+    let has_emoji = subject.chars().any(|c| {
+        let cp = c as u32;
+        // Common emoji ranges: emoticons, dingbats, symbols, flags, etc.
+        matches!(cp,
+            0x1F600..=0x1F64F |  // Emoticons
+            0x1F300..=0x1F5FF |  // Misc Symbols and Pictographs
+            0x1F680..=0x1F6FF |  // Transport and Map
+            0x1F700..=0x1F77F |  // Alchemical Symbols
+            0x1F780..=0x1F7FF |  // Geometric Shapes Extended
+            0x1F800..=0x1F8FF |  // Supplemental Arrows-C
+            0x1F900..=0x1F9FF |  // Supplemental Symbols and Pictographs
+            0x1FA00..=0x1FA6F |  // Chess Symbols
+            0x1FA70..=0x1FAFF |  // Symbols and Pictographs Extended-A
+            0x2600..=0x26FF   |  // Misc symbols (weather, zodiac, etc.)
+            0x2700..=0x27BF   |  // Dingbats
+            0x231A..=0x231B   |  // Watch, Hourglass
+            0x23E9..=0x23F3   |  // Media control symbols
+            0x23F8..=0x23FA   |  // More media controls
+            0x25AA..=0x25AB   |  // Squares
+            0x25B6 | 0x25C0   |  // Play buttons
+            0x25FB..=0x25FE      // Squares
+        )
+    });
     let has_spam_words = ["free", "urgent", "act now", "limited time"]
         .iter()
         .any(|w| subject.to_lowercase().contains(w));
@@ -240,7 +263,7 @@ async fn churn_prediction(
     .bind(auth.tenant_id)
     .fetch_one(&state.db)
     .await
-    .unwrap_or(0);
+    .map_err(|e| ApiError::Internal(format!("churn prediction query failed: {e}")))?;
 
     let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM contacts WHERE tenant_id = $1 AND status = 'active'",
@@ -248,7 +271,7 @@ async fn churn_prediction(
     .bind(auth.tenant_id)
     .fetch_one(&state.db)
     .await
-    .unwrap_or(1)
+    .map_err(|e| ApiError::Internal(format!("churn prediction total query failed: {e}")))?
     .max(1);
 
     Ok(Json(ChurnPredictionResponse {

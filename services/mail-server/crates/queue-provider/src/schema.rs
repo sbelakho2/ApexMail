@@ -67,7 +67,7 @@ mod tests {
         assert!(QUEUE_SCHEMA.contains("status"));
         assert!(QUEUE_SCHEMA.contains("attempts"));
         assert!(QUEUE_SCHEMA.contains("visibility_timeout"));
-        assert!(QUEUE_SCHEMA.contains("SKIP LOCKED").not());
+        assert!(!QUEUE_SCHEMA.contains("SKIP LOCKED"));
         // SKIP LOCKED is in the query, not the schema
     }
 
@@ -76,15 +76,5 @@ mod tests {
         assert!(QUEUE_SCHEMA.contains("CHECK"));
         assert!(QUEUE_SCHEMA.contains("pending"));
         assert!(QUEUE_SCHEMA.contains("dead_letter"));
-    }
-}
-
-// Helper for the contains().not() pattern
-trait Not {
-    fn not(self) -> bool;
-}
-impl Not for bool {
-    fn not(self) -> bool {
-        !self
     }
 }

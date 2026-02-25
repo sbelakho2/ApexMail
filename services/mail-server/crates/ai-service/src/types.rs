@@ -195,7 +195,7 @@ impl TrainingJob {
             model_id: model_id.to_string(),
             status: JobStatus::Queued,
             epochs,
-            loss: f64::NAN,
+            loss: 0.0,
             started_at: Utc::now(),
             completed_at: None,
         }

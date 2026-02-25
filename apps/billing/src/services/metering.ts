@@ -451,7 +451,7 @@ export class MeteringService {
       if (events.length > 0) {
         // Add recovered events to buffer and flush immediately
         this.buffer.push(...events);
-        console.log(`[Metering] Recovered ${events.length} pending events from Redis`);
+        console.error(`[Metering] Recovered ${events.length} pending events from Redis`);
         await this.flush();
       }
 

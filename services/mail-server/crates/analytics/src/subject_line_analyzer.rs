@@ -1,8 +1,7 @@
 //! Subject line analyzer – tokenization, category classification, scoring.
 
 use regex::Regex;
-use std::collections::HashMap;
-use tracing::debug;
+use std::sync::LazyLock;
 
 use crate::types::*;
 
@@ -20,42 +19,53 @@ const OPTIMAL_MAX_LEN: usize = 60;
 /// Baseline open rate (industry average ~20%).
 const BASELINE_OPEN_RATE: f64 = 0.20;
 
-lazy_static::lazy_static! {
-    static ref URGENCY_WORDS: Vec<&'static str> = vec![
+static URGENCY_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "urgent", "hurry", "limited", "now", "today", "act", "expires",
         "deadline", "last chance", "final", "don't miss", "ending",
-    ];
-    static ref EXCLUSIVITY_WORDS: Vec<&'static str> = vec![
+    ]
+});
+static EXCLUSIVITY_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "exclusive", "vip", "invitation", "private", "members only",
         "insider", "selected", "elite",
-    ];
-    static ref BENEFIT_WORDS: Vec<&'static str> = vec![
+    ]
+});
+static BENEFIT_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "free", "save", "discount", "bonus", "reward", "earn", "win",
         "upgrade", "benefit", "value", "deal",
-    ];
-    static ref CURIOSITY_WORDS: Vec<&'static str> = vec![
+    ]
+});
+static CURIOSITY_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "secret", "reveal", "discover", "surprising", "unexpected",
         "hidden", "mystery", "unlock",
-    ];
-    static ref SOCIAL_PROOF_WORDS: Vec<&'static str> = vec![
+    ]
+});
+static SOCIAL_PROOF_WORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "popular", "trending", "everyone", "best-selling", "top rated",
         "customer favorite", "most loved", "recommended",
-    ];
-    static ref PERSONALIZATION_PATTERNS: Vec<&'static str> = vec![
-        "{first_name}", "{name}", "{company}", "you", "your",
-    ];
-    static ref SPAM_TOKENS: Vec<&'static str> = vec![
+    ]
+});
+static PERSONALIZATION_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec!["{first_name}", "{name}", "{company}", "you", "your"]
+});
+static SPAM_TOKENS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
         "buy now", "click here", "act now", "limited time",
-        "100%", "free!!!", "!!!",  "$$", "winner", "congrats",
+        "100%", "free!!!", "!!!", "$$", "winner", "congrats",
         "guarantee", "no obligation", "risk free", "dear friend",
         "make money", "cash bonus", "double your",
-    ];
-    static ref SPAM_BIGRAMS: Vec<&'static str> = vec![
-        "buy now", "act now", "click here", "free offer",
-        "risk free", "no cost",
-    ];
-    static ref EMOJI_RE: Regex = Regex::new(r"[\p{Emoji_Presentation}\p{Emoji}\u{200d}\u{fe0f}]").unwrap();
-}
+    ]
+});
+static SPAM_BIGRAMS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec!["buy now", "act now", "click here", "free offer", "risk free", "no cost"]
+});
+static EMOJI_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\p{Emoji_Presentation}\p{Emoji}\u{200d}\u{fe0f}]").unwrap()
+});
 
 pub struct SubjectLineAnalyzer;
 
@@ -134,9 +144,9 @@ pub fn classify_tokens(tokens: &[String]) -> Vec<TokenAnalysis> {
                 TokenCategory::Neutral
             };
 
-            let is_question = token.contains('?');
-            let is_number = token.chars().all(|c| c.is_ascii_digit());
-            let has_emoji = EMOJI_RE.is_match(token);
+            let _is_question = token.contains('?');
+            let _is_number = token.chars().all(|c| c.is_ascii_digit());
+            let _has_emoji = EMOJI_RE.is_match(token);
 
             TokenAnalysis {
                 token: token.clone(),

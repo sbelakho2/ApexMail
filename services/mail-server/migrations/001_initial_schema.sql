@@ -107,11 +107,12 @@ CREATE TABLE IF NOT EXISTS mail_mailboxes (
     
     -- Timestamps
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    -- Unique constraint per account
-    UNIQUE(account_id, name, COALESCE(parent_id, '00000000-0000-0000-0000-000000000000'::UUID))
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Unique mailbox name per account (using index for COALESCE expression)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_mailboxes_unique_name
+    ON mail_mailboxes(account_id, name, COALESCE(parent_id, '00000000-0000-0000-0000-000000000000'::UUID));
 
 CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_account 
     ON mail_mailboxes(account_id);

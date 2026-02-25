@@ -45,11 +45,15 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     tracing::info!(%addr, "Listening");
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("bind failed");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(error = %err, %addr, "failed to bind listener");
+            return;
+        }
+    };
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!(error = %err, "server error");
+    }
 }

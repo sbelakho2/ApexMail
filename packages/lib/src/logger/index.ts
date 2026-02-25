@@ -105,7 +105,12 @@ const REDACT_PATHS = [
 class PinoLoggerWrapper implements Logger {
   private readonly pino: PinoLogger;
 
-  constructor(options: LoggerOptions = {}) {
+  constructor(options: LoggerOptions = {}, pinoInstance?: PinoLogger) {
+    if (pinoInstance) {
+      this.pino = pinoInstance;
+      return;
+    }
+
     const nodeEnv = process.env['NODE_ENV'];
     const isPretty = nodeEnv !== 'production' && nodeEnv !== 'test';
     
@@ -171,9 +176,7 @@ class PinoLoggerWrapper implements Logger {
 
   child(context: LogContext): Logger {
     const childPino = this.pino.child(context);
-    const wrapper = new PinoLoggerWrapper();
-    Object.defineProperty(wrapper, 'pino', { value: childPino, writable: false });
-    return wrapper;
+    return new PinoLoggerWrapper(undefined, childPino);
   }
 
   async flush(): Promise<void> {

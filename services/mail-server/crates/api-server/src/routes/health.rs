@@ -41,7 +41,10 @@ async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
         Ok::<bool, anyhow::Error>(pong == "PONG")
     }
     .await
-    .unwrap_or(false);
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "Redis readiness check failed");
+        false
+    });
 
     if db_ok && redis_ok {
         (

@@ -3,7 +3,7 @@
 //! Inbound SMTP server handling mail from the internet (port 25).
 
 mod session;
-mod parser;
+// #165: Removed dead `parser` module — all parsing is handled in session.rs.
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -11,11 +11,15 @@ use std::sync::Arc;
 use std::fs::File;
 use std::io::BufReader as StdBufReader;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::{info, warn, error};
 use tracing_subscriber::EnvFilter;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, pki_types::PrivateKeyDer};
 use rustls_pemfile::{certs, private_key};
+
+/// Default maximum concurrent connections.
+const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 
 #[derive(Parser)]
 #[command(name = "smtp-edge")]
@@ -44,6 +48,14 @@ struct Cli {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// #162: Comma-separated list of local domains to accept mail for
+    #[arg(long, env = "LOCAL_DOMAINS", value_delimiter = ',')]
+    local_domains: Vec<String>,
+
+    /// #163: Maximum concurrent connections
+    #[arg(long, env = "MAX_CONNECTIONS", default_value_t = DEFAULT_MAX_CONNECTIONS)]
+    max_connections: usize,
 }
 
 fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
@@ -87,39 +99,69 @@ async fn main() -> Result<()> {
     
     info!("Starting SMTP Edge on {}", cli.listen);
     
-    let enable_starttls = cli.cert.is_some() || cli.key.is_some();
+    // #164: Both cert AND key must be present to enable STARTTLS (was || — wrong)
+    let enable_starttls = cli.cert.is_some() && cli.key.is_some();
     let tls_acceptor = if enable_starttls {
-        let cert_path = cli.cert.clone().ok_or_else(|| anyhow!("--cert is required when STARTTLS is enabled"))?;
-        let key_path = cli.key.clone().ok_or_else(|| anyhow!("--key is required when STARTTLS is enabled"))?;
+        let cert_path = cli.cert.clone().unwrap(); // safe: checked above
+        let key_path = cli.key.clone().unwrap(); // safe: checked above
         Some(load_tls_acceptor(&cert_path, &key_path)?)
     } else {
+        if cli.cert.is_some() || cli.key.is_some() {
+            warn!("Both --cert and --key must be provided to enable STARTTLS; TLS disabled");
+        }
         None
     };
 
-    let config = Arc::new(session::SmtpConfig {
-        hostname: cli.hostname,
-        mailstore_addr: cli.mailstore_addr,
-        max_message_size: 25 * 1024 * 1024, // 25MB
-        max_recipients: 100,
+    // #162: local_domains from CLI/env; warn if empty
+    if cli.local_domains.is_empty() {
+        warn!("No --local-domains configured; all inbound mail will be rejected as non-local");
+    }
+
+    let config = Arc::new(session::SmtpConfig::new(
+        cli.hostname,
+        cli.mailstore_addr,
+        25 * 1024 * 1024, // 25MB
+        100,
         enable_starttls,
         tls_acceptor,
-        local_domains: vec![],
-    });
+        cli.local_domains,
+    ));
+
+    // #163: Semaphore limits concurrent connections
+    let conn_semaphore = Arc::new(Semaphore::new(cli.max_connections));
     
     let listener = TcpListener::bind(&cli.listen).await?;
-    info!("SMTP listening on {}", cli.listen);
+    info!("SMTP listening on {} (max_connections={})", cli.listen, cli.max_connections);
     
     loop {
         match listener.accept().await {
-            Ok((socket, addr)) => {
+            Ok((mut socket, addr)) => {
+                // #163: Acquire permit before spawning — rejects when at capacity
+                let permit = match conn_semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(peer = %addr, "Connection rejected: max connections reached");
+                        // Try to send a 421 before dropping
+                        let _ = tokio::io::AsyncWriteExt::write_all(
+                            &mut socket,
+                            b"421 4.7.0 Too many connections, try again later\r\n",
+                        ).await;
+                        drop(socket);
+                        continue;
+                    }
+                };
+
                 let config = config.clone();
                 tokio::spawn(async move {
-                    let peer = addr.to_string();
+                    let peer = addr;
                     info!(peer = %peer, "New SMTP connection");
                     
-                    if let Err(e) = session::handle_connection(socket, config, peer.clone()).await {
+                    if let Err(e) = session::handle_connection(socket, config, peer).await {
                         warn!(peer = %peer, error = %e, "SMTP session error");
                     }
+
+                    // Permit is dropped here, releasing the semaphore slot
+                    drop(permit);
                 });
             }
             Err(e) => {

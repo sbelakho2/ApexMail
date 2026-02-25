@@ -36,12 +36,22 @@ pub struct AppState {
 
 // ── Auth middleware helper ──────────────────────────────────
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
     let key = headers.get("x-api-key")
         .or_else(|| headers.get("x-internal-api-key"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if key == config.internal_api_key || key == config.admin_api_key {
+    let key_bytes = key.as_bytes();
+    if constant_time_eq(key_bytes, config.internal_api_key.as_bytes())
+        || constant_time_eq(key_bytes, config.admin_api_key.as_bytes())
+    {
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -181,6 +191,15 @@ struct HistoryQuery {
     limit: i64,
 }
 fn default_limit() -> i64 { 50 }
+fn default_offset() -> i64 { 0 }
+
+#[derive(Deserialize)]
+struct PaginationQuery {
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default = "default_offset")]
+    offset: i64,
+}
 
 async fn failover_history(
     State(state): State<Arc<AppState>>,
@@ -436,9 +455,12 @@ async fn replication_lag_history(
 async fn regions_list(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(q): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.list_regions().await
+    let limit = q.limit.max(1).min(200);
+    let offset = q.offset.max(0);
+    state.multi_region.list_regions(limit, offset).await
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -580,9 +602,12 @@ async fn regions_traffic(
 async fn geo_rules_list(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(q): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
     check_api_key(&headers, &state.config)?;
-    state.multi_region.list_geo_rules().await
+    let limit = q.limit.max(1).min(200);
+    let offset = q.offset.max(0);
+    state.multi_region.list_geo_rules(limit, offset).await
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

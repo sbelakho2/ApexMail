@@ -189,7 +189,7 @@ pub async fn handle_prefs_get(
     let prefs_path = &state.config.tracking.preferences_path;
 
     // FIX-077: parallel DB queries
-    let (prefs_res, cats_res, sup_res) = tokio::join!(
+    let (prefs_res, cats_res, sup_res) = match tokio::try_join!(
         sqlx::query_as::<_, (String, bool)>(
             "SELECT category, subscribed FROM subscription_preferences WHERE tenant_id=$1 AND email=$2"
         )
@@ -207,15 +207,18 @@ pub async fn handle_prefs_get(
         .bind(&data.tenant_id)
         .bind(&email_lc)
         .fetch_optional(&state.db),
-    );
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email_lc, "Failed to load preferences data");
+            return Html(render_error_page("Unable to load preferences. Please try again.")).into_response();
+        }
+    };
 
-    let pref_map: std::collections::HashMap<String, bool> = prefs_res
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let pref_map: std::collections::HashMap<String, bool> = prefs_res.into_iter().collect();
 
     // Collect into owned strings first, then build Category slices from those.
-    let cat_rows: Vec<(String, String)> = cats_res.unwrap_or_default();
+    let cat_rows: Vec<(String, String)> = cats_res;
     let cats: Vec<OwnedCategory> = cat_rows
         .into_iter()
         .map(|(name, desc)| {
@@ -229,7 +232,7 @@ pub async fn handle_prefs_get(
         .map(|c| Category { name: &c.name, description: &c.description, subscribed: c.subscribed })
         .collect();
 
-    let globally_unsubscribed = sup_res.ok().flatten().is_some();
+    let globally_unsubscribed = sup_res.is_some();
 
     Html(render_preferences_page(
         &token,
@@ -288,13 +291,20 @@ pub async fn handle_prefs_post(
     // Global unsubscribe
     if form.unsubscribe_all.as_deref() == Some("true") {
         let sup_id = new_id("sup");
-        let _ = sqlx::query(r#"
+        if let Err(e) = sqlx::query(r#"
             INSERT INTO suppressions (id, tenant_id, email, reason, subtype, created_at)
             VALUES ($1, $2, $3, 'unsubscribe', 'preferences', NOW())
             ON CONFLICT (tenant_id, email) DO UPDATE SET reason='unsubscribe', subtype='preferences', updated_at=NOW()
         "#)
         .bind(&sup_id).bind(&data.tenant_id).bind(&email)
-        .execute(&state.db).await;
+        .execute(&state.db).await {
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email, "CRITICAL: Failed to insert suppression record for unsubscribe");
+            return axum::http::Response::builder()
+                .status(500)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"error":"Failed to save unsubscribe preference. Please try again."}"#))
+                .unwrap_or_default();
+        }
 
         queue_unsub_webhook_async(&state, &data.tenant_id, &email, "preferences-center");
         let redirect_url = format!("{prefs_path}/{token}?saved=1");
@@ -303,11 +313,18 @@ pub async fn handle_prefs_post(
 
     // Resubscribe
     if form.resubscribe_all.as_deref() == Some("true") {
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             "DELETE FROM suppressions WHERE tenant_id=$1 AND email=$2 AND reason='unsubscribe'"
         )
         .bind(&data.tenant_id).bind(&email)
-        .execute(&state.db).await;
+        .execute(&state.db).await {
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email, "Failed to delete suppression record for resubscribe");
+            return axum::http::Response::builder()
+                .status(500)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"error":"Failed to save resubscribe preference. Please try again."}"#))
+                .unwrap_or_default();
+        }
 
         let redirect_url = format!("{prefs_path}/{token}?saved=1");
         return Redirect::to(&redirect_url).into_response();
@@ -322,48 +339,52 @@ pub async fn handle_prefs_post(
         .collect();
 
     if !cats.is_empty() {
-        // Build a multi-row INSERT for all category preferences (B-033)
-        // Using a hand-built query to work around sqlx QueryBuilder NOW() limitation.
-        let mut values_parts: Vec<String> = Vec::with_capacity(cats.len());
-        let mut params: Vec<serde_json::Value> = Vec::new();
-        let mut idx: usize = 1;
-
-        for (cat, subscribed) in &cats {
-            values_parts.push(format!(
-                "(${}, ${}, ${}, ${}, ${}, NOW())",
-                idx, idx+1, idx+2, idx+3, idx+4
-            ));
-            idx += 5;
-            // We can't use serde_json here — use sqlx directly below via separate inserts
-            let _ = (cat, subscribed, &mut params, &mut values_parts);
-        }
-
-        // Fall back to individual INSERTs (still within a single transaction)
-        let mut tx = state.db.begin().await.ok();
-        for (cat, subscribed) in &cats {
-            let pref_id = new_id("prf");
-            let query_result = sqlx::query(r#"
-                INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
-                VALUES ($1, $2, $3, $4, $5, NOW())
-                ON CONFLICT (tenant_id, email, category)
-                DO UPDATE SET subscribed=EXCLUDED.subscribed, updated_at=NOW()
-            "#)
-            .bind(&pref_id)
-            .bind(&data.tenant_id)
-            .bind(&email)
-            .bind(cat)
-            .bind(subscribed);
-
-            if let Some(ref mut t) = tx {
-                if let Err(e) = query_result.execute(&mut **t).await {
-                    error!(error = %e, "Failed to update subscription preference");
-                }
-            } else if let Err(e) = query_result.execute(&state.db).await {
-                error!(error = %e, "Failed to update subscription preference");
+        // #203: Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
+        let mut tx = match state.db.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!(error = %e, "Failed to begin transaction for preferences");
+                return axum::http::Response::builder()
+                    .status(500)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"error":"Failed to save preferences. Please try again."}"#))
+                    .unwrap_or_default();
             }
+        };
+
+        // Batch UPSERT all category preferences in a single statement
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at) "
+        );
+        builder.push_values(&cats, |mut b, (cat, subscribed)| {
+            b.push_bind(new_id("prf"))
+                .push_bind(&data.tenant_id)
+                .push_bind(&email)
+                .push_bind(cat)
+                .push_bind(*subscribed)
+                .push_unseparated(", NOW()");
+        });
+        builder.push(
+            " ON CONFLICT (tenant_id, email, category) DO UPDATE SET subscribed=EXCLUDED.subscribed, updated_at=NOW()"
+        );
+
+        if let Err(e) = builder.build().execute(&mut *tx).await {
+            error!(error = %e, "Failed to batch update subscription preferences");
+            // tx will be rolled back on drop
+            return axum::http::Response::builder()
+                .status(500)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"error":"Failed to save preferences. Please try again."}"#))
+                .unwrap_or_default();
         }
-        if let Some(t) = tx {
-            let _ = t.commit().await;
+
+        if let Err(e) = tx.commit().await {
+            tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %email, "CRITICAL: Failed to commit subscription preference transaction — changes rolled back");
+            return axum::http::Response::builder()
+                .status(500)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"error":"Failed to save preferences. Please try again."}"#))
+                .unwrap_or_default();
         }
     }
 
@@ -449,7 +470,7 @@ async fn queue_unsub_webhook(
             .push_bind(&payload_str)
             .push_bind("pending")
             .push_bind(1i32)
-            .push_unseparated(" NOW()");
+            .push_unseparated(", NOW()");  // #179: comma must precede NOW()
     });
     builder.build().execute(&state.db).await?;
     Ok(())

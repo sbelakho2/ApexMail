@@ -184,6 +184,8 @@ export async function PATCH(request: Request) {
             return NextResponse.json({ error: 'No valid fields to update' }, { status: 400 });
         }
 
+        // Always set updated_at server-side so it is never skipped or user-supplied.
+        setClauses.push('updated_at = NOW()');
         values.push(id);
         await query(`UPDATE tenants SET ${setClauses.join(', ')} WHERE id = $${paramIdx}`, values);
 

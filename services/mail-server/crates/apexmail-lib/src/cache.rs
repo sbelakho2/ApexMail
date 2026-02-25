@@ -38,16 +38,24 @@ pub async fn cache_del(
 }
 
 /// Atomic increment with expiry (for rate limiting counters).
+/// #218: Uses Lua script for atomic INCR + conditional EXPIRE
 pub async fn cache_incr_with_ttl(
     redis: &RedisPool,
     key: &str,
     ttl_secs: u64,
 ) -> Result<i64, anyhow::Error> {
     let mut conn = redis.get().await?;
-    let count: i64 = conn.incr(key, 1i64).await?;
-    if count == 1 {
-        let _: () = conn.expire(key, ttl_secs as i64).await?;
-    }
+    // Atomic Lua script: INCR and set EXPIRE only if first increment (count == 1)
+    let script = redis::Script::new(
+        r#"
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return count
+        "#,
+    );
+    let count: i64 = script.key(key).arg(ttl_secs).invoke_async(&mut *conn).await?;
     Ok(count)
 }
 

@@ -15,12 +15,16 @@ import java.util.*;
  */
 final class JsonParser {
 
+    private static final int MAX_DEPTH = 100;
+
     private final String src;
     private int pos;
+    private int depth;
 
     JsonParser(String src) {
         this.src = src;
         this.pos = 0;
+        this.depth = 0;
     }
 
     Object parse() {
@@ -44,35 +48,56 @@ final class JsonParser {
     }
 
     private Map<String, Object> parseObject() {
-        expect('{');
-        Map<String, Object> map = new LinkedHashMap<>();
-        skipWhitespace();
-        if (peek() == '}') { pos++; return map; }
-        while (true) {
-            String key = parseString();
+        enterDepth();
+        try {
+            expect('{');
+            Map<String, Object> map = new LinkedHashMap<>();
             skipWhitespace();
-            expect(':');
-            Object value = parseValue();
-            map.put(key, value);
-            skipWhitespace();
-            if (peek() == '}') { pos++; break; }
-            expect(',');
+            if (peek() == '}') { pos++; return map; }
+            while (true) {
+                String key = parseString();
+                skipWhitespace();
+                expect(':');
+                Object value = parseValue();
+                map.put(key, value);
+                skipWhitespace();
+                if (peek() == '}') { pos++; break; }
+                expect(',');
+            }
+            return map;
+        } finally {
+            exitDepth();
         }
-        return map;
     }
 
     private List<Object> parseArray() {
-        expect('[');
-        List<Object> list = new ArrayList<>();
-        skipWhitespace();
-        if (peek() == ']') { pos++; return list; }
-        while (true) {
-            list.add(parseValue());
+        enterDepth();
+        try {
+            expect('[');
+            List<Object> list = new ArrayList<>();
             skipWhitespace();
-            if (peek() == ']') { pos++; break; }
-            expect(',');
+            if (peek() == ']') { pos++; return list; }
+            while (true) {
+                list.add(parseValue());
+                skipWhitespace();
+                if (peek() == ']') { pos++; break; }
+                expect(',');
+            }
+            return list;
+        } finally {
+            exitDepth();
         }
-        return list;
+    }
+
+    private void enterDepth() {
+        depth++;
+        if (depth > MAX_DEPTH) {
+            throw new ApexMailException("Maximum JSON depth exceeded");
+        }
+    }
+
+    private void exitDepth() {
+        depth--;
     }
 
     private String parseString() {
@@ -92,6 +117,9 @@ final class JsonParser {
                     case 'r' -> '\r';
                     case 't' -> '\t';
                     case 'u' -> {
+                        if (pos + 4 > src.length()) {
+                            throw new ApexMailException("Invalid unicode escape at pos " + pos);
+                        }
                         String hex = src.substring(pos, pos + 4);
                         pos += 4;
                         yield (char) Integer.parseInt(hex, 16);
@@ -108,13 +136,44 @@ final class JsonParser {
     private Number parseNumber() {
         int start = pos;
         if (pos < src.length() && src.charAt(pos) == '-') pos++;
+
+        int intStart = pos;
         while (pos < src.length() && Character.isDigit(src.charAt(pos))) pos++;
-        boolean isFloat = pos < src.length() && (src.charAt(pos) == '.' || src.charAt(pos) == 'e' || src.charAt(pos) == 'E');
-        if (isFloat) {
-            while (pos < src.length() && "0123456789.eE+-".indexOf(src.charAt(pos)) >= 0) pos++;
-            return Double.parseDouble(src.substring(start, pos));
+        if (intStart == pos) {
+            throw new ApexMailException("Invalid number at pos " + start);
         }
-        return Long.parseLong(src.substring(start, pos));
+
+        boolean isFloat = false;
+        if (pos < src.length() && src.charAt(pos) == '.') {
+            isFloat = true;
+            pos++;
+            int fracStart = pos;
+            while (pos < src.length() && Character.isDigit(src.charAt(pos))) pos++;
+            if (fracStart == pos) {
+                throw new ApexMailException("Invalid number at pos " + start);
+            }
+        }
+
+        if (pos < src.length() && (src.charAt(pos) == 'e' || src.charAt(pos) == 'E')) {
+            isFloat = true;
+            pos++;
+            if (pos < src.length() && (src.charAt(pos) == '+' || src.charAt(pos) == '-')) pos++;
+            int expStart = pos;
+            while (pos < src.length() && Character.isDigit(src.charAt(pos))) pos++;
+            if (expStart == pos) {
+                throw new ApexMailException("Invalid number at pos " + start);
+            }
+        }
+
+        if (pos < src.length()) {
+            char next = src.charAt(pos);
+            if (!(Character.isWhitespace(next) || next == ',' || next == ']' || next == '}')) {
+                throw new ApexMailException("Invalid number at pos " + start);
+            }
+        }
+
+        String raw = src.substring(start, pos);
+        return isFloat ? Double.parseDouble(raw) : Long.parseLong(raw);
     }
 
     private Boolean parseBoolean() {

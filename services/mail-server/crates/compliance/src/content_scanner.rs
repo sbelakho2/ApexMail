@@ -10,9 +10,12 @@
 
 use aho_corasick::AhoCorasick;
 use chrono::Utc;
-use lazy_static::lazy_static;
 use regex::Regex;
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, LazyLock};
+use tokio::sync::RwLock;
 
 use uuid::Uuid;
 
@@ -29,7 +32,7 @@ struct SpamRule {
     pattern: &'static str,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone)]
 enum RuleTarget {
     Text,
     Html,
@@ -49,64 +52,108 @@ const SPAM_RULES: &[SpamRule] = &[
     SpamRule { name: "TINY_FONT", score: 5.0, description: "Extremely small font", target: RuleTarget::Html, pattern: r"(?i)font-size\s*:\s*[01](px|pt|em)" },
 ];
 
-lazy_static! {
-    /// Combined alternation of all text-targeted spam rules for fast pre-check.
-    static ref FAST_SPAM_CHECK: Regex = {
-        let text_patterns: Vec<&str> = SPAM_RULES
-            .iter()
-            .filter(|r| r.target == RuleTarget::Text && !r.pattern.contains("PLACEHOLDER"))
-            .map(|r| r.pattern)
-            .collect();
-        Regex::new(&text_patterns.join("|")).unwrap()
-    };
+struct CompiledSpamRule {
+    name: &'static str,
+    score: f64,
+    description: &'static str,
+    target: RuleTarget,
+    regex: Regex,
+}
 
-    // ─── Phishing ──────────────────────────────────────────
+static COMPILED_SPAM_RULES: LazyLock<Vec<CompiledSpamRule>> = LazyLock::new(|| {
+    SPAM_RULES
+        .iter()
+        .filter(|r| !r.pattern.contains("PLACEHOLDER"))
+        .filter_map(|r| {
+            Regex::new(r.pattern).ok().map(|regex| CompiledSpamRule {
+                name: r.name,
+                score: r.score,
+                description: r.description,
+                target: r.target,
+                regex,
+            })
+        })
+        .collect()
+});
 
-    static ref URL_REGEX: Regex = Regex::new(r#"https?://[^\s<>"']+"#).unwrap();
-    static ref IP_URL_REGEX: Regex = Regex::new(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}").unwrap();
+/// Combined alternation of all text-targeted spam rules for fast pre-check.
+static FAST_SPAM_CHECK: LazyLock<Regex> = LazyLock::new(|| {
+    let text_patterns: Vec<&str> = SPAM_RULES
+        .iter()
+        .filter(|r| r.target == RuleTarget::Text && !r.pattern.contains("PLACEHOLDER"))
+        .map(|r| r.pattern)
+        .collect();
+    Regex::new(&text_patterns.join("|")).unwrap()
+});
 
-    static ref URL_SHORTENERS: AhoCorasick = AhoCorasick::new(&[
+// ─── Phishing ──────────────────────────────────────────
+
+static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"']+"#).unwrap());
+static IP_URL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}").unwrap());
+
+static URL_SHORTENERS: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::new(&[
         "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly",
         "is.gd", "buff.ly", "adf.ly", "tiny.cc", "shorte.st",
-    ]).unwrap();
+    ])
+    .unwrap()
+});
 
-    static ref SUSPICIOUS_TLDS: AhoCorasick = AhoCorasick::new(&[
+static SUSPICIOUS_TLDS: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::new(&[
         ".xyz", ".top", ".work", ".date", ".review", ".bid",
         ".stream", ".click", ".download", ".loan", ".racing",
-    ]).unwrap();
+    ])
+    .unwrap()
+});
 
-    static ref BRAND_PATTERNS: Vec<(&'static str, Regex)> = vec![
-        ("PayPal",    Regex::new(r"(?i)paypa[l1]|pay[-_]?pal").unwrap()),
-        ("Apple",     Regex::new(r"(?i)app[l1]e|ap[p]+le").unwrap()),
-        ("Amazon",    Regex::new(r"(?i)amaz[o0]n|amazo[n]+").unwrap()),
-        ("Microsoft", Regex::new(r"(?i)micros[o0]ft|micr[o0]soft|m[i1]crosoft").unwrap()),
-        ("Google",    Regex::new(r"(?i)g[o0][o0]g[l1]e|googl[e3]").unwrap()),
-    ];
+static BRAND_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+    vec![
+        ("PayPal", Regex::new(r"(?i)paypa[l1]|pay[-_]?pal").unwrap()),
+        ("Apple", Regex::new(r"(?i)app[l1]e|ap[p]+le").unwrap()),
+        ("Amazon", Regex::new(r"(?i)amaz[o0]n|amazo[n]+").unwrap()),
+        (
+            "Microsoft",
+            Regex::new(r"(?i)micros[o0]ft|micr[o0]soft|m[i1]crosoft").unwrap(),
+        ),
+        ("Google", Regex::new(r"(?i)g[o0][o0]g[l1]e|googl[e3]").unwrap()),
+    ]
+});
 
-    static ref URGENCY_PATTERNS: Vec<Regex> = vec![
+static URGENCY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
         Regex::new(r"(?i)account.{0,20}suspended").unwrap(),
         Regex::new(r"(?i)verify\s+your\s+(identity|account)").unwrap(),
         Regex::new(r"(?i)unauthorized.{0,20}access").unwrap(),
         Regex::new(r"(?i)confirm.{0,20}now.{0,20}or.{0,20}lose").unwrap(),
         Regex::new(r"(?i)security\s+alert").unwrap(),
         Regex::new(r"(?i)click\s+here\s+immediately").unwrap(),
-    ];
+    ]
+});
 
-    /// Homograph / confusable Unicode chars.
-    static ref HOMOGRAPH_REGEX: Regex =
-        Regex::new(r"[\u{0400}-\u{04FF}\u{2000}-\u{206F}\u{FF00}-\u{FFEF}]").unwrap();
+/// Homograph / confusable Unicode chars.
+static HOMOGRAPH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\u{0400}-\u{04FF}\u{2000}-\u{206F}\u{FF00}-\u{FFEF}]").unwrap()
+});
 
-    // ─── Malware ───────────────────────────────────────────
+// ─── Malware ───────────────────────────────────────────
 
-    static ref DANGEROUS_EXTENSIONS: AhoCorasick = AhoCorasick::new(&[
+static DANGEROUS_EXTENSIONS: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::new(&[
         ".exe", ".bat", ".cmd", ".com", ".js", ".jse", ".vbs", ".vbe",
         ".wsf", ".wsh", ".ps1", ".scr", ".pif", ".msi", ".hta", ".cpl",
-    ]).unwrap();
+    ])
+    .unwrap()
+});
 
-    static ref MACRO_EXTENSIONS: AhoCorasick = AhoCorasick::new(&[
-        ".docm", ".xlsm", ".pptm", ".dotm", ".xltm",
-    ]).unwrap();
-}
+static MACRO_EXTENSIONS: LazyLock<AhoCorasick> = LazyLock::new(|| {
+    AhoCorasick::new(&[".docm", ".xlsm", ".pptm", ".dotm", ".xltm"]).unwrap()
+});
+
+static PHYSICAL_ADDRESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\d{1,6}\s+\w+\s+(St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)").unwrap()
+});
 
 // ─── Magic bytes (file signature) ──────────────────────────────
 
@@ -130,11 +177,16 @@ fn is_password_protected_zip(header_bytes: &[u8]) -> bool {
 pub struct ContentScanner {
     db: PgPool,
     config: ContentScanningConfig,
+    policy_regex_cache: RwLock<HashMap<String, Arc<Vec<(String, Regex)>>>>,
 }
 
 impl ContentScanner {
     pub fn new(db: PgPool, config: ContentScanningConfig) -> Self {
-        Self { db, config }
+        Self {
+            db,
+            config,
+            policy_regex_cache: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Scan an email through all analysis layers.
@@ -272,37 +324,30 @@ impl ContentScanner {
         // Fast pre-check: if combined regex doesn't match, skip text rules.
         let text_rules_may_match = FAST_SPAM_CHECK.is_match(&combined_text);
 
-        for rule in SPAM_RULES {
-            if rule.pattern.contains("PLACEHOLDER") {
-                continue; // handled separately below
-            }
+        for rule in COMPILED_SPAM_RULES.iter() {
             match rule.target {
                 RuleTarget::Text => {
                     if !text_rules_may_match {
                         continue;
                     }
-                    if let Ok(re) = Regex::new(rule.pattern) {
-                        if re.is_match(&combined_text) {
+                    if rule.regex.is_match(&combined_text) {
+                        score += rule.score;
+                        triggers.push(SpamTrigger {
+                            rule: rule.name.into(),
+                            score: rule.score,
+                            description: rule.description.into(),
+                        });
+                    }
+                }
+                RuleTarget::Html => {
+                    if !html.is_empty() {
+                        if rule.regex.is_match(html) {
                             score += rule.score;
                             triggers.push(SpamTrigger {
                                 rule: rule.name.into(),
                                 score: rule.score,
                                 description: rule.description.into(),
                             });
-                        }
-                    }
-                }
-                RuleTarget::Html => {
-                    if !html.is_empty() {
-                        if let Ok(re) = Regex::new(rule.pattern) {
-                            if re.is_match(html) {
-                                score += rule.score;
-                                triggers.push(SpamTrigger {
-                                    rule: rule.name.into(),
-                                    score: rule.score,
-                                    description: rule.description.into(),
-                                });
-                            }
                         }
                     }
                 }
@@ -674,9 +719,7 @@ impl ContentScanner {
         let body_combined = format!("{text} {html}");
 
         // Simplified physical address heuristic (US postal pattern)
-        let has_address = Regex::new(r"\d{1,6}\s+\w+\s+(St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)")
-            .map(|re| re.is_match(&body_combined))
-            .unwrap_or(false);
+        let has_address = PHYSICAL_ADDRESS_REGEX.is_match(&body_combined);
         if !has_address {
             violations.push(PolicyViolation {
                 policy: "CAN-SPAM".into(),
@@ -724,28 +767,53 @@ impl ContentScanner {
         for (policy_name, rules) in &tenant_policies {
             if let Some(patterns) = rules.get("blocked_patterns") {
                 if let Some(arr) = patterns.as_array() {
-                    for pat_val in arr {
-                        if let Some(pat_str) = pat_val.as_str() {
-                            // Bound pattern length for ReDoS protection
-                            if pat_str.len() <= 512 {
-                                if let Ok(re) = Regex::new(pat_str) {
-                                    let check_text = if body_combined.len() > 50_000 {
-                                        &body_combined[..50_000]
-                                    } else {
-                                        &body_combined
-                                    };
-                                    if re.is_match(check_text) {
-                                        violations.push(PolicyViolation {
-                                            policy: policy_name.clone(),
-                                            rule: pat_str.into(),
-                                            description: format!(
-                                                "Content matches blocked pattern in {policy_name}"
-                                            ),
-                                            severity: ViolationSeverity::Error,
-                                        });
-                                    }
-                                }
-                            }
+                    let blocked_patterns: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .filter(|pat| pat.len() <= 512)
+                        .map(|pat| pat.to_string())
+                        .collect();
+
+                    if blocked_patterns.is_empty() {
+                        continue;
+                    }
+
+                    let cache_key = policy_cache_key(policy_name, &blocked_patterns);
+                    let cached = {
+                        let cache = self.policy_regex_cache.read().await;
+                        cache.get(&cache_key).cloned()
+                    };
+
+                    let compiled = if let Some(found) = cached {
+                        found
+                    } else {
+                        let compiled: Vec<(String, Regex)> = blocked_patterns
+                            .iter()
+                            .filter_map(|pat| Regex::new(pat).ok().map(|re| (pat.clone(), re)))
+                            .collect();
+                        let compiled = Arc::new(compiled);
+                        let mut cache = self.policy_regex_cache.write().await;
+                        cache.insert(cache_key, compiled.clone());
+                        compiled
+                    };
+
+                    let check_text = if body_combined.len() > 50_000 {
+                        &body_combined[..50_000]
+                    } else {
+                        &body_combined
+                    };
+
+                    for (pattern, re) in compiled.iter() {
+                        if re.is_match(check_text) {
+                            violations.push(PolicyViolation {
+                                policy: policy_name.clone(),
+                                rule: pattern.clone(),
+                                description: format!(
+                                    "Content matches blocked pattern in {policy_name}"
+                                ),
+                                severity: ViolationSeverity::Error,
+                            });
+                            break;
                         }
                     }
                 }
@@ -800,6 +868,12 @@ fn determine_verdict(
     } else {
         ScanVerdict::Clean
     }
+}
+
+fn policy_cache_key(policy_name: &str, patterns: &[String]) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    patterns.hash(&mut hasher);
+    format!("{policy_name}:{:x}", hasher.finish())
 }
 
 #[cfg(test)]

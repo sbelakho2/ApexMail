@@ -6,7 +6,7 @@ Official Python SDK for the ApexMail transactional email API.
 Usage:
     from apexmail import ApexMail
     
-    client = ApexMail(api_key="am_live_xxxx")
+    client = ApexMail(api_key="YOUR_API_KEY")
     response = client.emails.send(
         from_="hello@example.com",
         to="user@example.com",

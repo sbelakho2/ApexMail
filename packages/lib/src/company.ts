@@ -6,6 +6,8 @@
  * Used in invoices, contracts, legal documents, email footers, and API responses.
  */
 
+const COMPANY_IBAN = process.env['APEXMAIL_COMPANY_IBAN'] ?? 'EE382200221012345678';
+
 export const COMPANY_INFO = {
   /** Legal entity name */
   name: 'Bel Consulting OÜ',
@@ -45,7 +47,7 @@ export const COMPANY_INFO = {
   /** Bank account details for invoicing */
   bank: {
     name: 'Swedbank AS',
-    iban: 'EE382200221012345678',
+    iban: COMPANY_IBAN,
     bic: 'HABAEE2X',
   },
   

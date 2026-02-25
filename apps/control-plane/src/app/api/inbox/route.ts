@@ -32,7 +32,8 @@ export async function GET(request: Request) {
         const { searchParams } = new URL(request.url);
         const classification = searchParams.get('classification');
         const archived = searchParams.get('archived') === 'true';
-        const limit = Math.min(parseInt(searchParams.get('limit') ?? '50', 10), 200);
+        const rawLimit = parseInt(searchParams.get('limit') ?? '50', 10);
+        const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 50, 1), 200);
 
         let sql = `SELECT id, tenant_id, message_id, from_address, to_address,
                            subject, body_preview, classification, confidence,

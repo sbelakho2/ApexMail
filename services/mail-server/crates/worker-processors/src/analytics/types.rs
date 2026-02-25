@@ -78,6 +78,7 @@ impl AggregatedStats {
 }
 
 /// Event type enumeration.
+/// Fix #95: Removed blanket #[allow(dead_code)] — type is part of public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     Sent,
@@ -91,21 +92,6 @@ pub enum EventType {
 }
 
 impl EventType {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "sent" => Some(Self::Sent),
-            "delivered" => Some(Self::Delivered),
-            "opened" => Some(Self::Opened),
-            "clicked" => Some(Self::Clicked),
-            "bounced" => Some(Self::Bounced),
-            "unsubscribed" => Some(Self::Unsubscribed),
-            "complained" => Some(Self::Complained),
-            "failed" => Some(Self::Failed),
-            _ => None,
-        }
-    }
-
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -118,5 +104,30 @@ impl EventType {
             Self::Complained => "complained",
             Self::Failed => "failed",
         }
+    }
+}
+
+/// Fix #96: Implement std::str::FromStr trait properly instead of shadowing it.
+impl std::str::FromStr for EventType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "sent" => Ok(Self::Sent),
+            "delivered" => Ok(Self::Delivered),
+            "opened" => Ok(Self::Opened),
+            "clicked" => Ok(Self::Clicked),
+            "bounced" => Ok(Self::Bounced),
+            "unsubscribed" => Ok(Self::Unsubscribed),
+            "complained" => Ok(Self::Complained),
+            "failed" => Ok(Self::Failed),
+            _ => Err(format!("Unknown event type: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }

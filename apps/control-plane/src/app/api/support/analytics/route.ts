@@ -11,7 +11,8 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
     try {
-        const days = parseInt(request.nextUrl.searchParams.get('days') ?? '30', 10);
+        const rawDays = parseInt(request.nextUrl.searchParams.get('days') ?? '30', 10);
+        const days = Number.isFinite(rawDays) ? Math.min(Math.max(rawDays, 1), 365) : 30;
         const since = new Date();
         since.setDate(since.getDate() - days);
 

@@ -99,6 +99,34 @@ export function formatDateTime(date: Date | string): string {
 }
 
 /**
+ * Format a short date (e.g. Jan 15)
+ */
+export function formatShortDate(date: Date | string): string {
+    return new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+    }).format(new Date(date));
+}
+
+/**
+ * Format a time-only value
+ */
+export function formatTime(date: Date | string, options?: Intl.DateTimeFormatOptions): string {
+    return new Intl.DateTimeFormat('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        ...options,
+    }).format(new Date(date));
+}
+
+/**
+ * Get the user's local timezone identifier
+ */
+export function getLocalTimeZone(): string {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
+/**
  * Format bytes to human readable format
  */
 export function formatBytes(bytes: number, decimals = 2): string {

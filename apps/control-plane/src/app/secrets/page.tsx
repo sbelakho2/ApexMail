@@ -92,6 +92,11 @@ export default function SecretsPage() {
     }
 
     async function revokeSecret(secretId: string) {
+        const confirmed = window.confirm(
+            'Revoke this secret now? Clients using it will immediately lose access. You can rotate/create a new secret if revoked by mistake.'
+        );
+        if (!confirmed) return;
+
         try {
             const res = await fetch('/api/secrets', {
                 method: 'PATCH',

@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
@@ -179,17 +179,22 @@ impl SupportService {
 
     /// Escalate a ticket
     pub async fn escalate(
-        &self, id: Uuid, _reason: &str, _escalated_by: Uuid,
+        &self, id: Uuid, reason: &str, escalated_by: Uuid,
     ) -> Result<ApiResult<SupportTicket>, String> {
+        // #263: Store reason and escalated_by in the update
         let row = sqlx::query_as::<_, SupportTicket>(
             "UPDATE ent_support_tickets SET
              status = 'escalated',
              escalation_level = escalation_level + 1,
              escalated_at = NOW(),
+             escalation_reason = $2,
+             escalated_by = $3,
              updated_at = NOW()
              WHERE id = $1 RETURNING *"
         )
         .bind(id)
+        .bind(reason)
+        .bind(escalated_by)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Escalate ticket: {e}"))?;
@@ -205,13 +210,17 @@ impl SupportService {
 
     /// Submit customer satisfaction rating
     pub async fn submit_satisfaction(
-        &self, id: Uuid, rating: i32, _feedback: Option<&str>,
+        &self, id: Uuid, rating: i32, feedback: Option<&str>,
     ) -> Result<ApiResult<SupportTicket>, String> {
+        // #262: Store feedback in the satisfaction_feedback column
         let row = sqlx::query_as::<_, SupportTicket>(
-            "UPDATE ent_support_tickets SET satisfaction_rating = $2, updated_at = NOW()
+            "UPDATE ent_support_tickets SET 
+             satisfaction_rating = $2, 
+             satisfaction_feedback = $3,
+             updated_at = NOW()
              WHERE id = $1 RETURNING *"
         )
-        .bind(id).bind(rating)
+        .bind(id).bind(rating).bind(feedback)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Submit satisfaction: {e}"))?;
@@ -284,12 +293,20 @@ impl SupportService {
     }
 
     /// Auto-assign to least loaded agent with optional specialty match
+    /// #264: Now increments the assigned agent's current_ticket_count
     async fn auto_assign_agent(&self, category: &str) -> Result<Option<Uuid>, String> {
+        // Try to find an agent with matching specialty first
         let row: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM ent_support_agents
-             WHERE available = true AND $1 = ANY(specialties)
-             ORDER BY current_ticket_count ASC
-             LIMIT 1"
+            "UPDATE ent_support_agents 
+             SET current_ticket_count = current_ticket_count + 1
+             WHERE id = (
+                 SELECT id FROM ent_support_agents
+                 WHERE available = true AND $1 = ANY(specialties)
+                 ORDER BY current_ticket_count ASC
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id"
         )
         .bind(category)
         .fetch_optional(&self.db)
@@ -300,11 +317,18 @@ impl SupportService {
             return Ok(Some(id));
         }
 
+        // Fallback: assign to any available agent
         let row: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM ent_support_agents
-             WHERE available = true
-             ORDER BY current_ticket_count ASC
-             LIMIT 1"
+            "UPDATE ent_support_agents 
+             SET current_ticket_count = current_ticket_count + 1
+             WHERE id = (
+                 SELECT id FROM ent_support_agents
+                 WHERE available = true
+                 ORDER BY current_ticket_count ASC
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id"
         )
         .fetch_optional(&self.db)
         .await
@@ -331,10 +355,13 @@ impl SupportService {
         .map_err(|e| format!("SLA breach check: {e}"))?;
 
         for ticket in &tickets {
-            let _ = sqlx::query("UPDATE ent_support_tickets SET sla_breached = true WHERE id = $1")
+            if let Err(e) = sqlx::query("UPDATE ent_support_tickets SET sla_breached = true WHERE id = $1")
                 .bind(ticket.id)
                 .execute(&self.db)
-                .await;
+                .await
+            {
+                tracing::error!(error = %e, ticket_id = %ticket.id, "Failed to mark SLA breach — ticket will be retried next cycle");
+            }
             info!(ticket_id = %ticket.id, priority = %ticket.priority, "SLA breach detected");
         }
         Ok(tickets)
@@ -344,9 +371,12 @@ impl SupportService {
     pub async fn auto_escalate(&self) -> Result<i64, String> {
         let now = Utc::now();
         let rules = vec![
-            ("critical", Duration::minutes(30)),
-            ("high", Duration::hours(1)),
-            ("medium", Duration::hours(2)),
+            (
+                "critical",
+                TimeDelta::try_minutes(30).unwrap_or(TimeDelta::zero()),
+            ),
+            ("high", TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero())),
+            ("medium", TimeDelta::try_hours(2).unwrap_or(TimeDelta::zero())),
         ];
 
         let mut escalated = 0i64;

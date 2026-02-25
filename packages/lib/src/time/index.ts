@@ -245,11 +245,11 @@ export function getUtcOffset(): number {
 }
 
 export function toUtc(date: Date): Date {
-  return new Date(date.getTime() + date.getTimezoneOffset() * 60 * 1000);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
 }
 
 export function fromUtc(date: Date): Date {
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+  return new Date(date.getTime() + date.getTimezoneOffset() * 60 * 1000);
 }
 
 // Week number (ISO 8601)

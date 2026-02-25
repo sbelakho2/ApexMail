@@ -14,8 +14,9 @@ use aes_gcm::{
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::{Duration, Utc};
+use hmac::{Hmac, Mac};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
@@ -317,6 +318,8 @@ impl SecretManager {
         &self,
         tenant_id: &str,
         secret_type: Option<SecretType>,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<Secret>, String> {
         let rows: Vec<SecretRow> = if let Some(st) = secret_type {
             sqlx::query_as(
@@ -324,10 +327,12 @@ impl SecretManager {
                         rotation_schedule, last_rotated_at, next_rotation_at,
                         created_by, created_at, updated_at, expires_at
                  FROM secrets WHERE tenant_id = $1 AND type = $2
-                 ORDER BY created_at DESC",
+                 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
             )
             .bind(tenant_id)
             .bind(st.to_string())
+            .bind(limit)
+            .bind(offset)
             .fetch_all(&self.db)
             .await
             .map_err(|e| format!("DB error: {e}"))?
@@ -337,9 +342,11 @@ impl SecretManager {
                         rotation_schedule, last_rotated_at, next_rotation_at,
                         created_by, created_at, updated_at, expires_at
                  FROM secrets WHERE tenant_id = $1
-                 ORDER BY created_at DESC",
+                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
             )
             .bind(tenant_id)
+            .bind(limit)
+            .bind(offset)
             .fetch_all(&self.db)
             .await
             .map_err(|e| format!("DB error: {e}"))?
@@ -698,12 +705,26 @@ impl SecretManager {
 // ─── Key Derivation ────────────────────────────────────────────
 
 fn derive_key(master_key: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(master_key.as_bytes());
-    hasher.update(b"apexmail-secrets");
-    let result = hasher.finalize();
+    type HmacSha256 = Hmac<Sha256>;
+
+    let salt = std::env::var("SECRETS_KDF_SALT")
+        .unwrap_or_else(|_| "apexmail-compliance-kdf-v1".to_string());
+
+    // HKDF-Extract(salt, ikm)
+    let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes())
+        .unwrap_or_else(|_| <HmacSha256 as Mac>::new_from_slice(b"apexmail-compliance-kdf-v1").expect("static salt"));
+    extract.update(master_key.as_bytes());
+    let prk = extract.finalize().into_bytes();
+
+    // HKDF-Expand(prk, info, 32)
+    let info = b"apexmail-secret-manager-encryption-key-v1";
+    let mut expand = <HmacSha256 as Mac>::new_from_slice(&prk).expect("PRK size valid for HMAC");
+    expand.update(info);
+    expand.update(&[1]);
+    let okm = expand.finalize().into_bytes();
+
     let mut key = [0u8; 32];
-    key.copy_from_slice(&result);
+    key.copy_from_slice(&okm[..32]);
     key
 }
 

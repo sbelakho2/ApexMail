@@ -56,20 +56,18 @@ function sanitizePath(key: string, basePath: string): string {
   // Step 4: Replace backslashes with forward slashes (Windows compatibility)
   sanitized = sanitized.replace(/\\/g, '/');
   
-  // Step 5: Remove all variations of parent directory references
-  // Matches: .., ../, /.., /../, and variations with spaces/special chars
+  // Step 5: Normalize slashes and strip leading/trailing separators
   sanitized = sanitized
-    .replace(/\.{2,}/g, '')      // Multiple dots
     .replace(/\/+/g, '/')         // Multiple slashes
     .replace(/^\/+/, '')          // Leading slashes
     .replace(/\/$/,'');           // Trailing slash
   
   // Step 6: Split and filter path components
   const parts = sanitized.split('/').filter(part => {
-    // Remove empty parts, dots, and hidden files starting with .
+    // Remove empty parts and explicit current/parent directory markers.
     if (!part || part === '.' || part === '..') return false;
-    // Disallow parts that are only dots and/or whitespace
-    if (/^[\s.]*$/.test(part)) return false;
+    // Disallow parts that are only whitespace.
+    if (/^\s*$/.test(part)) return false;
     return true;
   });
   
@@ -395,8 +393,12 @@ export class S3StorageProvider implements StorageProvider {
         return Result.err(new Error(`Object not found: ${key}`));
       }
 
-      const data = Buffer.from(await response.arrayBuffer());
-      return Result.ok(Readable.from(data));
+      if (!response.body) {
+        return Result.err(new Error(`Empty response body for ${key}`));
+      }
+
+      const stream = Readable.fromWeb(response.body as unknown as ReadableStream<Uint8Array>);
+      return Result.ok(stream);
     } catch (error) {
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
@@ -793,7 +795,9 @@ export class CompressedStorageProvider implements StorageProvider {
   }
 
   async copy(sourceKey: string, destKey: string): Promise<Result<void, Error>> {
-    return this.underlying.copy(`${sourceKey}.gz`, `${destKey}.gz`);
+    const compressedResult = await this.underlying.copy(`${sourceKey}.gz`, `${destKey}.gz`);
+    if (compressedResult.ok) return compressedResult;
+    return this.underlying.copy(sourceKey, destKey);
   }
 }
 

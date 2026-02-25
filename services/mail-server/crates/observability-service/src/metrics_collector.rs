@@ -28,7 +28,7 @@ struct CounterInner {
 impl CounterInner {
     fn new() -> Self {
         Self {
-            bits: AtomicU64::new(0u64.to_be_bytes().iter().fold(0u64, |a, &b| (a << 8) | b as u64)),
+            bits: AtomicU64::new(0f64.to_bits()),
         }
     }
 
@@ -200,46 +200,39 @@ impl MetricsCollector {
     // -----------------------------------------------------------------------
 
     fn ensure_counter(&self, name: &str, help: &str) {
-        if !self.metrics.contains_key(name) {
-            self.metrics.insert(
-                name.to_string(),
-                RegisteredMetric {
-                    name: name.to_string(),
-                    help: help.to_string(),
-                    metric_type: MetricType::Counter,
-                    storage: MetricStorage::Counter(Arc::new(CounterInner::new())),
-                },
-            );
-        }
+        self.metrics
+            .entry(name.to_string())
+            .or_insert_with(|| RegisteredMetric {
+                name: name.to_string(),
+                help: help.to_string(),
+                metric_type: MetricType::Counter,
+                storage: MetricStorage::Counter(Arc::new(CounterInner::new())),
+            });
     }
 
     fn ensure_gauge(&self, name: &str, help: &str) {
-        if !self.metrics.contains_key(name) {
-            self.metrics.insert(
-                name.to_string(),
-                RegisteredMetric {
-                    name: name.to_string(),
-                    help: help.to_string(),
-                    metric_type: MetricType::Gauge,
-                    storage: MetricStorage::Gauge(Arc::new(GaugeInner::new())),
-                },
-            );
-        }
+        self.metrics
+            .entry(name.to_string())
+            .or_insert_with(|| RegisteredMetric {
+                name: name.to_string(),
+                help: help.to_string(),
+                metric_type: MetricType::Gauge,
+                storage: MetricStorage::Gauge(Arc::new(GaugeInner::new())),
+            });
     }
 
     fn ensure_histogram(&self, name: &str, help: &str) {
-        if !self.metrics.contains_key(name) {
-            let buckets = self.default_buckets.read().clone();
-            self.metrics.insert(
-                name.to_string(),
+        self.metrics
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let buckets = self.default_buckets.read().clone();
                 RegisteredMetric {
                     name: name.to_string(),
                     help: help.to_string(),
                     metric_type: MetricType::Histogram,
                     storage: MetricStorage::Histogram(Arc::new(HistogramInner::new(&buckets))),
-                },
-            );
-        }
+                }
+            });
     }
 
     // -----------------------------------------------------------------------

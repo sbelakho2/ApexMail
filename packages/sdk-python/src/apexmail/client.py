@@ -8,10 +8,11 @@ SECURITY: Implements HTTPS enforcement, retry logic, and masked API key repr.
 
 from __future__ import annotations
 
+import random
 import re
 import time
-import random
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -62,8 +63,10 @@ class BaseClient:
             )
 
         # SECURITY FIX: Enforce HTTPS in production
-        if not base_url.startswith("https://"):
-            if "localhost" not in base_url and "127.0.0.1" not in base_url:
+        parsed_url = urlparse(base_url)
+        if parsed_url.scheme != "https":
+            hostname = parsed_url.hostname or ""
+            if hostname not in {"localhost", "127.0.0.1"}:
                 raise ValueError(
                     "HTTPS is required for production API URLs. "
                     "HTTP is only allowed for localhost."
@@ -73,6 +76,11 @@ class BaseClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self._base_headers = {
+            "X-API-Key": self._api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "apexmail-python/1.0.0",
+        }
 
     # SECURITY FIX: Mask API key in repr to prevent accidental logging
     def __repr__(self) -> str:
@@ -84,15 +92,10 @@ class BaseClient:
         """Access API key (use with caution)."""
         return self._api_key
 
-    def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
-        headers = {
-            "X-API-Key": self._api_key,
-            "Content-Type": "application/json",
-            "User-Agent": "apexmail-python/1.0.0",
-        }
+    def _get_headers(self, idempotency_key: Optional[str] = None) -> Optional[dict[str, str]]:
         if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
-        return headers
+            return {"X-Idempotency-Key": idempotency_key}
+        return None
 
     def _calculate_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff with jitter."""
@@ -152,7 +155,7 @@ class ApexMail(BaseClient):
     (e.g. unasync). This is a known acceptable pattern.
 
     Usage:
-        client = ApexMail(api_key="am_live_xxxx")
+        client = ApexMail(api_key="YOUR_API_KEY")
         response = client.emails.send(
             from_="hello@example.com",
             to="user@example.com",
@@ -173,7 +176,7 @@ class ApexMail(BaseClient):
 
         self._client = httpx.Client(
             base_url=self.base_url,
-            headers=self._get_headers(),
+            headers=self._base_headers,
             timeout=timeout,
         )
 
@@ -248,13 +251,6 @@ class ApexMail(BaseClient):
         """Close the HTTP client."""
         self._client.close()
 
-    # FIX-500-296: Safety net for unclosed clients
-    def __del__(self) -> None:
-        try:
-            self._client.close()
-        except Exception:
-            pass
-
     def __enter__(self) -> "ApexMail":
         return self
 
@@ -272,7 +268,7 @@ class AsyncApexMail(BaseClient):
     Asynchronous ApexMail API client.
 
     Usage:
-        async with AsyncApexMail(api_key="am_live_xxxx") as client:
+        async with AsyncApexMail(api_key="YOUR_API_KEY") as client:
             response = await client.emails.send(
                 from_="hello@example.com",
                 to="user@example.com",
@@ -293,7 +289,7 @@ class AsyncApexMail(BaseClient):
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
-            headers=self._get_headers(),
+            headers=self._base_headers,
             timeout=timeout,
         )
 

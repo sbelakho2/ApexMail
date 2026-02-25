@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use sqlx::PgPool;
-use tracing::{debug, info};
 
 use crate::types::*;
 

@@ -107,8 +107,31 @@ fn sanitize_identifier(id: &str) -> String {
 pub struct TenantService {
     db: PgPool,
     config: Config,
-    org_cache: DashMap<String, Organization>,
-    workspace_cache: DashMap<String, Workspace>,
+    org_cache: DashMap<String, CacheEntry<Organization>>,
+    workspace_cache: DashMap<String, CacheEntry<Workspace>>,
+}
+
+const MAX_CACHE_ENTRIES: usize = 10_000;
+const CACHE_TTL_SECONDS: i64 = 300;
+
+#[derive(Clone)]
+struct CacheEntry<T> {
+    value: T,
+    cached_at: chrono::DateTime<Utc>,
+}
+
+impl<T> CacheEntry<T> {
+    fn new(value: T) -> Self {
+        Self {
+            value,
+            cached_at: Utc::now(),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        let age = Utc::now() - self.cached_at;
+        age.num_seconds() > CACHE_TTL_SECONDS
+    }
 }
 
 impl TenantService {
@@ -180,20 +203,8 @@ impl TenantService {
             .execute(&mut *tx)
             .await?;
 
-        // Add owner as member
-        sqlx::query(
-            "INSERT INTO iso_workspace_members (id, workspace_id, user_id, role, permissions, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)"
-        )
-            .bind(Uuid::new_v4().to_string())
-            .bind(&id) // org-level membership
-            .bind(owner_id)
-            .bind("owner")
-            .bind(serde_json::json!([]))
-            .bind(now).bind(now)
-            .execute(&mut *tx)
-            .await
-            .ok(); // Ignore if workspace_members table doesn't support org-level
+        // Organization ownership is tracked via owner_id on iso_organizations.
+        // Workspace membership is created when a concrete workspace is created.
 
         tx.commit().await?;
 
@@ -213,14 +224,14 @@ impl TenantService {
             created_at: now,
             updated_at: now,
         };
-        self.org_cache.insert(id, org.clone());
+        self.cache_org(&id, org.clone());
         info!(slug = slug, "Organization created");
         Ok(org)
     }
 
     pub async fn get_organization(&self, id: &str) -> anyhow::Result<Organization> {
-        if let Some(cached) = self.org_cache.get(id) {
-            return Ok(cached.clone());
+        if let Some(cached) = self.get_cached_org(id) {
+            return Ok(cached);
         }
         let row: OrgRow = sqlx::query_as::<_, OrgRow>(
             r#"SELECT id, name, slug, billing_email, plan, status, isolation_level,
@@ -234,7 +245,7 @@ impl TenantService {
         .ok_or_else(|| anyhow::anyhow!("Organization not found: {}", id))?;
 
         let org = row.into_org()?;
-        self.org_cache.insert(id.into(), org.clone());
+        self.cache_org(id, org.clone());
         Ok(org)
     }
 
@@ -381,14 +392,14 @@ impl TenantService {
             created_at: now,
             updated_at: now,
         };
-        self.workspace_cache.insert(id, ws.clone());
+        self.cache_workspace(&id, ws.clone());
         info!(slug = slug, org_id = organization_id, "Workspace created");
         Ok(ws)
     }
 
     pub async fn get_workspace(&self, id: &str) -> anyhow::Result<Workspace> {
-        if let Some(cached) = self.workspace_cache.get(id) {
-            return Ok(cached.clone());
+        if let Some(cached) = self.get_cached_workspace(id) {
+            return Ok(cached);
         }
         let row: WorkspaceRow = sqlx::query_as::<_, WorkspaceRow>(
             r#"SELECT id, organization_id, name, slug, status, schema_name, database_name,
@@ -401,7 +412,7 @@ impl TenantService {
         .ok_or_else(|| anyhow::anyhow!("Workspace not found: {}", id))?;
 
         let ws = row.into_workspace()?;
-        self.workspace_cache.insert(id.into(), ws.clone());
+        self.cache_workspace(id, ws.clone());
         Ok(ws)
     }
 
@@ -609,6 +620,53 @@ impl TenantService {
         self.workspace_cache.remove(workspace_id);
         Ok(())
     }
+
+    // ── Cache Helpers ─────────────────────────────────────
+
+    fn get_cached_org(&self, id: &str) -> Option<Organization> {
+        let entry = self.org_cache.get(id)?;
+        if entry.is_expired() {
+            drop(entry);
+            self.org_cache.remove(id);
+            return None;
+        }
+        Some(entry.value.clone())
+    }
+
+    fn get_cached_workspace(&self, id: &str) -> Option<Workspace> {
+        let entry = self.workspace_cache.get(id)?;
+        if entry.is_expired() {
+            drop(entry);
+            self.workspace_cache.remove(id);
+            return None;
+        }
+        Some(entry.value.clone())
+    }
+
+    fn cache_org(&self, id: &str, org: Organization) {
+        self.prune_org_cache();
+        self.org_cache
+            .insert(id.to_string(), CacheEntry::new(org));
+    }
+
+    fn cache_workspace(&self, id: &str, workspace: Workspace) {
+        self.prune_workspace_cache();
+        self.workspace_cache
+            .insert(id.to_string(), CacheEntry::new(workspace));
+    }
+
+    fn prune_org_cache(&self) {
+        if self.org_cache.len() > MAX_CACHE_ENTRIES {
+            self.org_cache.clear();
+        }
+    }
+
+    fn prune_workspace_cache(&self) {
+        if self.workspace_cache.len() > MAX_CACHE_ENTRIES {
+            self.workspace_cache.clear();
+        }
+    }
+
 
     // ── Schema Helpers ─────────────────────────────────────
 

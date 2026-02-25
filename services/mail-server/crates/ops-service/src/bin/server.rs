@@ -6,6 +6,8 @@ use ops_service::incidents::IncidentManager;
 use ops_service::routes::{router, AppState};
 use ops_service::slo::SloTracker;
 use ops_service::warmup::IpWarmupManager;
+use std::sync::Arc;
+use dashmap::DashMap;
 use tracing::info;
 
 #[tokio::main]
@@ -29,6 +31,8 @@ async fn main() {
         incidents: IncidentManager::new(db.clone()),
         slo: SloTracker::new(),
         warmup: IpWarmupManager::new(db),
+        api_key: config.ops_api_key.clone(),
+        trust_cache: Arc::new(DashMap::new()),
     };
 
     // Load existing state from database

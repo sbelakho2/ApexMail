@@ -31,16 +31,27 @@ export default defineConfig({
     outputDir: 'reports/visual-console/artifacts',
     webServer: [
         {
-            command: 'pnpm --filter @apexmail/web dev',
-            url: 'http://localhost:3000',
+            command: 'node ./src/visual/mock-api-server.cjs',
+            url: 'http://127.0.0.1:3001/health',
+            reuseExistingServer: true,
+            timeout: 60000,
+            env: {
+                ...process.env,
+                MOCK_API_PORT: '3001',
+            },
+        },
+        {
+            command: 'pnpm --filter @apexmail/web exec next dev -p 3010',
+            url: process.env.WEB_URL || 'http://127.0.0.1:3010',
             reuseExistingServer: false,
             timeout: 120000,
             env: {
                 ...process.env,
+                WEB_URL: process.env.WEB_URL || 'http://127.0.0.1:3010',
                 E2E_TEST_MODE: 'true',
                 E2E_BYPASS_KEY: bypassKey,
                 SESSION_SECRET: process.env.SESSION_SECRET || 'test-web-session-secret',
-                API_URL: process.env.API_URL || 'http://localhost:3001',
+                API_URL: 'http://127.0.0.1:3001',
             },
         },
         {
@@ -50,6 +61,7 @@ export default defineConfig({
             timeout: 120000,
             env: {
                 ...process.env,
+                CONTROL_PLANE_URL: process.env.CONTROL_PLANE_URL || 'http://localhost:3020',
                 E2E_TEST_MODE: 'true',
                 E2E_BYPASS_KEY: bypassKey,
                 CONTROL_PLANE_JWT_SECRET: process.env.CONTROL_PLANE_JWT_SECRET || 'test-control-plane-jwt-secret',

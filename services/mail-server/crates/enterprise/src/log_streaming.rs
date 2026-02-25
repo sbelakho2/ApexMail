@@ -200,10 +200,14 @@ impl LogStreamingService {
             .await
             .map_err(|e| format!("Update stream stats: {e}"))?;
         } else {
+            // #274: Fixed race condition - increment first, then check the NEW value
+            // Using a single atomic update that increments and evaluates in one operation
             sqlx::query(
-                "UPDATE ent_log_streams SET last_error = $2, last_error_at = NOW(),
+                "UPDATE ent_log_streams SET 
+                 last_error = $2, 
+                 last_error_at = NOW(),
                  delivery_failures_count = delivery_failures_count + 1,
-                 status = CASE WHEN delivery_failures_count >= 10 THEN 'error' ELSE status END
+                 status = CASE WHEN delivery_failures_count + 1 >= 10 THEN 'error' ELSE status END
                  WHERE id = $1"
             )
             .bind(stream_id).bind(error_message)
@@ -258,15 +262,62 @@ impl LogStreamingService {
 
 // ── Delivery helpers ───────────────────────────────────────────────────
 
+/// Shared HTTP client for verification requests — avoids repeated TLS setup.
+fn http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// Validate that a URL is safe for server-side requests (SSRF protection)
+/// #252: Prevents requests to internal/private networks
+fn is_safe_url(url: &str) -> Result<bool, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    
+    // Must use HTTPS for security
+    if parsed.scheme() != "https" {
+        return Ok(false);
+    }
+    
+    // Check for private/internal hostnames
+    let host = parsed.host_str().ok_or("No host in URL")?;
+    let blocked_patterns = [
+        "localhost", "127.0.0.1", "::1", "0.0.0.0",
+        "169.254.", "10.", "192.168.", "172.16.", "172.17.",
+        "172.18.", "172.19.", "172.20.", "172.21.", "172.22.",
+        "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+        "172.28.", "172.29.", "172.30.", "172.31.",
+        ".local", ".internal", ".corp", "metadata.google",
+        "169.254.169.254", // AWS/GCP metadata
+    ];
+    
+    let host_lower = host.to_lowercase();
+    for pattern in blocked_patterns {
+        if host_lower.starts_with(pattern) || host_lower.ends_with(pattern) || host_lower == pattern {
+            return Ok(false);
+        }
+    }
+    
+    Ok(true)
+}
+
 async fn verify_webhook(stream: &LogStream) -> Result<serde_json::Value, String> {
     let config = stream.destination_config.as_ref().ok_or("No destination config")?;
     let url = config.get("url").and_then(|v| v.as_str()).ok_or("No webhook URL")?;
 
-    let client = reqwest::Client::new();
-    let resp = client.post(url)
+    // #252: SSRF protection - validate URL is safe before making request
+    if !is_safe_url(url)? {
+        return Err("Webhook URL blocked: internal/private addresses not allowed".into());
+    }
+
+    let resp = http_client().post(url)
         .header("Content-Type", "application/json")
         .body(r#"{"test": true}"#)
-        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| format!("Webhook verify failed: {e}"))?;
@@ -283,11 +334,9 @@ async fn verify_splunk(stream: &LogStream) -> Result<serde_json::Value, String> 
     let url = config.get("url").and_then(|v| v.as_str()).ok_or("No Splunk URL")?;
     let token = config.get("token").and_then(|v| v.as_str()).ok_or("No HEC token")?;
 
-    let client = reqwest::Client::new();
-    let resp = client.post(&format!("{url}/services/collector/event"))
+    let resp = http_client().post(&format!("{url}/services/collector/event"))
         .header("Authorization", format!("Splunk {token}"))
         .json(&serde_json::json!({"event": "test", "sourcetype": "apexmail"}))
-        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| format!("Splunk verify failed: {e}"))?;
@@ -303,11 +352,9 @@ async fn verify_datadog(stream: &LogStream) -> Result<serde_json::Value, String>
     let config = stream.destination_config.as_ref().ok_or("No destination config")?;
     let api_key = config.get("api_key").and_then(|v| v.as_str()).ok_or("No Datadog API key")?;
 
-    let client = reqwest::Client::new();
-    let resp = client.post("https://http-intake.logs.datadoghq.com/api/v2/logs")
+    let resp = http_client().post("https://http-intake.logs.datadoghq.com/api/v2/logs")
         .header("DD-API-KEY", api_key)
         .json(&serde_json::json!([{"message": "ApexMail connectivity test", "ddsource": "apexmail"}]))
-        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| format!("Datadog verify failed: {e}"))?;
@@ -327,13 +374,15 @@ pub fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Sign a webhook payload with HMAC-SHA256
-pub fn hmac_sign(key: &[u8], data: &[u8]) -> String {
+/// #271: Returns Result instead of panicking on invalid key
+pub fn hmac_sign(key: &[u8], data: &[u8]) -> Result<String, String> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key");
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|e| format!("Invalid HMAC key: {e}"))?;
     mac.update(data);
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -360,21 +409,21 @@ mod tests {
 
     #[test]
     fn test_hmac_sign_deterministic() {
-        let sig1 = hmac_sign(b"secret", b"payload");
-        let sig2 = hmac_sign(b"secret", b"payload");
+        let sig1 = hmac_sign(b"secret", b"payload").unwrap();
+        let sig2 = hmac_sign(b"secret", b"payload").unwrap();
         assert_eq!(sig1, sig2);
     }
 
     #[test]
     fn test_hmac_sign_different_keys() {
-        let sig1 = hmac_sign(b"key1", b"same_data");
-        let sig2 = hmac_sign(b"key2", b"same_data");
+        let sig1 = hmac_sign(b"key1", b"same_data").unwrap();
+        let sig2 = hmac_sign(b"key2", b"same_data").unwrap();
         assert_ne!(sig1, sig2);
     }
 
     #[test]
     fn test_hmac_sign_hex_format() {
-        let sig = hmac_sign(b"test", b"test");
+        let sig = hmac_sign(b"test", b"test").unwrap();
         assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(sig.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
     }

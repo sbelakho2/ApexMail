@@ -226,7 +226,7 @@ export class DedicatedIpBillingService {
            updated_at = NOW()
          WHERE id = $1`,
         [ip.id],
-      ).catch(() => {}); // Best effort
+      ).catch((dbErr: unknown) => { logger.error('Failed to update billing failure count', { ipId: ip.id, dbErr: String(dbErr) }); });
 
       return Result.err(error instanceof Error ? error : new Error(msg));
     }

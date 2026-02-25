@@ -70,6 +70,8 @@ class WebhooksResource:
         Returns:
             Created webhook details
         """
+        _validate_webhook_url(url)
+
         payload: dict[str, Any] = {
             "name": name,
             "url": url,
@@ -151,11 +153,14 @@ class WebhooksResource:
         Returns:
             Updated webhook details
         """
+        _validate_id(webhook_id, 'webhook')
+
         payload: dict[str, Any] = {}
 
         if name is not None:
             payload["name"] = name
         if url is not None:
+            _validate_webhook_url(url)
             payload["url"] = url
         if events is not None:
             payload["events"] = events
@@ -165,6 +170,9 @@ class WebhooksResource:
             payload["headers"] = headers
         if enabled is not None:
             payload["enabled"] = enabled
+
+        if not payload:
+            raise ValidationError("Update payload must include at least one field")
 
         data = self._client._request("PATCH", f"/webhooks/{webhook_id}", json=payload)
         return Webhook(**data["webhook"])

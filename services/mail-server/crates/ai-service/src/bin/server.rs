@@ -26,8 +26,16 @@ async fn main() {
     let app = routes::build_router(state);
 
     let bind = std::env::var("AI_BIND").unwrap_or_else(|_| "0.0.0.0:3012".into());
-    let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind failed");
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(error = %err, %bind, "failed to bind TCP listener");
+            return;
+        }
+    };
     tracing::info!(%bind, "AI service listening");
 
-    axum::serve(listener, app).await.expect("server error");
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!(error = %err, "AI service failed");
+    }
 }

@@ -1,10 +1,25 @@
 //! MTA‑STS – SMTP MTA Strict Transport Security (RFC 8461) + TLSRPT (RFC 8460).
 
+use std::sync::LazyLock;
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
+
+// #134: Shared DNS resolver – avoids creating a new resolver per verification call
+static MTA_STS_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
+// #135: Shared HTTP client with timeout – avoids per-call TLS handshake overhead
+static MTA_STS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("MTA-STS HTTP client")
+});
 
 /// MTA‑STS mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,10 +76,8 @@ pub async fn verify_mta_sts(domain: &str) -> MtaStsVerificationResult {
         recommendations: Vec::new(),
     };
 
-    let resolver = TokioAsyncResolver::tokio(
-        ResolverConfig::default(),
-        ResolverOpts::default(),
-    );
+    // #134: Use shared resolver instead of creating new one per call
+    let resolver = &*MTA_STS_RESOLVER;
 
     // 1. Check DNS TXT record at _mta-sts.<domain>
     let sts_name = format!("_mta-sts.{domain}");
@@ -93,16 +106,8 @@ pub async fn verify_mta_sts(domain: &str) -> MtaStsVerificationResult {
 
     // 2. Fetch policy from https://mta-sts.<domain>/.well-known/mta-sts.txt
     let policy_url = format!("https://mta-sts.{domain}/.well-known/mta-sts.txt");
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            result.errors.push(format!("HTTP client init failed: {e}"));
-            return result;
-        }
-    };
+    // #135: Use shared HTTP client instead of creating a new one per call
+    let client = &*MTA_STS_CLIENT;
 
     match client.get(&policy_url).send().await {
         Ok(resp) => {
@@ -170,10 +175,8 @@ pub fn generate_tlsrpt_record(reporting_emails: &[&str]) -> String {
 
 /// Verify TLSRPT record for a domain.
 pub async fn verify_tlsrpt(domain: &str) -> Option<TlsRptRecord> {
-    let resolver = TokioAsyncResolver::tokio(
-        ResolverConfig::default(),
-        ResolverOpts::default(),
-    );
+    // #134: Use shared resolver
+    let resolver = &*MTA_STS_RESOLVER;
 
     let name = format!("_smtp._tls.{domain}");
     let records = resolver.txt_lookup(&name).await.ok()?;

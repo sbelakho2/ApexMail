@@ -1,13 +1,12 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalDependencies": [".env", "tsconfig.base.json"],
-  "pipeline": {
+  "globalDependencies": ["tsconfig.base.json"],
+  "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
       "env": [
         "NODE_ENV",
-        "DATABASE_URL",
         "NEXT_PUBLIC_API_URL",
         "NEXT_PUBLIC_TRACKING_URL",
         "NEXT_PUBLIC_APP_URL",
@@ -35,7 +34,7 @@
     "test:e2e": {
       "dependsOn": ["build"],
       "outputs": [],
-      "env": ["CI", "NODE_ENV", "DATABASE_URL"]
+      "env": ["CI", "NODE_ENV"]
     },
     "test:unit": {
       "dependsOn": ["build"],
@@ -45,12 +44,12 @@
     "test:integration": {
       "dependsOn": ["build"],
       "outputs": [],
-      "env": ["CI", "NODE_ENV", "DATABASE_URL", "REDIS_URL"]
+      "env": ["CI", "NODE_ENV"]
     },
     "test:coverage": {
       "dependsOn": ["build"],
       "outputs": ["coverage/**"],
-      "env": ["CI", "NODE_ENV", "DATABASE_URL"]
+      "env": ["CI", "NODE_ENV"]
     },
     "lint": {
       "outputs": []

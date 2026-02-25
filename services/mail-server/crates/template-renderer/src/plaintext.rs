@@ -12,8 +12,9 @@ static BLOCK_TAGS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)</?(p|div|br|h[1-6]|li|tr|table|hr|blockquote)\b[^>]*>").unwrap()
 });
 
+// #202: Use (?is) flags so `.*?` can match across line breaks in multi-line <a> tags
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)<a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#).unwrap()
+    Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#).unwrap()
 });
 
 static STYLE_SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| {

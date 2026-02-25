@@ -46,6 +46,13 @@ export default function AuditLogsPage() {
     const [logs, setLogs] = useState<AuditEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedLog, setSelectedLog] = useState<AuditEntry | null>(null);
+    const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+    const [exportJob, setExportJob] = useState<{
+        id: string;
+        status: 'queued' | 'running' | 'completed' | 'failed';
+        downloadUrl?: string;
+        error?: string;
+    } | null>(null);
     const [filters, setFilters] = useState({
         search: '',
         action: '',
@@ -86,8 +93,52 @@ export default function AuditLogsPage() {
     }
 
     async function exportLogs() {
-        // In production: call Compliance API to generate export
-        await dialog.alert({ title: 'Export Started', message: 'You will receive a download link via email.' });
+        try {
+            const response = await fetch('/api/audit/export', {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filters }),
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to start export (${response.status})`);
+            }
+
+            const job = await response.json();
+            setExportJob({ id: job.id, status: 'queued' });
+
+            const interval = setInterval(async () => {
+                try {
+                    const statusRes = await fetch(`/api/audit/export/${job.id}`, { credentials: 'include' });
+                    if (!statusRes.ok) {
+                        throw new Error(`Failed to poll export (${statusRes.status})`);
+                    }
+                    const statusPayload = await statusRes.json();
+                    setExportJob(prev => prev ? {
+                        ...prev,
+                        status: statusPayload.status,
+                        downloadUrl: statusPayload.downloadUrl,
+                        error: statusPayload.error,
+                    } : prev);
+
+                    if (statusPayload.status === 'completed' || statusPayload.status === 'failed') {
+                        clearInterval(interval);
+                    }
+                } catch (error) {
+                    clearInterval(interval);
+                    setExportJob(prev => prev ? {
+                        ...prev,
+                        status: 'failed',
+                        error: error instanceof Error ? error.message : 'Unknown export polling error',
+                    } : prev);
+                }
+            }, 2500);
+        } catch (error) {
+            await dialog.alert({
+                title: 'Export Failed',
+                message: error instanceof Error ? error.message : 'Unable to start export job',
+            });
+        }
     }
 
     const filteredLogs = logs.filter(log => {
@@ -95,6 +146,12 @@ export default function AuditLogsPage() {
         if (filters.action && !log.action.startsWith(filters.action)) return false;
         if (filters.status && log.status !== filters.status) return false;
         if (filters.tenantId && log.tenantId !== filters.tenantId) return false;
+        if (filters.dateFrom && new Date(log.timestamp) < new Date(filters.dateFrom)) return false;
+        if (filters.dateTo) {
+            const dateTo = new Date(filters.dateTo);
+            dateTo.setHours(23, 59, 59, 999);
+            if (new Date(log.timestamp) > dateTo) return false;
+        }
         return true;
     });
 
@@ -118,7 +175,7 @@ export default function AuditLogsPage() {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
+                    <button type="button" className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
                             Configure Alerts
                     </button>
                     <button
@@ -130,18 +187,55 @@ export default function AuditLogsPage() {
                 </div>
             </div>
 
+            {exportJob && (
+                <div className={cn(
+                    'mb-4 rounded-lg border px-4 py-3 text-sm',
+                    exportJob.status === 'failed' ? 'border-destructive/30 bg-destructive/10 text-destructive' :
+                    exportJob.status === 'completed' ? 'border-success/30 bg-success/10 text-success' :
+                    'border-primary/30 bg-primary/5 text-primary'
+                )}>
+                    <div className="flex items-center justify-between gap-3">
+                        <span>
+                            Export job {exportJob.id}: {exportJob.status}
+                            {exportJob.error ? ` — ${exportJob.error}` : ''}
+                        </span>
+                        {exportJob.status === 'completed' && exportJob.downloadUrl && (
+                            <a
+                                href={exportJob.downloadUrl}
+                                className="text-sm font-medium underline"
+                                download
+                            >
+                                Download export
+                            </a>
+                        )}
+                    </div>
+                </div>
+            )}
+
             {/* Filters */}
             <div className="bg-card rounded-xl border border-border p-5 mb-8 shadow-sm">
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
                         <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Search</label>
-                        <input
-                            type="text"
-                            placeholder="Search logs..."
-                            value={filters.search}
-                            onChange={(e) => setFilters(prev => ({ ...prev, search: e.target.value }))}
-                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground placeholder:text-muted-foreground bg-background"
-                        />
+                        <div className="relative">
+                            <input
+                                type="text"
+                                placeholder="Search logs..."
+                                value={filters.search}
+                                onChange={(e) => setFilters(prev => ({ ...prev, search: e.target.value }))}
+                                className="w-full px-3 py-2 pr-10 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground placeholder:text-muted-foreground bg-background"
+                            />
+                            {filters.search && (
+                                <button
+                                    type="button"
+                                    onClick={() => setFilters(prev => ({ ...prev, search: '' }))}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
+                                    aria-label="Clear audit search"
+                                >
+                                    ×
+                                </button>
+                            )}
+                        </div>
                     </div>
                     <div>
                         <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Action Category</label>
@@ -159,40 +253,71 @@ export default function AuditLogsPage() {
                             <option value="subscription">Billing</option>
                         </select>
                     </div>
-                    <div>
-                        <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Status</label>
-                        <select
-                            value={filters.status}
-                            onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
-                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
-                        >
-                            <option value="">All Statuses</option>
-                            <option value="success">Success</option>
-                            <option value="failure">Failure</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Tenant</label>
-                        <select
-                            value={filters.tenantId}
-                            onChange={(e) => setFilters(prev => ({ ...prev, tenantId: e.target.value }))}
-                            className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
-                        >
-                            <option value="">All Tenants</option>
-                            {uniqueTenants.map(tenant => (
-                                <option key={tenant} value={tenant!}>{tenant}</option>
-                            ))}
-                        </select>
-                    </div>
                     <div className="flex items-end">
-                        <button
-                            onClick={() => setFilters({ search: '', action: '', status: '', tenantId: '', dateFrom: '', dateTo: '' })}
-                            className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors w-full"
-                        >
-                            Clear Filters
-                        </button>
+                        <div className="flex w-full gap-2">
+                            <button
+                                onClick={() => setShowAdvancedFilters((prev) => !prev)}
+                                className="px-4 py-2 text-sm font-medium text-foreground bg-muted hover:bg-muted/80 rounded-lg transition-colors flex-1"
+                            >
+                                {showAdvancedFilters ? 'Hide Advanced' : 'Show Advanced'}
+                            </button>
+                            <button
+                                onClick={() => setFilters({ search: '', action: '', status: '', tenantId: '', dateFrom: '', dateTo: '' })}
+                                className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors flex-1"
+                            >
+                                Clear
+                            </button>
+                        </div>
                     </div>
                 </div>
+
+                {showAdvancedFilters && (
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 pt-4 border-t border-border">
+                        <div>
+                            <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Status</label>
+                            <select
+                                value={filters.status}
+                                onChange={(e) => setFilters(prev => ({ ...prev, status: e.target.value }))}
+                                className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
+                            >
+                                <option value="">All Statuses</option>
+                                <option value="success">Success</option>
+                                <option value="failure">Failure</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">Tenant</label>
+                            <select
+                                value={filters.tenantId}
+                                onChange={(e) => setFilters(prev => ({ ...prev, tenantId: e.target.value }))}
+                                className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
+                            >
+                                <option value="">All Tenants</option>
+                                {uniqueTenants.map(tenant => (
+                                    <option key={tenant} value={tenant!}>{tenant}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">From Date</label>
+                            <input
+                                type="date"
+                                value={filters.dateFrom}
+                                onChange={(e) => setFilters(prev => ({ ...prev, dateFrom: e.target.value }))}
+                                className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
+                            />
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold text-muted-foreground mb-1.5 block uppercase tracking-wider">To Date</label>
+                            <input
+                                type="date"
+                                value={filters.dateTo}
+                                onChange={(e) => setFilters(prev => ({ ...prev, dateTo: e.target.value }))}
+                                className="w-full px-3 py-2 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-foreground bg-background"
+                            />
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Audit Log List */}
@@ -201,7 +326,18 @@ export default function AuditLogsPage() {
                     <span className="text-sm font-medium text-muted-foreground">{filteredLogs.length} events found</span>
                 </div>
                 <div className="divide-y divide-border">
-                    {filteredLogs.map(log => (
+                    {filteredLogs.length === 0 ? (
+                        <div className="p-8 text-center">
+                            <p className="text-sm text-muted-foreground">No audit events match your current filters.</p>
+                            <button
+                                type="button"
+                                onClick={() => setFilters({ search: '', action: '', status: '', tenantId: '', dateFrom: '', dateTo: '' })}
+                                className="mt-2 text-sm text-primary hover:underline"
+                            >
+                                Clear filters and broaden search
+                            </button>
+                        </div>
+                    ) : filteredLogs.map(log => (
                         <div
                             key={log.id}
                             className="p-4 hover:bg-muted/50 cursor-pointer transition-colors"
@@ -262,6 +398,7 @@ export default function AuditLogsPage() {
                                 </div>
                             </div>
                                 <button 
+                                    type="button"
                                     onClick={() => setSelectedLog(null)} 
                                     className="text-muted-foreground hover:text-foreground p-2 rounded-lg hover:bg-muted transition-colors"
                                     aria-label="Close modal"

@@ -51,10 +51,16 @@ pub struct ListCampaignsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub cursor: Option<i64>,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -114,13 +120,15 @@ async fn list_campaigns(
 ) -> Result<Json<Vec<CampaignResponse>>, ApiError> {
     require_scopes(&auth, &["campaigns:read"])?;
 
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, CampaignRow>(
         "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
          FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
-    .bind(params.limit.min(100))
-    .bind(params.offset)
+    .bind(clamp_limit(params.limit, 100))
+    // Fix #58: Clamp offset to valid range.
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -162,7 +170,8 @@ async fn resume_campaign(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    update_campaign_status(&state, auth.tenant_id, id, "sending").await
+    // Fix #51: Validate current state before resume - only paused/draft can be resumed.
+    update_campaign_status_validated(&state, auth.tenant_id, id, "sending", &["paused", "draft"]).await
 }
 
 async fn pause_campaign(
@@ -171,15 +180,27 @@ async fn pause_campaign(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CampaignResponse>, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
-    update_campaign_status(&state, auth.tenant_id, id, "paused").await
+    // Fix #51: Validate current state before pause - only sending/scheduled can be paused.
+    update_campaign_status_validated(&state, auth.tenant_id, id, "paused", &["sending", "scheduled"]).await
 }
 
-async fn update_campaign_status(
+/// Fix #51: Update campaign status with validation of current state.
+async fn update_campaign_status_validated(
     state: &AppState,
     tenant_id: Uuid,
     id: Uuid,
     new_status: &str,
+    valid_current_states: &[&str],
 ) -> Result<Json<CampaignResponse>, ApiError> {
+    // Fetch current campaign to validate state transition.
+    let current = fetch_campaign(state, tenant_id, id).await?;
+    
+    if !valid_current_states.contains(&current.status.as_str()) {
+        return Err(ApiError::Validation(vec![
+            format!("cannot transition from '{}' to '{}'", current.status, new_status)
+        ]));
+    }
+
     let result = sqlx::query(
         "UPDATE campaigns SET status = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3",
     )

@@ -36,7 +36,7 @@ impl AiConfig {
     /// Build config from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
         let defaults = Self::default();
-        Self {
+        let config = Self {
             model_endpoint: std::env::var("AI_MODEL_ENDPOINT")
                 .unwrap_or(defaults.model_endpoint),
             embedding_dim: std::env::var("AI_EMBEDDING_DIM")
@@ -59,7 +59,36 @@ impl AiConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.sto_lookback_days),
+        };
+        if let Err(err) = config.validate() {
+            panic!("Invalid AI config: {err}");
         }
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.model_endpoint.trim().is_empty() {
+            return Err("AI_MODEL_ENDPOINT must not be empty".into());
+        }
+        if !(self.model_endpoint.starts_with("http://") || self.model_endpoint.starts_with("https://")) {
+            return Err("AI_MODEL_ENDPOINT must be http/https".into());
+        }
+        if self.embedding_dim == 0 {
+            return Err("AI_EMBEDDING_DIM must be > 0".into());
+        }
+        if self.max_tokens == 0 {
+            return Err("AI_MAX_TOKENS must be > 0".into());
+        }
+        if !(0.0..=2.0).contains(&self.temperature) {
+            return Err("AI_TEMPERATURE must be between 0.0 and 2.0".into());
+        }
+        if !(0.0..=1.0).contains(&self.bandit_epsilon) {
+            return Err("AI_BANDIT_EPSILON must be between 0.0 and 1.0".into());
+        }
+        if self.sto_lookback_days == 0 {
+            return Err("AI_STO_LOOKBACK_DAYS must be > 0".into());
+        }
+        Ok(())
     }
 }
 

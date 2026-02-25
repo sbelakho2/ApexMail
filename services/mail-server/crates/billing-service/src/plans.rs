@@ -238,7 +238,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
 
 /// Upsert a plan seed into the database.
 pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::Error> {
-    let features_json = serde_json::to_value(&seed.features).unwrap_or_default();
+    let features_json = serde_json::to_value(&seed.features)
+        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
     let now = Utc::now();
 
     let row: PlanRow = sqlx::query_as(
@@ -388,8 +389,8 @@ pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
         return 0;
     }
     let overage = emails_sent - email_limit;
-    // 0.04 cents per email → multiply then ceil
-    ((overage as f64) * 0.04).ceil() as i64
+    // 0.04 cents per email → ceil(overage * 4 / 100)
+    (overage.saturating_mul(4) + 99) / 100
 }
 
 // ---------------------------------------------------------------------------

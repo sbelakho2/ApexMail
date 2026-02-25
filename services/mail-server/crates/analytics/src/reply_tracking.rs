@@ -4,8 +4,8 @@ use chrono::Utc;
 use moka::sync::Cache;
 use regex::Regex;
 use sqlx::PgPool;
+use std::sync::LazyLock;
 use std::time::Duration;
-use tracing::debug;
 
 use crate::types::*;
 
@@ -13,9 +13,9 @@ use crate::types::*;
 const REPLY_CACHE_MAX: u64 = 50_000;
 const REPLY_CACHE_TTL_SECS: u64 = 3600;
 
-lazy_static::lazy_static! {
-    /// Auto-reply detection patterns.
-    static ref AUTO_REPLY_PATTERNS: Vec<Regex> = vec![
+/// Auto-reply detection patterns.
+static AUTO_REPLY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![
         Regex::new(r"(?i)^auto[- ]?reply").unwrap(),
         Regex::new(r"(?i)^automatic reply").unwrap(),
         Regex::new(r"(?i)^out of (the )?office").unwrap(),
@@ -34,34 +34,48 @@ lazy_static::lazy_static! {
         Regex::new(r"(?i)message not delivered").unwrap(),
         Regex::new(r"(?i)^thank you for (your |contacting)").unwrap(),
         Regex::new(r"(?i)^we (have )?received your").unwrap(),
-    ];
+    ]
+});
 
-    /// Auto-reply header indicators.
-    static ref AUTO_REPLY_HEADERS: Vec<(&'static str, &'static str)> = vec![
+/// Auto-reply header indicators.
+static AUTO_REPLY_HEADERS: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
+    vec![
         ("auto-submitted", "auto-replied"),
         ("auto-submitted", "auto-generated"),
         ("auto-submitted", "auto-notified"),
         ("x-auto-response-suppress", ""),
         ("precedence", "bulk"),
-    ];
+    ]
+});
 
-    /// Sentiment patterns.
-    static ref POSITIVE_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\b(thank|thanks|great|awesome|excellent|love|perfect|wonderful|appreciate)\b").unwrap(),
-    ];
-    static ref NEGATIVE_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\b(unsubscribe|stop|remove|spam|hate|terrible|worst|annoying|complaint)\b").unwrap(),
-    ];
-    static ref INQUIRY_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\b(question|how|when|where|what|why|can you|could you|please help)\b").unwrap(),
-    ];
-    static ref UNSUB_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\b(unsubscribe|opt.out|stop (sending|emailing)|remove me)\b").unwrap(),
-    ];
-    static ref OOO_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\b(out of office|ooo|on vacation|away|on leave|returning)\b").unwrap(),
-    ];
-}
+/// Sentiment patterns.
+static POSITIVE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![Regex::new(
+        r"(?i)\b(thank|thanks|great|awesome|excellent|love|perfect|wonderful|appreciate)\b",
+    )
+    .unwrap()]
+});
+static NEGATIVE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![Regex::new(
+        r"(?i)\b(unsubscribe|stop|remove|spam|hate|terrible|worst|annoying|complaint)\b",
+    )
+    .unwrap()]
+});
+static INQUIRY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![Regex::new(
+        r"(?i)\b(question|how|when|where|what|why|can you|could you|please help)\b",
+    )
+    .unwrap()]
+});
+static UNSUB_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![Regex::new(
+        r"(?i)\b(unsubscribe|opt.out|stop (sending|emailing)|remove me)\b",
+    )
+    .unwrap()]
+});
+static OOO_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    vec![Regex::new(r"(?i)\b(out of office|ooo|on vacation|away|on leave|returning)\b").unwrap()]
+});
 
 pub struct ReplyTrackingService {
     pool: PgPool,
@@ -131,7 +145,7 @@ impl ReplyTrackingService {
         .bind(since)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .map_err(|e| anyhow::anyhow!("reply metrics total_replies query failed: {e}"))?;
 
         let (auto_replies,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM reply_events WHERE tenant_id = $1 AND timestamp >= $2 AND is_auto_reply = true",
@@ -140,7 +154,7 @@ impl ReplyTrackingService {
         .bind(since)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .map_err(|e| anyhow::anyhow!("reply metrics auto_replies query failed: {e}"))?;
 
         let (total_sent,): (i64,) = sqlx::query_as(
             "SELECT COUNT(DISTINCT message_id) FROM events WHERE tenant_id = $1 AND event_type = 'sent' AND timestamp >= $2",
@@ -149,7 +163,7 @@ impl ReplyTrackingService {
         .bind(since)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .map_err(|e| anyhow::anyhow!("reply metrics total_sent query failed: {e}"))?;
 
         let human_replies = total_replies - auto_replies;
         let reply_rate = if total_sent > 0 {
@@ -165,7 +179,7 @@ impl ReplyTrackingService {
         .bind(since)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((None,));
+        .map_err(|e| anyhow::anyhow!("reply metrics avg_depth query failed: {e}"))?;
 
         let metrics = ReplyMetrics {
             total_replies,
@@ -186,7 +200,7 @@ impl ReplyTrackingService {
         .bind(in_reply_to)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((None,));
+        .map_err(|e| anyhow::anyhow!("reply metrics thread_depth query failed: {e}"))?;
 
         Ok(depth.unwrap_or(0) + 1)
     }

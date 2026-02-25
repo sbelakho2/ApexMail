@@ -247,7 +247,7 @@ impl Config {
         let environment = env_or("NODE_ENV", "development");
         let pid = std::process::id();
 
-        Self {
+        let config = Self {
             port: env_or_u16("HA_PORT", 4300),
             environment: environment.clone(),
             service_name: "apexmail-ha".into(),
@@ -259,7 +259,7 @@ impl Config {
                 port: env_or_u16("DB_PORT", 5432),
                 database: env_or("DB_NAME", "apexmail"),
                 user: env_or("DB_USER", "apexmail"),
-                password: env_or("DB_PASSWORD", "apexmail"),
+                password: env_or("DB_PASSWORD", ""),
                 pool_max: env_or_u32("DB_POOL_MAX", 20),
                 idle_timeout_ms: env_or_u64("DB_IDLE_TIMEOUT", 30000),
                 connection_timeout_ms: env_or_u64("DB_CONNECTION_TIMEOUT", 3000),
@@ -338,6 +338,21 @@ impl Config {
             alerting_webhook: std::env::var("ALERTING_WEBHOOK").ok(),
             rpo_target_secs: env_or_u64("RPO_TARGET", 60),
             rto_target_secs: env_or_u64("RTO_TARGET", 300),
+        };
+        config.validate_production();
+        config
+    }
+}
+
+impl Config {
+    pub fn validate_production(&self) {
+        if self.environment == "production" {
+            if self.internal_api_key.is_empty() || self.internal_api_key == "internal-key" {
+                panic!("INTERNAL_API_KEY must be set to a strong non-default value in production");
+            }
+            if self.database.password.is_empty() || self.database.password == "apexmail" {
+                panic!("DB_PASSWORD must be set to a strong non-default value in production");
+            }
         }
     }
 }

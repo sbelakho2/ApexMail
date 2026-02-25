@@ -16,17 +16,26 @@ impl ComplianceService {
     }
 
     /// Enable compliance frameworks for an account
+    /// 
+    /// When `hipaa_enabled` is true, both `encryption_at_rest` and `encryption_in_transit` 
+    /// are enabled. For more granular control, use separate configuration methods.
     pub async fn enable(&self, tenant_id: Uuid, frameworks: Vec<String>, hipaa_enabled: bool) -> Result<ApiResult<ComplianceConfig>, String> {
         let id = Uuid::new_v4();
         let now = Utc::now();
+        
+        // #261: HIPAA requires both encryption types. Set them based on HIPAA flag,
+        // but allow separate configuration for non-HIPAA compliance frameworks.
+        let encryption_at_rest = hipaa_enabled || frameworks.iter().any(|f| f == "soc2" || f == "iso27001");
+        let encryption_in_transit = true; // Always require encryption in transit
+        
         let row = sqlx::query_as::<_, ComplianceConfig>(
             "INSERT INTO ent_compliance_configs (id, tenant_id, enabled_frameworks, status, zero_retention_mode, encryption_at_rest, encryption_in_transit, audit_log_retention_days, require_mfa, baa_signed, dpa_signed, created_at, updated_at)
-             VALUES ($1,$2,$3,'active',false,$4,$4,$5,false,false,false,$6,$6)
+             VALUES ($1,$2,$3,'active',false,$4,$5,$6,false,false,false,$7,$7)
              ON CONFLICT (tenant_id) DO UPDATE SET
-               enabled_frameworks=$3, status='active', encryption_at_rest=$4, encryption_in_transit=$4, updated_at=$6
+               enabled_frameworks=$3, status='active', encryption_at_rest=$4, encryption_in_transit=$5, updated_at=$7
              RETURNING *"
         )
-        .bind(id).bind(tenant_id).bind(&frameworks).bind(hipaa_enabled)
+        .bind(id).bind(tenant_id).bind(&frameworks).bind(encryption_at_rest).bind(encryption_in_transit)
         .bind(2555i32).bind(now)
         .fetch_one(&self.db)
         .await

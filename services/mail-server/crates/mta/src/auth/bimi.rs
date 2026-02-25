@@ -2,11 +2,29 @@
 //!
 //! Verifies BIMI DNS records, validates SVG logos, and checks VMC certificates.
 
+use std::sync::LazyLock;
+use std::time::Duration;
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
+
+// #131: Shared DNS resolver – avoids creating a new resolver per verify_bimi call
+static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
+// Shared HTTP client for BIMI logo fetching.
+static BIMI_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+});
+
+// #128: Maximum logo download size (256 KB) to prevent OOM from malicious URLs
+const MAX_LOGO_SIZE: usize = 256 * 1024;
 
 /// Parsed BIMI DNS record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +83,8 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
 
     // 1. Check DMARC enforcement (required for BIMI)
     let dmarc_name = format!("_dmarc.{domain}");
-    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+    // #131: Use shared resolver instead of creating new one per call
+    let resolver = &*BIMI_RESOLVER;
 
     match resolver.txt_lookup(&dmarc_name).await {
         Ok(records) => {
@@ -156,14 +175,7 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
     }
 
     // Try to fetch and validate SVG
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-
-    let client = match client {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let client = &*BIMI_CLIENT;
 
     match client.get(url).send().await {
         Ok(resp) => {
@@ -181,8 +193,22 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
                 return false;
             }
 
-            match resp.text().await {
-                Ok(body) => validate_svg_content(&body),
+            // #128: Check Content-Length before downloading
+            if let Some(len) = resp.content_length() {
+                if len > MAX_LOGO_SIZE as u64 {
+                    return false;
+                }
+            }
+
+            // #128: Download with size limit to prevent OOM
+            match resp.bytes().await {
+                Ok(bytes) => {
+                    if bytes.len() > MAX_LOGO_SIZE {
+                        return false;
+                    }
+                    let body = String::from_utf8_lossy(&bytes);
+                    validate_svg_content(&body)
+                }
                 Err(_) => false,
             }
         }
@@ -191,28 +217,58 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
 }
 
 /// Validate SVG content for BIMI compliance (SVG Tiny PS).
+/// #129: Comprehensive validation replacing fragile string matching.
+/// #130: Robust external reference detection.
 pub fn validate_svg_content(svg: &str) -> bool {
     let lower = svg.to_lowercase();
 
-    // Must not contain scripts
-    if lower.contains("<script") || lower.contains("javascript:") || lower.contains("onerror") {
-        return false;
+    // #129: Comprehensive script/event-handler detection
+    let dangerous_patterns = [
+        "<script", "javascript:", "vbscript:", "data:",
+        "onerror", "onclick", "onload", "onmouseover", "onfocus",
+        "onblur", "onsubmit", "onreset", "onchange", "oninput",
+        "onkeydown", "onkeyup", "onkeypress", "onmouseout",
+        "onmousedown", "onmouseup", "ondblclick",
+        "eval(", "expression(",
+    ];
+    for pattern in &dangerous_patterns {
+        if lower.contains(pattern) {
+            return false;
+        }
     }
 
     // Must not contain animations
-    if lower.contains("<animate") || lower.contains("<set ") || lower.contains("<animatetransform") {
+    let animation_patterns = ["<animate", "<set ", "<animatetransform", "<animatemotion"];
+    for pattern in &animation_patterns {
+        if lower.contains(pattern) {
+            return false;
+        }
+    }
+
+    // #129: Reject entity-encoded characters that could bypass checks
+    if lower.contains("&#") {
         return false;
     }
 
-    // Must not contain external references
-    if lower.contains("xlink:href=\"http") || lower.contains("href=\"http") {
-        // Allow the SVG namespace itself
-        let has_external = lower
-            .matches("href=\"http")
-            .count()
-            > lower.matches("xmlns").count();
-        if has_external {
-            return false;
+    // #129: Reject CDATA sections (can hide malicious content)
+    if lower.contains("<![cdata[") {
+        return false;
+    }
+
+    // #130: Reject foreignObject (can embed arbitrary HTML)
+    if lower.contains("<foreignobject") {
+        return false;
+    }
+
+    // #130: Stricter external reference detection – reject any href pointing
+    // to an external URL, checking per-line instead of heuristic counting
+    for line in lower.lines() {
+        let has_href = line.contains("xlink:href") || line.contains("href=");
+        let is_xmlns = line.contains("xmlns");
+        if has_href && !is_xmlns {
+            if line.contains("http://") || line.contains("https://") || line.contains("//") {
+                return false;
+            }
         }
     }
 

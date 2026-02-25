@@ -9,12 +9,13 @@ use super::types::EmailJob;
 use crate::common::TrackingConfig;
 
 /// Tracking payload encoded in URLs.
+/// Fix #78: tenant_id is hashed to prevent leakage in URLs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackingPayload {
     /// Message ID.
     #[serde(rename = "m")]
     pub message_id: String,
-    /// Tenant ID.
+    /// Tenant ID (hashed for privacy - cannot be decoded back).
     #[serde(rename = "t")]
     pub tenant_id: String,
     /// Recipient email (hashed for privacy).
@@ -33,13 +34,33 @@ static HREF_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"href\s*=\s*["']([^"']+)["']"#).expect("Invalid href regex")
 });
 
+/// Hash a tenant ID for privacy-preserving tracking.
+/// The server maintains a mapping of hashes to tenant IDs.
+fn hash_tenant_id(tenant_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // Add salt to prevent rainbow table attacks
+    hasher.update(b"apexmail_tenant_v1:");
+    hasher.update(tenant_id.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8])
+}
+
 /// Encode a tracking payload to a URL-safe string.
+/// Fix #98: Log serialization errors instead of silently producing empty token.
 pub fn encode_tracking_id(payload: &TrackingPayload) -> String {
-    let json = serde_json::to_string(payload).unwrap_or_default();
-    URL_SAFE_NO_PAD.encode(json.as_bytes())
+    match serde_json::to_string(payload) {
+        Ok(json) => URL_SAFE_NO_PAD.encode(json.as_bytes()),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to serialize tracking payload");
+            // Return a distinctive invalid token instead of empty string
+            format!("err_{}", payload.message_id)
+        }
+    }
 }
 
 /// Decode a tracking ID back to its payload.
+#[allow(dead_code)]
 pub fn decode_tracking_id(encoded: &str) -> Option<TrackingPayload> {
     let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -59,7 +80,7 @@ fn hash_email(email: &str) -> String {
 pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -> String {
     let payload = TrackingPayload {
         message_id: job.message_id.clone(),
-        tenant_id: job.tenant_id.clone(),
+        tenant_id: hash_tenant_id(&job.tenant_id), // Fix #78: Hash tenant ID
         recipient_hash: hash_email(&job.to),
         original_url: None,
         campaign_id: job.campaign_id.clone(),
@@ -77,7 +98,12 @@ pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -
         pixel_url
     );
 
-    if let Some(pos) = html.to_lowercase().rfind("</body>") {
+    // Fix #90: Case-insensitive search without allocating a full lowercase copy
+    let pos = html.as_bytes().windows(7).rposition(|w| {
+        w.eq_ignore_ascii_case(b"</body>")
+    });
+
+    if let Some(pos) = pos {
         let mut result = html.to_string();
         result.insert_str(pos, &pixel_html);
         result
@@ -108,7 +134,7 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
 
             let payload = TrackingPayload {
                 message_id: job.message_id.clone(),
-                tenant_id: job.tenant_id.clone(),
+                tenant_id: hash_tenant_id(&job.tenant_id), // Fix #78: Hash tenant ID
                 recipient_hash: hash_email(&job.to),
                 original_url: Some(original_url.to_string()),
                 campaign_id: job.campaign_id.clone(),

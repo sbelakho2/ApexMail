@@ -2,6 +2,44 @@
 
 use crate::types::{ContentSuggestion, ImprovementType};
 
+type TemplateFn = fn(&str) -> String;
+
+fn urgent_0(t: &str) -> String { format!("🔥 {t} — Act Now!") }
+fn urgent_1(t: &str) -> String { format!("Last chance: {t}") }
+fn urgent_2(t: &str) -> String { format!("⏰ Don't miss out on {t}") }
+fn urgent_3(t: &str) -> String { format!("Limited time: {t} expires soon") }
+fn urgent_4(t: &str) -> String { format!("Hurry — {t} won't last") }
+
+fn friendly_0(t: &str) -> String { format!("Hey! Check out {t} 🎉") }
+fn friendly_1(t: &str) -> String { format!("We think you'll love {t}") }
+fn friendly_2(t: &str) -> String { format!("Good news about {t}!") }
+fn friendly_3(t: &str) -> String { format!("You're going to enjoy {t}") }
+fn friendly_4(t: &str) -> String { format!("Something exciting about {t}") }
+
+fn formal_0(t: &str) -> String { format!("Introducing: {t}") }
+fn formal_1(t: &str) -> String { format!("An important update regarding {t}") }
+fn formal_2(t: &str) -> String { format!("Your guide to {t}") }
+fn formal_3(t: &str) -> String { format!("{t}: What you need to know") }
+fn formal_4(t: &str) -> String { format!("Professional insights on {t}") }
+
+fn curious_0(t: &str) -> String { format!("The secret to {t} revealed") }
+fn curious_1(t: &str) -> String { format!("What nobody tells you about {t}") }
+fn curious_2(t: &str) -> String { format!("Why {t} matters more than you think") }
+fn curious_3(t: &str) -> String { format!("Discover the truth about {t}") }
+fn curious_4(t: &str) -> String { format!("Have you heard about {t}?") }
+
+fn neutral_0(t: &str) -> String { format!("{t} — a quick update") }
+fn neutral_1(t: &str) -> String { format!("All about {t}") }
+fn neutral_2(t: &str) -> String { format!("Here's what's new with {t}") }
+fn neutral_3(t: &str) -> String { format!("Explore {t} today") }
+fn neutral_4(t: &str) -> String { format!("{t}: tips and insights") }
+
+const URGENT_TEMPLATES: &[TemplateFn] = &[urgent_0, urgent_1, urgent_2, urgent_3, urgent_4];
+const FRIENDLY_TEMPLATES: &[TemplateFn] = &[friendly_0, friendly_1, friendly_2, friendly_3, friendly_4];
+const FORMAL_TEMPLATES: &[TemplateFn] = &[formal_0, formal_1, formal_2, formal_3, formal_4];
+const CURIOUS_TEMPLATES: &[TemplateFn] = &[curious_0, curious_1, curious_2, curious_3, curious_4];
+const NEUTRAL_TEMPLATES: &[TemplateFn] = &[neutral_0, neutral_1, neutral_2, neutral_3, neutral_4];
+
 /// AI-powered assistant for email content tasks.
 pub struct AiAssistant;
 
@@ -20,48 +58,18 @@ impl AiAssistant {
     ///
     /// `tone` can be "urgent", "friendly", "formal", "curious", "playful".
     pub fn suggest_subject_lines(&self, topic: &str, tone: &str, count: usize) -> Vec<String> {
-        let templates: Vec<Box<dyn Fn(&str) -> String>> = match tone {
-            "urgent" => vec![
-                Box::new(|t: &str| format!("🔥 {t} — Act Now!")),
-                Box::new(|t: &str| format!("Last chance: {t}")),
-                Box::new(|t: &str| format!("⏰ Don't miss out on {t}")),
-                Box::new(|t: &str| format!("Limited time: {t} expires soon")),
-                Box::new(|t: &str| format!("Hurry — {t} won't last")),
-            ],
-            "friendly" => vec![
-                Box::new(|t: &str| format!("Hey! Check out {t} 🎉")),
-                Box::new(|t: &str| format!("We think you'll love {t}")),
-                Box::new(|t: &str| format!("Good news about {t}!")),
-                Box::new(|t: &str| format!("You're going to enjoy {t}")),
-                Box::new(|t: &str| format!("Something exciting about {t}")),
-            ],
-            "formal" => vec![
-                Box::new(|t: &str| format!("Introducing: {t}")),
-                Box::new(|t: &str| format!("An important update regarding {t}")),
-                Box::new(|t: &str| format!("Your guide to {t}")),
-                Box::new(|t: &str| format!("{t}: What you need to know")),
-                Box::new(|t: &str| format!("Professional insights on {t}")),
-            ],
-            "curious" => vec![
-                Box::new(|t: &str| format!("The secret to {t} revealed")),
-                Box::new(|t: &str| format!("What nobody tells you about {t}")),
-                Box::new(|t: &str| format!("Why {t} matters more than you think")),
-                Box::new(|t: &str| format!("Discover the truth about {t}")),
-                Box::new(|t: &str| format!("Have you heard about {t}?")),
-            ],
-            _ => vec![
-                Box::new(|t: &str| format!("{t} — a quick update")),
-                Box::new(|t: &str| format!("All about {t}")),
-                Box::new(|t: &str| format!("Here's what's new with {t}")),
-                Box::new(|t: &str| format!("Explore {t} today")),
-                Box::new(|t: &str| format!("{t}: tips and insights")),
-            ],
+        let templates: &[TemplateFn] = match tone {
+            "urgent" => URGENT_TEMPLATES,
+            "friendly" => FRIENDLY_TEMPLATES,
+            "formal" => FORMAL_TEMPLATES,
+            "curious" => CURIOUS_TEMPLATES,
+            _ => NEUTRAL_TEMPLATES,
         };
 
         templates
             .iter()
             .take(count)
-            .map(|f| f(topic))
+                .map(|f| f(topic))
             .collect()
     }
 

@@ -138,11 +138,12 @@ impl GmailAnnotationsService {
     }
 
     /// Generate a "preview badge" HTML snippet for the deal.
+    /// #153: HTML-escapes user-provided text to prevent XSS.
     pub fn generate_preview_badge(&self, deal: &DealBadge) -> String {
         let mut badge = String::from("<span class=\"gmail-promo-badge\">");
-        badge.push_str(&deal.description);
+        badge.push_str(&html_escape(&deal.description));
         if let Some(ref code) = deal.discount_code {
-            badge.push_str(&format!(" – Code: {code}"));
+            badge.push_str(&format!(" \u{2013} Code: {}", html_escape(code)));
         }
         badge.push_str("</span>");
         badge
@@ -258,7 +259,11 @@ impl GmailAnnotationsService {
             json["potentialAction"] = act;
         }
 
-        serde_json::to_string_pretty(&json).unwrap_or_default()
+        // #154: Log an error instead of silently returning empty on serialization failure
+        serde_json::to_string_pretty(&json).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "Failed to serialize Gmail annotation JSON-LD");
+            String::new()
+        })
     }
 
     fn build_html(&self, json_ld: &str) -> String {
@@ -266,6 +271,15 @@ impl GmailAnnotationsService {
             "<script type=\"application/ld+json\">\n{json_ld}\n</script>"
         )
     }
+}
+
+/// #153: HTML-escape user-provided text to prevent XSS in badge output.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 /// Factory function.

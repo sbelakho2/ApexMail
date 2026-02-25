@@ -44,10 +44,12 @@ impl GovernorLimiter {
     }
 
     /// Check if a single request is allowed.
+    /// #229: Note: `remaining` is approximate (burst capacity) as Governor doesn't expose actual count
     pub fn check(&self) -> Decision {
         match self.limiter.check() {
             Ok(()) => {
-                // Governor doesn't expose remaining directly; approximate from burst
+                // Governor doesn't expose remaining directly; approximate from burst.
+                // For accurate remaining counts, use sliding_window limiter instead.
                 Decision::Allowed {
                     remaining: self.burst.get() as u64,
                 }

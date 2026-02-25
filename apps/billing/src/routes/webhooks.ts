@@ -21,7 +21,7 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
     if (!result.ok) {
       console.error('Stripe webhook error:', result.error);
-      return c.json({ error: result.error.message }, 400);
+      return c.json({ error: 'Webhook processing failed' }, 400);
     }
 
     return c.json({ received: true });

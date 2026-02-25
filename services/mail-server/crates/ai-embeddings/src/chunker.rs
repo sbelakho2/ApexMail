@@ -93,10 +93,11 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
     }
 
     let mut result = Vec::new();
-    let mut offset = 0;
+    let mut offset: usize = 0;
 
     for (i, chunk) in chunks.iter().enumerate() {
         let mut text = String::new();
+        let mut overlap_len = 0;
 
         // Prepend overlap from previous chunk
         if i > 0 && overlap > 0 {
@@ -104,7 +105,7 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
             let overlap_start = prev.len().saturating_sub(overlap);
             let overlap_text = &prev[overlap_start..];
             text.push_str(overlap_text);
-            text.push(' ');
+            overlap_len = overlap_text.len();
         }
 
         text.push_str(chunk);
@@ -114,15 +115,16 @@ fn merge_with_overlap(chunks: &[String], overlap: usize, max_size: usize) -> Vec
             text.truncate(max_size);
         }
 
-        let chunk_len = chunk.len();
+        let start_offset = offset.saturating_sub(overlap_len);
+        let end_offset = start_offset + text.len();
         result.push(TextChunk {
             text,
-            start_offset: offset,
-            end_offset: offset + chunk_len,
+            start_offset,
+            end_offset,
             index: i,
         });
 
-        offset += chunk_len;
+        offset += chunk.len();
     }
 
     result

@@ -82,6 +82,8 @@ pub struct ScimListQuery {
     pub start_index: i64,
     #[serde(default = "default_count")]
     pub count: i64,
+    #[serde(default)]
+    pub cursor: Option<i64>,
 }
 
 fn default_start() -> i64 {
@@ -95,6 +97,13 @@ const SCIM_USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
 const SCIM_GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
 const SCIM_LIST_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 
+/// Maximum allowed count parameter for list operations (Fix #49).
+const MAX_SCIM_COUNT: i64 = 200;
+
+/// SCIM placeholder hash that can never be valid Argon2 (Fix #47).
+/// Users with this hash must authenticate via SSO.
+const SCIM_DISABLED_HASH: &str = "!scim:disabled";
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn list_users(
@@ -104,7 +113,10 @@ async fn list_users(
 ) -> Result<Json<ScimListResponse<ScimUser>>, ApiError> {
     require_scopes(&auth, &["scim:read"])?;
 
-    let offset = (params.start_index - 1).max(0);
+    let start_index = params.cursor.unwrap_or(params.start_index);
+    let offset = (start_index - 1).max(0);
+    // Fix #49: Cap count parameter to prevent excessive result sets.
+    let count = params.count.min(MAX_SCIM_COUNT);
     let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM users WHERE tenant_id = $1",
     )
@@ -116,7 +128,7 @@ async fn list_users(
         "SELECT id, email, name, status FROM users WHERE tenant_id = $1 ORDER BY email LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
-    .bind(params.count)
+    .bind(count)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
@@ -157,15 +169,17 @@ async fn create_user(
     let id = Uuid::new_v4();
     let now = Utc::now();
 
-    // Create with a placeholder password hash (SCIM users authenticate via SSO)
+    // Fix #47: Use an unusable hash format that Argon2 can never parse.
+    // SCIM users must authenticate via SSO; direct password login is blocked.
     sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,'scim_provisioned','member','active',$5,$5)",
+         VALUES ($1,$2,$3,$4,$5,'member','active',$6,$6)",
     )
     .bind(id)
     .bind(auth.tenant_id)
     .bind(&email)
     .bind(&name)
+    .bind(SCIM_DISABLED_HASH)
     .bind(now)
     .execute(&state.db)
     .await?;
@@ -274,11 +288,14 @@ async fn list_groups(
 ) -> Result<Json<ScimListResponse<ScimGroup>>, ApiError> {
     require_scopes(&auth, &["scim:read"])?;
 
-    let offset = (params.start_index - 1).max(0);
+    let start_index = params.cursor.unwrap_or(params.start_index);
+    let offset = (start_index - 1).max(0);
+    // Fix #49: Cap count parameter.
+    let count = params.count.min(MAX_SCIM_COUNT);
     let total = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1",
     )
-    .bind(auth.tenant_id.to_string())
+    .bind(auth.tenant_id)  // Fix #50: Use UUID directly
     .fetch_one(&state.db)
     .await?;
 
@@ -286,34 +303,50 @@ async fn list_groups(
         "SELECT id, scim_id, display_name, created_at FROM scim_groups 
          WHERE tenant_id = $1 ORDER BY display_name LIMIT $2 OFFSET $3",
     )
-    .bind(auth.tenant_id.to_string())
-    .bind(params.count)
+    .bind(auth.tenant_id)  // Fix #50: Use UUID directly
+    .bind(count)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
-    let mut resources: Vec<ScimGroup> = Vec::with_capacity(group_rows.len());
-    for row in group_rows {
-        let members = sqlx::query_as::<_, GroupMemberRow>(
-            "SELECT m.user_id, m.display, u.email 
+    // Fix #48: Batch fetch all group members in a single query to avoid N+1.
+    let group_ids: Vec<Uuid> = group_rows.iter().map(|r| r.id).collect();
+    let all_members = if group_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, GroupMemberWithGroupRow>(
+            "SELECT m.group_id, m.user_id, m.display, u.email 
              FROM scim_group_members m
              LEFT JOIN users u ON u.id = m.user_id
-             WHERE m.group_id = $1",
+             WHERE m.group_id = ANY($1)",
         )
-        .bind(row.id)
+        .bind(&group_ids)
         .fetch_all(&state.db)
-        .await?;
+        .await?
+    };
 
-        resources.push(ScimGroup {
+    // Group members by group_id for efficient lookup.
+    let mut members_by_group: std::collections::HashMap<Uuid, Vec<ScimMember>> = 
+        std::collections::HashMap::new();
+    for m in all_members {
+        members_by_group
+            .entry(m.group_id)
+            .or_default()
+            .push(ScimMember {
+                value: m.user_id.to_string(),
+                display: m.display.or(m.email),
+            });
+    }
+
+    let resources: Vec<ScimGroup> = group_rows
+        .into_iter()
+        .map(|row| ScimGroup {
             schemas: vec![SCIM_GROUP_SCHEMA.into()],
             id: row.scim_id,
             display_name: row.display_name,
-            members: members.into_iter().map(|m| ScimMember {
-                value: m.user_id.to_string(),
-                display: m.display.or(m.email),
-            }).collect(),
-        });
-    }
+            members: members_by_group.remove(&row.id).unwrap_or_default(),
+        })
+        .collect();
 
     Ok(Json(ScimListResponse {
         schemas: vec![SCIM_LIST_SCHEMA.into()],
@@ -626,6 +659,15 @@ struct GroupScimRow {
 
 #[derive(sqlx::FromRow)]
 struct GroupMemberRow {
+    user_id: Uuid,
+    display: Option<String>,
+    email: Option<String>,
+}
+
+/// Fix #48: Row type for batch member fetch including group_id.
+#[derive(sqlx::FromRow)]
+struct GroupMemberWithGroupRow {
+    group_id: Uuid,
     user_id: Uuid,
     display: Option<String>,
     email: Option<String>,

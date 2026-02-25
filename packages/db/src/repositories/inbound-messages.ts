@@ -5,8 +5,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
 import { ok, err, type Result } from '@apexmail/lib';
+import type { DatabasePool } from '../pool.js';
+
+/** Escape ILIKE special characters to prevent wildcard injection. */
+function escapeIlike(input: string): string {
+    return input.replace(/[%_\\]/g, '\\$&');
+}
 
 // =============================================================================
 // Types
@@ -93,7 +98,7 @@ export interface UnmatchedComplaint {
 // =============================================================================
 
 export class InboundMessagesRepository {
-    constructor(private pool: Pool) {}
+    constructor(private readonly db: DatabasePool) {}
 
     // -------------------------------------------------------------------------
     // Inbound Messages
@@ -102,58 +107,59 @@ export class InboundMessagesRepository {
     async create(data: InboundMessageInsert): Promise<Result<InboundMessage, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO inbound_messages (
-                    id, tenant_id, domain_id, message_id_header,
-                    from_address, to_address, subject, text_body, html_body,
-                    raw_message, headers, attachments,
-                    spam_score, spam_status, virus_status,
-                    spf_result, dkim_result, dmarc_result,
-                    client_ip, session_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-                RETURNING *`,
-                [
-                    id,
-                    data.tenantId,
-                    data.domainId,
-                    data.messageIdHeader,
-                    data.fromAddress,
-                    data.toAddress,
-                    data.subject,
-                    data.textBody,
-                    data.htmlBody,
-                    data.rawMessage,
-                    data.headers ? JSON.stringify(data.headers) : null,
-                    data.attachments ? JSON.stringify(data.attachments) : null,
-                    data.spamScore,
-                    data.spamStatus,
-                    data.virusStatus,
-                    data.spfResult,
-                    data.dkimResult,
-                    data.dmarcResult,
-                    data.clientIp,
-                    data.sessionId
-                ]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO inbound_messages (
+                id, tenant_id, domain_id, message_id_header,
+                from_address, to_address, subject, text_body, html_body,
+                raw_message, headers, attachments,
+                spam_score, spam_status, virus_status,
+                spf_result, dkim_result, dmarc_result,
+                client_ip, session_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            RETURNING *`,
+            [
+                id,
+                data.tenantId,
+                data.domainId,
+                data.messageIdHeader,
+                data.fromAddress,
+                data.toAddress,
+                data.subject,
+                data.textBody,
+                data.htmlBody,
+                data.rawMessage,
+                data.headers ? JSON.stringify(data.headers) : null,
+                data.attachments ? JSON.stringify(data.attachments) : null,
+                data.spamScore,
+                data.spamStatus,
+                data.virusStatus,
+                data.spfResult,
+                data.dkimResult,
+                data.dmarcResult,
+                data.clientIp,
+                data.sessionId
+            ]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create inbound message'));
-            }
-            return ok(this.mapInboundRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create inbound message'));
+        }
+        return ok(this.mapInboundRow(row));
     }
 
     async findById(id: string, tenantId: string): Promise<InboundMessage | null> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM inbound_messages WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return result.rows[0] ? this.mapInboundRow(result.rows[0]) : null;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapInboundRow(result.value.rows[0]) : null;
     }
 
     async findByTenant(
@@ -173,11 +179,11 @@ export class InboundMessagesRepository {
 
         if (options.fromAddress) {
             conditions.push(`from_address ILIKE $${paramIndex++}`);
-            values.push(`%${options.fromAddress}%`);
+            values.push(`%${escapeIlike(options.fromAddress)}%`);
         }
         if (options.toAddress) {
             conditions.push(`to_address ILIKE $${paramIndex++}`);
-            values.push(`%${options.toAddress}%`);
+            values.push(`%${escapeIlike(options.toAddress)}%`);
         }
         if (options.since) {
             conditions.push(`received_at >= $${paramIndex++}`);
@@ -191,11 +197,11 @@ export class InboundMessagesRepository {
         const whereClause = conditions.join(' AND ');
 
         const [countResult, dataResult] = await Promise.all([
-            this.pool.query<{ count: string }>(
+            this.db.query<{ count: string }>(
                 `SELECT COUNT(*)::text as count FROM inbound_messages WHERE ${whereClause}`,
                 values
             ),
-            this.pool.query<Record<string, unknown>>(
+            this.db.query<Record<string, unknown>>(
                 `SELECT * FROM inbound_messages 
                  WHERE ${whereClause}
                  ORDER BY received_at DESC
@@ -204,19 +210,23 @@ export class InboundMessagesRepository {
             )
         ]);
 
+        if (!countResult.ok) throw countResult.error;
+        if (!dataResult.ok) throw dataResult.error;
+
         return {
-            messages: dataResult.rows.map(row => this.mapInboundRow(row)),
-            total: parseInt(countResult.rows[0]?.count ?? '0', 10)
+            messages: dataResult.value.rows.map(row => this.mapInboundRow(row)),
+            total: parseInt(countResult.value.rows[0]?.count ?? '0', 10)
         };
     }
 
     async delete(id: string, tenantId: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `DELETE FROM inbound_messages WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     // -------------------------------------------------------------------------
@@ -226,8 +236,7 @@ export class InboundMessagesRepository {
     async createUnmatchedBounce(data: Omit<UnmatchedBounce, 'id' | 'createdAt'>): Promise<Result<UnmatchedBounce, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
                 `INSERT INTO unmatched_bounces (
                     id, recipient, from_address, bounce_type, bounce_subtype,
                     diagnostic_code, original_message_id, raw_message
@@ -243,16 +252,17 @@ export class InboundMessagesRepository {
                     data.originalMessageId,
                     data.rawMessage
                 ]
-            );
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create unmatched bounce'));
-            }
-            return ok(this.mapBounceRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create unmatched bounce'));
+        }
+        return ok(this.mapBounceRow(row));
     }
 
     async findUnmatchedBounces(options: {
@@ -271,7 +281,7 @@ export class InboundMessagesRepository {
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM unmatched_bounces 
              ${whereClause}
              ORDER BY created_at DESC
@@ -279,7 +289,8 @@ export class InboundMessagesRepository {
             [...values, options.limit ?? 100, options.offset ?? 0]
         );
 
-        return result.rows.map(row => this.mapBounceRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapBounceRow(row));
     }
 
     // -------------------------------------------------------------------------
@@ -289,33 +300,33 @@ export class InboundMessagesRepository {
     async createUnmatchedComplaint(data: Omit<UnmatchedComplaint, 'id' | 'createdAt'>): Promise<Result<UnmatchedComplaint, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO unmatched_complaints (
-                    id, recipient, from_address, feedback_type, user_agent,
-                    original_message_id, original_recipient, raw_message
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING *`,
-                [
-                    id,
-                    data.recipient,
-                    data.fromAddress,
-                    data.feedbackType,
-                    data.userAgent,
-                    data.originalMessageId,
-                    data.originalRecipient,
-                    data.rawMessage
-                ]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO unmatched_complaints (
+                id, recipient, from_address, feedback_type, user_agent,
+                original_message_id, original_recipient, raw_message
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *`,
+            [
+                id,
+                data.recipient,
+                data.fromAddress,
+                data.feedbackType,
+                data.userAgent,
+                data.originalMessageId,
+                data.originalRecipient,
+                data.rawMessage
+            ]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create unmatched complaint'));
-            }
-            return ok(this.mapComplaintRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create unmatched complaint'));
+        }
+        return ok(this.mapComplaintRow(row));
     }
 
     async findUnmatchedComplaints(options: {
@@ -334,7 +345,7 @@ export class InboundMessagesRepository {
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM unmatched_complaints 
              ${whereClause}
              ORDER BY created_at DESC
@@ -342,7 +353,8 @@ export class InboundMessagesRepository {
             [...values, options.limit ?? 100, options.offset ?? 0]
         );
 
-        return result.rows.map(row => this.mapComplaintRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapComplaintRow(row));
     }
 
     // -------------------------------------------------------------------------
@@ -357,7 +369,7 @@ export class InboundMessagesRepository {
         const batchDelete = async (table: string, col: string): Promise<number> => {
             let total = 0;
             while (true) {
-                const result = await this.pool.query<{ count: string }>(
+                const result = await this.db.query<{ count: string }>(
                     `WITH deleted AS (
                         DELETE FROM ${table}
                         WHERE id IN (
@@ -367,7 +379,8 @@ export class InboundMessagesRepository {
                     ) SELECT COUNT(*) as count FROM deleted`,
                     [cutoff, batchSize]
                 );
-                const n = parseInt(result.rows[0]?.count ?? '0', 10);
+                if (!result.ok) throw result.error;
+                const n = parseInt(result.value.rows[0]?.count ?? '0', 10);
                 total += n;
                 if (n < batchSize) break;
             }

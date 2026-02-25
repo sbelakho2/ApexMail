@@ -110,7 +110,7 @@ class DatabasePool {
       port: validatedPort,
       database: config.database ?? process.env['DB_NAME'] ?? DEFAULT_CONFIG.database!,
       user: config.user ?? process.env['DB_USER'] ?? 'postgres',
-      password: config.password ?? process.env['DB_PASSWORD'] ?? '',
+      password: config.password ?? process.env['DB_PASSWORD'] ?? (() => { throw new Error('DB_PASSWORD must be configured — refusing to connect with an empty password'); })(),
       maxConnections: maxConnValue,
       idleTimeoutMs: config.idleTimeoutMs ?? DEFAULT_CONFIG.idleTimeoutMs!,
       connectionTimeoutMs: config.connectionTimeoutMs ?? DEFAULT_CONFIG.connectionTimeoutMs!,
@@ -167,6 +167,11 @@ class DatabasePool {
 
     this.pool.on('error', (err) => {
       this.logger.error('Database pool error', { error: err.message });
+    });
+
+    // G-210: Clean up leak tracking when clients are released back to the pool.
+    this.pool.on('release', (client) => {
+      this.checkedOutClients.delete(client);
     });
 
     this.pool.on('remove', () => {
@@ -345,13 +350,6 @@ class DatabasePool {
     // G-210: Track checkout for leak detection
     const stack = new Error('Connection acquired here').stack ?? '';
     this.checkedOutClients.set(client, { acquiredAt: Date.now(), stack });
-
-    // Monkey-patch release so we can clean up tracking
-    const originalRelease = client.release.bind(client);
-    client.release = (err?: boolean | Error) => {
-      this.checkedOutClients.delete(client);
-      return originalRelease(err);
-    };
 
     return client;
   }

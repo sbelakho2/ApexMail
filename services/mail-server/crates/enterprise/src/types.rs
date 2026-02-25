@@ -11,32 +11,22 @@ pub struct SSOConfiguration {
     pub provider_type: String,
     pub enabled: bool,
     pub domain: String,
-    #[allow(dead_code)]
     pub metadata_url: Option<String>,
     pub entity_id: Option<String>,
     pub sso_url: Option<String>,
-    #[allow(dead_code)]
     pub slo_url: Option<String>,
     pub certificate: Option<String>,
-    #[allow(dead_code)]
     pub private_key_encrypted: Option<String>,
     pub oidc_client_id: Option<String>,
-    #[allow(dead_code)]
     pub oidc_client_secret_encrypted: Option<String>,
     pub oidc_issuer: Option<String>,
-    #[allow(dead_code)]
     pub oidc_redirect_uri: Option<String>,
-    #[allow(dead_code)]
     pub oidc_scopes: Option<String>,
     pub attribute_mapping: Option<serde_json::Value>,
-    #[allow(dead_code)]
     pub enforce_sso: bool,
-    #[allow(dead_code)]
     pub allow_idp_initiated: bool,
-    #[allow(dead_code)]
     pub session_duration_hours: i32,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -52,12 +42,9 @@ pub struct SSOSession {
     pub groups: Option<serde_json::Value>,
     pub attributes: Option<serde_json::Value>,
     pub session_token: String,
-    #[allow(dead_code)]
     pub access_token_encrypted: Option<String>,
-    #[allow(dead_code)]
     pub refresh_token_encrypted: Option<String>,
     pub expires_at: DateTime<Utc>,
-    #[allow(dead_code)]
     pub last_activity_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -189,21 +176,15 @@ pub struct ComplianceConfig {
     pub encryption_in_transit: bool,
     pub audit_log_retention_days: i32,
     pub data_retention_days: Option<i32>,
-    #[allow(dead_code)]
     pub require_mfa: bool,
     pub baa_signed: bool,
     pub baa_signed_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub baa_signatory_name: Option<String>,
-    #[allow(dead_code)]
     pub baa_signatory_title: Option<String>,
-    #[allow(dead_code)]
     pub baa_signatory_email: Option<String>,
     pub dpa_signed: bool,
-    #[allow(dead_code)]
     pub dpa_signed_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -277,7 +258,6 @@ pub struct DataAccessRequest {
     pub requester_email: String,
     pub resource_type: Option<String>,
     pub resource_id: Option<String>,
-    #[allow(dead_code)]
     pub scope: Option<String>,
     pub identifiers: Option<serde_json::Value>,
     pub justification: Option<String>,
@@ -285,10 +265,8 @@ pub struct DataAccessRequest {
     pub approved_at: Option<DateTime<Utc>>,
     pub access_token: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub duration_minutes: Option<i32>,
     pub completed_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub completion_details: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -370,7 +348,6 @@ pub struct LogStream {
     pub status: String,
     pub enabled: bool,
     pub destination_config: Option<serde_json::Value>,
-    #[allow(dead_code)]
     pub credentials_encrypted: Option<String>,
     pub log_categories: Option<Vec<String>>,
     pub filter_rules: Option<serde_json::Value>,
@@ -385,7 +362,6 @@ pub struct LogStream {
     pub last_error: Option<String>,
     pub last_error_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -501,9 +477,7 @@ pub struct PrivateDeployment {
     pub status: String,
     pub region: Option<String>,
     pub availability_zones: Option<Vec<String>>,
-    #[allow(dead_code)]
     pub vpc_id: Option<String>,
-    #[allow(dead_code)]
     pub instance_type: Option<String>,
     pub instance_count: Option<i32>,
     pub storage_gb: Option<i32>,
@@ -513,7 +487,6 @@ pub struct PrivateDeployment {
     pub health_status: Option<String>,
     pub last_health_check_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -575,7 +548,6 @@ pub struct BYOIPRange {
     pub cidr_block: String,
     pub status: String,
     pub verification_token: Option<String>,
-    #[allow(dead_code)]
     pub verification_method: Option<String>,
     pub verified_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
@@ -618,7 +590,6 @@ pub struct SubAccount {
     pub settings: Option<serde_json::Value>,
     pub metadata: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -777,7 +748,6 @@ pub struct SupportTicket {
     pub tags: Option<Vec<String>>,
     pub custom_fields: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -801,13 +771,11 @@ pub struct SupportAgent {
     pub name: String,
     pub email: String,
     pub team: Option<String>,
-    #[allow(dead_code)]
     pub role: Option<String>,
     pub max_tickets: i32,
     pub current_ticket_count: i32,
     pub specialties: Option<Vec<String>>,
     pub available: bool,
-    #[allow(dead_code)]
     pub last_assignment_at: Option<DateTime<Utc>>,
 }
 
@@ -888,7 +856,6 @@ pub struct TemplateSubmission {
     pub spam_score: Option<f64>,
     pub spam_details: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -978,7 +945,6 @@ pub struct WhiteLabelConfigRow {
     pub privacy_url: Option<String>,
     pub terms_url: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -993,9 +959,7 @@ pub struct WhiteLabelDomain {
     pub dns_records: Option<serde_json::Value>,
     pub verified_at: Option<DateTime<Utc>>,
     pub ssl_status: Option<String>,
-    #[allow(dead_code)]
     pub ssl_certificate_id: Option<String>,
-    #[allow(dead_code)]
     pub ssl_expires_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -1009,7 +973,6 @@ pub struct WhiteLabelEmailTemplate {
     pub html_template: Option<String>,
     pub text_template: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -1104,12 +1067,10 @@ pub struct QuarterlyBusinessReview {
     pub quarter_over_quarter_change: Option<serde_json::Value>,
     pub presentation_url: Option<String>,
     pub report_url: Option<String>,
-    #[allow(dead_code)]
     pub recording_url: Option<String>,
     pub feedback: Option<serde_json::Value>,
     pub action_items: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
-    #[allow(dead_code)]
     pub updated_at: Option<DateTime<Utc>>,
 }
 

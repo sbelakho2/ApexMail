@@ -131,6 +131,14 @@ fn err_json(msg: &str) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "error": msg }))
 }
 
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
+}
+
+fn clamp_offset(offset: i64) -> i64 {
+    offset.clamp(0, 100_000)
+}
+
 // ─── Health ─────────────────────────────────────────────────────
 
 async fn health_check() -> Json<serde_json::Value> {
@@ -234,7 +242,10 @@ async fn risk_resolve_flag(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    let flag_type = parse_risk_flag_type(&body.flag_type);
+    let flag_type = match parse_risk_flag_type(&body.flag_type) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, err_json(&e)).into_response(),
+    };
     match state
         .risk_engine
         .resolve_flag(
@@ -340,13 +351,16 @@ async fn scan_malware(
 async fn scan_policy(
     State(state): State<S>,
     headers: HeaderMap,
-    Path(_tenant_id): Path<String>,
+    Path(tenant_id): Path<String>,
     Json(body): Json<ScanRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    match state.content_scanner.scan_email(&body.content).await {
+    // #283: enforce path tenant_id over body tenant_id
+    let mut scoped = body.content.clone();
+    scoped.tenant_id = tenant_id;
+    match state.content_scanner.scan_email(&scoped).await {
         Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result.policy).unwrap())).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e)).into_response(),
     }
@@ -382,8 +396,14 @@ async fn audit_create(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    let action = parse_audit_action(&body.action);
-    let resource = parse_audit_resource(&body.resource);
+    let action = match parse_audit_action(&body.action) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, err_json(&e)).into_response(),
+    };
+    let resource = match parse_audit_resource(&body.resource) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, err_json(&e)).into_response(),
+    };
     let ctx = LogContext {
         tenant_id: Some(body.tenant_id.clone()),
         user_id: Some(body.user_id.clone()),
@@ -428,17 +448,34 @@ async fn audit_query(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
+
+    let action = match params.action.as_deref() {
+        Some(v) => match parse_audit_action(v) {
+            Ok(a) => Some(a),
+            Err(e) => return (StatusCode::BAD_REQUEST, err_json(&e)).into_response(),
+        },
+        None => None,
+    };
+
+    let resource = match params.resource.as_deref() {
+        Some(v) => match parse_audit_resource(v) {
+            Ok(r) => Some(r),
+            Err(e) => return (StatusCode::BAD_REQUEST, err_json(&e)).into_response(),
+        },
+        None => None,
+    };
+
     let query = AuditLogQuery {
         tenant_id: params.tenant_id,
         user_id: params.user_id,
-        action: params.action.as_deref().map(parse_audit_action),
-        resource: params.resource.as_deref().map(parse_audit_resource),
+        action,
+        resource,
         resource_id: None,
         start_date: None,
         end_date: None,
         outcome: None,
-        limit: params.limit,
-        offset: params.offset,
+        limit: Some(clamp_limit(params.limit.unwrap_or(50), 500)),
+        offset: Some(clamp_offset(params.offset.unwrap_or(0))),
     };
     match state.audit_logger.query(&query).await {
         Ok((entries, total)) => {
@@ -489,7 +526,7 @@ async fn audit_export(
         start_date: None,
         end_date: None,
         outcome: None,
-        limit: params.limit,
+        limit: Some(clamp_limit(params.limit.unwrap_or(1000), 10_000)),
         offset: None,
     };
     let format = params.format.as_deref().unwrap_or("json");
@@ -557,7 +594,13 @@ async fn audit_register_webhook(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    let actions: Vec<AuditAction> = body.events.iter().map(|s| parse_audit_action(s)).collect();
+    let mut actions: Vec<AuditAction> = Vec::with_capacity(body.events.len());
+    for event in &body.events {
+        match parse_audit_action(event) {
+            Ok(v) => actions.push(v),
+            Err(e) => return (StatusCode::BAD_REQUEST, err_json(&e)).into_response(),
+        }
+    }
     match state
         .audit_logger
         .register_webhook(&body.tenant_id, &body.url, &actions)
@@ -814,6 +857,8 @@ async fn secret_rollback(
 struct ListSecretsQuery {
     #[serde(rename = "type")]
     secret_type: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 async fn secrets_list(
@@ -834,7 +879,13 @@ async fn secrets_list(
         "certificate" => Some(SecretType::Certificate),
         _ => None,
     });
-    match state.secret_manager.list_secrets(&tenant_id, st).await {
+    let limit = clamp_limit(params.limit.unwrap_or(50), 500);
+    let offset = clamp_offset(params.offset.unwrap_or(0));
+    match state
+        .secret_manager
+        .list_secrets(&tenant_id, st, limit, offset)
+        .await
+    {
         Ok(secrets) => {
             let list: Vec<serde_json::Value> = secrets
                 .into_iter()
@@ -1084,52 +1135,55 @@ async fn gdpr_stats(
 
 // ─── Helper ─────────────────────────────────────────────────────
 
-fn parse_audit_action(s: &str) -> AuditAction {
+fn parse_audit_action(s: &str) -> Result<AuditAction, String> {
     match s {
-        "create" => AuditAction::Create,
-        "read" => AuditAction::Read,
-        "update" => AuditAction::Update,
-        "delete" => AuditAction::Delete,
-        "login" => AuditAction::Login,
-        "logout" => AuditAction::Logout,
-        "send" => AuditAction::Send,
-        "export" => AuditAction::Export,
-        "import" => AuditAction::Import,
-        "receive" => AuditAction::Receive,
-        "approve" => AuditAction::Approve,
-        "reject" => AuditAction::Reject,
-        "escalate" => AuditAction::Escalate,
-        _ => AuditAction::Configure,
+        "create" => Ok(AuditAction::Create),
+        "read" => Ok(AuditAction::Read),
+        "update" => Ok(AuditAction::Update),
+        "delete" => Ok(AuditAction::Delete),
+        "login" => Ok(AuditAction::Login),
+        "logout" => Ok(AuditAction::Logout),
+        "send" => Ok(AuditAction::Send),
+        "export" => Ok(AuditAction::Export),
+        "import" => Ok(AuditAction::Import),
+        "receive" => Ok(AuditAction::Receive),
+        "approve" => Ok(AuditAction::Approve),
+        "reject" => Ok(AuditAction::Reject),
+        "escalate" => Ok(AuditAction::Escalate),
+        "configure" => Ok(AuditAction::Configure),
+        _ => Err(format!("Invalid audit action: {s}")),
     }
 }
 
-fn parse_audit_resource(s: &str) -> AuditResource {
+fn parse_audit_resource(s: &str) -> Result<AuditResource, String> {
     match s {
-        "tenant" => AuditResource::Tenant,
-        "user" => AuditResource::User,
-        "api_key" => AuditResource::ApiKey,
-        "domain" => AuditResource::Domain,
-        "template" => AuditResource::Template,
-        "campaign" => AuditResource::Campaign,
-        "subscriber" => AuditResource::Subscriber,
-        "list" => AuditResource::List,
-        "webhook" => AuditResource::Webhook,
-        "message" => AuditResource::Message,
-        "settings" => AuditResource::Settings,
-        "billing" => AuditResource::Billing,
-        _ => AuditResource::Consent,
+        "tenant" => Ok(AuditResource::Tenant),
+        "user" => Ok(AuditResource::User),
+        "api_key" => Ok(AuditResource::ApiKey),
+        "domain" => Ok(AuditResource::Domain),
+        "template" => Ok(AuditResource::Template),
+        "campaign" => Ok(AuditResource::Campaign),
+        "subscriber" => Ok(AuditResource::Subscriber),
+        "list" => Ok(AuditResource::List),
+        "webhook" => Ok(AuditResource::Webhook),
+        "message" => Ok(AuditResource::Message),
+        "settings" => Ok(AuditResource::Settings),
+        "billing" => Ok(AuditResource::Billing),
+        "consent" => Ok(AuditResource::Consent),
+        _ => Err(format!("Invalid audit resource: {s}")),
     }
 }
 
-fn parse_risk_flag_type(s: &str) -> RiskFlagType {
+fn parse_risk_flag_type(s: &str) -> Result<RiskFlagType, String> {
     match s {
-        "high_bounce_rate" => RiskFlagType::HighBounceRate,
-        "spam_trap_hit" => RiskFlagType::SpamTrapHit,
-        "blocklist_detected" => RiskFlagType::BlocklistDetected,
-        "unusual_sending_pattern" => RiskFlagType::UnusualSendingPattern,
-        "phishing_content" => RiskFlagType::PhishingContent,
-        "malware_attachment" => RiskFlagType::MalwareAttachment,
-        "suspended_account" => RiskFlagType::SuspendedAccount,
-        _ => RiskFlagType::PaymentFailed,
+        "high_bounce_rate" => Ok(RiskFlagType::HighBounceRate),
+        "spam_trap_hit" => Ok(RiskFlagType::SpamTrapHit),
+        "blocklist_detected" => Ok(RiskFlagType::BlocklistDetected),
+        "unusual_sending_pattern" => Ok(RiskFlagType::UnusualSendingPattern),
+        "phishing_content" => Ok(RiskFlagType::PhishingContent),
+        "malware_attachment" => Ok(RiskFlagType::MalwareAttachment),
+        "suspended_account" => Ok(RiskFlagType::SuspendedAccount),
+        "payment_failed" => Ok(RiskFlagType::PaymentFailed),
+        _ => Err(format!("Invalid risk flag type: {s}")),
     }
 }

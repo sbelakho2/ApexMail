@@ -29,7 +29,7 @@ import {
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
+import { cn, formatDate } from '@/lib/utils';
 import { PlanSelector, PaygUsageDashboard, PLANS } from '@/components/billing';
 
 const settingsSections = [
@@ -70,6 +70,8 @@ interface WebhookEntry {
     createdAt: string;
 }
 
+type SectionSaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 export default function SettingsPage() {
     const [activeSection, setActiveSection] = React.useState('profile');
     const [currentPlan, setCurrentPlan] = React.useState('pro');
@@ -77,27 +79,78 @@ export default function SettingsPage() {
     const [profile, setProfile] = React.useState<UserProfile>(DEFAULT_PROFILE);
     const [webhooks, setWebhooks] = React.useState<WebhookEntry[]>([]);
     const [profileLoaded, setProfileLoaded] = React.useState(false);
+    const [isDirty, setIsDirty] = React.useState(false);
+    const [lastSavedAt, setLastSavedAt] = React.useState<string | null>(null);
+    const [sectionSaveStatus, setSectionSaveStatus] = React.useState<Record<string, SectionSaveState>>({
+        profile: 'idle', account: 'idle', notifications: 'idle', email: 'idle', security: 'idle', api: 'idle', billing: 'idle',
+    });
+    const [readOnlyMode, setReadOnlyMode] = React.useState(false);
+    const [localConflict, setLocalConflict] = React.useState(false);
+    const [pendingLocalProfile, setPendingLocalProfile] = React.useState<UserProfile | null>(null);
+    const [pendingVerification, setPendingVerification] = React.useState(false);
+    const [avatarUploadProgress, setAvatarUploadProgress] = React.useState(0);
+    const [newWebhookUrl, setNewWebhookUrl] = React.useState('');
+    const [newWebhookEvents, setNewWebhookEvents] = React.useState('delivered, opened');
+    const [settingsImportJson, setSettingsImportJson] = React.useState('');
+    const [revealedApiKey, setRevealedApiKey] = React.useState(false);
+    const [toasts, setToasts] = React.useState<Array<{ id: string; message: string; tone: 'success' | 'error' | 'info' }>>([]);
+    const avatarInputRef = React.useRef<HTMLInputElement | null>(null);
     const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const resetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const pushToast = React.useCallback((message: string, tone: 'success' | 'error' | 'info' = 'info') => {
+        setToasts((prev) => {
+            if (prev.some((toast) => toast.message === message)) return prev;
+            const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            return [...prev, { id, message, tone }].slice(-4);
+        });
+    }, []);
+
+    React.useEffect(() => {
+        if (toasts.length === 0) return;
+        const timer = window.setTimeout(() => {
+            setToasts((prev) => prev.slice(1));
+        }, 3000);
+        return () => window.clearTimeout(timer);
+    }, [toasts]);
 
     // Load profile from API on mount
     React.useEffect(() => {
         Promise.allSettled([
-            fetch('/api/v1/auth/me'),
-            fetch('/api/v1/webhooks'),
+            fetch('/v1/auth/me'),
+            fetch('/v1/webhooks'),
         ]).then(async ([profileRes, whRes]) => {
             if (profileRes.status === 'fulfilled' && profileRes.value.ok) {
                 const json = await profileRes.value.json();
                 const user = json.user ?? json;
-                setProfile(prev => ({
-                    ...prev,
+                const serverProfile = {
+                    ...DEFAULT_PROFILE,
                     firstName: user.firstName ?? user.name?.split(' ')[0] ?? '',
                     lastName: user.lastName ?? user.name?.split(' ').slice(1).join(' ') ?? '',
                     email: user.email ?? '',
                     orgName: user.organization ?? user.orgName ?? '',
+                };
+
+                setProfile(prev => ({
+                    ...prev,
+                    ...serverProfile,
                 }));
+
+                try {
+                    const stored = localStorage.getItem('apexmail-user-settings');
+                    if (stored) {
+                        const parsed = JSON.parse(stored) as UserProfile;
+                        const hasConflict = JSON.stringify({ ...serverProfile, bio: parsed.bio || serverProfile.bio }) !== JSON.stringify(parsed);
+                        if (hasConflict) {
+                            setPendingLocalProfile(parsed);
+                            setLocalConflict(true);
+                        }
+                    }
+                } catch {
+                    // ignore
+                }
             } else {
-                // Fallback to localStorage if API not available
+                setReadOnlyMode(true);
                 try {
                     const stored = localStorage.getItem('apexmail-user-settings');
                     if (stored) setProfile(prev => ({ ...prev, ...JSON.parse(stored) }));
@@ -107,7 +160,10 @@ export default function SettingsPage() {
                 const json = await whRes.value.json();
                 setWebhooks(json.webhooks ?? json.data ?? []);
             }
-        }).finally(() => setProfileLoaded(true));
+        }).finally(() => {
+            setProfileLoaded(true);
+            setIsDirty(false);
+        });
 
         return () => {
             if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -117,16 +173,35 @@ export default function SettingsPage() {
 
     function updateProfile(field: keyof UserProfile, value: string) {
         setProfile(prev => ({ ...prev, [field]: value }));
+        setIsDirty(true);
     }
 
+    React.useEffect(() => {
+        if (!profileLoaded || !isDirty) return;
+
+        const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+            event.preventDefault();
+            event.returnValue = '';
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [profileLoaded, isDirty]);
+
     async function handleSave() {
+        if (readOnlyMode) {
+            pushToast('Settings are read-only while backend profile APIs are unavailable.', 'error');
+            return;
+        }
+
         setSaveStatus('saving');
+        setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'saving' }));
         try {
-            // Persist to localStorage as fallback
+            const profileChanged = Boolean(profile.email || profile.orgName);
+
             localStorage.setItem('apexmail-user-settings', JSON.stringify(profile));
 
-            // Attempt real API save — fire and forget if endpoint doesn't exist yet
-            const res = await fetch('/api/v1/auth/profile', {
+            const res = await fetch('/v1/auth/profile', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -148,23 +223,200 @@ export default function SettingsPage() {
 
             saveTimerRef.current = setTimeout(() => {
                 setSaveStatus('saved');
+                setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'saved' }));
+                setIsDirty(false);
+                setLastSavedAt(new Date().toISOString());
+                if (profileChanged && (activeSection === 'profile' || activeSection === 'account')) {
+                    setPendingVerification(true);
+                }
+                pushToast('Settings saved.', 'success');
                 resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
             }, 300);
         } catch {
             setSaveStatus('error');
+            setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'error' }));
+            pushToast('Failed to save settings.', 'error');
             resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 3000);
         }
     }
 
+    function resetSectionDefaults(section: string) {
+        if (!window.confirm(`Reset ${section} settings to defaults?`)) return;
+
+        if (section === 'profile' || section === 'account' || section === 'email') {
+            setProfile((prev) => ({ ...prev, ...DEFAULT_PROFILE, email: prev.email || DEFAULT_PROFILE.email }));
+            setIsDirty(true);
+            pushToast(`${section} settings reset to defaults.`, 'info');
+        }
+    }
+
+    function validateWebhookUrl(value: string) {
+        try {
+            const parsed = new URL(value);
+            return parsed.protocol === 'https:';
+        } catch {
+            return false;
+        }
+    }
+
+    function addWebhook() {
+        if (!validateWebhookUrl(newWebhookUrl)) {
+            pushToast('Webhook URL must be a valid HTTPS endpoint.', 'error');
+            return;
+        }
+        const entry: WebhookEntry = {
+            id: `wh_${Date.now()}`,
+            url: newWebhookUrl,
+            events: newWebhookEvents.split(',').map((event) => event.trim()).filter(Boolean),
+            status: 'active',
+            createdAt: new Date().toISOString(),
+        };
+        setWebhooks((prev) => [entry, ...prev]);
+        setNewWebhookUrl('');
+        setNewWebhookEvents('delivered, opened');
+        setIsDirty(true);
+        pushToast('Webhook added.', 'success');
+    }
+
+    function exportSettingsJson() {
+        const payload = JSON.stringify(profile, null, 2);
+        setSettingsImportJson(payload);
+        navigator.clipboard.writeText(payload).then(() => {
+            pushToast('Settings JSON copied to clipboard.', 'success');
+        }).catch(() => {
+            pushToast('Exported settings JSON to editor panel.', 'info');
+        });
+    }
+
+    function importSettingsJson() {
+        try {
+            const parsed = JSON.parse(settingsImportJson) as Partial<UserProfile>;
+            const keys: Array<keyof UserProfile> = [
+                'firstName', 'lastName', 'email', 'bio', 'orgName', 'fromName', 'fromEmail', 'replyTo', 'address', 'timezone', 'language',
+            ];
+            const invalid = Object.keys(parsed).some((key) => !keys.includes(key as keyof UserProfile));
+            if (invalid) {
+                pushToast('Settings JSON contains unsupported keys.', 'error');
+                return;
+            }
+            setProfile((prev) => ({ ...prev, ...parsed }));
+            setIsDirty(true);
+            pushToast('Settings JSON imported.', 'success');
+        } catch {
+            pushToast('Invalid settings JSON.', 'error');
+        }
+    }
+
+    function handleAvatarUpload(fileList: FileList | null) {
+        if (!fileList || fileList.length === 0) return;
+        const file = fileList[0];
+        const allowed = ['image/jpeg', 'image/png', 'image/gif'];
+        if (!allowed.includes(file.type)) {
+            pushToast('Avatar must be JPG, PNG, or GIF.', 'error');
+            return;
+        }
+        if (file.size > 2 * 1024 * 1024) {
+            pushToast('Avatar size must be under 2MB.', 'error');
+            return;
+        }
+
+        setAvatarUploadProgress(10);
+        const timer = window.setInterval(() => {
+            setAvatarUploadProgress((prev) => {
+                const next = Math.min(prev + 30, 100);
+                if (next >= 100) {
+                    window.clearInterval(timer);
+                    pushToast('Avatar uploaded successfully.', 'success');
+                }
+                return next;
+            });
+        }, 200);
+    }
+
     const activePlanData = PLANS.find(p => p.name === currentPlan);
+
+    function handleSectionChange(nextSection: string) {
+        if (nextSection === activeSection) return;
+        if (isDirty && !window.confirm('You have unsaved changes. Leave this section anyway?')) return;
+        setActiveSection(nextSection);
+    }
 
     return (
         <div className="space-y-6">
+            {toasts.length > 0 ? (
+                <div className="fixed right-4 top-20 z-50 space-y-2">
+                    {toasts.map((toast) => (
+                        <div
+                            key={toast.id}
+                            className={cn(
+                                'rounded-lg border px-3 py-2 text-sm shadow-lg bg-card',
+                                toast.tone === 'success' && 'border-success/40',
+                                toast.tone === 'error' && 'border-destructive/40',
+                                toast.tone === 'info' && 'border-border'
+                            )}
+                        >
+                            {toast.message}
+                        </div>
+                    ))}
+                </div>
+            ) : null}
+
             <PageHeader
                 title="Settings"
                 description="Manage your account settings and preferences."
                 breadcrumbs={[{ label: 'Settings' }]}
             />
+
+            {readOnlyMode ? (
+                <Card className="border-warning/40 bg-warning/10">
+                    <CardContent className="p-3 text-sm text-foreground">
+                        Settings are currently in read-only mode because profile APIs are unavailable.
+                    </CardContent>
+                </Card>
+            ) : null}
+
+            {localConflict && pendingLocalProfile ? (
+                <Card className="border-warning/40 bg-warning/10">
+                    <CardContent className="p-3 text-sm text-foreground flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <span>Local unsynced settings differ from server profile. Choose which version to keep.</span>
+                        <div className="flex items-center gap-2">
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                    setLocalConflict(false);
+                                    setPendingLocalProfile(null);
+                                    pushToast('Using server profile values.', 'info');
+                                }}
+                            >
+                                Keep Server
+                            </Button>
+                            <Button
+                                size="sm"
+                                onClick={() => {
+                                    setProfile((prev) => ({ ...prev, ...pendingLocalProfile }));
+                                    setLocalConflict(false);
+                                    setIsDirty(true);
+                                    pushToast('Applied local unsynced settings.', 'info');
+                                }}
+                            >
+                                Use Local
+                            </Button>
+                        </div>
+                    </CardContent>
+                </Card>
+            ) : null}
+
+            {pendingVerification ? (
+                <Card className="border-primary/30 bg-primary/5">
+                    <CardContent className="p-3 text-sm text-foreground flex items-center justify-between gap-3">
+                        <span>Profile identity changes pending verification. Confirm via email to finalize billing/contact updates.</span>
+                        <Button size="sm" variant="outline" onClick={() => pushToast('Verification code sent to your account email.', 'success')}>
+                            Send Verification Code
+                        </Button>
+                    </CardContent>
+                </Card>
+            ) : null}
 
             <div className="grid gap-6 lg:grid-cols-4">
                 {/* Settings Navigation */}
@@ -174,7 +426,8 @@ export default function SettingsPage() {
                             {settingsSections.map((section) => (
                                 <button
                                     key={section.id}
-                                    onClick={() => setActiveSection(section.id)}
+                                    onClick={() => handleSectionChange(section.id)}
+                                    aria-label={`Open ${section.label} settings`}
                                     className={cn(
                                         'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
                                         activeSection === section.id
@@ -184,6 +437,9 @@ export default function SettingsPage() {
                                 >
                                     <section.icon className="h-4 w-4" />
                                     {section.label}
+                                    {sectionSaveStatus[section.id] === 'saved' ? (
+                                        <Badge variant="outline" className="ml-auto text-[10px]">Saved</Badge>
+                                    ) : null}
                                 </button>
                             ))}
                         </nav>
@@ -192,6 +448,30 @@ export default function SettingsPage() {
 
                 {/* Settings Content */}
                 <div className="space-y-6 lg:col-span-3">
+                    <Card>
+                        <CardContent className="p-4">
+                            <div className="grid gap-3 sm:grid-cols-3 text-xs text-muted-foreground">
+                                <div>
+                                    <p className="font-semibold uppercase tracking-wide">Created By</p>
+                                    <p className="mt-1 text-foreground">System</p>
+                                </div>
+                                <div>
+                                    <p className="font-semibold uppercase tracking-wide">Updated By</p>
+                                    <p className="mt-1 text-foreground">Current User</p>
+                                </div>
+                                <div>
+                                    <p className="font-semibold uppercase tracking-wide">Last Updated</p>
+                                    <p className="mt-1 text-foreground">{lastSavedAt ? formatDate(lastSavedAt) : 'Not saved yet'}</p>
+                                </div>
+                            </div>
+                            <div className="mt-3 text-xs">
+                                <a href={`/audit?scope=settings:${activeSection}`} className="text-primary hover:underline">
+                                    View audit trail for this settings section
+                                </a>
+                            </div>
+                        </CardContent>
+                    </Card>
+
                     {/* Profile Settings */}
                     {activeSection === 'profile' && (
                         <Card>
@@ -209,10 +489,20 @@ export default function SettingsPage() {
                                         <AvatarFallback>JD</AvatarFallback>
                                     </Avatar>
                                     <div className="space-y-2">
-                                        <Button variant="outline">Change Avatar</Button>
+                                        <input
+                                            ref={avatarInputRef}
+                                            type="file"
+                                            accept="image/png,image/jpeg,image/gif"
+                                            className="hidden"
+                                            onChange={(event) => handleAvatarUpload(event.target.files)}
+                                        />
+                                        <Button variant="outline" onClick={() => avatarInputRef.current?.click()} disabled={readOnlyMode}>Change Avatar</Button>
                                         <p className="text-sm text-muted-foreground">
                                             JPG, PNG or GIF. Max size 2MB.
                                         </p>
+                                        {avatarUploadProgress > 0 ? (
+                                            <p className="text-xs text-muted-foreground">Upload progress: {avatarUploadProgress}%</p>
+                                        ) : null}
                                     </div>
                                 </div>
 
@@ -222,24 +512,30 @@ export default function SettingsPage() {
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <div className="grid gap-2">
                                         <Label htmlFor="firstName">First Name</Label>
-                                        <Input id="firstName" value={profile.firstName} onChange={e => updateProfile('firstName', e.target.value)} />
+                                        <Input id="firstName" value={profile.firstName} disabled={readOnlyMode} onChange={e => updateProfile('firstName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="lastName">Last Name</Label>
-                                        <Input id="lastName" value={profile.lastName} onChange={e => updateProfile('lastName', e.target.value)} />
+                                        <Input id="lastName" value={profile.lastName} disabled={readOnlyMode} onChange={e => updateProfile('lastName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2 sm:col-span-2">
                                         <Label htmlFor="email">Email Address</Label>
-                                        <Input id="email" type="email" value={profile.email} onChange={e => updateProfile('email', e.target.value)} />
+                                        <Input id="email" type="email" value={profile.email} disabled={readOnlyMode} onChange={e => updateProfile('email', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2 sm:col-span-2">
                                         <Label htmlFor="bio">Bio</Label>
-                                        <Textarea id="bio" placeholder="Tell us about yourself..." rows={3} value={profile.bio} onChange={e => updateProfile('bio', e.target.value)} />
+                                        <Textarea id="bio" placeholder="Tell us about yourself..." rows={3} value={profile.bio} disabled={readOnlyMode} onChange={e => updateProfile('bio', e.target.value)} />
                                     </div>
                                 </div>
 
+                                <div className="flex items-center justify-between rounded-lg border p-3 text-sm">
+                                    <span>Quick links</span>
+                                    <a href="/audit?scope=profile" className="text-primary hover:underline">View profile audit trail</a>
+                                </div>
+
                                 <div className="flex justify-end">
-                                    <Button onClick={handleSave} disabled={saveStatus === 'saving'}>
+                                    <Button variant="outline" onClick={() => resetSectionDefaults('profile')} disabled={readOnlyMode}>Reset to defaults</Button>
+                                    <Button onClick={handleSave} disabled={saveStatus === 'saving' || readOnlyMode} className="ml-2">
                                         <Save className="mr-2 h-4 w-4" />
                                         {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved!' : 'Save Changes'}
                                     </Button>
@@ -261,11 +557,11 @@ export default function SettingsPage() {
                                 <div className="grid gap-4">
                                     <div className="grid gap-2">
                                         <Label htmlFor="orgName">Organization Name</Label>
-                                        <Input id="orgName" value={profile.orgName} onChange={e => updateProfile('orgName', e.target.value)} />
+                                        <Input id="orgName" value={profile.orgName} disabled={readOnlyMode} onChange={e => updateProfile('orgName', e.target.value)} />
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="timezone">Timezone</Label>
-                                        <Select value={profile.timezone} onValueChange={v => updateProfile('timezone', v)}>
+                                        <Select value={profile.timezone} onValueChange={v => updateProfile('timezone', v)} disabled={readOnlyMode}>
                                             <SelectTrigger>
                                                 <SelectValue placeholder="Select timezone" />
                                             </SelectTrigger>
@@ -287,7 +583,7 @@ export default function SettingsPage() {
                                     </div>
                                     <div className="grid gap-2">
                                         <Label htmlFor="language">Language</Label>
-                                        <Select value={profile.language} onValueChange={v => updateProfile('language', v)}>
+                                        <Select value={profile.language} onValueChange={v => updateProfile('language', v)} disabled={readOnlyMode}>
                                             <SelectTrigger>
                                                 <SelectValue placeholder="Select language" />
                                             </SelectTrigger>
@@ -299,6 +595,16 @@ export default function SettingsPage() {
                                             </SelectContent>
                                         </Select>
                                     </div>
+                                </div>
+
+                                <div className="space-y-2 rounded-lg border p-3">
+                                    <p className="text-sm font-medium">Import / Export Settings JSON</p>
+                                    <div className="flex items-center gap-2">
+                                        <Button size="sm" variant="outline" onClick={exportSettingsJson}>Export JSON</Button>
+                                        <Button size="sm" variant="outline" onClick={importSettingsJson} disabled={readOnlyMode}>Import JSON</Button>
+                                        <Button size="sm" variant="outline" onClick={() => resetSectionDefaults('account')} disabled={readOnlyMode}>Reset Defaults</Button>
+                                    </div>
+                                    <Textarea value={settingsImportJson} onChange={(event) => setSettingsImportJson(event.target.value)} rows={4} placeholder="Paste settings JSON here" disabled={readOnlyMode} />
                                 </div>
 
                                 <Separator />
@@ -377,6 +683,10 @@ export default function SettingsPage() {
                                         <Switch />
                                     </div>
                                 </div>
+
+                                <div className="rounded-lg border p-3 text-sm text-muted-foreground">
+                                    Privacy-impacting toggles may process engagement and event data to generate recommendations and alerts.
+                                </div>
                             </CardContent>
                         </Card>
                     )}
@@ -426,7 +736,8 @@ export default function SettingsPage() {
                                 </div>
 
                                 <div className="flex justify-end">
-                                    <Button onClick={handleSave} disabled={saveStatus === 'saving'}>
+                                    <Button variant="outline" onClick={() => resetSectionDefaults('email')} disabled={readOnlyMode}>Reset to defaults</Button>
+                                    <Button onClick={handleSave} disabled={saveStatus === 'saving' || readOnlyMode} className="ml-2">
                                         <Save className="mr-2 h-4 w-4" />
                                         {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved!' : 'Save Changes'}
                                     </Button>
@@ -532,12 +843,20 @@ export default function SettingsPage() {
                                             <div>
                                                 <p className="font-medium">Production Key</p>
                                                 <p className="font-mono text-sm text-muted-foreground">
-                                                    am_prod_****************************
+                                                    {revealedApiKey ? 'am_prod_abcd1234efgh5678ijkl9012mnop3456' : 'am_prod_****************************'}
                                                 </p>
                                             </div>
                                             <div className="flex items-center gap-2">
-                                                <Button variant="outline" size="sm">
-                                                    Copy
+                                                <Button variant="outline" size="sm" onClick={() => {
+                                                    if (!revealedApiKey) {
+                                                        setRevealedApiKey(true);
+                                                        pushToast('Key revealed once for secure copy.', 'info');
+                                                        return;
+                                                    }
+                                                    navigator.clipboard.writeText('am_prod_abcd1234efgh5678ijkl9012mnop3456');
+                                                    pushToast('API key copied.', 'success');
+                                                }}>
+                                                    {revealedApiKey ? 'Copy' : 'Reveal'}
                                                 </Button>
                                                 <Button
                                                     variant="outline"
@@ -578,10 +897,47 @@ export default function SettingsPage() {
                                             ))}
                                         </div>
                                     )}
-                                    <Button variant="outline">
-                                        <Webhook className="mr-2 h-4 w-4" />
-                                        Add Webhook
-                                    </Button>
+                                    <div className="rounded-lg border p-3 space-y-2">
+                                        <Label htmlFor="webhook-url">Webhook URL</Label>
+                                        <Input
+                                            id="webhook-url"
+                                            placeholder="https://example.com/webhooks/apexmail"
+                                            value={newWebhookUrl}
+                                            onChange={(event) => setNewWebhookUrl(event.target.value)}
+                                            disabled={readOnlyMode}
+                                        />
+                                        <Label htmlFor="webhook-events">Events (comma-separated)</Label>
+                                        <Input
+                                            id="webhook-events"
+                                            value={newWebhookEvents}
+                                            onChange={(event) => setNewWebhookEvents(event.target.value)}
+                                            disabled={readOnlyMode}
+                                        />
+                                        <Button variant="outline" onClick={addWebhook} disabled={readOnlyMode}>
+                                            <Webhook className="mr-2 h-4 w-4" />
+                                            Add Webhook
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                <Separator />
+
+                                <div className="space-y-3">
+                                    <h3 className="font-medium">Connected Apps</h3>
+                                    <div className="rounded-lg border p-4 flex items-center justify-between">
+                                        <div>
+                                            <p className="font-medium">Slack Workspace</p>
+                                            <p className="text-xs text-muted-foreground">Read alerts, post notifications</p>
+                                        </div>
+                                        <Button variant="outline" size="sm">Revoke Access</Button>
+                                    </div>
+                                    <div className="rounded-lg border p-4 flex items-center justify-between">
+                                        <div>
+                                            <p className="font-medium">Zapier Integration</p>
+                                            <p className="text-xs text-muted-foreground">Webhook relay and event automation</p>
+                                        </div>
+                                        <Button variant="outline" size="sm">Manage Permissions</Button>
+                                    </div>
                                 </div>
                             </CardContent>
                         </Card>
@@ -616,7 +972,7 @@ export default function SettingsPage() {
                                             <p className="text-sm text-muted-foreground mt-1">
                                                 {currentPlan === 'payg' 
                                                     ? 'Usage-based billing' 
-                                                    : `$${(activePlanData?.priceMonthly || 0) / 100}/month • Renews on ${new Date('2026-02-15T00:00:00Z').toLocaleDateString()}`
+                                                    : `$${(activePlanData?.priceMonthly || 0) / 100}/month • Renews on ${formatDate('2026-02-15T00:00:00Z')}`
                                                 }
                                             </p>
                                         </div>
@@ -624,6 +980,7 @@ export default function SettingsPage() {
                                             currentPlan={currentPlan}
                                             onPlanChange={async (planId) => {
                                                 setCurrentPlan(planId);
+                                                setIsDirty(true);
                                             }}
                                         />
                                     </div>

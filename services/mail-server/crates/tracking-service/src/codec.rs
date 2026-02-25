@@ -272,6 +272,10 @@ impl TrackingCodec {
     }
 
     fn try_legacy_hmac_verify(&self, combined: &[u8]) -> Option<String> {
+        // #194: Legacy tokens used 16-byte truncated HMAC. Accept both truncated
+        // (backward compat) and full 32-byte HMAC for newly generated tokens.
+        // Truncated verification is weaker (128 bits) but still sufficient for
+        // unsubscribe tokens; log a warning for monitoring migration progress.
         if combined.len() < 17 {
             return None;
         }
@@ -281,6 +285,7 @@ impl TrackingCodec {
         if !constant_time_eq(provided_sig, &expected_full[..16]) {
             return None;
         }
+        tracing::debug!("Legacy 16-byte truncated HMAC token verified — consider re-issuing with full HMAC");
         String::from_utf8(payload_bytes.to_vec()).ok()
     }
 }
@@ -323,18 +328,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option<UnsubscribeData> {
     // Format: "tenantId:recipient:timestamp_ms"
-    // Note: recipient may contain ':', so we split from both ends.
-    let first_colon = payload.find(':')?;
+    // #195: Both tenant_id and recipient may contain colons.
+    // Strategy: timestamp_ms is always a pure decimal integer at the end,
+    // so find the rightmost `:` followed by only digits → that's the timestamp separator.
+    // Then from the remaining prefix find the FIRST `:` → tenant_id/recipient separator.
     let last_colon = payload.rfind(':')?;
-
-    if first_colon == last_colon {
-        // Only one colon — malformed
+    let ts_str = &payload[last_colon + 1..];
+    // Verify ts_str is a valid numeric timestamp
+    if ts_str.is_empty() || !ts_str.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
 
-    let tenant_id = payload[..first_colon].to_owned();
-    let ts_str = &payload[last_colon + 1..];
-    let recipient = payload[first_colon + 1..last_colon].to_owned();
+    let prefix = &payload[..last_colon];
+    let first_colon = prefix.find(':')?;
+
+    let tenant_id = prefix[..first_colon].to_owned();
+    let recipient = prefix[first_colon + 1..].to_owned();
 
     if tenant_id.is_empty() || recipient.is_empty() {
         return None;

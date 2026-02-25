@@ -161,11 +161,12 @@ export class UsersRepository {
   }
 
   async verifyCredentials(email: string, password: string, tenantId?: string): Promise<Result<User | null, Error>> {
-    // A-002: When tenantId is provided, scope the query to prevent cross-tenant login
-    const sql = tenantId
-      ? `SELECT * FROM users WHERE email = $1 AND status = 'active' AND tenant_id = $2`
-      : `SELECT * FROM users WHERE email = $1 AND status = 'active'`;
-    const params = tenantId ? [email.toLowerCase(), tenantId] : [email.toLowerCase()];
+    if (!tenantId) {
+      return Result.err(new Error('tenantId is required for credential verification'));
+    }
+    // A-002: Enforce tenant scoping to prevent cross-tenant login
+    const sql = `SELECT * FROM users WHERE email = $1 AND status = 'active' AND tenant_id = $2`;
+    const params = [email.toLowerCase(), tenantId];
     const result = await this.db.query<{
       id: string;
       tenant_id: string;

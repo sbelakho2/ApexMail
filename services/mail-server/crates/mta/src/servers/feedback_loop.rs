@@ -5,11 +5,12 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use bytes::BytesMut;
-use dashmap::DashMap;
 use hmac::{Hmac, Mac};
+use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::PgPool;
@@ -22,6 +23,19 @@ use trust_dns_resolver::TokioAsyncResolver;
 use uuid::Uuid;
 
 use crate::config::FeedbackConfig;
+
+// #148: Shared DNS resolver – avoids creating a new one per rDNS verification call
+static FBL_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
+// #147: Shared HTTP client with timeout – avoids Client::new() fallback without timeout
+static FBL_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("FBL HTTP client")
+});
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -69,8 +83,8 @@ pub struct FeedbackLoopServer {
     redis: deadpool_redis::Pool,
     hostname: String,
     trusted_domains: HashSet<String>,
-    /// Cache: IP → verified (true if rDNS matched a trusted sender).
-    rdns_cache: Arc<DashMap<IpAddr, bool>>,
+    /// #149: Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
+    rdns_cache: Cache<IpAddr, bool>,
     shutdown: Arc<Notify>,
 }
 
@@ -95,7 +109,11 @@ impl FeedbackLoopServer {
             redis,
             hostname,
             trusted_domains: trusted,
-            rdns_cache: Arc::new(DashMap::new()),
+            // #149: Bounded cache with TTL prevents unbounded memory growth
+            rdns_cache: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(600))
+                .build(),
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -235,27 +253,41 @@ impl FeedbackLoopServer {
     async fn verify_fbl_source(&self, ip: IpAddr) -> bool {
         // Check cache
         if let Some(cached) = self.rdns_cache.get(&ip) {
-            return *cached;
+            return cached;
         }
 
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        );
+        // #148: Use shared resolver instead of creating a new one per call
+        let resolver = &*FBL_RESOLVER;
 
         // Reverse DNS lookup
         let result = match resolver.reverse_lookup(ip).await {
             Ok(lookup) => {
-                let verified = lookup.iter().any(|name| {
+                let mut matched_hostname: Option<String> = None;
+                for name in lookup.iter() {
                     let hostname_str = name.to_string();
                     let hostname = hostname_str.trim_end_matches('.').to_lowercase();
-                    self.trusted_domains
-                        .iter()
-                        .any(|domain| hostname.ends_with(domain.as_str()))
-                });
-                // Forward confirmation: if rDNS matched, verify forward DNS matches
-                if verified {
-                    true
+                    if self.trusted_domains.iter().any(|domain| hostname.ends_with(domain.as_str())) {
+                        matched_hostname = Some(hostname);
+                        break;
+                    }
+                }
+
+                // #146: Forward-Confirmed reverse DNS (FCrDNS) – verify the PTR
+                // hostname resolves back to the original IP to prevent PTR spoofing
+                if let Some(ref hostname) = matched_hostname {
+                    match resolver.lookup_ip(hostname.as_str()).await {
+                        Ok(forward) => {
+                            let confirmed = forward.iter().any(|addr| addr == ip);
+                            if !confirmed {
+                                debug!(ip = %ip, hostname = %hostname, "FCrDNS failed: forward lookup doesn't match IP");
+                            }
+                            confirmed
+                        }
+                        Err(e) => {
+                            debug!(ip = %ip, hostname = %hostname, error = %e, "FCrDNS forward lookup failed");
+                            false
+                        }
+                    }
                 } else {
                     debug!(ip = %ip, "rDNS lookup didn't match trusted FBL senders");
                     false
@@ -333,7 +365,7 @@ impl FeedbackLoopServer {
             redis::cmd("LPUSH")
                 .arg("mta:webhook_queue")
                 .arg(payload.to_string())
-                .query_async::<String>(&mut *conn)
+                .query_async::<i64>(&mut *conn)  // LPUSH returns list length
                 .await
                 .ok();
         }
@@ -455,10 +487,8 @@ impl FeedbackLoopServer {
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // #147: Use shared client with guaranteed timeout
+        let client = &*FBL_CLIENT;
 
         for (webhook_id, url, secret) in webhooks {
             // Compute HMAC signature

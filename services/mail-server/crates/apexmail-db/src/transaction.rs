@@ -18,8 +18,9 @@ impl Tx {
     }
 
     /// Get a mutable reference to the inner transaction (for passing to queries).
-    pub fn as_mut(&mut self) -> &mut Transaction<'static, Postgres> {
-        self.inner.as_mut().expect("transaction already consumed")
+    /// #233: Returns None instead of panicking if transaction was already consumed
+    pub fn as_mut(&mut self) -> Option<&mut Transaction<'static, Postgres>> {
+        self.inner.as_mut()
     }
 
     /// Commit the transaction.

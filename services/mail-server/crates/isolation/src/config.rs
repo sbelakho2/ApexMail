@@ -162,26 +162,31 @@ fn env_or_i32(key: &str, default: i32) -> i32 {
 impl Config {
     pub fn from_env() -> Self {
         let environment = env_or("NODE_ENV", "development");
+        let is_production = environment.eq_ignore_ascii_case("production") || environment.eq_ignore_ascii_case("prod");
         let encryption_key = env_or(
             "TENANT_ENCRYPTION_KEY",
             "dev-encryption-key-change-in-prod!!",
         );
+        let internal_api_key = env_or("ISOLATION_INTERNAL_API_KEY", "dev-internal-key");
         if environment == "production"
             && encryption_key == "dev-encryption-key-change-in-prod!!"
         {
             panic!("TENANT_ENCRYPTION_KEY must be set in production");
         }
+        if is_production && (internal_api_key.is_empty() || internal_api_key == "dev-internal-key") {
+            panic!("ISOLATION_INTERNAL_API_KEY must be set to a strong non-default value in production");
+        }
 
         Self {
             port: env_or_u16("ISOLATION_PORT", 4500),
             environment,
-            internal_api_key: env_or("ISOLATION_INTERNAL_API_KEY", "dev-internal-key"),
+            internal_api_key,
             database: DatabaseConfig {
                 host: env_or("ISOLATION_DB_HOST", "localhost"),
                 port: env_or_u16("ISOLATION_DB_PORT", 5432),
                 database: env_or("ISOLATION_DB_NAME", "apexmail_isolation"),
                 user: env_or("ISOLATION_DB_USER", "apexmail"),
-                password: env_or("ISOLATION_DB_PASSWORD", "apexmail"),
+                password: env_or("ISOLATION_DB_PASSWORD", ""),
                 max_connections: env_or_u32("ISOLATION_DB_MAX_CONN", 20),
             },
             redis: RedisConfig {

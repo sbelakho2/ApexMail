@@ -4,8 +4,8 @@
 //
 //	client := apexmail.New("am_live_xxxx")
 //	resp, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
-//	    From:    "hello@example.com",
-//	    To:      []string{"user@example.com"},
+//	    From:    apexmail.EmailAddress{Email: "hello@example.com"},
+//	    To:      []apexmail.EmailAddress{{Email: "user@example.com"}},
 //	    Subject: "Hello!",
 //	    HTML:    "<h1>Hello World</h1>",
 //	})
@@ -18,6 +18,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -25,11 +28,19 @@ const (
 	defaultBaseURL = "https://api.apexmail.ee"
 	defaultTimeout = 30 * time.Second
 	sdkVersion     = "1.0.0"
+	maxResponseBytes = 5 * 1024 * 1024
+	defaultMaxRetries = 3
+	defaultInitialBackoff = 500 * time.Millisecond
+	defaultMaxBackoff = 5 * time.Second
 )
+
+var apiKeyPattern = regexp.MustCompile(`^am_(live|test)_[A-Za-z0-9]{16,}$`)
+var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 // Client is the root ApexMail API client. Use New() to create one.
 type Client struct {
 	apiKey       string
+	apiKeyErr    error
 	baseURL      string
 	httpClient   *http.Client
 	Emails       *EmailsAPI
@@ -69,6 +80,7 @@ func New(apiKey string, cfg ...Config) *Client {
 		apiKey:     apiKey,
 		baseURL:    baseURL,
 		httpClient: httpClient,
+		apiKeyErr:  validateAPIKey(apiKey),
 	}
 	cl.Emails = &EmailsAPI{client: cl}
 	cl.Domains = &DomainsAPI{client: cl}
@@ -79,59 +91,184 @@ func New(apiKey string, cfg ...Config) *Client {
 	return cl
 }
 
+func validateAPIKey(apiKey string) error {
+	if apiKey == "" || !apiKeyPattern.MatchString(apiKey) {
+		return fmt.Errorf("apexmail: invalid API key format")
+	}
+	return nil
+}
+
+func validateSendEmailRequest(req *SendEmailRequest) error {
+	if req == nil {
+		return fmt.Errorf("apexmail: send request is required")
+	}
+	if req.From.Email == "" || !emailPattern.MatchString(req.From.Email) {
+		return fmt.Errorf("apexmail: invalid from address")
+	}
+	if len(req.To) == 0 {
+		return fmt.Errorf("apexmail: at least one recipient is required")
+	}
+	for _, recipient := range req.To {
+		if recipient.Email == "" || !emailPattern.MatchString(recipient.Email) {
+			return fmt.Errorf("apexmail: invalid to address")
+		}
+	}
+	for _, recipient := range req.CC {
+		if recipient.Email == "" || !emailPattern.MatchString(recipient.Email) {
+			return fmt.Errorf("apexmail: invalid cc address")
+		}
+	}
+	for _, recipient := range req.BCC {
+		if recipient.Email == "" || !emailPattern.MatchString(recipient.Email) {
+			return fmt.Errorf("apexmail: invalid bcc address")
+		}
+	}
+	if req.Subject == "" {
+		return fmt.Errorf("apexmail: subject is required")
+	}
+	if req.HTML == "" && req.Text == "" && req.TemplateID == "" {
+		return fmt.Errorf("apexmail: html, text, or templateId is required")
+	}
+	return nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, out interface{}, idempotencyKey ...string) error {
-	var bodyReader io.Reader
+	if c.apiKeyErr != nil {
+		return c.apiKeyErr
+	}
+
+	var bodyBytes []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("apexmail: marshal request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(b)
+		bodyBytes = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
-	if err != nil {
-		return &NetworkError{Message: "create request: " + err.Error(), Cause: err}
-	}
-	req.Header.Set("X-API-Key", c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "apexmail-go/"+sdkVersion)
-	if len(idempotencyKey) > 0 && idempotencyKey[0] != "" {
-		req.Header.Set("X-Idempotency-Key", idempotencyKey[0])
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return &NetworkError{Message: err.Error(), Cause: err}
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return &NetworkError{Message: "read response body: " + err.Error(), Cause: err}
-	}
-	if resp.StatusCode >= 400 {
-		var apiErr APIError
-		if jsonErr := json.Unmarshal(respBody, &apiErr); jsonErr != nil {
-			apiErr.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
+
+	for attempt := 0; attempt <= defaultMaxRetries; attempt++ {
+		var bodyReader io.Reader
+		if len(bodyBytes) > 0 {
+			bodyReader = bytes.NewReader(bodyBytes)
 		}
-		apiErr.StatusCode = resp.StatusCode
-		switch resp.StatusCode {
-		case 401:
-			return &AuthenticationError{APIError: apiErr}
-		case 404:
-			return &NotFoundError{APIError: apiErr}
-		case 422:
-			return &ValidationError{APIError: apiErr}
-		case 429:
-			return &RateLimitError{APIError: apiErr}
-		default:
-			return &apiErr
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+		if err != nil {
+			return &NetworkError{Message: "create request: " + err.Error(), Cause: err}
 		}
-	}
-	if out != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("apexmail: unmarshal response: %w", err)
+		req.Header.Set("X-API-Key", c.apiKey)
+		req.Header.Set("User-Agent", "apexmail-go/"+sdkVersion)
+		if bodyReader != nil {
+			req.Header.Set("Content-Type", "application/json")
 		}
+		if len(idempotencyKey) > 0 && idempotencyKey[0] != "" {
+			req.Header.Set("X-Idempotency-Key", idempotencyKey[0])
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if attempt < defaultMaxRetries {
+				time.Sleep(calculateBackoff(attempt))
+				continue
+			}
+			return &NetworkError{Message: err.Error(), Cause: err}
+		}
+
+		respBody, readErr := readLimitedBody(resp)
+		resp.Body.Close()
+		if readErr != nil {
+			return readErr
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
+			if attempt < defaultMaxRetries {
+				time.Sleep(retryDelay(resp, attempt))
+				continue
+			}
+		}
+
+		if resp.StatusCode >= 400 {
+			var apiErr APIError
+			if jsonErr := json.Unmarshal(respBody, &apiErr); jsonErr != nil {
+				apiErr.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
+			}
+			apiErr.StatusCode = resp.StatusCode
+			switch resp.StatusCode {
+			case 401:
+				return &AuthenticationError{APIError: apiErr}
+			case 404:
+				return &NotFoundError{APIError: apiErr}
+			case 422:
+				return &ValidationError{APIError: apiErr}
+			case 429:
+				return &RateLimitError{APIError: apiErr}
+			default:
+				return &apiErr
+			}
+		}
+		if out != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, out); err != nil {
+				return fmt.Errorf("apexmail: unmarshal response: %w", err)
+			}
+		}
+		return nil
 	}
-	return nil
+
+	return &NetworkError{Message: "request failed after retries", Cause: nil}
+}
+
+func readLimitedBody(resp *http.Response) ([]byte, error) {
+	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+	respBody, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, &NetworkError{Message: "read response body: " + err.Error(), Cause: err}
+	}
+	if int64(len(respBody)) > maxResponseBytes {
+		return nil, &NetworkError{Message: "response body too large", Cause: nil}
+	}
+	return respBody, nil
+}
+
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	retryAfter := resp.Header.Get("Retry-After")
+	if retryAfter == "" {
+		return calculateBackoff(attempt)
+	}
+	if seconds, err := strconv.Atoi(retryAfter); err == nil {
+		delay := time.Duration(seconds) * time.Second
+		if delay > defaultMaxBackoff {
+			return defaultMaxBackoff
+		}
+		return delay
+	}
+	if t, err := time.Parse(time.RFC1123, retryAfter); err == nil {
+		delay := time.Until(t)
+		if delay < 0 {
+			return 0
+		}
+		if delay > defaultMaxBackoff {
+			return defaultMaxBackoff
+		}
+		return delay
+	}
+	if t, err := time.Parse(time.RFC1123Z, retryAfter); err == nil {
+		delay := time.Until(t)
+		if delay < 0 {
+			return 0
+		}
+		if delay > defaultMaxBackoff {
+			return defaultMaxBackoff
+		}
+		return delay
+	}
+	return calculateBackoff(attempt)
+}
+
+func calculateBackoff(attempt int) time.Duration {
+	delay := defaultInitialBackoff * time.Duration(1<<attempt)
+	if delay > defaultMaxBackoff {
+		return defaultMaxBackoff
+	}
+	return delay
 }
 
 // APIError represents an error response from the ApexMail API.
@@ -200,11 +337,11 @@ type EmailsAPI struct{ client *Client }
 
 // SendEmailRequest is the request body for sending a single email.
 type SendEmailRequest struct {
-	From           interface{}  `json:"from"`
-	To             interface{}  `json:"to"`
-	CC             interface{}  `json:"cc,omitempty"`
-	BCC            interface{}  `json:"bcc,omitempty"`
-	ReplyTo        string       `json:"replyTo,omitempty"`
+	From           EmailAddress  `json:"from"`
+	To             []EmailAddress `json:"to"`
+	CC             []EmailAddress `json:"cc,omitempty"`
+	BCC            []EmailAddress `json:"bcc,omitempty"`
+	ReplyTo        *EmailAddress `json:"replyTo,omitempty"`
 	Subject        string       `json:"subject"`
 	HTML           string       `json:"html,omitempty"`
 	Text           string       `json:"text,omitempty"`
@@ -232,6 +369,9 @@ type SendEmailResponse struct {
 
 // Send sends a single transactional email.
 func (a *EmailsAPI) Send(ctx context.Context, req *SendEmailRequest) (*SendEmailResponse, error) {
+	if err := validateSendEmailRequest(req); err != nil {
+		return nil, err
+	}
 	var resp SendEmailResponse
 	err := a.client.do(ctx, http.MethodPost, "/v1/messages", req, &resp, req.IdempotencyKey)
 	return &resp, err
@@ -292,14 +432,14 @@ type GetEmailResponse struct {
 // Get retrieves an email by its ID.
 func (a *EmailsAPI) Get(ctx context.Context, id string) (*GetEmailResponse, error) {
 	var resp GetEmailResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/messages/"+id, nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/messages/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
 // ListEmailsOptions filters for the List endpoint.
 type ListEmailsOptions struct {
 	Status string
-	Limit  int
+	Limit  *int
 	Offset int
 	Tag    string
 }
@@ -316,13 +456,16 @@ func (a *EmailsAPI) List(ctx context.Context, opts ...ListEmailsOptions) (*ListE
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	query := fmt.Sprintf("?limit=%d&offset=%d", optInt(o.Limit, 20), o.Offset)
+	values := url.Values{}
+	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 20)))
+	values.Set("offset", fmt.Sprintf("%d", o.Offset))
 	if o.Status != "" {
-		query += "&status=" + o.Status
+		values.Set("status", o.Status)
 	}
 	if o.Tag != "" {
-		query += "&tag=" + o.Tag
+		values.Set("tag", o.Tag)
 	}
+	query := "?" + values.Encode()
 	var resp ListEmailsResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/messages"+query, nil, &resp)
 	return &resp, err
@@ -375,7 +518,7 @@ func (a *DomainsAPI) Get(ctx context.Context, id string) (*struct {
 	var resp struct {
 		Domain Domain `json:"domain"`
 	}
-	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+id, nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
@@ -401,13 +544,13 @@ type VerifyDomainResponse struct {
 // Verify triggers DNS verification for the given domain ID.
 func (a *DomainsAPI) Verify(ctx context.Context, id string) (*VerifyDomainResponse, error) {
 	var resp VerifyDomainResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/domains/"+id+"/verify", nil, &resp)
+	err := a.client.do(ctx, http.MethodPost, "/v1/domains/"+url.PathEscape(id)+"/verify", nil, &resp)
 	return &resp, err
 }
 
 // Delete removes a domain.
 func (a *DomainsAPI) Delete(ctx context.Context, id string) error {
-	return a.client.do(ctx, http.MethodDelete, "/v1/domains/"+id, nil, nil)
+	return a.client.do(ctx, http.MethodDelete, "/v1/domains/"+url.PathEscape(id), nil, nil)
 }
 
 // DomainHealthResponse contains SPF/DKIM/DMARC/blacklist status.
@@ -422,7 +565,7 @@ type DomainHealthResponse struct {
 // Health checks the deliverability health of a domain (SPF/DKIM/DMARC/blacklist).
 func (a *DomainsAPI) Health(ctx context.Context, id string) (*DomainHealthResponse, error) {
 	var resp DomainHealthResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+id+"/health", nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id)+"/health", nil, &resp)
 	return &resp, err
 }
 
@@ -474,7 +617,7 @@ func (a *WebhooksAPI) Get(ctx context.Context, id string) (*struct {
 	var resp struct {
 		Webhook Webhook `json:"webhook"`
 	}
-	err := a.client.do(ctx, http.MethodGet, "/v1/webhooks/"+id, nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/webhooks/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
@@ -493,13 +636,13 @@ func (a *WebhooksAPI) Update(ctx context.Context, id string, req *UpdateWebhookR
 	var resp struct {
 		Webhook Webhook `json:"webhook"`
 	}
-	err := a.client.do(ctx, http.MethodPatch, "/v1/webhooks/"+id, req, &resp)
+	err := a.client.do(ctx, http.MethodPatch, "/v1/webhooks/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }
 
 // Delete removes a webhook.
 func (a *WebhooksAPI) Delete(ctx context.Context, id string) error {
-	return a.client.do(ctx, http.MethodDelete, "/v1/webhooks/"+id, nil, nil)
+	return a.client.do(ctx, http.MethodDelete, "/v1/webhooks/"+url.PathEscape(id), nil, nil)
 }
 
 // TemplatesAPI provides methods for managing email templates.
@@ -547,7 +690,7 @@ func (a *TemplatesAPI) Get(ctx context.Context, id string) (*struct {
 	var resp struct {
 		Template Template `json:"template"`
 	}
-	err := a.client.do(ctx, http.MethodGet, "/v1/templates/"+id, nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/templates/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
@@ -558,13 +701,13 @@ func (a *TemplatesAPI) GetBySlug(ctx context.Context, slug string) (*struct {
 	var resp struct {
 		Template Template `json:"template"`
 	}
-	err := a.client.do(ctx, http.MethodGet, "/v1/templates/slug/"+slug, nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/templates/slug/"+url.PathEscape(slug), nil, &resp)
 	return &resp, err
 }
 
 // ListTemplatesOptions filters for the Templates.List endpoint.
 type ListTemplatesOptions struct {
-	Limit  int
+	Limit  *int
 	Offset int
 }
 
@@ -580,7 +723,10 @@ func (a *TemplatesAPI) List(ctx context.Context, opts ...ListTemplatesOptions) (
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	query := fmt.Sprintf("?limit=%d&offset=%d", optInt(o.Limit, 20), o.Offset)
+	values := url.Values{}
+	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 20)))
+	values.Set("offset", fmt.Sprintf("%d", o.Offset))
+	query := "?" + values.Encode()
 	var resp ListTemplatesResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/templates"+query, nil, &resp)
 	return &resp, err
@@ -603,13 +749,13 @@ func (a *TemplatesAPI) Update(ctx context.Context, id string, req *UpdateTemplat
 	var resp struct {
 		Template Template `json:"template"`
 	}
-	err := a.client.do(ctx, http.MethodPatch, "/v1/templates/"+id, req, &resp)
+	err := a.client.do(ctx, http.MethodPatch, "/v1/templates/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }
 
 // Delete removes a template and all its versions.
 func (a *TemplatesAPI) Delete(ctx context.Context, id string) error {
-	return a.client.do(ctx, http.MethodDelete, "/v1/templates/"+id, nil, nil)
+	return a.client.do(ctx, http.MethodDelete, "/v1/templates/"+url.PathEscape(id), nil, nil)
 }
 
 // RenderTemplateRequest is the request body for rendering a template.
@@ -630,7 +776,7 @@ func (a *TemplatesAPI) Render(ctx context.Context, id string, data map[string]in
 		data = map[string]interface{}{}
 	}
 	var resp RenderTemplateResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+id+"/render", &RenderTemplateRequest{Data: data}, &resp)
+	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/render", &RenderTemplateRequest{Data: data}, &resp)
 	return &resp, err
 }
 
@@ -657,8 +803,10 @@ type ReactEmailStarterResponse struct {
 // ReactEmailStarter retrieves a React Email JSX starter template.
 func (a *TemplatesAPI) ReactEmailStarter(ctx context.Context, componentName string) (*ReactEmailStarterResponse, error) {
 	var resp ReactEmailStarterResponse
+	values := url.Values{}
+	values.Set("name", componentName)
 	err := a.client.do(ctx, http.MethodGet,
-		"/v1/templates/react-email/starter?name="+componentName, nil, &resp)
+		"/v1/templates/react-email/starter?"+values.Encode(), nil, &resp)
 	return &resp, err
 }
 
@@ -680,7 +828,7 @@ func (a *SuppressionsAPI) Add(ctx context.Context, req *AddSuppressionRequest) e
 // ListSuppressionsOptions filters for the Suppressions.List endpoint.
 type ListSuppressionsOptions struct {
 	Reason string
-	Limit  int
+	Limit  *int
 	Offset int
 }
 
@@ -703,10 +851,13 @@ func (a *SuppressionsAPI) List(ctx context.Context, opts ...ListSuppressionsOpti
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	query := fmt.Sprintf("?limit=%d&offset=%d", optInt(o.Limit, 50), o.Offset)
+	values := url.Values{}
+	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 50)))
+	values.Set("offset", fmt.Sprintf("%d", o.Offset))
 	if o.Reason != "" {
-		query += "&reason=" + o.Reason
+		values.Set("reason", o.Reason)
 	}
+	query := "?" + values.Encode()
 	var resp ListSuppressionsResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/suppressions"+query, nil, &resp)
 	return &resp, err
@@ -722,13 +873,15 @@ type CheckSuppressionResponse struct {
 // Check whether a specific email address is on the suppression list.
 func (a *SuppressionsAPI) Check(ctx context.Context, email string) (*CheckSuppressionResponse, error) {
 	var resp CheckSuppressionResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/suppressions/check?email="+email, nil, &resp)
+	values := url.Values{}
+	values.Set("email", email)
+	err := a.client.do(ctx, http.MethodGet, "/v1/suppressions/check?"+values.Encode(), nil, &resp)
 	return &resp, err
 }
 
 // Delete removes an email from the suppression list.
 func (a *SuppressionsAPI) Delete(ctx context.Context, email string) error {
-	return a.client.do(ctx, http.MethodDelete, "/v1/suppressions/"+email, nil, nil)
+	return a.client.do(ctx, http.MethodDelete, "/v1/suppressions/"+url.PathEscape(email), nil, nil)
 }
 
 // EventsAPI provides methods for querying email delivery events.
@@ -750,7 +903,7 @@ type ListEventsOptions struct {
 	DomainID  string
 	Start     string
 	End       string
-	Limit     int
+	Limit     *int
 	Offset    int
 }
 
@@ -766,22 +919,25 @@ func (a *EventsAPI) List(ctx context.Context, opts ...ListEventsOptions) (*ListE
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	query := fmt.Sprintf("?limit=%d&offset=%d", optInt(o.Limit, 50), o.Offset)
+	values := url.Values{}
+	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 50)))
+	values.Set("offset", fmt.Sprintf("%d", o.Offset))
 	if o.Type != "" {
-		query += "&type=" + o.Type
+		values.Set("type", o.Type)
 	}
 	if o.MessageID != "" {
-		query += "&messageId=" + o.MessageID
+		values.Set("messageId", o.MessageID)
 	}
 	if o.DomainID != "" {
-		query += "&domainId=" + o.DomainID
+		values.Set("domainId", o.DomainID)
 	}
 	if o.Start != "" {
-		query += "&start=" + o.Start
+		values.Set("start", o.Start)
 	}
 	if o.End != "" {
-		query += "&end=" + o.End
+		values.Set("end", o.End)
 	}
+	query := "?" + values.Encode()
 	var resp ListEventsResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/events"+query, nil, &resp)
 	return &resp, err
@@ -790,7 +946,10 @@ func (a *EventsAPI) List(ctx context.Context, opts ...ListEventsOptions) (*ListE
 // GetByMessage retrieves all events for a specific sent message.
 func (a *EventsAPI) GetByMessage(ctx context.Context, messageID string) (*ListEventsResponse, error) {
 	var resp ListEventsResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/events?messageId="+messageID+"&limit=100", nil, &resp)
+	values := url.Values{}
+	values.Set("messageId", messageID)
+	values.Set("limit", "100")
+	err := a.client.do(ctx, http.MethodGet, "/v1/events?"+values.Encode(), nil, &resp)
 	return &resp, err
 }
 
@@ -802,13 +961,13 @@ type GetEventResponse struct {
 // Get retrieves a single event by its ID.
 func (a *EventsAPI) Get(ctx context.Context, eventID string) (*GetEventResponse, error) {
 	var resp GetEventResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/events/"+eventID, nil, &resp)
+	err := a.client.do(ctx, http.MethodGet, "/v1/events/"+url.PathEscape(eventID), nil, &resp)
 	return &resp, err
 }
 
-func optInt(v, def int) int {
-	if v == 0 {
+func optInt(v *int, def int) int {
+	if v == nil {
 		return def
 	}
-	return v
+	return *v
 }

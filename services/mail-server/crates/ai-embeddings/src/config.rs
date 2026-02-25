@@ -64,6 +64,42 @@ fn default_timeout_ms() -> u64 { 30_000 }
 fn default_max_vectors() -> usize { 100_000 }
 fn default_eviction_threshold() -> usize { 90_000 }
 
+impl EmbeddingsConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.server.host.trim().is_empty() {
+            return Err("HOST must not be empty".into());
+        }
+        if self.server.port == 0 {
+            return Err("PORT must be > 0".into());
+        }
+        if self.inference.url.trim().is_empty() {
+            return Err("INFERENCE_URL must not be empty".into());
+        }
+        if !(self.inference.url.starts_with("http://") || self.inference.url.starts_with("https://")) {
+            return Err("INFERENCE_URL must be http/https".into());
+        }
+        if self.inference.dimension == 0 {
+            return Err("DIMENSION must be > 0".into());
+        }
+        if self.inference.max_concurrency == 0 {
+            return Err("MAX_CONCURRENCY must be > 0".into());
+        }
+        if self.inference.timeout_ms == 0 {
+            return Err("TIMEOUT_MS must be > 0".into());
+        }
+        if self.store.max_vectors == 0 {
+            return Err("MAX_VECTORS must be > 0".into());
+        }
+        if self.store.eviction_threshold == 0 {
+            return Err("EVICTION_THRESHOLD must be > 0".into());
+        }
+        if self.store.eviction_threshold > self.store.max_vectors {
+            return Err("EVICTION_THRESHOLD must be <= MAX_VECTORS".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

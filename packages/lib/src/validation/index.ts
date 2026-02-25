@@ -100,6 +100,15 @@ const DISPOSABLE_DOMAINS = new Set([
     'mailsac.com',
 ]);
 
+const extraDisposableDomains = (process.env['APEXMAIL_DISPOSABLE_DOMAINS'] ?? '')
+    .split(',')
+    .map((domain) => domain.trim().toLowerCase())
+    .filter((domain) => domain.length > 0);
+
+for (const domain of extraDisposableDomains) {
+    DISPOSABLE_DOMAINS.add(domain);
+}
+
 // Role-based email prefixes
 const ROLE_BASED_PREFIXES = new Set([
     'admin',

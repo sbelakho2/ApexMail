@@ -7,7 +7,7 @@
 #
 #   client = ApexMail::Client.new("am_live_xxxx")
 #
-#   response = client.emails.send(
+#   response = client.emails.send_email(
 #     from:    "hello@example.com",
 #     to:      "user@example.com",
 #     subject: "Hello!",
@@ -22,6 +22,7 @@ require "json"
 module ApexMail
   DEFAULT_BASE_URL = "https://api.apexmail.ee"
   SDK_VERSION      = "1.0.0"
+  API_KEY_REGEX    = /\Aam_(live|test)_[A-Za-z0-9]{16,}\z/
 
   # ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -45,23 +46,47 @@ module ApexMail
 
   # @api private
   class Transport
+    MAX_RETRIES = 3
+    INITIAL_BACKOFF = 0.5
+    MAX_BACKOFF = 5.0
+
     def initialize(api_key:, base_url:, open_timeout:, read_timeout:)
       @api_key      = api_key
-      @base_url     = base_url
+      @base_uri     = URI.parse(base_url)
       @open_timeout = open_timeout
       @read_timeout = read_timeout
+      @http = Net::HTTP.new(@base_uri.host, @base_uri.port)
+      @http.use_ssl = @base_uri.scheme == "https"
+      @http.open_timeout = @open_timeout
+      @http.read_timeout = @read_timeout
+      @http.keep_alive_timeout = 30
     end
 
     def request(method, path, body: nil, idempotency_key: nil)
-      uri  = URI.parse("#{@base_url}#{path}")
-      http = Net::HTTP.new(uri.host, uri.port)
-      http.use_ssl     = uri.scheme == "https"
-      http.open_timeout = @open_timeout
-      http.read_timeout = @read_timeout
+      attempt = 0
 
-      req = build_request(method, uri, body, idempotency_key)
-      resp = http.request(req)
-      handle_response(resp)
+      begin
+        ensure_connection
+        uri = URI.parse("#{@base_uri}#{path}")
+        req = build_request(method, uri, body, idempotency_key)
+        resp = @http.request(req)
+
+        if retryable_status?(resp.code.to_i) && attempt < MAX_RETRIES
+          sleep(retry_delay(resp, attempt))
+          attempt += 1
+          retry
+        end
+
+        handle_response(resp)
+      rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError => e
+        reset_connection
+        if attempt < MAX_RETRIES
+          sleep(backoff(attempt))
+          attempt += 1
+          retry
+        end
+        raise NetworkError, e.message
+      end
     end
 
     private
@@ -81,6 +106,40 @@ module ApexMail
       req["X-Idempotency-Key"] = idempotency_key if idempotency_key
       req.body = JSON.generate(body) if body
       req
+    end
+
+    def ensure_connection
+      @http.start unless @http.started?
+    end
+
+    def reset_connection
+      @http.finish if @http.started?
+    end
+
+    def retryable_status?(status)
+      status == 429 || status >= 500
+    end
+
+    def retry_delay(resp, attempt)
+      retry_after = resp["Retry-After"]
+      if retry_after
+        seconds = Integer(retry_after, exception: false)
+        return [seconds.to_f, MAX_BACKOFF].min if seconds
+
+        begin
+          date = Time.httpdate(retry_after)
+          delay = [date - Time.now, 0].max
+          return [delay, MAX_BACKOFF].min
+        rescue ArgumentError
+        end
+      end
+
+      backoff(attempt)
+    end
+
+    def backoff(attempt)
+      delay = INITIAL_BACKOFF * (2**attempt)
+      [delay, MAX_BACKOFF].min
     end
 
     def handle_response(resp)
@@ -114,6 +173,7 @@ module ApexMail
     # @param open_timeout [Integer] TCP connect timeout in seconds (default: 10)
     # @param read_timeout [Integer] Read timeout in seconds (default: 30)
     def initialize(api_key, base_url: DEFAULT_BASE_URL, open_timeout: 10, read_timeout: 30)
+      validate_api_key!(api_key)
       @transport   = Transport.new(api_key: api_key, base_url: base_url,
                                    open_timeout: open_timeout, read_timeout: read_timeout)
       @emails      = EmailsAPI.new(@transport)
@@ -123,12 +183,22 @@ module ApexMail
       @suppressions = SuppressionsAPI.new(@transport)
       @events      = EventsAPI.new(@transport)
     end
+
+    private
+
+    def validate_api_key!(api_key)
+      return if API_KEY_REGEX.match?(api_key)
+
+      raise ValidationError.new("Invalid API key format", status_code: nil, code: "INVALID_API_KEY")
+    end
   end
 
   # ── Emails ──────────────────────────────────────────────────────────────────
 
   class EmailsAPI
     def initialize(transport) = @t = transport
+
+    EMAIL_REGEX = /\A[^@\s]+@[^@\s]+\.[^@\s]+\z/
 
     # Send a single transactional email.
     #
@@ -147,7 +217,19 @@ module ApexMail
     # @option options [String]  :scheduled_at  ISO 8601 datetime
     # @option options [String]  :idempotency_key
     # @return [Hash]
-    def send(from:, to:, subject:, html: nil, text: nil, **options)
+    def send_email(from:, to:, subject:, html: nil, text: nil, **options)
+      raise ArgumentError, '"from" is required' if from.nil?
+      raise ArgumentError, '"to" is required' if to.nil?
+      raise ArgumentError, '"subject" is required' if subject.to_s.strip.empty?
+      if (html.nil? || html.to_s.strip.empty?) && (text.nil? || text.to_s.strip.empty?)
+        raise ArgumentError, 'Either "html" or "text" body is required'
+      end
+
+      validate_recipients(from, 'from')
+      validate_recipients(to, 'to')
+      validate_recipients(options[:cc], 'cc') if options[:cc]
+      validate_recipients(options[:bcc], 'bcc') if options[:bcc]
+
       idempotency_key = options.delete(:idempotency_key)
       body = compact({
         from:         normalize_address(from),
@@ -205,6 +287,22 @@ module ApexMail
     def normalize_recipients(recips)
       return nil if recips.nil?
       Array(recips).map { |r| normalize_address(r) }
+    end
+
+    def validate_recipients(recips, field)
+      list = Array(recips)
+      raise ArgumentError, "\"#{field}\" must include at least one recipient" if list.empty?
+
+      list.each do |recipient|
+        email = extract_email(recipient)
+        unless email && EMAIL_REGEX.match?(email)
+          raise ArgumentError, "Invalid \"#{field}\" email format: #{email}"
+        end
+      end
+    end
+
+    def extract_email(recipient)
+      recipient.is_a?(Hash) ? recipient[:email] || recipient['email'] : recipient
     end
 
     def normalize_send_params(params)

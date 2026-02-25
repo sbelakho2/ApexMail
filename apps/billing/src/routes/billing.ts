@@ -20,7 +20,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.metering.getUsage(tenantId, periodStart, periodEnd);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -36,7 +36,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.metering.getRealtimeCounter(tenantId, metric, periodKey);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ metric, count: result.value, period: periodKey });
@@ -59,7 +59,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.usageAlerts.configureThresholds(tenantId, parsed.thresholds);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value, 201);
@@ -72,7 +72,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.stripe.getSubscription(tenantId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     if (!result.value) {
@@ -89,8 +89,14 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
     const schema = z.object({
       priceId: z.string(),
-      successUrl: z.string().url(),
-      cancelUrl: z.string().url(),
+      successUrl: z.string().url().refine(
+        (u) => { try { const h = new URL(u).hostname; return h.endsWith('apexmail.ee') || h === 'localhost'; } catch { return false; } },
+        'Redirect URL must belong to apexmail.ee'
+      ),
+      cancelUrl: z.string().url().refine(
+        (u) => { try { const h = new URL(u).hostname; return h.endsWith('apexmail.ee') || h === 'localhost'; } catch { return false; } },
+        'Redirect URL must belong to apexmail.ee'
+      ),
     });
 
     const parsed = schema.parse(body);
@@ -103,7 +109,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -115,7 +121,10 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const body = await c.req.json();
 
     const schema = z.object({
-      returnUrl: z.string().url(),
+      returnUrl: z.string().url().refine(
+        (u) => { try { const h = new URL(u).hostname; return h.endsWith('apexmail.ee') || h === 'localhost'; } catch { return false; } },
+        'Redirect URL must belong to apexmail.ee'
+      ),
     });
 
     const parsed = schema.parse(body);
@@ -123,7 +132,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.stripe.createPortalSession(tenantId, parsed.returnUrl);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -137,7 +146,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.proration.previewProration(tenantId, planName);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -146,13 +155,13 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Get invoices
   router.get('/invoices', async (c) => {
     const tenantId = c.get('tenantId');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query('offset') ?? '0', 10) || 0, 0);
 
     const result = await ctx.invoices.listInvoices(tenantId, { limit, offset });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ invoices: result.value });
@@ -166,7 +175,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.getInvoice(invoiceId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     if (!result.value) {
@@ -189,7 +198,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.getInvoice(invoiceId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     if (!result.value) {
@@ -201,9 +210,9 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'Invoice not found' }, 404);
     }
 
-    const pdfContent = ctx.invoices.generatePdfContent(result.value);
+    const htmlContent = ctx.invoices.generateInvoiceHtml(result.value);
 
-    return c.html(pdfContent);
+    return c.html(htmlContent);
   });
 
   // Get invoice e-Invoice XML
@@ -214,7 +223,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.getInvoice(invoiceId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     if (!result.value) {
@@ -241,7 +250,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.wallet.getBalance(tenantId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -250,14 +259,14 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Get wallet transactions
   router.get('/wallet/transactions', async (c) => {
     const tenantId = c.get('tenantId');
-    const limit = parseInt(c.req.query('limit') ?? '50', 10);
-    const offset = parseInt(c.req.query('offset') ?? '0', 10);
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') ?? '50', 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query('offset') ?? '0', 10) || 0, 0);
     const type = c.req.query('type') as 'credit' | 'debit' | undefined;
 
     const result = await ctx.wallet.getTransactions(tenantId, { limit, offset, type });
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json({ transactions: result.value });
@@ -270,7 +279,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.slaCredits.getPendingCredits(tenantId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -283,7 +292,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.dunning.getFullState(tenantId);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value ?? { status: 'healthy' });
@@ -298,7 +307,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.costCircuit.getCostReport(tenantId, periodStart, now);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -313,7 +322,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.viralLoop.getStats(tenantId, periodStart, now);
 
     if (!result.ok) {
-      return c.json({ error: result.error.message }, 500);
+      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     return c.json(result.value);
@@ -360,7 +369,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const usageResult = await ctx.metering.getUsage(tenantId, periodStart, periodEnd);
 
     if (!usageResult.ok) {
-      return c.json({ error: usageResult.error.message }, 500);
+      console.error("Usage check failed:", usageResult.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     const usage = usageResult.value;
@@ -407,7 +416,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
         );
 
         if (!cancelResult.ok) {
-          return c.json({ error: cancelResult.error.message }, 500);
+          console.error("Cancel failed:", cancelResult.error); return c.json({ error: "Operation failed" }, 500);
         }
       }
 
@@ -415,7 +424,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
       const updateResult = await ctx.plans.updateTenantPlan(tenantId, 'payg');
 
       if (!updateResult.ok) {
-        return c.json({ error: updateResult.error.message }, 500);
+        console.error("Update failed:", updateResult.error); return c.json({ error: "Operation failed" }, 500);
       }
 
       // E-170: Audit trail for plan change to PAYG
@@ -447,7 +456,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const previewResult = await ctx.proration.previewProration(tenantId, parsed.planName);
 
     if (!previewResult.ok) {
-      return c.json({ error: previewResult.error.message }, 500);
+      console.error("Preview failed:", previewResult.error); return c.json({ error: "Operation failed" }, 500);
     }
 
     // Apply the plan change

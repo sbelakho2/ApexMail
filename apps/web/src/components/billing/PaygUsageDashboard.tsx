@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Mail, Code } from '@/components/ui/icons';
+import { formatShortDate, getLocalTimeZone } from '@/lib/utils';
 
 interface PaygUsage {
   period: {
@@ -43,7 +44,7 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
 
   const fetchUsage = async () => {
     try {
-      const response = await fetch('/api/billing/payg/usage');
+      const response = await fetch('/v1/billing/payg/usage');
       if (response.ok) {
         const data = await response.json();
         setUsage(data);
@@ -91,6 +92,7 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
 
   const currentTierIndex = getCurrentTierIndex(usage.usage.emailsSent);
   const currentTier = PRICING_TIERS[currentTierIndex];
+  const timezone = getLocalTimeZone();
 
   return (
     <Card>
@@ -104,7 +106,7 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
             {formatCurrency(usage.cost.totalCost)}
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {new Date(usage.period.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – {new Date(usage.period.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            {formatShortDate(usage.period.start)} – {formatShortDate(usage.period.end)} • {timezone}
           </p>
         </div>
 

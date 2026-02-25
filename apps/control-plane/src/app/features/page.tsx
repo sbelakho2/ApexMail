@@ -98,6 +98,11 @@ function FeatureFlagsPageContent() {
     }
 
     function deleteOverride(tenantId: string, flagKey: string) {
+        const confirmed = window.confirm(
+            'Remove this tenant override? The tenant will immediately fall back to default flag behavior. Recreate the override if this was accidental.'
+        );
+        if (!confirmed) return;
+
         setOverrides(prev => prev.filter(o => !(o.tenantId === tenantId && o.flagKey === flagKey)));
     }
 

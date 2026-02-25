@@ -44,13 +44,23 @@ impl ApiKeysRepo {
         .await
     }
 
-    /// List all API keys for a tenant.
-    pub async fn list(pool: &PgPool, tenant_id: Uuid) -> Result<Vec<ApiKey>, sqlx::Error> {
+    /// List API keys for a tenant with pagination.
+    /// #226: Added limit/offset parameters
+    pub async fn list(
+        pool: &PgPool,
+        tenant_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ApiKey>, sqlx::Error> {
+        let limit = limit.clamp(1, 100);
+        let offset = offset.max(0);
         sqlx::query_as::<_, ApiKey>(
             "SELECT id, tenant_id, name, key_hash, key_prefix, scopes, last_used_at, expires_at, created_at \
-             FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC"
+             FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
         .fetch_all(pool)
         .await
     }

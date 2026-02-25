@@ -29,6 +29,10 @@ pub struct SubmissionSession {
     data_buffer: Vec<u8>,
 }
 
+const MAX_MESSAGE_SIZE: usize = 25 * 1024 * 1024; // 25 MB
+/// #171: Maximum recipients per message
+const MAX_RECIPIENTS: usize = 100;
+
 enum SessionStream {
     Plain(BufStream<TcpStream>),
     Tls(BufStream<TlsStream<TcpStream>>),
@@ -106,9 +110,15 @@ impl SubmissionSession {
                     let line = line.trim().to_string();
                     debug!(peer = %self.peer_addr, command = %line, "Received command");
                     
-                    if let Err(e) = self.handle_command(&line).await {
-                        error!(peer = %self.peer_addr, error = %e, "Command error");
-                        self.send_response(500, "Internal error").await?;
+                    // #166: handle_command returns Ok(true) for QUIT to avoid
+                    // the error handler sending a spurious "500 Internal error".
+                    match self.handle_command(&line).await {
+                        Ok(true) => break, // QUIT
+                        Ok(false) => {}
+                        Err(e) => {
+                            error!(peer = %self.peer_addr, error = %e, "Command error");
+                            self.send_response(500, "Internal error").await?;
+                        }
                     }
                 }
                 Err(e) => {
@@ -121,34 +131,35 @@ impl SubmissionSession {
         Ok(())
     }
     
-    /// Handle an SMTP command
-    async fn handle_command(&mut self, line: &str) -> Result<()> {
+    /// Handle an SMTP command. Returns Ok(true) when session should end (QUIT).
+    async fn handle_command(&mut self, line: &str) -> Result<bool> {
         let parts: Vec<&str> = line.splitn(2, ' ').collect();
         let command = parts[0].to_uppercase();
         let args = parts.get(1).copied().unwrap_or("");
         
         match command.as_str() {
-            "EHLO" | "HELO" => self.handle_ehlo(args).await,
-            "AUTH" => self.handle_auth(args).await,
-            "MAIL" => self.handle_mail(args).await,
-            "RCPT" => self.handle_rcpt(args).await,
-            "DATA" => self.handle_data().await,
-            "RSET" => self.handle_rset().await,
-            "NOOP" => self.handle_noop().await,
-            "QUIT" => self.handle_quit().await,
-            "STARTTLS" => self.handle_starttls().await,
+            "EHLO" | "HELO" => { self.handle_ehlo(args).await?; Ok(false) }
+            "AUTH" => { self.handle_auth(args).await?; Ok(false) }
+            "MAIL" => { self.handle_mail(args).await?; Ok(false) }
+            "RCPT" => { self.handle_rcpt(args).await?; Ok(false) }
+            "DATA" => { self.handle_data().await?; Ok(false) }
+            "RSET" => { self.handle_rset().await?; Ok(false) }
+            "NOOP" => { self.handle_noop().await?; Ok(false) }
+            "QUIT" => { self.handle_quit().await?; Ok(true) }
+            "STARTTLS" => { self.handle_starttls().await?; Ok(false) }
             _ => {
                 self.send_response(500, "Unknown command").await?;
-                Ok(())
+                Ok(false)
             }
         }
     }
     
     /// Handle EHLO/HELO
     async fn handle_ehlo(&mut self, _domain: &str) -> Result<()> {
+        // #167: SIZE must match MAX_MESSAGE_SIZE (25 MB), was advertising 50 MB
         let mut extensions = vec![
             format!("{}", self.state.hostname),
-            "SIZE 52428800".to_string(), // 50MB
+            format!("SIZE {}", MAX_MESSAGE_SIZE),
             "8BITMIME".to_string(),
             "SMTPUTF8".to_string(),
             "PIPELINING".to_string(),
@@ -197,7 +208,7 @@ impl SubmissionSession {
                     }
                 };
                 
-                let result = auth_plain(&credentials, &self.state.db_pool).await?;
+                let result = auth_plain(&credentials, &self.state.db_pool, self.peer_addr.ip()).await?;
                 self.complete_auth(result).await
             }
             "LOGIN" => {
@@ -213,7 +224,7 @@ impl SubmissionSession {
                 self.stream.read_line(&mut password).await?;
                 let password = password.trim().to_string();
                 
-                let result = auth_login(&username, &password, &self.state.db_pool).await?;
+                let result = auth_login(&username, &password, &self.state.db_pool, self.peer_addr.ip()).await?;
                 self.complete_auth(result).await
             }
             _ => {
@@ -260,13 +271,18 @@ impl SubmissionSession {
             return Ok(());
         }
         
-        let from = args[5..].trim();
-        let from = from.trim_start_matches('<').trim_end_matches('>').trim();
+        // #169: Extract address properly, handling ESMTP parameters after '>'
+        let rest = args[5..].trim();
+        let from = extract_address(rest).unwrap_or_default();
+        if from.is_empty() {
+            self.send_response(501, "Syntax error in sender address").await?;
+            return Ok(());
+        }
         
         // Verify sender matches authenticated user (optional)
         if self.authenticated {
             if let Some(ref auth_email) = self.auth_email {
-                if from != auth_email && !from.ends_with(&format!("@{}", self.state.hostname)) {
+                if from != auth_email.as_str() && !from.ends_with(&format!("@{}", self.state.hostname)) {
                     warn!(
                         peer = %self.peer_addr,
                         from = %from,
@@ -290,6 +306,12 @@ impl SubmissionSession {
             return Ok(());
         }
         
+        // #171: Enforce maximum recipient limit
+        if self.rcpt_to.len() >= MAX_RECIPIENTS {
+            self.send_response(452, "Too many recipients").await?;
+            return Ok(());
+        }
+        
         // Parse RCPT TO:<address>
         let args_upper = args.to_uppercase();
         if !args_upper.starts_with("TO:") {
@@ -297,15 +319,16 @@ impl SubmissionSession {
             return Ok(());
         }
         
-        let to = args[3..].trim();
-        let to = to.trim_start_matches('<').trim_end_matches('>').trim();
+        // #172: Extract address properly, handling ESMTP parameters after '>'
+        let rest = args[3..].trim();
+        let to = extract_address(rest).unwrap_or_default();
         
         if to.is_empty() || !to.contains('@') {
             self.send_response(550, "Invalid recipient").await?;
             return Ok(());
         }
         
-        self.rcpt_to.push(to.to_string());
+        self.rcpt_to.push(to);
         self.send_response(250, "OK").await
     }
     
@@ -326,10 +349,29 @@ impl SubmissionSession {
         // Read message data
         self.data_buffer.clear();
         let mut line = String::new();
+        let mut too_large = false;
+        
+        // #170: Total 10-minute deadline for DATA phase to prevent slow-loris
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
         
         loop {
             line.clear();
-            match self.stream.read_line(&mut line).await {
+            let remaining = deadline.duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                self.send_response(451, "Timeout waiting for message data").await?;
+                self.mail_from = None;
+                self.rcpt_to.clear();
+                return Ok(());
+            }
+            let per_line = remaining.min(std::time::Duration::from_secs(300));
+            match tokio::time::timeout(per_line, self.stream.read_line(&mut line)).await {
+                Err(_) => {
+                    self.send_response(451, "Timeout waiting for message data").await?;
+                    self.mail_from = None;
+                    self.rcpt_to.clear();
+                    return Ok(());
+                }
+                Ok(result) => match result {
                 Ok(0) => {
                     return Err(anyhow!("Client disconnected during DATA"));
                 }
@@ -339,21 +381,49 @@ impl SubmissionSession {
                     }
                     // Handle dot-stuffing
                     let data = if line.starts_with("..") { &line[1..] } else { &line };
-                    self.data_buffer.extend_from_slice(data.as_bytes());
+                    if !too_large {
+                        if self.data_buffer.len() + data.as_bytes().len() > MAX_MESSAGE_SIZE {
+                            too_large = true;
+                            self.data_buffer.clear();
+                        } else {
+                            self.data_buffer.extend_from_slice(data.as_bytes());
+                        }
+                    }
                 }
                 Err(e) => return Err(e.into()),
-            }
+                }, // Ok(result)
+            } // match timeout
+        } // loop
+
+        if too_large {
+            self.send_response(552, "Message too large").await?;
+            self.mail_from = None;
+            self.rcpt_to.clear();
+            return Ok(());
         }
-        
+
         // Submit message to outbound queue
         self.submit_message().await
     }
     
+    /// #168: Split raw message into headers + body so outbound doesn't duplicate headers.
     /// Submit message to outbound queue
     async fn submit_message(&mut self) -> Result<()> {
-        let from = self.mail_from.as_ref().unwrap().clone();
+        let from = self.mail_from.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No MAIL FROM set before submitting message"))?
+            .clone();
         let to = self.rcpt_to.clone();
-        let data = String::from_utf8_lossy(&self.data_buffer).to_string();
+        let raw = String::from_utf8_lossy(&self.data_buffer).to_string();
+        
+        // #168: Separate headers from body to avoid outbound re-prepending them.
+        // The raw message has headers separated from body by a blank line.
+        let (headers_part, body_part) = if let Some(sep) = raw.find("\r\n\r\n") {
+            (&raw[..sep], &raw[sep + 4..])
+        } else if let Some(sep) = raw.find("\n\n") {
+            (&raw[..sep], &raw[sep + 2..])
+        } else {
+            ("", raw.as_str())
+        };
         
         info!(
             peer = %self.peer_addr,
@@ -363,28 +433,29 @@ impl SubmissionSession {
             "Submitting message"
         );
         
-        // Connect to outbound queue and submit via direct queue insert.
         let message_id = Uuid::new_v4();
         
         // Parse subject from headers
-        let subject = data.lines()
+        let subject = headers_part.lines()
             .find(|l| l.to_lowercase().starts_with("subject:"))
             .map(|l| l[8..].trim().to_string())
             .unwrap_or_else(|| "(no subject)".to_string());
         
-        // Insert into queue
+        // Store headers separately and body as text_body so outbound
+        // can reconstruct without duplicating headers.
         sqlx::query(r#"
             INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, 
-                text_body, status, priority
+                raw_headers, text_body, status, priority
             )
-            VALUES ($1, $2, $3, $4, $5, 'pending', 50)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', 50)
         "#)
         .bind(&message_id)
         .bind(&from)
         .bind(&to)
         .bind(&subject)
-        .bind(&data)
+        .bind(headers_part)
+        .bind(body_part)
         .execute(&self.state.db_pool)
         .await?;
         
@@ -418,10 +489,11 @@ impl SubmissionSession {
         self.send_response(250, "OK").await
     }
     
-    /// Handle QUIT
+    /// Handle QUIT — #166: Returns Ok(()) instead of Err("QUIT") to avoid
+    /// the error handler sending a spurious "500 Internal error" after "221 Bye".
     async fn handle_quit(&mut self) -> Result<()> {
         self.send_response(221, &format!("{} Bye", self.state.hostname)).await?;
-        Err(anyhow!("QUIT"))
+        Ok(())
     }
     
     /// Handle STARTTLS
@@ -481,4 +553,23 @@ impl SubmissionSession {
         self.stream.flush().await?;
         Ok(())
     }
+}
+
+/// #169/#172: Extract email address from SMTP command argument,
+/// properly handling angle brackets and ESMTP parameters after '>'.
+fn extract_address(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.starts_with('<') {
+        if let Some(end) = s.find('>') {
+            let addr = &s[1..end];
+            return Some(addr.to_string());
+        }
+        return None; // malformed
+    }
+    // Bare address: take up to first whitespace
+    let addr = s.split_whitespace().next()?;
+    if addr.is_empty() {
+        return None;
+    }
+    Some(addr.to_string())
 }

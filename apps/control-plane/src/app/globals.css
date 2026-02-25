@@ -198,6 +198,15 @@
         text-rendering: optimizeLegibility;
     }
 
+    button,
+    [role='button'],
+    a[role='button'],
+    input[type='button'],
+    input[type='submit'],
+    input[type='reset'] {
+        min-height: 44px;
+    }
+
     h1 {
         @apply font-display text-[40px] md:text-[56px] font-semibold leading-[1.1] tracking-[-0.02em];
     }

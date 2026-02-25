@@ -4,6 +4,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Instant;
+use sysinfo::{ProcessesToUpdate, System};
 
 use crate::config::Config;
 use crate::types::{ClusterHealth, ComponentHealth, HealthStatus};
@@ -39,11 +40,18 @@ pub struct HealthCheckService {
     pool: PgPool,
     config: Arc<Config>,
     start_time: Instant,
+    redis_client: Option<redis::Client>,
 }
 
 impl HealthCheckService {
     pub fn new(pool: PgPool, config: Arc<Config>) -> Self {
-        Self { pool, config, start_time: Instant::now() }
+        let redis_client = redis::Client::open(config.redis.url().as_str()).ok();
+        Self {
+            pool,
+            config,
+            start_time: Instant::now(),
+            redis_client,
+        }
     }
 
     /// Run all health checks and produce a cluster health report.
@@ -93,10 +101,9 @@ impl HealthCheckService {
     }
 
     async fn check_redis(&self) -> ComponentHealth {
-        let url = self.config.redis.url();
+        let client = self.redis_client.clone();
         check_component("redis", async move {
-            let client = redis::Client::open(url.as_str())
-                .map_err(|e| format!("Redis client: {e}"))?;
+            let client = client.ok_or_else(|| "Redis client not configured".to_string())?;
             let mut conn = client.get_multiplexed_async_connection().await
                 .map_err(|e| format!("Redis connect: {e}"))?;
             let pong: String = redis::cmd("PING").query_async(&mut conn).await
@@ -162,9 +169,21 @@ impl HealthCheckService {
 
     async fn check_memory(&self) -> ComponentHealth {
         check_component("memory", async {
-            // Report Rust process RSS (not available portably, use a proxy)
-            let pid = std::process::id();
-            Ok((HealthStatus::Healthy, Some(format!("PID: {pid}"))))
+            let pid = sysinfo::Pid::from_u32(std::process::id());
+            let mut sys = System::new();
+            sys.refresh_processes(ProcessesToUpdate::All, false);
+            sys.refresh_memory();
+
+            if let Some(process) = sys.process(pid) {
+                let rss_kb = process.memory();
+                let total_kb = sys.total_memory();
+                Ok((
+                    HealthStatus::Healthy,
+                    Some(format!("RSS: {} KB / {} KB", rss_kb, total_kb)),
+                ))
+            } else {
+                Ok((HealthStatus::Unknown, Some("Process not found for memory check".into())))
+            }
         }).await
     }
 

@@ -1,14 +1,14 @@
 //! Encryption: AES-256-GCM envelope encryption with key rotation.
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::Utc;
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -30,11 +30,13 @@ fn derive_key(master_key: &str, salt: &[u8], info: &str) -> [u8; KEY_LENGTH] {
 }
 
 fn hash_code(s: &str) -> i64 {
-    let mut h: i64 = 0;
-    for c in s.chars() {
-        h = h.wrapping_mul(31).wrapping_add(c as i64);
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in s.as_bytes() {
+        h = h
+            .wrapping_mul(0x100000001b3)
+            .wrapping_add(b as u64);
     }
-    h.abs()
+    (h & 0x7fff_ffff_ffff_ffff) as i64
 }
 
 // ── Encryption Service ─────────────────────────────────────
@@ -43,6 +45,7 @@ pub struct EncryptionService {
     db: PgPool,
     config: SecurityConfig,
     keys: dashmap::DashMap<String, EncryptionKey>,
+    active_key_by_org: dashmap::DashMap<String, String>,
     policies: dashmap::DashMap<String, EncryptionPolicy>,
 }
 
@@ -52,6 +55,7 @@ impl EncryptionService {
             db,
             config,
             keys: dashmap::DashMap::new(),
+            active_key_by_org: dashmap::DashMap::new(),
             policies: dashmap::DashMap::new(),
         }
     }
@@ -75,17 +79,15 @@ impl EncryptionService {
         rand::thread_rng().fill_bytes(&mut iv);
         let nonce = Nonce::from_slice(&iv);
 
-        let ciphertext = cipher
-            .encrypt(nonce, raw_key)
+        let mut buffer = raw_key.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(nonce, b"", &mut buffer)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-
-        // Format: iv:authTag:ciphertext (all base64)
-        let (ct, tag) = ciphertext.split_at(ciphertext.len() - 16);
         Ok(format!(
             "{}:{}:{}",
             B64.encode(iv),
             B64.encode(tag),
-            B64.encode(ct)
+            B64.encode(buffer)
         ))
     }
 
@@ -95,8 +97,8 @@ impl EncryptionService {
             anyhow::bail!("Invalid encrypted key format");
         }
         let iv = B64.decode(parts[0])?;
-        let tag = B64.decode(parts[1])?;
-        let ct = B64.decode(parts[2])?;
+        let tag_bytes = B64.decode(parts[1])?;
+        let mut buffer = B64.decode(parts[2])?;
 
         let salt = b"apexmail-isolation-master";
         let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption");
@@ -104,13 +106,12 @@ impl EncryptionService {
         let cipher = Aes256Gcm::new_from_slice(&derived)?;
         let nonce = Nonce::from_slice(&iv);
 
-        // Reconstruct ciphertext + tag for aes-gcm
-        let mut combined = ct;
-        combined.extend_from_slice(&tag);
-
+        let tag = Tag::from_slice(&tag_bytes);
         cipher
-            .decrypt(nonce, combined.as_ref())
-            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))
+            .decrypt_in_place_detached(nonce, b"", &mut buffer, tag)
+            .map_err(|e| anyhow::anyhow!("Decryption failed: {}", e))?;
+
+        Ok(buffer)
     }
 
     // ── Key Management ─────────────────────────────────────
@@ -119,55 +120,9 @@ impl EncryptionService {
         &self,
         organization_id: &str,
     ) -> anyhow::Result<EncryptionKey> {
-        let mut raw_key = [0u8; KEY_LENGTH];
-        rand::thread_rng().fill_bytes(&mut raw_key);
-
-        let encrypted_key = self.encrypt_data_key(&raw_key)?;
-
-        // Get next version
-        let version: i32 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM iso_encryption_keys WHERE organization_id = $1"
-        )
-            .bind(organization_id)
-            .fetch_one(&self.db)
-            .await?;
-
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now();
-        let expires_at = now + chrono::Duration::days(self.config.data_key_rotation_days);
-
-        // Retire old active keys
-        sqlx::query(
-            "UPDATE iso_encryption_keys SET status='retired' WHERE organization_id=$1 AND status='active'"
-        )
-            .bind(organization_id)
-            .execute(&self.db)
-            .await?;
-
-        sqlx::query(
-            "INSERT INTO iso_encryption_keys (id, organization_id, version, algorithm, key_material, status, created_at, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"
-        )
-            .bind(&id).bind(organization_id).bind(version)
-            .bind(ALGORITHM).bind(encrypted_key.as_bytes())
-            .bind("active").bind(now).bind(expires_at)
-            .execute(&self.db)
-            .await?;
-
-        let key = EncryptionKey {
-            id: id.clone(),
-            organization_id: organization_id.into(),
-            version,
-            algorithm: ALGORITHM.into(),
-            encrypted_key,
-            status: KeyStatus::Active,
-            created_at: now,
-            rotated_at: None,
-            expires_at: Some(expires_at),
-        };
-
-        self.keys.insert(id, key.clone());
-        info!(org_id = organization_id, version = version, "Data key generated");
+        let mut tx = self.db.begin().await?;
+        let key = self.generate_data_key_tx(&mut tx, organization_id).await?;
+        tx.commit().await?;
         Ok(key)
     }
 
@@ -184,14 +139,13 @@ impl EncryptionService {
         rand::thread_rng().fill_bytes(&mut iv);
         let nonce = Nonce::from_slice(&iv);
 
-        let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_bytes())
+        let mut buffer = plaintext.as_bytes().to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(nonce, b"", &mut buffer)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-        let (ct, tag) = ciphertext.split_at(ciphertext.len() - 16);
-
         Ok(EncryptedField {
-            ciphertext: B64.encode(ct),
+            ciphertext: B64.encode(buffer),
             key_id: key.id.clone(),
             algorithm: ALGORITHM.into(),
             iv: B64.encode(iv),
@@ -205,18 +159,16 @@ impl EncryptionService {
 
         let cipher = Aes256Gcm::new_from_slice(&raw_key)?;
         let iv = B64.decode(&encrypted.iv)?;
-        let ct = B64.decode(&encrypted.ciphertext)?;
-        let tag = B64.decode(&encrypted.auth_tag)?;
+        let mut buffer = B64.decode(&encrypted.ciphertext)?;
+        let tag_bytes = B64.decode(&encrypted.auth_tag)?;
 
         let nonce = Nonce::from_slice(&iv);
-        let mut combined = ct;
-        combined.extend_from_slice(&tag);
-
-        let plaintext = cipher
-            .decrypt(nonce, combined.as_ref())
+        let tag = Tag::from_slice(&tag_bytes);
+        cipher
+            .decrypt_in_place_detached(nonce, b"", &mut buffer, tag)
             .map_err(|e| anyhow::anyhow!("Decryption failed (possibly tampered): {}", e))?;
 
-        String::from_utf8(plaintext).map_err(Into::into)
+        String::from_utf8(buffer).map_err(Into::into)
     }
 
     /// Encrypt specific fields of an object based on policy.
@@ -276,29 +228,37 @@ impl EncryptionService {
         organization_id: &str,
     ) -> anyhow::Result<EncryptionKey> {
         let lock_id = hash_code(organization_id);
-
-        let mut tx = self.db.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        let mut lock_conn = self.db.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(lock_id)
-            .execute(&mut *tx)
+            .execute(&mut *lock_conn)
             .await?;
 
-        // Get current active key
-        let old_key_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM iso_encryption_keys WHERE organization_id=$1 AND status='active'"
-        )
-            .bind(organization_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let rotation_result: anyhow::Result<EncryptionKey> = async {
+            let old_key_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM iso_encryption_keys WHERE organization_id=$1 AND status='active'"
+            )
+                .bind(organization_id)
+                .fetch_optional(&mut *lock_conn)
+                .await?;
 
-        tx.commit().await?;
+            let new_key = self.generate_data_key(organization_id).await?;
+            if let Some(old_id) = old_key_id.as_deref() {
+                self.reencrypt_data(organization_id, old_id, &new_key.id).await?;
+            }
+            Ok(new_key)
+        }
+        .await;
 
-        let new_key = self.generate_data_key(organization_id).await?;
-
-        if let Some(old_id) = old_key_id {
-            self.reencrypt_data(organization_id, &old_id, &new_key.id).await?;
+        if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(lock_id)
+            .execute(&mut *lock_conn)
+            .await
+        {
+            warn!(org_id = organization_id, error = %e, "Failed to release advisory lock");
         }
 
+        let new_key = rotation_result?;
         info!(org_id = organization_id, "Key rotation completed");
         Ok(new_key)
     }
@@ -349,8 +309,7 @@ impl EncryptionService {
                  FROM iso_encryption_keys WHERE status = 'active'"
             )
             .fetch_all(&self.db)
-            .await
-            .unwrap_or_default();
+            .await?;
 
         for (id, org_id, version, algorithm, key_material, status, created_at, rotated_at, expires_at) in rows {
             let key = EncryptionKey {
@@ -364,6 +323,8 @@ impl EncryptionService {
                 rotated_at,
                 expires_at,
             };
+            self.active_key_by_org
+                .insert(key.organization_id.clone(), id.clone());
             self.keys.insert(id, key);
         }
         Ok(())
@@ -376,8 +337,7 @@ impl EncryptionService {
                  FROM iso_encryption_policies WHERE enabled = true"
             )
             .fetch_all(&self.db)
-            .await
-            .unwrap_or_default();
+            .await?;
 
         for (id, name, resource, fields, algorithm, rotation_days, enabled) in rows {
             let policy = EncryptionPolicy {
@@ -415,11 +375,11 @@ impl EncryptionService {
         &self,
         organization_id: &str,
     ) -> anyhow::Result<EncryptionKey> {
-        // Check cache
-        for entry in self.keys.iter() {
-            let key = entry.value();
-            if key.organization_id == organization_id && key.status == KeyStatus::Active {
-                return Ok(key.clone());
+        if let Some(key_id) = self.active_key_by_org.get(organization_id) {
+            if let Some(key) = self.keys.get(key_id.value()) {
+                if key.status == KeyStatus::Active {
+                    return Ok(key.clone());
+                }
             }
         }
 
@@ -445,6 +405,8 @@ impl EncryptionService {
                 rotated_at,
                 expires_at,
             };
+            self.active_key_by_org
+                .insert(organization_id.to_string(), id.clone());
             self.keys.insert(id, key.clone());
             return Ok(key);
         }
@@ -479,7 +441,68 @@ impl EncryptionService {
             rotated_at: row.7,
             expires_at: row.8,
         };
+        if key.status == KeyStatus::Active {
+            self.active_key_by_org
+                .insert(key.organization_id.clone(), key.id.clone());
+        }
         self.keys.insert(key.id.clone(), key.clone());
+        Ok(key)
+    }
+
+    async fn generate_data_key_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        organization_id: &str,
+    ) -> anyhow::Result<EncryptionKey> {
+        let mut raw_key = [0u8; KEY_LENGTH];
+        rand::thread_rng().fill_bytes(&mut raw_key);
+
+        let encrypted_key = self.encrypt_data_key(&raw_key)?;
+
+        let version: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM iso_encryption_keys WHERE organization_id = $1"
+        )
+            .bind(organization_id)
+            .fetch_one(&mut **tx)
+            .await?;
+
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::days(self.config.data_key_rotation_days);
+
+        sqlx::query(
+            "UPDATE iso_encryption_keys SET status='retired' WHERE organization_id=$1 AND status='active'"
+        )
+            .bind(organization_id)
+            .execute(&mut **tx)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO iso_encryption_keys (id, organization_id, version, algorithm, key_material, status, created_at, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"
+        )
+            .bind(&id).bind(organization_id).bind(version)
+            .bind(ALGORITHM).bind(encrypted_key.as_bytes())
+            .bind("active").bind(now).bind(expires_at)
+            .execute(&mut **tx)
+            .await?;
+
+        let key = EncryptionKey {
+            id: id.clone(),
+            organization_id: organization_id.into(),
+            version,
+            algorithm: ALGORITHM.into(),
+            encrypted_key,
+            status: KeyStatus::Active,
+            created_at: now,
+            rotated_at: None,
+            expires_at: Some(expires_at),
+        };
+
+        self.active_key_by_org
+            .insert(organization_id.to_string(), id.clone());
+        self.keys.insert(id, key.clone());
+        info!(org_id = organization_id, version = version, "Data key generated");
         Ok(key)
     }
 
@@ -515,8 +538,16 @@ impl EncryptionService {
         for policy in policies {
             // Map resource to table name (convention: iso_<resource>)
             let table = format!("iso_{}", policy.resource.replace('-', "_"));
+            if !is_safe_ident(&table) {
+                warn!(table = table, "Skipping re-encryption for unsafe table identifier");
+                continue;
+            }
 
             for field in &policy.fields {
+                if !is_safe_ident(field) {
+                    warn!(field = field, "Skipping re-encryption for unsafe field identifier");
+                    continue;
+                }
                 // Find records where the JSONB field has our old key_id
                 // The encrypted field structure: {"ciphertext":"...", "key_id":"...", "algorithm":"...", "iv":"...", "auth_tag":"..."}
                 let query = format!(
@@ -543,6 +574,8 @@ impl EncryptionService {
                         continue;
                     }
                 };
+
+                let mut updates: Vec<(String, serde_json::Value)> = Vec::with_capacity(rows.len());
 
                 for (record_id, encrypted_value) in rows {
                     // Parse the encrypted field
@@ -577,61 +610,64 @@ impl EncryptionService {
                         }
                     };
 
-                    // Combine ciphertext + auth_tag for decryption
-                    let mut combined = ciphertext.clone();
-                    combined.extend_from_slice(&auth_tag);
-
                     let nonce = Nonce::from_slice(&iv);
-                    let plaintext = match old_cipher.decrypt(nonce, combined.as_ref()) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(record_id = record_id, error = %e, "Failed to decrypt field");
-                            continue;
-                        }
-                    };
+                    let tag = Tag::from_slice(&auth_tag);
+                    let mut buffer = ciphertext.clone();
+                    if let Err(e) = old_cipher.decrypt_in_place_detached(nonce, b"", &mut buffer, tag) {
+                        warn!(record_id = record_id, error = %e, "Failed to decrypt field");
+                        continue;
+                    }
 
                     // Re-encrypt with new key
                     let mut new_iv = [0u8; IV_LENGTH];
                     rand::thread_rng().fill_bytes(&mut new_iv);
                     let new_nonce = Nonce::from_slice(&new_iv);
 
-                    let new_ciphertext = match new_cipher.encrypt(new_nonce, plaintext.as_ref()) {
-                        Ok(c) => c,
+                    let mut buffer = buffer;
+                    let new_tag = match new_cipher.encrypt_in_place_detached(new_nonce, b"", &mut buffer) {
+                        Ok(tag) => tag,
                         Err(e) => {
                             warn!(record_id = record_id, error = %e, "Failed to re-encrypt field");
                             continue;
                         }
                     };
 
-                    // Split ciphertext and auth_tag (last 16 bytes is auth tag)
-                    let (new_ct, new_tag) = new_ciphertext.split_at(new_ciphertext.len() - 16);
-
                     let new_enc_field = EncryptedField {
-                        ciphertext: B64.encode(new_ct),
+                        ciphertext: B64.encode(buffer),
                         key_id: new_key_id.to_string(),
                         algorithm: ALGORITHM.to_string(),
                         iv: B64.encode(new_iv),
                         auth_tag: B64.encode(new_tag),
                     };
 
-                    // Update the record
-                    let update_query = format!(
-                        "UPDATE {table} SET {field} = $1 WHERE id = $2",
-                        table = table,
-                        field = field
-                    );
-
-                    if let Err(e) = sqlx::query(&update_query)
-                        .bind(serde_json::to_value(&new_enc_field)?)
-                        .bind(&record_id)
-                        .execute(&self.db)
-                        .await
-                    {
-                        warn!(record_id = record_id, error = %e, "Failed to update re-encrypted field");
-                        continue;
-                    }
+                    updates.push((record_id, serde_json::to_value(&new_enc_field)?));
 
                     total_reencrypted += 1;
+                }
+
+                for chunk in updates.chunks(250) {
+                    let mut qb = QueryBuilder::<Postgres>::new(format!(
+                        "UPDATE {table} AS t SET {field} = u.val FROM (",
+                        table = table,
+                        field = field
+                    ));
+
+                    qb.push("VALUES ");
+                    let mut separated = qb.separated(", ");
+                    for (id, value) in chunk {
+                        separated.push("(");
+                        separated.push_bind(id);
+                        separated.push(", ");
+                        separated.push_bind(value);
+                        separated.push(")");
+                    }
+                    drop(separated);
+
+                    qb.push(") AS u(id, val) WHERE t.id = u.id");
+
+                    if let Err(e) = qb.build().execute(&self.db).await {
+                        warn!(table = table, field = field, error = %e, "Batch update failed during re-encryption");
+                    }
                 }
             }
         }
@@ -647,6 +683,13 @@ impl EncryptionService {
     fn get_policy_for_resource(&self, resource: &str) -> Option<EncryptionPolicy> {
         self.policies.get(resource).map(|e| e.value().clone())
     }
+}
+
+static SQL_IDENT_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
+
+fn is_safe_ident(value: &str) -> bool {
+    SQL_IDENT_RE.is_match(value)
 }
 
 #[cfg(test)]

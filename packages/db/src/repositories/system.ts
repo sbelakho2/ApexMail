@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
 import { ok, err, type Result } from '@apexmail/lib';
+import type { DatabasePool } from '../pool.js';
 
 // =============================================================================
 // Types
@@ -62,7 +62,7 @@ export interface ReconciliationLogEntry {
 // =============================================================================
 
 export class SystemRepository {
-    constructor(private pool: Pool) {}
+    constructor(private readonly db: DatabasePool) {}
 
     // -------------------------------------------------------------------------
     // System Alerts
@@ -77,33 +77,33 @@ export class SystemRepository {
     }): Promise<Result<SystemAlert, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO system_alerts (id, alert_type, severity, title, message, metadata)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 RETURNING *`,
-                [
-                    id,
-                    data.alertType,
-                    data.severity,
-                    data.title,
-                    data.message,
-                    data.metadata ? JSON.stringify(data.metadata) : null
-                ]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO system_alerts (id, alert_type, severity, title, message, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [
+                id,
+                data.alertType,
+                data.severity,
+                data.title,
+                data.message,
+                data.metadata ? JSON.stringify(data.metadata) : null
+            ]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create alert'));
-            }
-            return ok(this.mapAlertRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create alert'));
+        }
+        return ok(this.mapAlertRow(row));
     }
 
     async getActiveAlerts(): Promise<SystemAlert[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM system_alerts
              WHERE acknowledged = false
              ORDER BY 
@@ -116,7 +116,8 @@ export class SystemRepository {
                 created_at DESC`
         );
 
-        return result.rows.map(row => this.mapAlertRow(row));
+            if (!result.ok) throw result.error;
+            return result.value.rows.map(row => this.mapAlertRow(row));
     }
 
     async getAlerts(options: {
@@ -145,11 +146,11 @@ export class SystemRepository {
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
         const [countResult, dataResult] = await Promise.all([
-            this.pool.query<{ count: string }>(
+            this.db.query<{ count: string }>(
                 `SELECT COUNT(*)::text as count FROM system_alerts ${whereClause}`,
                 values
             ),
-            this.pool.query<Record<string, unknown>>(
+            this.db.query<Record<string, unknown>>(
                 `SELECT * FROM system_alerts
                  ${whereClause}
                  ORDER BY created_at DESC
@@ -158,14 +159,17 @@ export class SystemRepository {
             )
         ]);
 
+        if (!countResult.ok) throw countResult.error;
+        if (!dataResult.ok) throw dataResult.error;
+
         return {
-            alerts: dataResult.rows.map(row => this.mapAlertRow(row)),
-            total: parseInt(countResult.rows[0]?.count ?? '0', 10)
+            alerts: dataResult.value.rows.map(row => this.mapAlertRow(row)),
+            total: parseInt(countResult.value.rows[0]?.count ?? '0', 10)
         };
     }
 
     async acknowledgeAlert(id: string, acknowledgedBy?: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `UPDATE system_alerts
              SET acknowledged = true,
                  acknowledged_by = $2,
@@ -174,7 +178,8 @@ export class SystemRepository {
             [id, acknowledgedBy]
         );
 
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     // -------------------------------------------------------------------------
@@ -182,13 +187,14 @@ export class SystemRepository {
     // -------------------------------------------------------------------------
 
     async getIdempotencyRecord(tenantId: string, key: string): Promise<IdempotencyRecord | null> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM idempotency_keys
              WHERE tenant_id = $1 AND idempotency_key = $2 AND expires_at > NOW()`,
             [tenantId, key]
         );
 
-        return result.rows[0] ? this.mapIdempotencyRow(result.rows[0]) : null;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapIdempotencyRow(result.value.rows[0]) : null;
     }
 
     async createIdempotencyRecord(data: {
@@ -202,43 +208,43 @@ export class SystemRepository {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
         const ttl = data.ttlSeconds ?? 86400; // 24 hours default
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO idempotency_keys (
-                    id, tenant_id, idempotency_key, request_hash,
-                    response_status, response_body, expires_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 second' * $7)
-                ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
-                SET response_status = EXCLUDED.response_status,
-                    response_body = EXCLUDED.response_body,
-                    expires_at = NOW() + INTERVAL '1 second' * $7
-                RETURNING *`,
-                [
-                    id,
-                    data.tenantId,
-                    data.idempotencyKey,
-                    data.requestHash,
-                    data.responseStatus,
-                    JSON.stringify(data.responseBody),
-                    ttl
-                ]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO idempotency_keys (
+                id, tenant_id, idempotency_key, request_hash,
+                response_status, response_body, expires_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 second' * $7)
+            ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+            SET response_status = EXCLUDED.response_status,
+                response_body = EXCLUDED.response_body,
+                expires_at = NOW() + INTERVAL '1 second' * $7
+            RETURNING *`,
+            [
+                id,
+                data.tenantId,
+                data.idempotencyKey,
+                data.requestHash,
+                data.responseStatus,
+                JSON.stringify(data.responseBody),
+                ttl
+            ]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create idempotency record'));
-            }
-            return ok(this.mapIdempotencyRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create idempotency record'));
+        }
+        return ok(this.mapIdempotencyRow(row));
     }
 
     // FIX-500-051: Batch deletes with LIMIT to avoid long-running table locks
     async cleanupExpiredIdempotencyRecords(batchSize: number = 1000): Promise<number> {
         let totalDeleted = 0;
         while (true) {
-            const result = await this.pool.query<{ count: string }>(
+            const result = await this.db.query<{ count: string }>(
                 `WITH deleted AS (
                     DELETE FROM idempotency_keys
                     WHERE id IN (
@@ -248,7 +254,8 @@ export class SystemRepository {
                 ) SELECT COUNT(*) as count FROM deleted`,
                 [batchSize]
             );
-            const deletedCount = parseInt(result.rows[0]?.count ?? '0', 10);
+            if (!result.ok) throw result.error;
+            const deletedCount = parseInt(result.value.rows[0]?.count ?? '0', 10);
             totalDeleted += deletedCount;
             if (deletedCount < batchSize) break;
         }
@@ -261,12 +268,13 @@ export class SystemRepository {
 
     async getCompactionLog(date: Date): Promise<CompactionLogEntry | null> {
         const dateStr = date.toISOString().split('T')[0];
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM compaction_log WHERE date = $1`,
             [dateStr]
         );
 
-        return result.rows[0] ? this.mapCompactionRow(result.rows[0]) : null;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapCompactionRow(result.value.rows[0]) : null;
     }
 
     async upsertCompactionLog(date: Date, data: {
@@ -276,30 +284,30 @@ export class SystemRepository {
     }): Promise<Result<CompactionLogEntry, Error>> {
         const dateStr = date.toISOString().split('T')[0];
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO compaction_log (date, status, event_count, completed_at)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (date) DO UPDATE
-                 SET status = EXCLUDED.status,
-                     event_count = COALESCE(EXCLUDED.event_count, compaction_log.event_count),
-                     completed_at = EXCLUDED.completed_at
-                 RETURNING *`,
-                [dateStr, data.status, data.eventCount ?? 0, data.completedAt]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO compaction_log (date, status, event_count, completed_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (date) DO UPDATE
+             SET status = EXCLUDED.status,
+                 event_count = COALESCE(EXCLUDED.event_count, compaction_log.event_count),
+                 completed_at = EXCLUDED.completed_at
+             RETURNING *`,
+            [dateStr, data.status, data.eventCount ?? 0, data.completedAt]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create compaction log'));
-            }
-            return ok(this.mapCompactionRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create compaction log'));
+        }
+        return ok(this.mapCompactionRow(row));
     }
 
     async getPendingCompactionDates(since: Date): Promise<Date[]> {
-        const result = await this.pool.query<{ date: string }>(
+        const result = await this.db.query<{ date: string }>(
             `SELECT DISTINCT date::text as date 
              FROM events 
              WHERE timestamp >= $1 
@@ -310,7 +318,8 @@ export class SystemRepository {
             [since]
         );
 
-        return result.rows.map(row => new Date(row.date));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => new Date(row.date));
     }
 
     // -------------------------------------------------------------------------
@@ -319,41 +328,42 @@ export class SystemRepository {
 
     async getReconciliationLog(date: Date): Promise<ReconciliationLogEntry | null> {
         const dateStr = date.toISOString().split('T')[0];
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM reconciliation_log WHERE date = $1`,
             [dateStr]
         );
 
-        return result.rows[0] ? this.mapReconciliationRow(result.rows[0]) : null;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapReconciliationRow(result.value.rows[0]) : null;
     }
 
     async createReconciliationLog(date: Date): Promise<Result<ReconciliationLogEntry, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
         const dateStr = date.toISOString().split('T')[0];
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO reconciliation_log (id, date, status)
-                 VALUES ($1, $2, 'pending')
-                 ON CONFLICT (date) DO NOTHING
-                 RETURNING *`,
-                [id, dateStr]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO reconciliation_log (id, date, status)
+             VALUES ($1, $2, 'pending')
+             ON CONFLICT (date) DO NOTHING
+             RETURNING *`,
+            [id, dateStr]
+        );
 
-            if (result.rows.length === 0) {
-                // Already exists, fetch it
-                const existing = await this.getReconciliationLog(date);
-                return existing ? ok(existing) : err(new Error('Failed to create reconciliation log'));
-            }
-
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create reconciliation log'));
-            }
-            return ok(this.mapReconciliationRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        if (result.value.rows.length === 0) {
+            // Already exists, fetch it
+            const existing = await this.getReconciliationLog(date);
+            return existing ? ok(existing) : err(new Error('Failed to create reconciliation log'));
+        }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create reconciliation log'));
+        }
+        return ok(this.mapReconciliationRow(row));
     }
 
     async updateReconciliationLog(id: string, data: Partial<{
@@ -401,38 +411,39 @@ export class SystemRepository {
         fields.push('updated_at = NOW()');
         values.push(id);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `UPDATE reconciliation_log
-                 SET ${fields.join(', ')}
-                 WHERE id = $${paramIndex}
-                 RETURNING *`,
-                values
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `UPDATE reconciliation_log
+             SET ${fields.join(', ')}
+             WHERE id = $${paramIndex}
+             RETURNING *`,
+            values
+        );
 
-            if (result.rows.length === 0) {
-                return err(new Error('Reconciliation log not found'));
-            }
-
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Reconciliation log not found'));
-            }
-            return ok(this.mapReconciliationRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        if (result.value.rows.length === 0) {
+            return err(new Error('Reconciliation log not found'));
+        }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Reconciliation log not found'));
+        }
+        return ok(this.mapReconciliationRow(row));
     }
 
     async getRecentReconciliations(limit: number = 30): Promise<ReconciliationLogEntry[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM reconciliation_log
              ORDER BY date DESC
              LIMIT $1`,
             [limit]
         );
 
-        return result.rows.map(row => this.mapReconciliationRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapReconciliationRow(row));
     }
 
     // -------------------------------------------------------------------------

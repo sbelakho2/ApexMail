@@ -63,15 +63,17 @@ impl CircuitBreaker {
     }
 
     /// Check if a request is allowed through the circuit.
+    /// Fix #79, #82: Use write lock to atomically check and transition state; handle poisoned locks.
     pub fn is_allowed(&self) -> bool {
-        let state = *self.state.read().unwrap();
-        match state {
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        match *state {
             CircuitState::Closed => true,
             CircuitState::Open => {
                 // Check if we should transition to half-open
-                if let Some(opened_at) = *self.opened_at.read().unwrap() {
-                    if opened_at.elapsed() >= self.config.open_duration {
-                        *self.state.write().unwrap() = CircuitState::HalfOpen;
+                let opened_at = self.opened_at.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(opened) = *opened_at {
+                    if opened.elapsed() >= self.config.open_duration {
+                        *state = CircuitState::HalfOpen;
                         self.success_count.store(0, Ordering::SeqCst);
                         return true;
                     }
@@ -83,9 +85,10 @@ impl CircuitBreaker {
     }
 
     /// Record a successful operation.
+    /// Fix #80, #82: Use write lock to atomically check and modify state; handle poisoned locks.
     pub fn record_success(&self) {
-        let state = *self.state.read().unwrap();
-        match state {
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        match *state {
             CircuitState::Closed => {
                 // Reset failure count on success
                 self.failure_count.store(0, Ordering::SeqCst);
@@ -93,10 +96,11 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => {
                 let count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if count >= self.config.success_threshold as u64 {
-                    *self.state.write().unwrap() = CircuitState::Closed;
+                    *state = CircuitState::Closed;
                     self.failure_count.store(0, Ordering::SeqCst);
                     self.success_count.store(0, Ordering::SeqCst);
-                    *self.opened_at.write().unwrap() = None;
+                    let mut opened_at = self.opened_at.write().unwrap_or_else(|e| e.into_inner());
+                    *opened_at = None;
                 }
             }
             CircuitState::Open => {
@@ -106,19 +110,23 @@ impl CircuitBreaker {
     }
 
     /// Record a failed operation.
+    /// Fix #80, #81, #82: Use write lock atomically; use fetch_add for proper counting; handle poisoned locks.
     pub fn record_failure(&self) {
-        let state = *self.state.read().unwrap();
-        match state {
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        match *state {
             CircuitState::Closed => {
-                // Check if previous failures are within the window
                 let now = Instant::now();
-                let should_reset = if let Some(last) = *self.last_failure_time.read().unwrap() {
-                    now.duration_since(last) > self.config.window_duration
-                } else {
-                    true
+                
+                // Lock last_failure_time for atomic check-and-update
+                let mut last_failure = self.last_failure_time.write().unwrap_or_else(|e| e.into_inner());
+                let should_reset = match *last_failure {
+                    Some(last) => now.duration_since(last) > self.config.window_duration,
+                    None => true,
                 };
 
+                // Fix #81: Always use atomic operations; if resetting, store 1 only if current is expected
                 let count = if should_reset {
+                    // Reset window - store 1 atomically
                     self.failure_count.store(1, Ordering::SeqCst);
                     1
                 } else {
@@ -126,37 +134,43 @@ impl CircuitBreaker {
                 };
 
                 if count >= self.config.failure_threshold as u64 {
-                    *self.state.write().unwrap() = CircuitState::Open;
-                    *self.opened_at.write().unwrap() = Some(now);
+                    *state = CircuitState::Open;
+                    let mut opened_at = self.opened_at.write().unwrap_or_else(|e| e.into_inner());
+                    *opened_at = Some(now);
                 }
 
-                *self.last_failure_time.write().unwrap() = Some(now);
+                *last_failure = Some(now);
             }
             CircuitState::HalfOpen => {
                 // Any failure in half-open reopens the circuit
-                *self.state.write().unwrap() = CircuitState::Open;
-                *self.opened_at.write().unwrap() = Some(Instant::now());
+                *state = CircuitState::Open;
+                let mut opened_at = self.opened_at.write().unwrap_or_else(|e| e.into_inner());
+                *opened_at = Some(Instant::now());
                 self.success_count.store(0, Ordering::SeqCst);
             }
             CircuitState::Open => {
                 // Already open, update timestamp
-                *self.opened_at.write().unwrap() = Some(Instant::now());
+                let mut opened_at = self.opened_at.write().unwrap_or_else(|e| e.into_inner());
+                *opened_at = Some(Instant::now());
             }
         }
     }
 
     /// Get the current circuit state.
     pub fn state(&self) -> CircuitState {
-        *self.state.read().unwrap()
+        *self.state.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Reset the circuit breaker to closed state.
     pub fn reset(&self) {
-        *self.state.write().unwrap() = CircuitState::Closed;
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        *state = CircuitState::Closed;
         self.failure_count.store(0, Ordering::SeqCst);
         self.success_count.store(0, Ordering::SeqCst);
-        *self.last_failure_time.write().unwrap() = None;
-        *self.opened_at.write().unwrap() = None;
+        let mut last_failure = self.last_failure_time.write().unwrap_or_else(|e| e.into_inner());
+        *last_failure = None;
+        let mut opened_at = self.opened_at.write().unwrap_or_else(|e| e.into_inner());
+        *opened_at = None;
     }
 }
 

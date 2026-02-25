@@ -92,7 +92,7 @@ impl BanditOptimizer {
             .ok_or_else(|| AiError::ArmNotFound(arm_id.to_string()))?;
 
         let alpha = arm.conversions as f64 + 1.0;
-        let beta = (arm.impressions - arm.conversions) as f64 + 1.0;
+        let beta = arm.impressions.saturating_sub(arm.conversions) as f64 + 1.0;
 
         // Normal approximation to Beta
         let mean = alpha / (alpha + beta);

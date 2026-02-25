@@ -130,25 +130,23 @@ const DEFAULT_PLAN_FEATURES: PlanFeatures = {
 
 /**
  * Pay As You Go pricing configuration
- * All prices in cents
+ * All prices in integer cents/millicents
  */
 export const PAYG_PRICING = {
-  // Email pricing tiers (price per email in cents, with volume discounts)
+  // Email pricing tiers (price per email in millicents, with volume discounts)
   emailPricing: [
-    { upTo: 10000, pricePerEmail: 0.10 },      // $0.001/email for first 10k
-    { upTo: 100000, pricePerEmail: 0.08 },     // $0.0008/email for 10k-100k
-    { upTo: 1000000, pricePerEmail: 0.05 },    // $0.0005/email for 100k-1M
-    { upTo: Infinity, pricePerEmail: 0.03 },   // $0.0003/email for 1M+
+    { upTo: 10000, pricePerEmailMillicents: 100 },      // $0.001/email for first 10k
+    { upTo: 100000, pricePerEmailMillicents: 80 },      // $0.0008/email for 10k-100k
+    { upTo: 1000000, pricePerEmailMillicents: 50 },     // $0.0005/email for 100k-1M
+    { upTo: Infinity, pricePerEmailMillicents: 30 },    // $0.0003/email for 1M+
   ],
   // API call pricing (free up to limit, then charged)
   apiPricing: {
     freeCallsPerMonth: 100000,
-    pricePerThousandCalls: 10, // $0.10 per 1000 API calls
+    pricePerThousandCallsCents: 10, // $0.10 per 1000 API calls
   },
   // Minimum monthly charge
-  minimumMonthlyCharge: 0, // No minimum
-  // Billing precision
-  billingPrecision: 2, // Round to 2 decimal places
+  minimumMonthlyChargeCents: 0, // No minimum
 } as const;
 
 /**
@@ -159,30 +157,31 @@ export function calculatePaygCost(emailsSent: number, apiCalls: number): {
   apiCost: number;
   totalCost: number;
 } {
-  let emailCost = 0;
+  let emailCostMillicents = 0;
   let remaining = emailsSent;
 
-  for (const tier of PAYG_PRICING.emailPricing) {
+  for (let i = 0; i < PAYG_PRICING.emailPricing.length; i += 1) {
+    const tier = PAYG_PRICING.emailPricing[i]!;
     if (remaining <= 0) break;
-    const previousUpTo = PAYG_PRICING.emailPricing[PAYG_PRICING.emailPricing.indexOf(tier) - 1]?.upTo ?? 0;
+    const previousUpTo = PAYG_PRICING.emailPricing[i - 1]?.upTo ?? 0;
     const tierEmails = Math.min(remaining, tier.upTo - previousUpTo);
-    emailCost += tierEmails * tier.pricePerEmail;
+    emailCostMillicents += tierEmails * tier.pricePerEmailMillicents;
     remaining -= tierEmails;
   }
 
   // API costs (only for calls over free limit)
   const billableApiCalls = Math.max(0, apiCalls - PAYG_PRICING.apiPricing.freeCallsPerMonth);
-  const apiCost = Math.ceil(billableApiCalls / 1000) * PAYG_PRICING.apiPricing.pricePerThousandCalls;
+  const apiCostCents =
+    Math.ceil(billableApiCalls / 1000) * PAYG_PRICING.apiPricing.pricePerThousandCallsCents;
 
-  const totalCost = Math.max(
-    emailCost + apiCost,
-    PAYG_PRICING.minimumMonthlyCharge
-  );
+  const emailCostCents = Math.floor((emailCostMillicents + 500) / 1000);
+  const minimumMonthlyChargeCents = PAYG_PRICING.minimumMonthlyChargeCents;
+  const totalCostCents = Math.max(emailCostCents + apiCostCents, minimumMonthlyChargeCents);
 
   return {
-    emailCost: Math.round(emailCost * 100) / 100,
-    apiCost: Math.round(apiCost * 100) / 100,
-    totalCost: Math.round(totalCost * 100) / 100,
+    emailCost: emailCostCents / 100,
+    apiCost: apiCostCents / 100,
+    totalCost: totalCostCents / 100,
   };
 }
 
@@ -190,7 +189,7 @@ export function calculatePaygCost(emailsSent: number, apiCalls: number): {
  * Subscription overage pricing
  * $0.40 per 1,000 emails = $0.0004 per email = 0.04 cents per email
  */
-export const OVERAGE_RATE_PER_EMAIL_CENTS = 0.04; // $0.40/1K = 0.04 cents/email
+export const OVERAGE_RATE_PER_EMAIL_MILLICENTS = 40; // $0.40/1K = 0.04 cents/email
 
 /**
  * Calculate overage cost for subscription plans that exceed their monthly email limit.
@@ -208,7 +207,7 @@ export function calculateOverageCost(emailsSent: number, emailLimit: number): nu
   
   const overageEmails = emailsSent - emailLimit;
   // Round up to nearest cent
-  return Math.ceil(overageEmails * OVERAGE_RATE_PER_EMAIL_CENTS);
+  return Math.floor((overageEmails * OVERAGE_RATE_PER_EMAIL_MILLICENTS + 999) / 1000);
 }
 
 export interface CreatePlanInput {
@@ -638,7 +637,10 @@ export class PlansService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM plans WHERE is_active = true ORDER BY sort_order ASC LIMIT 100`
+      `SELECT id, name, display_name, description, price_monthly, price_yearly,
+              email_limit, api_call_limit, features, stripe_price_id_monthly,
+              stripe_price_id_yearly, is_active, sort_order, created_at, updated_at
+       FROM plans WHERE is_active = true ORDER BY sort_order ASC LIMIT 100`
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -667,7 +669,10 @@ export class PlansService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM plans WHERE name = $1`,
+      `SELECT id, name, display_name, description, price_monthly, price_yearly,
+              email_limit, api_call_limit, features, stripe_price_id_monthly,
+              stripe_price_id_yearly, is_active, sort_order, created_at, updated_at
+       FROM plans WHERE name = $1`,
       [name]
     );
 

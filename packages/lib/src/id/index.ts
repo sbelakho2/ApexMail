@@ -98,6 +98,8 @@ export function generateIdempotencyKey(): string {
   return `idem_${generateUuid()}`;
 }
 
+const API_KEY_PREFIX_LENGTH = 8;
+
 /**
  * Generate an API key
  * Format: am_live_<random> or am_test_<random>
@@ -107,9 +109,10 @@ export function generateApiKey(mode: 'live' | 'test' = 'live'): {
   prefix: string;
   hash: string;
 } {
-  const prefix = `am_${mode}_`;
+  const basePrefix = `am_${mode}_`;
   const secret = secureRandomBase64(32);
-  const key = `${prefix}${secret}`;
+  const key = `${basePrefix}${secret}`;
+  const prefix = `${basePrefix}${secret.slice(0, API_KEY_PREFIX_LENGTH)}`;
   
   // Generate a hash for storage
   const hash = createHash('sha256').update(key).digest('hex');
@@ -124,16 +127,35 @@ export function parseApiKey(key: string): {
   valid: boolean;
   mode: 'live' | 'test' | null;
   prefix: string | null;
+  legacyPrefix?: string | null;
 } {
   const livePrefix = 'am_live_';
   const testPrefix = 'am_test_';
   
   if (key.startsWith(livePrefix)) {
-    return { valid: true, mode: 'live', prefix: livePrefix };
+    const suffix = key.slice(livePrefix.length);
+    if (suffix.length >= API_KEY_PREFIX_LENGTH) {
+      return {
+        valid: true,
+        mode: 'live',
+        prefix: `${livePrefix}${suffix.slice(0, API_KEY_PREFIX_LENGTH)}`,
+        legacyPrefix: livePrefix,
+      };
+    }
+    return { valid: true, mode: 'live', prefix: livePrefix, legacyPrefix: null };
   }
   
   if (key.startsWith(testPrefix)) {
-    return { valid: true, mode: 'test', prefix: testPrefix };
+    const suffix = key.slice(testPrefix.length);
+    if (suffix.length >= API_KEY_PREFIX_LENGTH) {
+      return {
+        valid: true,
+        mode: 'test',
+        prefix: `${testPrefix}${suffix.slice(0, API_KEY_PREFIX_LENGTH)}`,
+        legacyPrefix: testPrefix,
+      };
+    }
+    return { valid: true, mode: 'test', prefix: testPrefix, legacyPrefix: null };
   }
   
   return { valid: false, mode: null, prefix: null };

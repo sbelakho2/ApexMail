@@ -11,8 +11,9 @@ static DOMAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$").unwrap()
 });
 
+// #216: UUID regex must be case-insensitive to accept uppercase hex
 static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+    Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
 });
 
 pub fn is_valid_email(email: &str) -> bool {
@@ -28,8 +29,9 @@ pub fn is_valid_uuid(s: &str) -> bool {
 }
 
 /// Check for null bytes in a string.
+/// #235: Only check for actual null byte '\0', not literal "\u0000" text
 pub fn has_null_bytes(s: &str) -> bool {
-    s.contains('\0') || s.contains("\\u0000")
+    s.contains('\0')
 }
 
 /// Sanitize a string by removing null bytes.

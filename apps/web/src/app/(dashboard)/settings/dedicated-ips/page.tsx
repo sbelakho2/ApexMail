@@ -97,7 +97,7 @@ export default function DedicatedIpsPage() {
   // Fetch IPs
   const fetchIps = React.useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/dedicated-ips');
+      const res = await fetch('/v1/dedicated-ips');
       if (!res.ok) {
         if (res.status === 403) {
           setError('upgrade');
@@ -131,7 +131,7 @@ export default function DedicatedIpsPage() {
   async function handleProvision() {
     setProvisioning(true);
     try {
-      const res = await fetch('/api/v1/dedicated-ips', { method: 'POST' });
+      const res = await fetch('/v1/dedicated-ips', { method: 'POST' });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error?.message ?? 'Failed to provision IP');
@@ -150,7 +150,7 @@ export default function DedicatedIpsPage() {
   async function handleRelease(id: string) {
     setReleasing(true);
     try {
-      const res = await fetch(`/api/v1/dedicated-ips/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/v1/dedicated-ips/${id}`, { method: 'DELETE' });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         throw new Error(body?.error?.message ?? 'Failed to release IP');

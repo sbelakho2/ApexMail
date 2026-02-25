@@ -103,6 +103,18 @@ export default function RootLayout({
         <link rel="manifest" href="/manifest.json" />
       </head>
       <body className="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom">
+        {/* Deterministic fallback for visitors with JS disabled */}
+        <noscript>
+          <div style={{ background: '#1e40af', color: '#fff', textAlign: 'center', padding: '12px 16px', fontSize: '14px', fontFamily: 'sans-serif' }}>
+            ApexMail requires JavaScript for interactive features.{' '}
+            <a href="/docs" style={{ color: '#bfdbfe', textDecoration: 'underline' }}>
+              Browse documentation
+            </a>{' '}or{' '}
+            <a href="mailto:hello@apexmail.ee" style={{ color: '#bfdbfe', textDecoration: 'underline' }}>
+              contact us
+            </a>{' '}to learn more.
+          </div>
+        </noscript>
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />

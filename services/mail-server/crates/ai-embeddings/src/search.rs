@@ -2,7 +2,7 @@
 
 use uuid::Uuid;
 
-use crate::embeddings::{cosine_similarity, EmbeddingService};
+use crate::embeddings::EmbeddingService;
 use crate::types::{EmbeddingError, SearchResult};
 use crate::vector_store::VectorStore;
 
@@ -84,7 +84,7 @@ mod tests {
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
         };
-        let svc = EmbeddingService::new(config);
+        let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
@@ -107,7 +107,7 @@ mod tests {
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
         };
-        let svc = EmbeddingService::new(config);
+        let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);
@@ -129,7 +129,7 @@ mod tests {
             timeout_ms: 5000,
             pooling: crate::config::PoolingStrategy::Mean,
         };
-        let svc = EmbeddingService::new(config);
+        let svc = EmbeddingService::new(config).unwrap();
         let engine = SearchEngine::new(&svc, &store);
 
         let query = l2_normalize(vec![1.0, 0.0, 0.0]);

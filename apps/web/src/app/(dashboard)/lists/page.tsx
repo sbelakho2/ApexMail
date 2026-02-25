@@ -29,7 +29,7 @@ export default function ListsPage() {
 
     React.useEffect(() => {
         // Fetch from events endpoint as a proxy for subscriber data
-        fetch('/api/v1/events/lists')
+        fetch('/v1/events/lists')
             .then(r => r.ok ? r.json() : Promise.reject())
             .then(json => setLists(json.lists ?? json.data ?? []))
             .catch(() => setLists([]))

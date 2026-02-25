@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     priority    VARCHAR(20)  NOT NULL DEFAULT 'medium', -- low, medium, high, urgent
     category    VARCHAR(50),  -- technical, billing, feature_request, bug, general
     assignee    VARCHAR(255),
+    resolved_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );

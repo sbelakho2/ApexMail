@@ -570,8 +570,9 @@ impl EventProcessor {
     // ── Redis counter helpers ─────────────────────────────────────────
 
     async fn incr_counters(&self, tenant_id: &str, date: &str, hour: &str, metric: &str) {
-        let hourly = format!("stats:{tenant_id}:{date}:{hour}:{metric}");
-        let daily = format!("stats:{tenant_id}:{date}:{metric}");
+        // #180: Key format must match reader in query_engine.rs: stats:{tenant_id}:day:{date}:{metric}
+        let hourly = format!("stats:{tenant_id}:hour:{date}:{hour}:{metric}");
+        let daily = format!("stats:{tenant_id}:day:{date}:{metric}");
 
         let redis = self.redis.clone();
         let hourly2 = hourly.clone();
@@ -579,13 +580,17 @@ impl EventProcessor {
 
         tokio::spawn(async move {
             if let Ok(mut conn) = redis.get().await {
-                let _ = redis::pipe()
+                // #200: Log Redis pipeline errors instead of silently dropping them
+                if let Err(e) = redis::pipe()
                     .cmd("INCR").arg(&hourly2)
                     .cmd("EXPIRE").arg(&hourly2).arg(86400u64 * 7)
                     .cmd("INCR").arg(&daily2)
                     .cmd("EXPIRE").arg(&daily2).arg(86400u64 * 90)
                     .query_async::<()>(&mut *conn)
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = %e, hourly = %hourly2, daily = %daily2, "Redis counter pipeline failed");
+                }
             }
         });
     }
@@ -629,15 +634,25 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
         if v != WAL_VERSION as u64 {
             anyhow::bail!("unsupported WAL version {v}");
         }
-        // Extract the raw `d` slice for checksum verification
-        let d_idx = raw.find(",\"d\":").context("no 'd' key in envelope")?;
-        let raw_payload = &raw[d_idx + 5..raw.len() - 1]; // strip closing `}`
-        let expected_cs = sha256_hex8(raw_payload);
+
+        // #181: Extract the `d` value from the already-parsed JSON instead of
+        // fragile string searching with raw.find(",\"d\":"), which can match
+        // content inside the payload itself.
+        let d_value = outer.get("d").context("no 'd' key in envelope")?;
+        let raw_payload = serde_json::to_string(d_value).context("re-serialize 'd' value")?;
+        let expected_cs = sha256_hex8(&raw_payload);
         let actual_cs = outer["cs"].as_str().unwrap_or("");
         if actual_cs != expected_cs {
-            anyhow::bail!("checksum mismatch: expected={expected_cs} actual={actual_cs}");
+            // Fall back: try the original raw extraction for backward compatibility
+            // with envelopes where checksum was computed over the raw substring
+            let d_idx = raw.find(",\"d\":").context("no 'd' key in raw envelope")?;
+            let raw_payload_legacy = &raw[d_idx + 5..raw.len() - 1];
+            let expected_cs_legacy = sha256_hex8(raw_payload_legacy);
+            if actual_cs != expected_cs_legacy {
+                anyhow::bail!("checksum mismatch: expected={expected_cs} actual={actual_cs}");
+            }
         }
-        serde_json::from_str(raw_payload).context("deserialize event from envelope")
+        serde_json::from_value(d_value.clone()).context("deserialize event from envelope")
     } else {
         // Legacy bare event
         serde_json::from_str(raw).context("deserialize legacy event")

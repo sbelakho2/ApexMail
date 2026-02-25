@@ -10,7 +10,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::audit::AuditService;
@@ -150,6 +150,23 @@ fn ok_json(v: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::OK, Json(v))
 }
 
+fn serialize_json<T: Serialize>(value: T) -> Result<serde_json::Value, (StatusCode, Json<serde_json::Value>)> {
+    serde_json::to_value(value).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err_json(&format!("serialization failed: {e}")),
+        )
+    })
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
+}
+
+fn clamp_offset(offset: i64) -> i64 {
+    offset.clamp(0, 100_000)
+}
+
 // ─── Health ─────────────────────────────────────────────────────
 
 async fn health_check() -> Json<serde_json::Value> {
@@ -198,7 +215,10 @@ async fn org_create(
         )
         .await
     {
-        Ok(org) => (StatusCode::CREATED, Json(serde_json::to_value(org).unwrap())),
+        Ok(org) => match serialize_json(org) {
+            Ok(json) => (StatusCode::CREATED, Json(json)),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
 }
@@ -212,7 +232,10 @@ async fn org_get(
         return (e.0, err_json(e.1));
     }
     match state.tenant.get_organization(&org_id).await {
-        Ok(org) => ok_json(serde_json::to_value(org).unwrap()),
+        Ok(org) => match serialize_json(org) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::NOT_FOUND, err_json(&e.to_string())),
     }
 }
@@ -245,7 +268,10 @@ async fn org_update(
         )
         .await
     {
-        Ok(org) => ok_json(serde_json::to_value(org).unwrap()),
+        Ok(org) => match serialize_json(org) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
 }
@@ -304,7 +330,10 @@ async fn workspace_create(
         .create_workspace(&org_id, &body.name, &body.slug, &user_id, None)
         .await
     {
-        Ok(ws) => (StatusCode::CREATED, Json(serde_json::to_value(ws).unwrap())),
+        Ok(ws) => match serialize_json(ws) {
+            Ok(json) => (StatusCode::CREATED, Json(json)),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
 }
@@ -318,7 +347,10 @@ async fn workspace_list(
         return (e.0, err_json(e.1));
     }
     match state.tenant.list_workspaces(&org_id).await {
-        Ok(workspaces) => ok_json(serde_json::to_value(workspaces).unwrap()),
+        Ok(workspaces) => match serialize_json(workspaces) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
 }
@@ -332,7 +364,10 @@ async fn workspace_get(
         return (e.0, err_json(e.1));
     }
     match state.tenant.get_workspace(&workspace_id).await {
-        Ok(ws) => ok_json(serde_json::to_value(ws).unwrap()),
+        Ok(ws) => match serialize_json(ws) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::NOT_FOUND, err_json(&e.to_string())),
     }
 }
@@ -357,7 +392,10 @@ async fn workspace_update(
         .update_workspace(&workspace_id, body.name.as_deref(), body.settings)
         .await
     {
-        Ok(ws) => ok_json(serde_json::to_value(ws).unwrap()),
+        Ok(ws) => match serialize_json(ws) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
 }
@@ -443,7 +481,10 @@ async fn member_access(
         .check_member_access(&workspace_id, &user_id)
         .await
     {
-        Ok(access) => ok_json(serde_json::to_value(access).unwrap()),
+        Ok(access) => match serialize_json(access) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
 }
@@ -522,7 +563,10 @@ async fn rate_limit_status(
         key_prefix: Some("ratelimit".into()),
     };
     match state.rate_limit.get_rate_limit_status(&key, &config).await {
-        Ok(result) => ok_json(serde_json::to_value(result).unwrap()),
+        Ok(result) => match serialize_json(result) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
 }
@@ -583,9 +627,13 @@ async fn encryption_create_policy(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    if let Err(e) = state.tenant.get_organization(&body.organization_id).await {
+        return (StatusCode::NOT_FOUND, err_json(&e.to_string()));
+    }
+
     let policy = EncryptionPolicy {
         id: uuid::Uuid::new_v4().to_string(),
-        name: format!("{}_policy", body.table_name),
+        name: format!("{}_{}_policy", body.organization_id, body.table_name),
         resource: body.table_name.clone(),
         fields: body.fields.clone(),
         algorithm: body.algorithm.clone().unwrap_or_else(|| "aes-256-gcm".into()),
@@ -597,7 +645,10 @@ async fn encryption_create_policy(
         .create_policy(policy)
         .await
     {
-        Ok(policy) => (StatusCode::CREATED, Json(serde_json::to_value(policy).unwrap())),
+        Ok(policy) => match serialize_json(policy) {
+            Ok(json) => (StatusCode::CREATED, Json(json)),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
     }
 }
@@ -622,12 +673,22 @@ async fn isolation_check_access(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    let org = match state.tenant.get_organization(&body.organization_id).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
+    };
+
+    let workspace = match state.tenant.get_workspace(&body.workspace_id).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
+    };
+
     let ctx = IsolationContext {
         organization_id: body.organization_id.clone(),
         workspace_id: body.workspace_id.clone(),
         user_id: body.user_id.clone(),
-        isolation_level: IsolationLevel::Shared,
-        schema_name: None,
+        isolation_level: org.isolation_level,
+        schema_name: workspace.schema_name,
         permissions: vec![],
     };
 
@@ -680,14 +741,21 @@ async fn isolation_migrate(
 async fn isolation_setup_rls(
     State(state): State<S>,
     headers: HeaderMap,
-    Path(_workspace_id): Path<String>,
+    Path(workspace_id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    let workspace = match state.tenant.get_workspace(&workspace_id).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
+    };
+
+    let schema = workspace.schema_name.unwrap_or_else(|| "public".to_string());
+
     match state
         .isolation
-        .setup_rls("emails", "public")
+        .setup_rls("emails", &schema)
         .await
     {
         Ok(()) => ok_json(serde_json::json!({ "status": "rls_configured" })),
@@ -727,8 +795,8 @@ async fn audit_query(
         resource: params.resource,
         start_time: params.start_time.and_then(|s| s.parse().ok()),
         end_time: params.end_time.and_then(|s| s.parse().ok()),
-        limit: params.limit,
-        offset: params.offset,
+        limit: Some(clamp_limit(params.limit.unwrap_or(50), 500)),
+        offset: Some(clamp_offset(params.offset.unwrap_or(0))),
     };
     match state.audit.query(&q).await {
         Ok((events, total)) => ok_json(serde_json::json!({
@@ -757,7 +825,10 @@ async fn audit_stats(
     }
     let days = params.days.unwrap_or(30);
     match state.audit.get_stats(&org_id, days).await {
-        Ok(stats) => ok_json(serde_json::to_value(stats).unwrap()),
+        Ok(stats) => match serialize_json(stats) {
+            Ok(json) => ok_json(json),
+            Err(err) => err,
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
 }

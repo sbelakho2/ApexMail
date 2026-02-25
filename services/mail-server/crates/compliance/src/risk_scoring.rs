@@ -242,151 +242,139 @@ impl RiskScoringEngine {
     ) -> Result<TenantMetrics, String> {
         let mut m = TenantMetrics::default();
 
-        // Account age
-        let age_row: Option<(Option<i64>,)> = sqlx::query_as(
+        let age_fut = sqlx::query_as::<_, (Option<i64>,)>(
             "SELECT EXTRACT(EPOCH FROM (NOW() - created_at))::bigint / 86400
              FROM tenants WHERE id = $1",
         )
         .bind(tenant_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.account_age_days = age_row.and_then(|r| r.0).unwrap_or(0);
+        .fetch_optional(&self.db);
 
-        // Verified domains
-        let dom_row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM domains
-             WHERE tenant_id = $1 AND verified = true",
+        let domains_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM domains WHERE tenant_id = $1 AND verified = true",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.verified_domains = dom_row.0;
+        .fetch_one(&self.db);
 
-        // Payment failures (last 90 days)
-        let pay_row: (i64,) = sqlx::query_as(
+        let payments_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM payment_events
              WHERE tenant_id = $1 AND event_type = 'failed'
                AND created_at > NOW() - INTERVAL '90 days'",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.payment_failures = pay_row.0;
+        .fetch_one(&self.db);
 
-        // Sending stats
-        let msg_row: (i64, i64, i64) = sqlx::query_as(
-            "SELECT
-               COUNT(*),
-               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 day'),
-               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')
+        let messages_fut = sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT COUNT(*),
+                    COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 day'),
+                    COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')
              FROM messages WHERE tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.total_messages = msg_row.0;
-        m.messages_24h = msg_row.1;
-        m.messages_7d = msg_row.2;
-        m.avg_daily_7d = if m.messages_7d > 0 {
-            m.messages_7d as f64 / 7.0
-        } else {
-            0.0
-        };
+        .fetch_one(&self.db);
 
-        // Bounce rate
-        if m.total_messages > 0 {
-            let bounce_row: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM messages
-                 WHERE tenant_id = $1 AND status = 'bounced'",
-            )
-            .bind(tenant_id)
-            .fetch_one(&self.db)
-            .await
-            .map_err(|e| format!("DB error: {e}"))?;
-            m.bounce_rate = (bounce_row.0 as f64 / m.total_messages as f64) * 100.0;
-        }
+        let bounce_fut = sqlx::query_as::<_, (i64,)>(
+            "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'bounced'",
+        )
+        .bind(tenant_id)
+        .fetch_one(&self.db);
 
-        // Spam complaint rate
-        let spam_row: (i64,) = sqlx::query_as(
+        let spam_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM spam_complaints WHERE tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        if m.total_messages > 0 {
-            m.spam_rate = (spam_row.0 as f64 / m.total_messages as f64) * 100.0;
-        }
+        .fetch_one(&self.db);
 
-        // Unsubscribe rate
-        let unsub_row: (i64,) = sqlx::query_as(
+        let unsub_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM unsubscribes WHERE tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        if m.total_messages > 0 {
-            m.unsub_rate = (unsub_row.0 as f64 / m.total_messages as f64) * 100.0;
-        }
+        .fetch_one(&self.db);
 
-        // Engagement from campaign_stats
-        let eng_row: Option<(Option<f64>, Option<f64>)> = sqlx::query_as(
+        let engagement_fut = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
             "SELECT AVG(open_rate), AVG(click_rate)
              FROM campaign_stats WHERE tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        if let Some((or, cr)) = eng_row {
-            m.open_rate = or.unwrap_or(0.0);
-            m.click_rate = cr.unwrap_or(0.0);
-        }
+        .fetch_optional(&self.db);
 
-        // Abuse / violations
-        let abuse_row: (i64,) = sqlx::query_as(
+        let abuse_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM abuse_reports WHERE tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.abuse_reports = abuse_row.0;
+        .fetch_one(&self.db);
 
-        let cv_row: (i64,) = sqlx::query_as(
+        let violations_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM content_violations WHERE tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.content_violations = cv_row.0;
+        .fetch_one(&self.db);
 
-        let phish_row: (i64,) = sqlx::query_as(
+        let phishing_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM scan_results
              WHERE tenant_id = $1 AND phishing_detected = true",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-        m.phishing_detections = phish_row.0;
+        .fetch_one(&self.db);
 
-        // Blocklist
-        let bl_row: (i64,) = sqlx::query_as(
+        let blocklist_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM tenant_ips ti
              JOIN blocklist_entries be ON be.ip = ti.ip AND be.active = true
              WHERE ti.tenant_id = $1",
         )
         .bind(tenant_id)
-        .fetch_one(&self.db)
-        .await
+        .fetch_one(&self.db);
+
+        let (
+            age_row,
+            dom_row,
+            pay_row,
+            msg_row,
+            bounce_row,
+            spam_row,
+            unsub_row,
+            eng_row,
+            abuse_row,
+            cv_row,
+            phish_row,
+            bl_row,
+        ) = tokio::try_join!(
+            age_fut,
+            domains_fut,
+            payments_fut,
+            messages_fut,
+            bounce_fut,
+            spam_fut,
+            unsub_fut,
+            engagement_fut,
+            abuse_fut,
+            violations_fut,
+            phishing_fut,
+            blocklist_fut,
+        )
         .map_err(|e| format!("DB error: {e}"))?;
+
+        m.account_age_days = age_row.and_then(|r| r.0).unwrap_or(0);
+        m.verified_domains = dom_row.0;
+        m.payment_failures = pay_row.0;
+        m.total_messages = msg_row.0;
+        m.messages_24h = msg_row.1;
+        m.messages_7d = msg_row.2;
+        m.avg_daily_7d = if m.messages_7d > 0 { m.messages_7d as f64 / 7.0 } else { 0.0 };
+
+        if m.total_messages > 0 {
+            m.bounce_rate = (bounce_row.0 as f64 / m.total_messages as f64) * 100.0;
+            m.spam_rate = (spam_row.0 as f64 / m.total_messages as f64) * 100.0;
+            m.unsub_rate = (unsub_row.0 as f64 / m.total_messages as f64) * 100.0;
+        }
+
+        if let Some((open_rate, click_rate)) = eng_row {
+            m.open_rate = open_rate.unwrap_or(0.0);
+            m.click_rate = click_rate.unwrap_or(0.0);
+        }
+
+        m.abuse_reports = abuse_row.0;
+        m.content_violations = cv_row.0;
+        m.phishing_detections = phish_row.0;
         m.blocklisted = bl_row.0 > 0;
 
         Ok(m)

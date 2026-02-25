@@ -391,7 +391,9 @@ export class DunningService {
       suspended_at: Date | null;
       grace_period_ends_at: Date | null;
     }>(
-      `SELECT * FROM dunning_records WHERE tenant_id = $1`,
+      `SELECT tenant_id, status, failed_payment_count, first_failed_at, last_failed_at,
+              next_retry_at, suspended_at, grace_period_ends_at
+       FROM dunning_records WHERE tenant_id = $1`,
       [tenantId]
     );
 

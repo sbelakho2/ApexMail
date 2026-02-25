@@ -61,10 +61,16 @@ pub struct ListAutomationsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    #[serde(default)]
+    pub cursor: Option<i64>,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -121,13 +127,15 @@ async fn list_automations(
 ) -> Result<Json<Vec<AutomationResponse>>, ApiError> {
     require_scopes(&auth, &["automations:read"])?;
 
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, AutomationRow>(
         "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
          FROM automations WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
-    .bind(params.limit.min(100))
-    .bind(params.offset)
+    .bind(clamp_limit(params.limit, 100))
+    // Fix #58: Clamp offset to valid range to prevent DB scan issues.
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 

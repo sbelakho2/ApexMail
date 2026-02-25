@@ -8,7 +8,6 @@
 
 use chrono::Utc;
 use sqlx::PgPool;
-use tracing::debug;
 
 use crate::types::*;
 
@@ -100,7 +99,7 @@ impl EngagementTrustService {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut map: std::collections::HashMap<String, i64> = counts.into_iter().collect();
+        let map: std::collections::HashMap<String, i64> = counts.into_iter().collect();
 
         let sent = *map.get("sent").unwrap_or(&0);
         let delivered = *map.get("delivered").unwrap_or(&0);

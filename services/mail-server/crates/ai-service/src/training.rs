@@ -105,7 +105,6 @@ impl TrainingManager {
         let n = predictions.len() as f64;
         let mut tp = 0.0f64;
         let mut fp = 0.0f64;
-        let mut _tn = 0.0f64;
         let mut fn_ = 0.0f64;
         let mut correct = 0.0f64;
 
@@ -120,7 +119,6 @@ impl TrainingManager {
             } else if !pred_pos && actual_pos {
                 fn_ += 1.0;
             } else {
-                _tn += 1.0;
                 correct += 1.0;
             }
         }

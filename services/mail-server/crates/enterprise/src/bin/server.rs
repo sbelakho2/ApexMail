@@ -21,6 +21,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration
     let config = Config::from_env();
+    if let Err(err) = config.validate() {
+        return Err(anyhow::anyhow!("Invalid enterprise config: {err}"));
+    }
     let bind_addr = format!("{}:{}", config.host, config.port);
     info!(host = %config.host, port = config.port, "Starting enterprise service");
 

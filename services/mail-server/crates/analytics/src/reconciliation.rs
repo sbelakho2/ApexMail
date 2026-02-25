@@ -1,8 +1,8 @@
 //! Reconciliation worker – exact-once event verification, health checks.
 
-use chrono::{Duration, Utc};
+use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
-use tracing::{error, info, warn};
+use tracing::warn;
 
 use crate::types::*;
 
@@ -21,7 +21,7 @@ impl ReconciliationWorker {
 
     /// Run full reconciliation cycle.
     pub async fn run(&self) -> anyhow::Result<ReconciliationResult> {
-        let since = Utc::now() - Duration::hours(24);
+        let since = Utc::now() - TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero());
         let discrepancies = self.find_discrepancies(since).await?;
         let health = self.check_health().await?;
 
@@ -86,16 +86,17 @@ impl ReconciliationWorker {
         let now = Utc::now();
 
         // Orphaned messages: sent but no events in 5+ min
+        // #189: Use NOT EXISTS instead of NOT IN (SELECT DISTINCT ...) for O(n) instead of O(n×m)
         let five_min_ago = now - Duration::minutes(5);
         let orphaned_count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(DISTINCT message_id) FROM messages \
-             WHERE status = 'sent' AND created_at < $1 \
-             AND message_id NOT IN (SELECT DISTINCT message_id FROM events WHERE timestamp >= $1)",
+            "SELECT COUNT(DISTINCT m.message_id) FROM messages m \
+             WHERE m.status = 'sent' AND m.created_at < $1 \
+             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.message_id = m.message_id AND e.timestamp >= $1)",
         )
         .bind(five_min_ago)
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .map_err(|e| anyhow::anyhow!("reconciliation orphaned_count query failed: {e}"))?;
 
         // Event lag: average time between events
         let event_lag: (Option<f64>,) = sqlx::query_as(
@@ -104,7 +105,7 @@ impl ReconciliationWorker {
         )
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((None,));
+        .map_err(|e| anyhow::anyhow!("reconciliation event_lag query failed: {e}"))?;
 
         // Queue backlog
         let queue_backlog: (i64,) = sqlx::query_as(
@@ -112,7 +113,7 @@ impl ReconciliationWorker {
         )
         .fetch_one(&self.pool)
         .await
-        .unwrap_or((0,));
+        .map_err(|e| anyhow::anyhow!("reconciliation queue_backlog query failed: {e}"))?;
 
         let healthy = orphaned_count.0 < 100
             && event_lag.0.unwrap_or(0.0) < 300.0

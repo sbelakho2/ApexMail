@@ -120,6 +120,11 @@ impl ContactsRepo {
         tenant_id: Uuid,
         entries: &[(&str, Option<&str>)], // (email, name)
     ) -> Result<Vec<Contact>, sqlx::Error> {
+        // #214: Return early on empty input to avoid invalid SQL
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut query = String::from(
             "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at) VALUES "
         );

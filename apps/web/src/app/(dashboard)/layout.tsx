@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { ImpersonationBanner } from '@/components/impersonation-banner';
@@ -11,7 +12,35 @@ export default function DashboardLayout({
 }: {
     children: React.ReactNode;
 }) {
+    const router = useRouter();
+    const pathname = usePathname();
     const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
+
+    React.useEffect(() => {
+        let cancelled = false;
+
+        const verifySession = async () => {
+            try {
+                const response = await fetch('/api/auth/session', { cache: 'no-store' });
+                if (!response.ok) return;
+                const data = await response.json();
+                if (!cancelled && !data?.authenticated) {
+                    const next = pathname?.startsWith('/') ? pathname : '/dashboard';
+                    router.replace(`/login?next=${encodeURIComponent(next)}&reason=session_expired`);
+                }
+            } catch {
+                // no-op on transient errors
+            }
+        };
+
+        verifySession();
+        const interval = window.setInterval(verifySession, 60_000);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+        };
+    }, [pathname, router]);
 
     return (
         <div className="flex h-screen overflow-hidden bg-surface-50">

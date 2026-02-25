@@ -10,6 +10,7 @@ import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
+import { formatDate } from '@/lib/utils';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -110,7 +111,7 @@ function timeAgo(dateStr: string): string {
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString();
+  return formatDate(dateStr);
 }
 
 /* ------------------------------------------------------------------ */
@@ -266,10 +267,96 @@ function CreateTicketDialog({
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState<TicketCategory | ''>('');
   const [priority, setPriority] = useState<TicketPriority>('medium');
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [copyStatus, setCopyStatus] = useState('');
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const lastFocusedElementRef = useRef<HTMLElement | null>(null);
+  const draftKey = 'apexmail.help.create-ticket.draft';
+
+  useEffect(() => {
+    if (!isOpen) return;
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as { subject?: string; description?: string; category?: TicketCategory; priority?: TicketPriority };
+      setSubject(draft.subject ?? '');
+      setDescription(draft.description ?? '');
+      setCategory(draft.category ?? '');
+      setPriority(draft.priority ?? 'medium');
+    } catch {
+      // noop
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(
+          draftKey,
+          JSON.stringify({ subject, description, category, priority })
+        );
+      } catch {
+        // noop
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [subject, description, category, priority, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    lastFocusedElementRef.current = document.activeElement as HTMLElement | null;
+    const timer = window.setTimeout(() => {
+      const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (focusables && focusables.length > 0) {
+        focusables[0].focus();
+      } else {
+        dialogRef.current?.focus();
+      }
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      lastFocusedElementRef.current?.focus();
+    };
+  }, [isOpen]);
 
   if (!isOpen) return null;
+
+  function handleDialogKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Escape') {
+      onClose();
+      return;
+    }
+
+    if (e.key !== 'Tab') return;
+
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusables || focusables.length === 0) {
+      e.preventDefault();
+      return;
+    }
+
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+
+    if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -277,30 +364,99 @@ function CreateTicketDialog({
     if (!subject.trim() || subject.trim().length < 5) { setError('Subject must be at least 5 characters'); return; }
     if (!category) { setError('Please select a category'); return; }
     if (!description.trim() || description.trim().length < 10) { setError('Description must be at least 10 characters'); return; }
+    if (attachments.length > 5) { setError('You can upload up to 5 attachments.'); return; }
 
     setSubmitting(true);
+    setUploadProgress(10);
     try {
+      const progressTimer = window.setInterval(() => {
+        setUploadProgress((prev) => Math.min(prev + 15, 95));
+      }, 200);
+
       const result = await apiCall<{ ticket: Ticket }>('/v1/support/tickets', {
         method: 'POST',
-        body: JSON.stringify({ subject: subject.trim(), description: description.trim(), category, priority }),
+        body: JSON.stringify({
+          subject: subject.trim(),
+          description: description.trim(),
+          category,
+          priority,
+          attachments: attachments.map((file) => file.name),
+        }),
       });
+      window.clearInterval(progressTimer);
+      setUploadProgress(100);
       onCreated(result.ticket);
       onClose();
       setSubject(''); setDescription(''); setCategory(''); setPriority('medium');
+      setAttachments([]);
+      setUploadProgress(0);
+      localStorage.removeItem(draftKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create ticket');
+      setUploadProgress(0);
     } finally {
       setSubmitting(false);
     }
   }
 
+  function handleAttachmentChange(files: FileList | null) {
+    if (!files) return;
+    const allowed = ['image/png', 'image/jpeg', 'application/pdf', 'text/plain'];
+    const maxSize = 5 * 1024 * 1024;
+    const accepted: File[] = [];
+
+    for (const file of Array.from(files)) {
+      if (!allowed.includes(file.type)) {
+        setError(`Unsupported file type: ${file.name}`);
+        continue;
+      }
+      if (file.size > maxSize) {
+        setError(`File too large: ${file.name}. Max size is 5MB.`);
+        continue;
+      }
+      accepted.push(file);
+    }
+
+    setAttachments((prev) => [...prev, ...accepted].slice(0, 5));
+  }
+
+  async function copyDiagnosticBundle() {
+    const bundle = {
+      subject,
+      category,
+      priority,
+      url: window.location.href,
+      userAgent: navigator.userAgent,
+      timestamp: new Date().toISOString(),
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+      setCopyStatus('Diagnostic bundle copied.');
+    } catch {
+      setCopyStatus('Failed to copy diagnostic bundle.');
+    }
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="create-ticket-title"
+      onKeyDown={handleDialogKeyDown}
+      tabIndex={-1}
+    >
+      <div
+        ref={dialogRef}
+        className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+        tabIndex={-1}
+      >
         <div className="p-6">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-xl font-semibold">Create Support Ticket</h2>
-            <button onClick={onClose} className="text-muted-foreground hover:text-foreground p-1"><X className="h-5 w-5" /></button>
+            <h2 id="create-ticket-title" className="text-xl font-semibold">Create Support Ticket</h2>
+            <button onClick={onClose} aria-label="Close create ticket modal" className="text-muted-foreground hover:text-foreground p-1"><X className="h-5 w-5" /></button>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
@@ -308,7 +464,7 @@ function CreateTicketDialog({
               <label className="block text-sm font-medium mb-1.5">Subject <span className="text-destructive">*</span></label>
               <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Brief summary of your issue..." maxLength={200}
                 className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-background focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary" />
-              <p className="text-xs text-muted-foreground mt-1">{subject.length}/200 characters (min 5)</p>
+              <p className={`text-xs mt-1 ${subject.length > 160 ? 'text-warning' : 'text-muted-foreground'}`}>{subject.length}/200 characters (min 5)</p>
             </div>
 
             <div>
@@ -340,11 +496,34 @@ function CreateTicketDialog({
               <label className="block text-sm font-medium mb-1.5">Description <span className="text-destructive">*</span></label>
               <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Describe your issue in detail..." rows={5} maxLength={5000}
                 className="w-full px-3 py-2.5 border border-input rounded-lg text-sm bg-background focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary resize-none" />
-              <p className="text-xs text-muted-foreground mt-1">{description.length}/5000 characters (min 10)</p>
+              <p className={`text-xs mt-1 ${description.length > 4000 ? 'text-warning' : 'text-muted-foreground'}`}>{description.length}/5000 characters (min 10)</p>
             </div>
 
+            <div>
+              <label className="block text-sm font-medium mb-1.5">Attachments</label>
+              <input
+                type="file"
+                multiple
+                onChange={(e) => handleAttachmentChange(e.target.files)}
+                className="w-full text-sm"
+                accept=".png,.jpg,.jpeg,.pdf,.txt"
+              />
+              {attachments.length > 0 ? (
+                <p className="text-xs text-muted-foreground mt-1">{attachments.length} file(s) attached</p>
+              ) : null}
+              {uploadProgress > 0 ? (
+                <p className="text-xs text-muted-foreground mt-1">Upload progress: {uploadProgress}%</p>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-between rounded-lg border border-border p-3">
+              <span className="text-sm text-muted-foreground">Need support diagnostics?</span>
+              <Button type="button" variant="outline" size="sm" onClick={copyDiagnosticBundle}>Copy Diagnostic Bundle</Button>
+            </div>
+            {copyStatus ? <p className="text-xs text-muted-foreground">{copyStatus}</p> : null}
+
             {error && (
-              <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg text-sm text-destructive flex items-center gap-2">
+              <div role="alert" aria-live="assertive" className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg text-sm text-destructive flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 flex-shrink-0" />{error}
               </div>
             )}
@@ -373,7 +552,9 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
   const [ticketStatus, setTicketStatus] = useState<TicketStatus>(ticket.status);
   const [closing, setClosing] = useState(false);
   const [reopening, setReopening] = useState(false);
+  const [replyNotice, setReplyNotice] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const latestMessageIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     setMessages(ticket.messages);
@@ -381,6 +562,30 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
   }, [ticket.id, ticket.messages, ticket.status]);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  useEffect(() => {
+    const latest = messages[messages.length - 1];
+    if (!latest) return;
+    if (latestMessageIdRef.current === latest.id) return;
+    latestMessageIdRef.current = latest.id;
+
+    if (latest.authorType === 'support') {
+      setReplyNotice('New support reply received.');
+    }
+  }, [messages]);
+
+  const sanitizedReplyPreview = replyContent
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/on\w+\s*=\s*"[^"]*"/g, '')
+    .replace(/javascript:/gi, '');
+
+  const timeline = [
+    { key: 'open', label: 'Opened', complete: true },
+    { key: 'in_progress', label: 'In Progress', complete: ['in_progress', 'waiting_on_customer', 'resolved', 'closed'].includes(ticketStatus) },
+    { key: 'waiting_on_customer', label: 'Waiting', complete: ['waiting_on_customer', 'resolved', 'closed'].includes(ticketStatus) },
+    { key: 'resolved', label: 'Resolved', complete: ['resolved', 'closed'].includes(ticketStatus) },
+    { key: 'closed', label: 'Closed', complete: ['closed'].includes(ticketStatus) },
+  ];
 
   async function sendReply() {
     if (!replyContent.trim() || sending) return;
@@ -474,6 +679,17 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
           </span>
           <span className="text-xs text-muted-foreground">Created {timeAgo(ticket.createdAt)}</span>
         </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {timeline.map((step) => (
+            <span
+              key={step.key}
+              className={`px-2 py-1 rounded-full text-xs ${step.complete ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}
+            >
+              {step.label}
+            </span>
+          ))}
+        </div>
       </div>
 
       <div className="p-4 space-y-4 max-h-[500px] overflow-y-auto bg-muted/20">
@@ -499,6 +715,13 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
 
       {ticketStatus !== 'closed' && (
         <div className="p-4 border-t border-border">
+          {replyNotice ? (
+            <div className="mb-3 rounded-md border border-primary/20 bg-primary/10 p-2 text-xs text-foreground flex items-center justify-between gap-2">
+              <span>{replyNotice}</span>
+              <button className="text-primary hover:underline" onClick={() => setReplyNotice('')}>Dismiss</button>
+            </div>
+          ) : null}
+
           <div className="flex gap-2">
             <textarea value={replyContent} onChange={(e) => setReplyContent(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendReply(); } }}
@@ -508,6 +731,13 @@ function TicketDetailView({ ticket, onBack, onRefresh }: { ticket: Ticket; onBac
               {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             </Button>
           </div>
+
+          {replyContent ? (
+            <div className="mt-3 rounded-md border border-border p-3">
+              <p className="text-xs font-medium text-muted-foreground mb-1">Sanitized preview</p>
+              <p className="text-sm whitespace-pre-wrap">{sanitizedReplyPreview}</p>
+            </div>
+          ) : null}
         </div>
       )}
     </Card>
@@ -590,7 +820,22 @@ export default function HelpPage() {
         <>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {resources.map(r => (
-              <Card key={r.title} className="hover:border-primary/30 transition-colors cursor-pointer" role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') window.location.href = r.href; }}>
+              <Card
+                key={r.title}
+                className="hover:border-primary/30 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                role="button"
+                aria-label={r.title}
+                tabIndex={0}
+                onClick={() => {
+                  window.location.href = r.href;
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    window.location.href = r.href;
+                  }
+                }}
+              >
                 <CardContent className="p-6">
                   <div className={`inline-flex rounded-lg p-3 ${r.color} mb-4`}><r.icon className="h-5 w-5" /></div>
                   <h3 className="font-semibold mb-1">{r.title}</h3>

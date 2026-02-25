@@ -3,26 +3,24 @@
 //! Implements rate limiting, SPF/DKIM/DMARC authentication, VERP reply detection,
 //! and message storage.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::BytesMut;
 use dashmap::DashMap;
-use governor::{Quota, RateLimiter};
-use nonzero_ext::nonzero;
+use governor::RateLimiter;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::auth::EmailAuthenticator;
-use crate::config::{InboundConfig, EmailAuthConfig, RateLimitConfig};
+use crate::config::{InboundConfig, RateLimitConfig};
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -51,6 +49,7 @@ pub struct InboundServer {
     /// Per‑IP connection counter.
     connections: Arc<DashMap<IpAddr, u32>>,
     /// Rate limiter per IP (token bucket).
+    #[allow(dead_code)]
     ip_limiters: Arc<DashMap<IpAddr, Arc<RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>>>,
     shutdown: Arc<Notify>,
 }
@@ -153,7 +152,7 @@ impl InboundServer {
         self: Arc<Self>,
         socket: TcpStream,
         peer: SocketAddr,
-        tls: Option<TlsAcceptor>,
+        tls: Option<TlsAcceptor>,  // #136: renamed from _tls, now used for STARTTLS
     ) {
         let ip = peer.ip();
         if !self.check_rate_limit(ip) {
@@ -174,12 +173,41 @@ impl InboundServer {
             rcpt_to: Vec::new(),
         };
 
+        let allow_starttls = tls.is_some();
         let mut stream = BufStream::new(socket);
+        let starttls_requested = self.run_session_loop(&mut stream, &mut ctx, allow_starttls).await;
+
+        // #136: Handle STARTTLS upgrade if requested
+        if starttls_requested {
+            if let Some(acceptor) = tls {
+                let inner = stream.into_inner();
+                match acceptor.accept(inner).await {
+                    Ok(tls_stream) => {
+                        let mut tls_buf = BufStream::new(tls_stream);
+                        self.run_session_loop(&mut tls_buf, &mut ctx, false).await;
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "STARTTLS handshake failed");
+                    }
+                }
+            }
+        }
+
+        self.track_connection(ip, false);
+    }
+
+    /// Generic session loop over any AsyncRead+AsyncWrite stream (plain or TLS).
+    /// Returns true if client requested STARTTLS (caller should upgrade and re-enter).
+    async fn run_session_loop<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        self: &Arc<Self>,
+        stream: &mut BufStream<S>,
+        ctx: &mut SessionContext,
+        allow_starttls: bool,  // #136: whether STARTTLS upgrade is available
+    ) -> bool {
         let greeting = format!("220 {} ESMTP ApexMail MTA\r\n", self.hostname);
-        if let Err(e) = write_line_buf(&mut stream, &greeting).await {
+        if let Err(e) = write_line_buf(stream, &greeting).await {
             debug!(error = %e, "Failed to send greeting");
-            self.track_connection(ip, false);
-            return;
+            return false;
         }
 
         let mut line = String::new();
@@ -196,9 +224,21 @@ impl InboundServer {
             }
 
             let cmd = line.trim().to_uppercase();
-            let response = self.handle_command(&cmd, &line, &mut ctx).await;
 
-            if let Err(e) = write_line_buf(&mut stream, &response).await {
+            // #136: Handle STARTTLS before generic command dispatch
+            if cmd.starts_with("STARTTLS") {
+                if allow_starttls {
+                    let _ = write_line_buf(stream, "220 Ready to start TLS\r\n").await;
+                    return true; // Signal caller to upgrade
+                } else {
+                    let _ = write_line_buf(stream, "454 TLS not available\r\n").await;
+                    continue;
+                }
+            }
+
+            let response = self.handle_command(&cmd, &line, ctx).await;
+
+            if let Err(e) = write_line_buf(stream, &response).await {
                 debug!(error = %e, "Write error");
                 break;
             }
@@ -210,44 +250,70 @@ impl InboundServer {
             // DATA handling
             if cmd.starts_with("DATA") && response.starts_with("354") {
                 let mut message = BytesMut::new();
+                let mut too_large = false;
+                // #137: Track total DATA deadline (10 min) to prevent slow-loris attacks
+                let data_deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+                let mut data_timed_out = false;
                 loop {
                     line.clear();
-                    match tokio::time::timeout(Duration::from_secs(300), stream.read_line(&mut line)).await {
-                        Ok(Ok(0)) | Err(_) => break,
+                    let remaining = data_deadline
+                        .checked_duration_since(tokio::time::Instant::now())
+                        .unwrap_or(Duration::ZERO);
+                    if remaining.is_zero() {
+                        data_timed_out = true;
+                        break;
+                    }
+                    let per_line_timeout = remaining.min(Duration::from_secs(300));
+                    match tokio::time::timeout(per_line_timeout, stream.read_line(&mut line)).await {
+                        Err(_) => { data_timed_out = true; break; }
+                        Ok(Ok(0)) => break,
                         Ok(Ok(_)) => {
                             if line.trim() == "." {
                                 break;
                             }
-                            // Dot-unstuffing
-                            if line.starts_with("..") {
-                                message.extend_from_slice(line[1..].as_bytes());
-                            } else {
-                                message.extend_from_slice(line.as_bytes());
+                            // #141: Check size BEFORE extending to prevent temporary overallocation
+                            if !too_large {
+                                let data_slice = if line.starts_with("..") {
+                                    &line[1..]
+                                } else {
+                                    &line[..]
+                                };
+                                if message.len() + data_slice.len() > self.config.max_message_size {
+                                    too_large = true;
+                                    message.clear();
+                                } else {
+                                    message.extend_from_slice(data_slice.as_bytes());
+                                }
                             }
                         }
                         Ok(Err(_)) => break,
                     }
-                    if message.len() > self.config.max_message_size {
-                        let _ = write_line_buf(&mut stream, "552 Message too large\r\n").await;
-                        break;
-                    }
                 }
 
-                if message.len() <= self.config.max_message_size {
-                    let result = self.process_message(&ctx, &message).await;
+                if data_timed_out {
+                    // #137: Total DATA timeout exceeded
+                    let _ = write_line_buf(stream, "421 Data timeout exceeded\r\n").await;
+                    break;
+                }
+
+                if too_large {
+                    let _ = write_line_buf(stream, "552 Message too large\r\n").await;
+                    ctx.mail_from = None;
+                    ctx.rcpt_to.clear();
+                } else if message.len() <= self.config.max_message_size {
+                    let result = self.process_message(ctx, &message).await;
                     let resp = match result {
                         Ok(id) => format!("250 OK id={id}\r\n"),
                         Err(e) => format!("451 Temporary failure: {e}\r\n"),
                     };
-                    let _ = write_line_buf(&mut stream, &resp).await;
+                    let _ = write_line_buf(stream, &resp).await;
                     ctx.message_count += 1;
                     ctx.mail_from = None;
                     ctx.rcpt_to.clear();
                 }
             }
         }
-
-        self.track_connection(ip, false);
+        false
     }
 
     async fn handle_session_tls(
@@ -261,7 +327,7 @@ impl InboundServer {
         }
         self.track_connection(ip, true);
 
-        let ctx = SessionContext {
+        let mut ctx = SessionContext {
             id: Uuid::new_v4().to_string(),
             client_ip: ip,
             authenticated: false,
@@ -273,9 +339,8 @@ impl InboundServer {
             rcpt_to: Vec::new(),
         };
 
-        // Similar session loop over TLS stream — simplified for brevity
-        // In production: factor out a generic session loop over AsyncRead+AsyncWrite
-        debug!(session = %ctx.id, "TLS session started");
+        let mut stream = BufStream::new(tls_stream);
+        self.run_session_loop(&mut stream, &mut ctx, false).await;  // #136: already on TLS
         self.track_connection(ip, false);
     }
 
@@ -296,16 +361,26 @@ impl InboundServer {
             ctx.helo_hostname = host.to_string();
             let mut caps = format!("250-{} Hello {}\r\n", self.hostname, host);
             caps.push_str(&format!("250-SIZE {}\r\n", self.config.max_message_size));
-            caps.push_str("250-STARTTLS\r\n");
+            if self.config.tls.enabled {
+                caps.push_str("250-STARTTLS\r\n");
+            }
             caps.push_str("250-8BITMIME\r\n");
             caps.push_str("250-PIPELINING\r\n");
             caps.push_str("250 SMTPUTF8\r\n");
             caps
+        } else if cmd_upper.starts_with("STARTTLS") {
+            "454 TLS not available\r\n".into()
         } else if cmd_upper.starts_with("MAIL FROM") {
+            if self.config.auth_required && !ctx.authenticated {
+                return "530 Authentication required\r\n".into();
+            }
             let addr = extract_address(raw_line);
             ctx.mail_from = Some(addr);
             "250 OK\r\n".into()
         } else if cmd_upper.starts_with("RCPT TO") {
+            if self.config.auth_required && !ctx.authenticated {
+                return "530 Authentication required\r\n".into();
+            }
             if ctx.rcpt_to.len() >= self.config.max_recipients {
                 return "452 Too many recipients\r\n".into();
             }
@@ -313,6 +388,9 @@ impl InboundServer {
             ctx.rcpt_to.push(addr);
             "250 OK\r\n".into()
         } else if cmd_upper.starts_with("DATA") {
+            if self.config.auth_required && !ctx.authenticated {
+                return "530 Authentication required\r\n".into();
+            }
             if ctx.mail_from.is_none() || ctx.rcpt_to.is_empty() {
                 "503 Bad sequence of commands\r\n".into()
             } else {
@@ -415,12 +493,15 @@ impl InboundServer {
         });
 
         let mut conn = self.redis.get().await?;
-        redis::cmd("LPUSH")
+        // #139: LPUSH returns list length (i64), not String
+        if let Err(e) = redis::cmd("LPUSH")
             .arg("mta:webhook_queue")
             .arg(payload.to_string())
-            .query_async::<String>(&mut *conn)
+            .query_async::<i64>(&mut *conn)
             .await
-            .ok();
+        {
+            tracing::error!(message_id = %message_id, error = %e, "Failed to push inbound webhook to Redis queue");
+        }
 
         Ok(())
     }
@@ -439,13 +520,10 @@ impl InboundServer {
         if connect {
             *self.connections.entry(ip).or_insert(0) += 1;
         } else {
-            if let Some(mut count) = self.connections.get_mut(&ip) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    drop(count);
-                    self.connections.remove(&ip);
-                }
-            }
+            // #140: Atomic decrement then conditional removal – avoids race
+            // between count reaching zero and another thread incrementing
+            self.connections.entry(ip).and_modify(|c| *c = c.saturating_sub(1));
+            self.connections.remove_if(&ip, |_, c| *c == 0);
         }
     }
 }
@@ -466,10 +544,18 @@ fn extract_address(line: &str) -> String {
         .to_string()
 }
 
+/// #138: Write all bytes to a raw TcpStream, handling partial writes.
 async fn write_line_tcp(socket: &TcpStream, data: &str) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let mut s = socket;
-    // TcpStream doesn't impl write directly without &mut, this is a simplified version
+    let bytes = data.as_bytes();
+    let mut written = 0;
+    while written < bytes.len() {
+        socket.writable().await?;
+        match socket.try_write(&bytes[written..]) {
+            Ok(n) => written += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 

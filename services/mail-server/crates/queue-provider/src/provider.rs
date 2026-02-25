@@ -1,6 +1,6 @@
 //! Postgres queue provider with SKIP LOCKED for exactly-once processing.
 
-use chrono::Utc;
+use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -22,6 +22,16 @@ impl PostgresQueueProvider {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let scheduled_at = opts.scheduled_at.unwrap_or(now);
+
+        if opts.queue.trim().is_empty() {
+            return Err(QueueError::InvalidPayload("queue name is required".into()));
+        }
+        if opts.max_attempts <= 0 {
+            return Err(QueueError::InvalidPayload("max_attempts must be positive".into()));
+        }
+        if opts.visibility_timeout <= 0 {
+            return Err(QueueError::InvalidPayload("visibility_timeout must be positive seconds".into()));
+        }
 
         let row: JobRow = sqlx::query_as::<_, JobRow>(
             r#"
@@ -134,8 +144,8 @@ impl PostgresQueueProvider {
             // Move to dead letter queue
             self.dead_letter(job_id, error).await?;
         } else {
-            // Exponential backoff: 2^attempts * 30 seconds
-            let backoff_secs = (2_i64.pow(job.attempts as u32)) * 30;
+            // #228: Exponential backoff with cap at 1 hour to prevent excessive delays
+            let backoff_secs = ((2_i64.pow(job.attempts as u32)) * 30).min(3600);
             let retry_at = now + chrono::Duration::seconds(backoff_secs);
 
             sqlx::query(
@@ -240,7 +250,7 @@ impl PostgresQueueProvider {
 
     /// Purge completed/dead_letter jobs older than the given age.
     pub async fn purge(&self, queue: &str, older_than_hours: i32) -> Result<i64, QueueError> {
-        let cutoff = Utc::now() - chrono::Duration::hours(older_than_hours as i64);
+        let cutoff = Utc::now() - TimeDelta::try_hours(older_than_hours as i64).unwrap_or(TimeDelta::zero());
         let result = sqlx::query(
             r#"
             DELETE FROM queue_jobs

@@ -122,7 +122,9 @@ export class UsageAlertsService {
       notification_channel: UsageThreshold['notificationChannel'];
       last_triggered_at: Date | null;
     }>(
-      `SELECT * FROM usage_alert_configs
+      `SELECT id, tenant_id, metric_type, threshold_percent,
+              notification_channel, last_triggered_at
+       FROM usage_alert_configs
        WHERE tenant_id = $1 AND enabled = true
        ORDER BY threshold_percent ASC`,
       [tenantId]

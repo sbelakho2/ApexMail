@@ -34,10 +34,12 @@ class Client
 {
     public const SDK_VERSION     = '1.0.0';
     public const DEFAULT_URL     = 'https://api.apexmail.ee';
+    private const API_KEY_REGEX  = '/^am_(live|test)_[A-Za-z0-9]{16,}$/';
 
     private string $apiKey;
     private string $baseUrl;
     private int    $timeout;
+    private int    $maxRetries;
 
     public Resources\Emails      $emails;
     public Resources\Domains     $domains;
@@ -52,9 +54,14 @@ class Client
      */
     public function __construct(string $apiKey, array $options = [])
     {
+        if (!preg_match(self::API_KEY_REGEX, $apiKey)) {
+            throw new \InvalidArgumentException('Invalid API key format');
+        }
+
         $this->apiKey  = $apiKey;
         $this->baseUrl = rtrim($options['baseUrl'] ?? self::DEFAULT_URL, '/');
         $this->timeout = (int) ($options['timeout'] ?? 30);
+        $this->maxRetries = (int) ($options['maxRetries'] ?? 3);
 
         $this->emails       = new Resources\Emails($this);
         $this->domains      = new Resources\Domains($this);
@@ -82,45 +89,95 @@ class Client
     ): array {
         $url = $this->baseUrl . $path;
 
-        $headers = [
-            'X-API-Key: ' . $this->apiKey,
-            'Content-Type: application/json',
-            'Accept: application/json',
-            'User-Agent: apexmail-php/' . self::SDK_VERSION,
-        ];
-        if ($idempotencyKey !== null) {
-            $headers[] = 'X-Idempotency-Key: ' . $idempotencyKey;
+        $attempt = 0;
+        while (true) {
+            $retryAfter = null;
+            $headers = [
+                'X-API-Key: ' . $this->apiKey,
+                'Accept: application/json',
+                'User-Agent: apexmail-php/' . self::SDK_VERSION,
+            ];
+            if ($body !== null) {
+                $headers[] = 'Content-Type: application/json';
+            }
+            if ($idempotencyKey !== null) {
+                $headers[] = 'X-Idempotency-Key: ' . $idempotencyKey;
+            }
+
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_CUSTOMREQUEST  => strtoupper($method),
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HTTPHEADER     => $headers,
+                CURLOPT_TIMEOUT        => $this->timeout,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_HEADERFUNCTION => static function ($curl, $header) use (&$retryAfter) {
+                    $len = strlen($header);
+                    if (stripos($header, 'Retry-After:') === 0) {
+                        $retryAfter = trim(substr($header, strlen('Retry-After:')));
+                    }
+                    return $len;
+                },
+            ]);
+
+            if ($body !== null) {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
+            }
+
+            $response   = curl_exec($ch);
+            $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlError  = curl_error($ch);
+            curl_close($ch);
+
+            if ($curlError) {
+                if ($attempt < $this->maxRetries) {
+                    $this->sleepBackoff($attempt);
+                    $attempt++;
+                    continue;
+                }
+                throw new Exceptions\NetworkException('cURL error: ' . $curlError);
+            }
+
+            if (in_array($statusCode, [429, 500, 502, 503, 504], true) && $attempt < $this->maxRetries) {
+                $this->sleepRetryAfter($retryAfter, $attempt);
+                $attempt++;
+                continue;
+            }
+
+            $decoded = $response ? (array) json_decode((string) $response, true, 512, JSON_THROW_ON_ERROR) : [];
+
+            if ($statusCode >= 400) {
+                $this->throwApiError($statusCode, $decoded);
+            }
+
+            return $decoded;
+        }
+    }
+
+    private function sleepRetryAfter(?string $retryAfter, int $attempt): void
+    {
+        if ($retryAfter !== null && $retryAfter !== '') {
+            if (ctype_digit($retryAfter)) {
+                sleep((int) $retryAfter);
+                return;
+            }
+            $parsed = strtotime($retryAfter);
+            if ($parsed !== false) {
+                $delay = $parsed - time();
+                if ($delay > 0) {
+                    sleep($delay);
+                    return;
+                }
+            }
         }
 
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_CUSTOMREQUEST  => strtoupper($method),
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER     => $headers,
-            CURLOPT_TIMEOUT        => $this->timeout,
-            CURLOPT_FOLLOWLOCATION => true,
-        ]);
+        $this->sleepBackoff($attempt);
+    }
 
-        if ($body !== null) {
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
-        }
-
-        $response   = curl_exec($ch);
-        $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError  = curl_error($ch);
-        curl_close($ch);
-
-        if ($curlError) {
-            throw new Exceptions\NetworkException('cURL error: ' . $curlError);
-        }
-
-        $decoded = $response ? (array) json_decode((string) $response, true, 512, JSON_THROW_ON_ERROR) : [];
-
-        if ($statusCode >= 400) {
-            $this->throwApiError($statusCode, $decoded);
-        }
-
-        return $decoded;
+    private function sleepBackoff(int $attempt): void
+    {
+        $delay = min(0.5 * (2 ** $attempt), 5.0);
+        usleep((int) ($delay * 1_000_000));
     }
 
     // ── Private ─────────────────────────────────────────────────────────────

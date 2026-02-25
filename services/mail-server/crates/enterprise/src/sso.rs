@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{TimeDelta, Utc};
 use rand::Rng;
 use redis::AsyncCommands;
 use sha2::{Sha256, Digest};
@@ -79,7 +79,8 @@ impl SSOService {
         )
         .bind(domain)
         .fetch_optional(&self.db)
-        .await
+        let expires_at = Utc::now()
+            + TimeDelta::try_hours(session_hours as i64).unwrap_or(TimeDelta::zero());
         .map_err(|e| format!("Get config by domain: {e}"))
     }
 
@@ -94,12 +95,27 @@ impl SSOService {
         let request_id = format!("_saml_{}", Uuid::new_v4());
         let sso_url = config.sso_url.unwrap_or_default();
         let entity_id = config.entity_id.unwrap_or_else(|| self.config.sso.saml.entity_id.clone());
+        let acs_url = self.config.sso.saml.acs_url.clone();
 
-        // Build SAML AuthnRequest URL (simplified — real implementation would use XML)
+        // #257: Build a minimally valid SAML AuthnRequest XML document.
+        let issue_instant = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let saml_request_xml = format!(
+            r#"<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{}" Version="2.0" IssueInstant="{}" Destination="{}" AssertionConsumerServiceURL="{}" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"><saml:Issuer>{}</saml:Issuer></samlp:AuthnRequest>"#,
+            request_id,
+            issue_instant,
+            sso_url,
+            acs_url,
+            entity_id
+        );
+        let saml_request_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            saml_request_xml.as_bytes(),
+        );
+
         let redirect_url = format!(
             "{}?SAMLRequest={}&RelayState={}",
             sso_url,
-            urlencoding::encode(&entity_id),
+            urlencoding::encode(&saml_request_b64),
             urlencoding::encode(&request_id)
         );
 
@@ -185,9 +201,22 @@ impl SSOService {
                 let parsed: serde_json::Value = serde_json::from_str(&json)
                     .map_err(|e| format!("Parse state: {e}"))?;
                 
+                // #258: Return error instead of silently falling back to empty string
+                let code_verifier = parsed["code_verifier"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .ok_or("Missing or empty code_verifier in OIDC state")?;
+                
+                let domain = parsed["domain"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .ok_or("Missing or empty domain in OIDC state")?;
+                
                 return Ok(Some(OidcStateData {
-                    code_verifier: parsed["code_verifier"].as_str().unwrap_or("").to_string(),
-                    domain: parsed["domain"].as_str().unwrap_or("").to_string(),
+                    code_verifier,
+                    domain,
                     tenant_id: parsed["tenant_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()),
                 }));
             }
@@ -220,9 +249,32 @@ impl SSOService {
         display_name: Option<&str>, external_user_id: &str,
         groups: Option<serde_json::Value>, attributes: Option<serde_json::Value>,
     ) -> Result<ApiResult<SSOCallbackResult>, String> {
+        // #255: Check if user already exists to correctly report is_new_user
+        let existing_user: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM ent_sso_sessions WHERE tenant_id = $1 AND external_user_id = $2 LIMIT 1"
+        )
+        .bind(tenant_id)
+        .bind(external_user_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Check existing user: {e}"))?;
+        
+        let is_new_user = existing_user.is_none();
+        
+        // #256: Get session duration from SSO config instead of hardcoded 8h
+        let session_hours = sqlx::query_scalar::<_, i32>(
+            "SELECT session_duration_hours FROM ent_sso_configurations WHERE tenant_id = $1"
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Get session config: {e}"))?
+        .unwrap_or(8); // Default to 8 hours if not configured
+        
         let session_token = generate_random_token(64);
         let session_id = Uuid::new_v4();
-        let expires_at = Utc::now() + Duration::hours(8);
+        let expires_at = Utc::now()
+            + TimeDelta::try_hours(session_hours as i64).unwrap_or(TimeDelta::zero());
 
         let _session = sqlx::query_as::<_, SSOSession>(
             "INSERT INTO ent_sso_sessions (id, tenant_id, provider_type, external_user_id, email, display_name, groups, attributes, session_token, expires_at, last_activity_at, created_at)
@@ -238,7 +290,7 @@ impl SSOService {
 
         let group_list = groups.and_then(|g| serde_json::from_value::<Vec<String>>(g).ok());
 
-        info!(tenant_id = %tenant_id, email = email, "SSO session created");
+        info!(tenant_id = %tenant_id, email = email, is_new_user = is_new_user, "SSO session created");
         Ok(ApiResult::ok(SSOCallbackResult {
             session: SSOSessionInfo {
                 session_token,
@@ -247,7 +299,7 @@ impl SSOService {
                 groups: group_list,
                 expires_at,
             },
-            is_new_user: true,
+            is_new_user,
         }))
     }
 
@@ -262,10 +314,13 @@ impl SSOService {
         .map_err(|e| format!("Validate session: {e}"))?;
 
         if let Some(ref s) = session {
-            let _ = sqlx::query("UPDATE ent_sso_sessions SET last_activity_at = NOW() WHERE id = $1")
+            if let Err(e) = sqlx::query("UPDATE ent_sso_sessions SET last_activity_at = NOW() WHERE id = $1")
                 .bind(s.id)
                 .execute(&self.db)
-                .await;
+                .await
+            {
+                tracing::warn!(session_id = %s.id, error = %e, "Failed to update SSO session last_activity_at");
+            }
         }
         Ok(session)
     }

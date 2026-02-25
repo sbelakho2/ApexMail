@@ -2,11 +2,36 @@
 //!
 //! TLSA record lookup, generation, and certificate validation.
 
+use std::sync::LazyLock;
+use std::time::Duration;
+
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use moka::sync::Cache;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
-use tracing::{debug, warn};
+use tracing::warn;
+
+// #132: Multiple DoH providers for TLSA lookups – avoids single point of trust
+const DOH_PROVIDERS: &[&str] = &[
+    "https://cloudflare-dns.com/dns-query",
+    "https://dns.google/resolve",
+];
+
+// #133: TLSA record cache with 5-minute TTL and bounded capacity
+static TLSA_CACHE: LazyLock<Cache<String, Vec<TlsaRecord>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(1_000)
+        .time_to_live(Duration::from_secs(300))
+        .build()
+});
+
+static DOH_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("DoH HTTP client")
+});
 
 /// Parsed TLSA record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +74,8 @@ pub struct DaneRecordGenerationResult {
     pub recommendations: Vec<String>,
 }
 
-/// Verify DANE for a domain + port using DNS‑over‑HTTPS (Cloudflare).
+/// Verify DANE for a domain + port using DNS‑over‑HTTPS.
+/// #132: Tries multiple DoH providers with fallback. #133: Caches results.
 pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerificationResult {
     let mut result = DaneVerificationResult {
         supported: false,
@@ -62,40 +88,68 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
 
     let name = format!("_{port}._{protocol}.{domain}");
 
-    // Use Cloudflare DoH for TLSA lookup (most stub resolvers don't support TLSA)
-    let doh_url = format!(
-        "https://cloudflare-dns.com/dns-query?name={name}&type=TLSA"
-    );
-
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            result.errors.push(format!("HTTP client init failed: {e}"));
-            return result;
+    // #133: Check TLSA cache first
+    if let Some(cached) = TLSA_CACHE.get(&name) {
+        if !cached.is_empty() {
+            result.supported = true;
+            for record in &cached {
+                match record.usage {
+                    3 => {
+                        if result.mode != DaneMode::DaneTa {
+                            result.mode = DaneMode::DaneEe;
+                        }
+                    }
+                    2 => result.mode = DaneMode::DaneTa,
+                    0 | 1 => {
+                        if result.mode == DaneMode::None {
+                            result.mode = DaneMode::Pkix;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            result.tlsa_records = cached;
         }
-    };
+        return result;
+    }
 
-    let resp = match client
-        .get(&doh_url)
-        .header("Accept", "application/dns-json")
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            result.errors.push(format!("DoH request failed: {e}"));
+    let client = &*DOH_CLIENT;
+
+    // #132: Try multiple DoH providers with fallback
+    let mut doh_body: Option<serde_json::Value> = None;
+    for provider in DOH_PROVIDERS {
+        let doh_url = format!("{provider}?name={name}&type=TLSA");
+
+        let resp = match client
+            .get(&doh_url)
+            .header("Accept", "application/dns-json")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(provider, error = %e, "DoH request failed, trying next");
+                continue;
+            }
+        };
+
+        match resp.json::<serde_json::Value>().await {
+            Ok(v) => {
+                doh_body = Some(v);
+                break;
+            }
+            Err(e) => {
+                warn!(provider, error = %e, "DoH parse failed, trying next");
+                continue;
+            }
+        }
+    }
+
+    let body = match doh_body {
+        Some(b) => b,
+        None => {
+            result.errors.push("All DoH providers failed for TLSA lookup".into());
             result.recommendations.push("Ensure DANE TLSA records are published".into());
-            return result;
-        }
-    };
-
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            result.errors.push(format!("DoH parse failed: {e}"));
             return result;
         }
     };
@@ -143,6 +197,9 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
             "Add TLSA record at {name} for DANE support"
         ));
     }
+
+    // #133: Cache the result
+    TLSA_CACHE.insert(name, result.tlsa_records.clone());
 
     result
 }

@@ -122,8 +122,13 @@ pub fn extract_client_ip(headers: &HeaderMap, socket_ip: std::net::IpAddr, state
         }
     }
 
+    // #188: Validate X-Real-IP as a valid IP address before trusting it
     if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        return xri.trim().to_owned();
+        let trimmed = xri.trim();
+        if trimmed.parse::<std::net::IpAddr>().is_ok() {
+            return trimmed.to_owned();
+        }
+        // Invalid IP in header — fall through to socket IP
     }
 
     socket_ip.to_string()
@@ -169,11 +174,22 @@ async fn rate_limit_middleware(
 
     let result: anyhow::Result<u64> = async {
         let mut conn = state.redis.get().await?;
-        let count: u64 = redis::cmd("INCR").arg(&window_key).query_async(&mut *conn).await?;
-        if count == 1 {
-            // First request in this window — set TTL
-            let _: () = redis::cmd("EXPIRE").arg(&window_key).arg(120u64).query_async(&mut *conn).await?;
-        }
+        // #183: Atomic INCR + EXPIRE via Lua script to prevent orphaned keys
+        // if a crash occurs between the two commands.
+        let script = r#"
+            local count = redis.call('INCR', KEYS[1])
+            if count == 1 then
+                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            end
+            return count
+        "#;
+        let count: u64 = redis::cmd("EVAL")
+            .arg(script)
+            .arg(1i32)
+            .arg(&window_key)
+            .arg(120u64)
+            .query_async(&mut *conn)
+            .await?;
         Ok(count)
     }.await;
 

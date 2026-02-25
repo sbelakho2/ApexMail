@@ -84,7 +84,9 @@ export class StripeService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM stripe_customers WHERE tenant_id = $1`,
+      `SELECT id, tenant_id, stripe_customer_id, email, name,
+              default_payment_method_id, created_at, updated_at
+       FROM stripe_customers WHERE tenant_id = $1`,
       [tenantId]
     );
 
@@ -707,7 +709,10 @@ export class StripeService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM stripe_subscriptions WHERE tenant_id = $1 AND status != 'canceled' ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+              status, billing_interval, billing_cycle_start, billing_cycle_end,
+              cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
+       FROM stripe_subscriptions WHERE tenant_id = $1 AND status != 'canceled' ORDER BY created_at DESC LIMIT 1`,
       [tenantId]
     );
 
@@ -899,7 +904,7 @@ export class StripeService {
         await this.db.query(
           `UPDATE subscription_change_saga SET status = 'db_failed', error = $2, updated_at = NOW() WHERE id = $1`,
           [sagaId, finalizeResult.error.message]
-        ).catch(() => {}); // Best effort
+        ).catch((dbErr) => { logger.error('Failed to update saga status to db_failed', { sagaId, dbErr }); });
         
         logger.error('CRITICAL: Stripe updated but DB failed - manual reconciliation required', {
           sagaId,
@@ -924,7 +929,7 @@ export class StripeService {
          SET status = 'failed', error = $2, updated_at = NOW() 
          WHERE id = $1`,
         [sagaId, error instanceof Error ? error.message : String(error)]
-      ).catch(() => {}); // Best effort
+      ).catch((dbErr) => { logger.error('Failed to update saga status to failed', { sagaId, dbErr }); });
       
       logger.error('Failed to switch subscription', { error, tenantId, planName, sagaId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));

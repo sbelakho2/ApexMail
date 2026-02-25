@@ -23,22 +23,37 @@ pub fn create_hmac_signature_base64(key: &[u8], data: &[u8]) -> String {
 }
 
 /// Timing-safe comparison of two strings (constant-time).
+///
+/// Does NOT short-circuit on length difference — we use a dummy comparison
+/// to avoid leaking the length of the expected value.
 pub fn timing_safe_compare(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let len_matches = a_bytes.len() == b_bytes.len();
+
+    // Always iterate over at least one full pass to avoid timing leaks.
+    // Compare against the first string if lengths differ (result is discarded).
+    let compare_against = if len_matches { b_bytes } else { a_bytes };
     let mut result: u8 = 0;
-    for (x, y) in a.bytes().zip(b.bytes()) {
+    for (x, y) in a_bytes.iter().zip(compare_against.iter()) {
         result |= x ^ y;
     }
-    result == 0
+    len_matches && result == 0
 }
 
-/// Hash an API key using SHA-256.
+/// Hash an API key using SHA-256 (backward-compatible, for migration).
 pub fn hash_api_key(key: &str) -> String {
     use sha2::Digest;
     let hash = Sha256::digest(key.as_bytes());
     hex::encode(hash)
+}
+
+/// Hash an API key using HMAC-SHA256 with a secret.
+///
+/// This is the preferred method — the secret prevents offline brute-force
+/// even if the database is leaked.
+pub fn hash_api_key_with_secret(key: &str, secret: &str) -> String {
+    create_hmac_signature(secret.as_bytes(), key.as_bytes())
 }
 
 /// Hash a password using Argon2id.

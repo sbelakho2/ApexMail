@@ -128,9 +128,11 @@ export class ProrationEngine {
       billing_cycle_end: Date;
       billing_interval: 'monthly' | 'yearly';
     }>(
-      `SELECT t.plan, s.billing_cycle_start, s.billing_cycle_end, s.billing_interval
+      `SELECT t.plan, s.current_period_start AS billing_cycle_start,
+              s.current_period_end AS billing_cycle_end,
+              s.billing_interval
        FROM tenants t
-       LEFT JOIN subscriptions s ON t.id = s.tenant_id AND s.status = 'active'
+       LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id AND s.status = 'active'
        WHERE t.id = $1`,
       [tenantId]
     );
@@ -148,6 +150,10 @@ export class ProrationEngine {
     const newPlanResult = await this.plans.getPlanByName(newPlanName);
     if (!newPlanResult.ok) return Result.err(newPlanResult.error);
     if (!newPlanResult.value) return Result.err(new Error('New plan not found'));
+
+    if (!row.billing_cycle_start || !row.billing_cycle_end) {
+      return Result.err(new Error('No active subscription billing period'));
+    }
 
     // Calculate period
     const period = this.calculatePeriod(row.billing_cycle_start, row.billing_cycle_end);

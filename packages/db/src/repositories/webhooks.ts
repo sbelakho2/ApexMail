@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
 import { ok, err, type Result } from '@apexmail/lib';
+import type { DatabasePool } from '../pool.js';
 
 // =============================================================================
 // Types
@@ -85,7 +85,7 @@ export interface WebhookQueueInsert {
 // =============================================================================
 
 export class WebhooksRepository {
-    constructor(private pool: Pool) {}
+    constructor(private readonly db: DatabasePool) {}
 
     // -------------------------------------------------------------------------
     // Webhook CRUD
@@ -93,54 +93,56 @@ export class WebhooksRepository {
 
     async create(data: WebhookInsert): Promise<Result<Webhook, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
-        
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO webhooks (id, tenant_id, name, url, secret, events, headers)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (tenant_id, url) DO NOTHING
-                 RETURNING *`,
-                [
-                    id,
-                    data.tenantId,
-                    data.name,
-                    data.url,
-                    data.secret,
-                    JSON.stringify(data.events ?? ['*']),
-                    data.headers ? JSON.stringify(data.headers) : null
-                ]
-            );
 
-            const row = result.rows[0];
-            if (!row) {
-                // B-050: ON CONFLICT (tenant_id, url) DO NOTHING produces no rows on duplicate
-                return err(new Error('Webhook URL already exists for this tenant'));
-            }
-            return ok(this.mapRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO webhooks (id, tenant_id, name, url, secret, events, headers)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (tenant_id, url) DO NOTHING
+             RETURNING *`,
+            [
+                id,
+                data.tenantId,
+                data.name,
+                data.url,
+                data.secret,
+                JSON.stringify(data.events ?? ['*']),
+                data.headers ? JSON.stringify(data.headers) : null
+            ]
+        );
+
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            // B-050: ON CONFLICT (tenant_id, url) DO NOTHING produces no rows on duplicate
+            return err(new Error('Webhook URL already exists for this tenant'));
+        }
+        return ok(this.mapRow(row));
     }
 
     async findById(id: string, tenantId: string): Promise<Webhook | null> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM webhooks WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
-        
-        return result.rows[0] ? this.mapRow(result.rows[0]) : null;
+
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapRow(result.value.rows[0]) : null;
     }
 
     // FIX-500-047: Add pagination to prevent unbounded result sets
     async findByTenant(tenantId: string, options?: { limit?: number; offset?: number }): Promise<Webhook[]> {
         const limit = options?.limit ?? 100;
         const offset = options?.offset ?? 0;
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
             [tenantId, limit, offset]
         );
-        
-        return result.rows.map(row => this.mapRow(row));
+
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapRow(row));
     }
 
     /**
@@ -167,7 +169,7 @@ export class WebhooksRepository {
             idx++;
         }
 
-        const countResult = await this.pool.query<{ count: string }>(
+        const countResult = await this.db.query<{ count: string }>(
             `SELECT COUNT(*)::text as count FROM webhooks WHERE ${conditions.join(' AND ')}`,
             params,
         );
@@ -175,14 +177,17 @@ export class WebhooksRepository {
         const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
         const offset = Math.max(0, options?.offset ?? 0);
 
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM webhooks WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx}`,
             [...params, limit, offset],
         );
 
+        if (!countResult.ok) throw countResult.error;
+        if (!result.ok) throw result.error;
+
         return {
-            webhooks: result.rows.map(row => this.mapRow(row)),
-            total: parseInt(countResult.rows[0]?.count ?? '0', 10),
+            webhooks: result.value.rows.map(row => this.mapRow(row)),
+            total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
         };
     }
 
@@ -200,7 +205,7 @@ export class WebhooksRepository {
             params.push(options.status);
         }
 
-        const countResult = await this.pool.query<{ count: string }>(
+        const countResult = await this.db.query<{ count: string }>(
             `SELECT COUNT(*)::text as count FROM webhook_queue WHERE ${conditions.join(' AND ')}`,
             params,
         );
@@ -208,7 +213,7 @@ export class WebhooksRepository {
         const limit = Math.max(1, Math.min(options?.limit ?? 50, 200));
         const offset = Math.max(0, options?.offset ?? 0);
 
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM webhook_queue
              WHERE ${conditions.join(' AND ')}
              ORDER BY created_at DESC
@@ -216,22 +221,26 @@ export class WebhooksRepository {
             [...params, limit, offset],
         );
 
+        if (!countResult.ok) throw countResult.error;
+        if (!result.ok) throw result.error;
+
         return {
-            deliveries: result.rows.map((row) => this.mapQueueRow(row)),
-            total: parseInt(countResult.rows[0]?.count ?? '0', 10),
+            deliveries: result.value.rows.map((row) => this.mapQueueRow(row)),
+            total: parseInt(countResult.value.rows[0]?.count ?? '0', 10),
         };
     }
 
     async findEnabledByEvent(tenantId: string, eventType: string): Promise<Webhook[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM webhooks 
              WHERE tenant_id = $1 
              AND enabled = true 
              AND (events @> '["*"]'::jsonb OR events @> $2::jsonb)`,
             [tenantId, JSON.stringify([eventType])]
         );
-        
-        return result.rows.map(row => this.mapRow(row));
+
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapRow(row));
     }
 
     async update(id: string, tenantId: string, data: WebhookUpdate): Promise<Result<Webhook, Error>> {
@@ -272,36 +281,37 @@ export class WebhooksRepository {
         fields.push('updated_at = NOW()');
         values.push(id, tenantId);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `UPDATE webhooks 
-                 SET ${fields.join(', ')}
-                 WHERE id = $${paramIndex++} AND tenant_id = $${paramIndex}
-                 RETURNING *`,
-                values
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `UPDATE webhooks 
+             SET ${fields.join(', ')}
+             WHERE id = $${paramIndex++} AND tenant_id = $${paramIndex}
+             RETURNING *`,
+            values
+        );
 
-            if (result.rows.length === 0) {
-                return err(new Error('Webhook not found'));
-            }
-
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Webhook not found'));
-            }
-            return ok(this.mapRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        if (result.value.rows.length === 0) {
+            return err(new Error('Webhook not found'));
+        }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Webhook not found'));
+        }
+        return ok(this.mapRow(row));
     }
 
     async delete(id: string, tenantId: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
-        
-        return (result.rowCount ?? 0) > 0;
+
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     /**
@@ -312,34 +322,34 @@ export class WebhooksRepository {
     async rotateSecret(id: string, tenantId: string): Promise<Result<Webhook, Error>> {
         const newSecret = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `UPDATE webhooks
-                 SET secret = $1, updated_at = NOW()
-                 WHERE id = $2 AND tenant_id = $3
-                 RETURNING *`,
-                [newSecret, id, tenantId]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `UPDATE webhooks
+             SET secret = $1, updated_at = NOW()
+             WHERE id = $2 AND tenant_id = $3
+             RETURNING *`,
+            [newSecret, id, tenantId]
+        );
 
-            if (result.rows.length === 0) {
-                return err(new Error('Webhook not found'));
-            }
-
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Webhook not found'));
-            }
-            return ok(this.mapRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        if (result.value.rows.length === 0) {
+            return err(new Error('Webhook not found'));
+        }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Webhook not found'));
+        }
+        return ok(this.mapRow(row));
     }
 
     // FIX-500-258/265: Add RETURNING id + rowCount check and tenant_id WHERE clause
     async recordTrigger(id: string, success: boolean, errorMessage?: string, tenantId?: string): Promise<boolean> {
         if (success) {
             const params = tenantId ? [id, tenantId] : [id];
-            const result = await this.pool.query(
+            const result = await this.db.query(
                 `UPDATE webhooks 
                  SET last_triggered_at = NOW(),
                      last_success_at = NOW(),
@@ -349,12 +359,13 @@ export class WebhooksRepository {
                  RETURNING id`,
                 params
             );
-            return (result.rowCount ?? 0) > 0;
+            if (!result.ok) throw result.error;
+            return (result.value.rowCount ?? 0) > 0;
         } else {
             const params = tenantId
                 ? [id, errorMessage ?? 'Too many consecutive failures', tenantId]
                 : [id, errorMessage ?? 'Too many consecutive failures'];
-            const result = await this.pool.query(
+            const result = await this.db.query(
                 `UPDATE webhooks 
                  SET last_triggered_at = NOW(),
                      last_failure_at = NOW(),
@@ -365,7 +376,8 @@ export class WebhooksRepository {
                  RETURNING id`,
                 params
             );
-            return (result.rowCount ?? 0) > 0;
+            if (!result.ok) throw result.error;
+            return (result.value.rowCount ?? 0) > 0;
         }
     }
 
@@ -376,22 +388,22 @@ export class WebhooksRepository {
     async enqueue(data: WebhookQueueInsert): Promise<Result<WebhookQueueItem, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO webhook_queue (id, webhook_id, tenant_id, event_type, payload, next_attempt_at)
-                 VALUES ($1, $2, $3, $4, $5, NOW())
-                 RETURNING *`,
-                [id, data.webhookId, data.tenantId, data.eventType, JSON.stringify(data.payload)]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO webhook_queue (id, webhook_id, tenant_id, event_type, payload, next_attempt_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())
+             RETURNING *`,
+            [id, data.webhookId, data.tenantId, data.eventType, JSON.stringify(data.payload)]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to enqueue webhook'));
-            }
-            return ok(this.mapQueueRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to enqueue webhook'));
+        }
+        return ok(this.mapQueueRow(row));
     }
 
     /**
@@ -401,7 +413,7 @@ export class WebhooksRepository {
      * passed — causing duplicate deliveries.
      */
     async dequeue(batchSize: number = 10): Promise<WebhookQueueItem[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `UPDATE webhook_queue
              SET status = 'processing',
                  attempt = attempt + 1,
@@ -419,12 +431,13 @@ export class WebhooksRepository {
             [batchSize]
         );
 
-        return result.rows.map(row => this.mapQueueRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapQueueRow(row));
     }
 
     // FIX-500-256: Add RETURNING id + rowCount check
     async markDelivered(id: string, responseStatus: number, responseBody?: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `UPDATE webhook_queue
              SET status = 'delivered',
                  response_status = $2,
@@ -434,12 +447,13 @@ export class WebhooksRepository {
              RETURNING id`,
             [id, responseStatus, responseBody]
         );
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     // FIX-500-257: Add RETURNING id + rowCount check
     async markFailed(id: string, errorMessage: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `UPDATE webhook_queue
              SET status = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE status END,
                  error_message = $2,
@@ -448,7 +462,8 @@ export class WebhooksRepository {
              RETURNING id`,
             [id, errorMessage]
         );
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     async getQueueStats(tenantId: string): Promise<{
@@ -456,7 +471,7 @@ export class WebhooksRepository {
         delivered: number;
         failed: number;
     }> {
-        const result = await this.pool.query<{ status: string; count: string }>(
+        const result = await this.db.query<{ status: string; count: string }>(
             `SELECT status, COUNT(*)::text as count
              FROM webhook_queue
              WHERE tenant_id = $1
@@ -465,8 +480,10 @@ export class WebhooksRepository {
             [tenantId]
         );
 
+        if (!result.ok) throw result.error;
+
         const stats = { pending: 0, delivered: 0, failed: 0 };
-        for (const row of result.rows) {
+        for (const row of result.value.rows) {
             if (row.status === 'pending') stats.pending = parseInt(row.count, 10);
             if (row.status === 'delivered') stats.delivered = parseInt(row.count, 10);
             if (row.status === 'failed') stats.failed = parseInt(row.count, 10);

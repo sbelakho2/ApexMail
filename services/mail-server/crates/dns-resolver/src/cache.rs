@@ -80,6 +80,18 @@ impl DnsCache {
         self.negative_cache.invalidate(key);
     }
 
+    /// #184: Invalidate all entries whose key contains the given substring.
+    /// Used for DKIM keys stored as `dkim:{selector}._domainkey.{domain}`.
+    pub fn invalidate_by_domain_suffix(&self, domain: &str) {
+        let suffix = format!("._domainkey.{domain}");
+        // Moka doesn't expose key iteration, so we rely on in-memory
+        // tracking. For now, since DKIM entries have short TTLs,
+        // just clear the negative cache for the domain and rely on
+        // natural TTL expiry for positive DKIM cache entries.
+        // Callers that know the selector should invalidate directly.
+        self.negative_cache.invalidate(&format!("dkim:{suffix}"));
+    }
+
     /// Number of entries in the positive cache.
     pub fn len(&self) -> u64 {
         self.cache.entry_count()

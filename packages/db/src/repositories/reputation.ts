@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
 import { ok, err, type Result } from '@apexmail/lib';
+import type { DatabasePool } from '../pool.js';
 
 // =============================================================================
 // Types
@@ -51,7 +51,7 @@ export interface ReputationSummary {
 // =============================================================================
 
 export class ReputationRepository {
-    constructor(private pool: Pool) {}
+    constructor(private readonly db: DatabasePool) {}
 
     // -------------------------------------------------------------------------
     // Daily Stats
@@ -73,34 +73,36 @@ export class ReputationRepository {
 
         const today = new Date().toISOString().split('T')[0];
         
-        await this.pool.query(
+        const result = await this.db.query(
             `INSERT INTO reputation_stats (tenant_id, date, ${metric})
              VALUES ($1, $2, 1)
              ON CONFLICT (tenant_id, date)
              DO UPDATE SET ${metric} = reputation_stats.${metric} + 1`,
             [tenantId, today]
         );
+        if (!result.ok) throw result.error;
     }
 
     /**
      * Get stats for a date range
      */
     async getStats(tenantId: string, startDate: Date, endDate: Date): Promise<ReputationStats[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM reputation_stats
              WHERE tenant_id = $1 AND date >= $2 AND date <= $3
              ORDER BY date`,
             [tenantId, startDate, endDate]
         );
 
-        return result.rows.map(row => this.mapStatsRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapStatsRow(row));
     }
 
     /**
      * Get aggregated stats for a period
      */
     async getAggregatedStats(tenantId: string, days: number): Promise<ReputationStats> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT 
                 $1 as tenant_id,
                 NOW() as date,
@@ -116,7 +118,8 @@ export class ReputationRepository {
             [tenantId, days]
         );
 
-        const row = result.rows[0];
+        if (!result.ok) throw result.error;
+        const row = result.value.rows[0];
         if (!row) {
             return this.mapStatsRow({
                 tenant_id: tenantId,
@@ -141,7 +144,7 @@ export class ReputationRepository {
         const currentStats = await this.getAggregatedStats(tenantId, 7);
         
         // Get previous 7 days for comparison
-        const previousResult = await this.pool.query<Record<string, unknown>>(
+        const previousResult = await this.db.query<Record<string, unknown>>(
             `SELECT 
                 COALESCE(SUM(sent), 0) as sent,
                 COALESCE(SUM(delivered), 0) as delivered,
@@ -154,7 +157,8 @@ export class ReputationRepository {
             [tenantId]
         );
 
-        const previousStats = previousResult.rows[0];
+        if (!previousResult.ok) throw previousResult.error;
+        const previousStats = previousResult.value.rows[0];
 
         const deliveryRate = currentStats.sent > 0 
             ? (currentStats.delivered / currentStats.sent) * 100 
@@ -214,45 +218,46 @@ export class ReputationRepository {
     }): Promise<Result<ReputationAlert, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            // FIX-500-056: Atomic upsert using CTE to prevent TOCTOU race condition
-            const result = await this.pool.query<Record<string, unknown>>(
-                `WITH check_existing AS (
-                    SELECT 1 FROM reputation_alerts
-                    WHERE tenant_id = $2 AND alert_type = $3
-                      AND created_at > NOW() - INTERVAL '24 hours'
-                      AND acknowledged = false
-                    LIMIT 1
-                )
-                INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold)
-                SELECT $1, $2, $3, $4, $5
-                WHERE NOT EXISTS (SELECT 1 FROM check_existing)
-                RETURNING *`,
-                [id, tenantId, data.alertType, data.value, data.threshold]
-            );
+        // FIX-500-056: Atomic upsert using CTE to prevent TOCTOU race condition
+        const result = await this.db.query<Record<string, unknown>>(
+            `WITH check_existing AS (
+                SELECT 1 FROM reputation_alerts
+                WHERE tenant_id = $2 AND alert_type = $3
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                  AND acknowledged = false
+                LIMIT 1
+            )
+            INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold)
+            SELECT $1, $2, $3, $4, $5
+            WHERE NOT EXISTS (SELECT 1 FROM check_existing)
+            RETURNING *`,
+            [id, tenantId, data.alertType, data.value, data.threshold]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Duplicate alert already exists'));
-            }
-            return ok(this.mapAlertRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Duplicate alert already exists'));
+        }
+        return ok(this.mapAlertRow(row));
     }
 
     /**
      * Get unacknowledged alerts for a tenant
      */
     async getActiveAlerts(tenantId: string): Promise<ReputationAlert[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM reputation_alerts
              WHERE tenant_id = $1 AND acknowledged = false
              ORDER BY created_at DESC`,
             [tenantId]
         );
 
-        return result.rows.map(row => this.mapAlertRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapAlertRow(row));
     }
 
     /**
@@ -274,11 +279,11 @@ export class ReputationRepository {
         const whereClause = conditions.join(' AND ');
 
         const [countResult, dataResult] = await Promise.all([
-            this.pool.query<{ count: string }>(
+            this.db.query<{ count: string }>(
                 `SELECT COUNT(*)::text as count FROM reputation_alerts WHERE ${whereClause}`,
                 values
             ),
-            this.pool.query<Record<string, unknown>>(
+            this.db.query<Record<string, unknown>>(
                 `SELECT * FROM reputation_alerts
                  WHERE ${whereClause}
                  ORDER BY created_at DESC
@@ -287,9 +292,12 @@ export class ReputationRepository {
             )
         ]);
 
+        if (!countResult.ok) throw countResult.error;
+        if (!dataResult.ok) throw dataResult.error;
+
         return {
-            alerts: dataResult.rows.map(row => this.mapAlertRow(row)),
-            total: parseInt(countResult.rows[0]?.count ?? '0', 10)
+            alerts: dataResult.value.rows.map(row => this.mapAlertRow(row)),
+            total: parseInt(countResult.value.rows[0]?.count ?? '0', 10)
         };
     }
 
@@ -297,28 +305,30 @@ export class ReputationRepository {
      * Acknowledge an alert
      */
     async acknowledgeAlert(id: string, tenantId: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `UPDATE reputation_alerts
              SET acknowledged = true
              WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     /**
      * Acknowledge all alerts for a tenant
      */
     async acknowledgeAllAlerts(tenantId: string): Promise<number> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `UPDATE reputation_alerts
              SET acknowledged = true
              WHERE tenant_id = $1 AND acknowledged = false`,
             [tenantId]
         );
 
-        return result.rowCount ?? 0;
+        if (!result.ok) throw result.error;
+        return result.value.rowCount ?? 0;
     }
 
     // -------------------------------------------------------------------------

@@ -112,7 +112,7 @@ async fn traces_list(
     State(state): State<AppState>,
     Query(params): Query<TracesQuery>,
 ) -> Json<Vec<crate::types::TraceSpan>> {
-    let limit = params.limit.unwrap_or(100);
+    let limit = clamp_limit(params.limit.unwrap_or(100), 1000);
     Json(state.traces.list_recent(limit))
 }
 
@@ -121,7 +121,7 @@ async fn logs_query(
     Query(params): Query<LogsQuery>,
 ) -> Json<Vec<crate::types::LogEntry>> {
     let level_filter = params.level.as_deref().and_then(parse_log_level);
-    let limit = params.limit.unwrap_or(200);
+    let limit = clamp_limit(params.limit.unwrap_or(200), 1000);
     Json(state.logs.query(level_filter, params.service.as_deref(), limit))
 }
 
@@ -157,6 +157,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn clamp_limit(limit: usize, max: usize) -> usize {
+    limit.clamp(1, max)
+}
 
 fn parse_log_level(s: &str) -> Option<LogLevel> {
     match s.to_lowercase().as_str() {

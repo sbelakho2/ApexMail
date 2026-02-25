@@ -89,7 +89,7 @@ impl Default for AnalyticsConfig {
 impl AnalyticsConfig {
     pub fn from_env() -> Self {
         let _ = dotenvy::dotenv();
-        Self {
+        let config = Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
@@ -129,7 +129,39 @@ impl AnalyticsConfig {
                     .unwrap_or(20),
                 query_timeout_secs: 30,
             },
+        };
+        if let Err(err) = config.validate() {
+            panic!("Invalid analytics config: {err}");
         }
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.database_url.trim().is_empty() {
+            return Err("DATABASE_URL must not be empty".into());
+        }
+        if self.redis_url.trim().is_empty() {
+            return Err("REDIS_URL must not be empty".into());
+        }
+        if self.storage_path.trim().is_empty() {
+            return Err("ANALYTICS_STORAGE_PATH must not be empty".into());
+        }
+        if self.compaction.batch_size == 0 {
+            return Err("ANALYTICS_COMPACTION_BATCH_SIZE must be > 0".into());
+        }
+        if self.compaction.hot_retention_days == 0 || self.compaction.cold_retention_days == 0 {
+            return Err("Retention days must be > 0".into());
+        }
+        if self.compaction.cold_retention_days < self.compaction.hot_retention_days {
+            return Err("Cold retention days must be >= hot retention days".into());
+        }
+        if self.compaction.schedule_hour >= 24 || self.reconciliation.schedule_hour >= 24 {
+            return Err("Schedule hours must be between 0 and 23".into());
+        }
+        if self.clickhouse.max_connections == 0 {
+            return Err("CLICKHOUSE_MAX_CONNECTIONS must be > 0".into());
+        }
+        Ok(())
     }
 }
 

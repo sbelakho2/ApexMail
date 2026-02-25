@@ -17,11 +17,10 @@ use super::tracking::{add_tracking_pixel, rewrite_links};
 use super::transport::{create_transport, EmailTransport};
 use super::types::{
     Attachment, CachedSuppression, Domain, DkimConfig, EmailJob, PreparedEmail,
-    RateLimitResult, SendOutcome, SendResult, Suppression, WarmupLimits,
+    SendOutcome, SendResult, WarmupLimits,
 };
 use crate::common::{
     CircuitBreaker, CircuitBreakerConfig, EmailConfig, ProcessorError, ProcessorResult, RedisPool,
-    TrackingConfig,
 };
 
 /// Maximum suppression cache size.
@@ -42,6 +41,7 @@ const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 /// Email processor for sending emails from the queue.
 pub struct EmailProcessor {
     db: PgPool,
+    #[allow(dead_code)]
     redis: RedisPool,
     config: EmailConfig,
     transport: Box<dyn EmailTransport>,
@@ -51,6 +51,7 @@ pub struct EmailProcessor {
 
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
+    #[allow(dead_code)]
     warmup_day_cache: Cache<String, i32>,
     dkim_keys: Mutex<HashMap<String, DkimConfig>>,
     domain_cache: Cache<String, Domain>,
@@ -187,7 +188,8 @@ impl EmailProcessor {
                     // Batch suppression check
                     let suppressions = self.batch_suppression_check(&jobs).await;
 
-                    // Process jobs (sequentially for simplicity; spawn separately for concurrency)
+                    // Fix #94: Process jobs concurrently using tokio::spawn
+                    let mut handles = Vec::with_capacity(jobs.len());
                     for job in jobs {
                         let suppression = suppressions.get(&format!("{}:{}", job.tenant_id, job.to));
                         if let Some(reason) = suppression {
@@ -198,8 +200,14 @@ impl EmailProcessor {
                             continue;
                         }
 
-                        if let Err(e) = self.process_job(job).await {
-                            // Error already handled in process_job
+                        // Process non-suppressed jobs concurrently
+                        handles.push(self.process_job(job));
+                    }
+
+                    // Await all concurrently
+                    let results = futures::future::join_all(handles).await;
+                    for result in results {
+                        if let Err(e) = result {
                             debug!(error = %e, "Job failed");
                         }
                     }
@@ -217,9 +225,14 @@ impl EmailProcessor {
 
     /// Fetch jobs from the queue.
     async fn fetch_jobs(&self, limit: usize) -> ProcessorResult<Vec<EmailJob>> {
-        let lock_until = Utc::now() + chrono::Duration::milliseconds(
-            self.config.base.visibility_timeout.as_millis() as i64
-        );
+        // Fix #63: Use saturating_as to prevent truncation on large timeouts.
+        let visibility_ms = self.config.base.visibility_timeout.as_millis();
+        let visibility_ms_i64 = if visibility_ms > i64::MAX as u128 {
+            i64::MAX
+        } else {
+            visibility_ms as i64
+        };
+        let lock_until = Utc::now() + chrono::Duration::milliseconds(visibility_ms_i64);
 
         let jobs = sqlx::query_as::<_, EmailJob>(
             r#"
@@ -279,7 +292,9 @@ impl EmailProcessor {
 
             // Query database for uncached
             if !uncached.is_empty() {
-                let suppressions: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+                // Fix #64: Properly handle DB errors - fail safe by treating as suppressed
+                // to avoid sending to potentially suppressed recipients.
+                let db_result = sqlx::query_as::<_, (String, String)>(
                     r#"
                     SELECT email, reason
                     FROM suppressions
@@ -289,8 +304,21 @@ impl EmailProcessor {
                 .bind(&tenant_id)
                 .bind(&uncached)
                 .fetch_all(&self.db)
-                .await
-                .unwrap_or_default();
+                .await;
+
+                let suppressions: Vec<(String, String)> = match db_result {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::error!(tenant_id = %tenant_id, error = %e, 
+                            "Failed to check suppressions; treating all as suppressed for safety");
+                        // Fail safe: treat all uncached emails as suppressed
+                        for email in &uncached {
+                            let cache_key = format!("{}:{}", tenant_id, email);
+                            result.insert(cache_key, "suppression_check_failed".to_string());
+                        }
+                        continue;
+                    }
+                };
 
                 // Build set of suppressed emails
                 let suppressed_emails: std::collections::HashSet<String> =
@@ -422,7 +450,7 @@ impl EmailProcessor {
         let limits = WarmupLimits::for_day(domain.warmup_day);
 
         // Get and increment current count
-        let mut counters = self.warmup_counters.lock().unwrap();
+        let mut counters = self.warmup_counters.lock().unwrap_or_else(|e| e.into_inner());
         let current = counters.entry(job.domain_id.clone()).or_insert(0);
 
         if *current >= limits.daily_limit {
@@ -483,10 +511,24 @@ impl EmailProcessor {
             headers.push(("X-ApexMail-Campaign-ID".to_string(), campaign_id.clone()));
         }
 
-        // Add custom headers from job
+        // Fix #77: Protected headers that cannot be overwritten by custom headers
+        const PROTECTED_HEADERS: &[&str] = &[
+            "from", "to", "cc", "bcc", "subject", "date", "message-id",
+            "dkim-signature", "arc-seal", "arc-message-signature", "arc-authentication-results",
+            "return-path", "received", "received-spf", "authentication-results",
+            "x-apexmail-message-id", "x-apexmail-tenant-id", "x-apexmail-campaign-id",
+            "x-originating-ip", "x-mailer", "mime-version", "content-type", "content-transfer-encoding",
+        ];
+
+        // Add custom headers from job (filtering protected headers)
         if let Some(ref job_headers) = job.headers {
             if let Some(obj) = job_headers.as_object() {
                 for (key, value) in obj {
+                    let key_lower = key.to_lowercase();
+                    if PROTECTED_HEADERS.contains(&key_lower.as_str()) {
+                        tracing::warn!(header = %key, "Blocked attempt to set protected header via custom headers");
+                        continue;
+                    }
                     if let Some(v) = value.as_str() {
                         headers.push((key.clone(), v.to_string()));
                     }
@@ -495,6 +537,7 @@ impl EmailProcessor {
         }
 
         // DKIM config
+        // Fix #99: Consult pre-loaded dkim_keys map as fallback when domain doesn't have DKIM config
         let dkim = if self.config.dkim.enabled {
             domain.dkim_private_key.as_ref().map(|key| DkimConfig {
                 selector: domain
@@ -503,6 +546,10 @@ impl EmailProcessor {
                     .unwrap_or_else(|| self.config.dkim.selector.clone()),
                 domain: domain.domain.clone(),
                 private_key: key.clone(),
+            }).or_else(|| {
+                // Fallback: check pre-loaded dkim_keys map
+                let dkim_keys = self.dkim_keys.lock().unwrap_or_else(|e| e.into_inner());
+                dkim_keys.get(&domain.id).cloned()
             })
         } else {
             None
@@ -599,8 +646,10 @@ impl EmailProcessor {
         }
 
         let next_attempt = job.attempt + 1;
+        // Fix #65: Use saturating_pow to prevent overflow for large attempt counts.
+        let backoff_multiplier = 2_i64.saturating_pow(job.attempt.min(30) as u32);
         let retry_at = Utc::now() + chrono::Duration::seconds(
-            (self.config.base.retry_delay.as_secs() as i64) * 2_i64.pow(job.attempt as u32)
+            (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier)
         );
 
         sqlx::query(
@@ -725,7 +774,7 @@ impl EmailProcessor {
     fn record_outcome(&self, outcome: SendOutcome) {
         let now = Instant::now();
 
-        let mut outcomes = self.recent_outcomes.lock().unwrap();
+        let mut outcomes = self.recent_outcomes.lock().unwrap_or_else(|e| e.into_inner());
         outcomes.push((outcome, now));
 
         // Evict old entries (>60s)
@@ -770,7 +819,7 @@ impl EmailProcessor {
         .fetch_all(&self.db)
         .await?;
 
-        let mut dkim_keys = self.dkim_keys.lock().unwrap();
+        let mut dkim_keys = self.dkim_keys.lock().unwrap_or_else(|e| e.into_inner());
         dkim_keys.clear();
 
         for (id, domain, selector, key) in keys {

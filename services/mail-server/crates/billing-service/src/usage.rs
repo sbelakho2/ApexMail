@@ -40,7 +40,7 @@ pub async fn record_usage(
         .arg("NX")
         .query_async(&mut conn)
         .await
-        .unwrap_or(false);
+        .map_err(UsageError::RedisCmd)?;
 
     if !was_set {
         return Ok(false); // duplicate
@@ -72,8 +72,8 @@ pub async fn record_usage(
         now.year(),
         now.month()
     );
-    let _: () = conn.incr(&period_key, quantity).await.unwrap_or(());
-    let _: () = conn.expire(&period_key, 40 * 86_400).await.unwrap_or(()); // 40 days TTL
+    let _: i64 = conn.incr(&period_key, quantity).await.map_err(UsageError::RedisCmd)?;
+    let _: () = conn.expire(&period_key, 40 * 86_400).await.map_err(UsageError::RedisCmd)?; // 40 days TTL
 
     Ok(true)
 }
@@ -171,7 +171,8 @@ pub async fn check_quota(
     );
 
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
-    let current: i64 = conn.get(&counter_key).await.unwrap_or(0);
+    let current: Option<i64> = conn.get(&counter_key).await.map_err(UsageError::RedisCmd)?;
+    let current = current.unwrap_or(0);
 
     let limits: Option<EmailLimitRow> = sqlx::query_as(
         r#"
@@ -222,19 +223,32 @@ pub async fn reset_monthly_counters(
     let pattern = format!("meter:rt:{tenant_id}:*:{year}-{month:02}");
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
-    // SCAN-based deletion – safe for production.
-    let keys: Vec<String> = redis::cmd("KEYS")
-        .arg(&pattern)
-        .query_async(&mut conn)
-        .await
-        .unwrap_or_default();
-
-    if !keys.is_empty() {
-        let _: () = redis::cmd("DEL")
-            .arg(&keys)
+    // Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
+    let mut cursor: u64 = 0;
+    let mut all_keys: Vec<String> = Vec::new();
+    loop {
+        let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(100)
             .query_async(&mut conn)
             .await
-            .unwrap_or(());
+            .map_err(UsageError::RedisCmd)?;
+        all_keys.extend(batch);
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    if !all_keys.is_empty() {
+        let _: () = redis::cmd("DEL")
+            .arg(&all_keys)
+            .query_async(&mut conn)
+            .await
+            .map_err(UsageError::RedisCmd)?;
     }
 
     Ok(())

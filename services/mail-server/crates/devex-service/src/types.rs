@@ -226,6 +226,8 @@ pub enum DevExError {
     UnsupportedLanguage(String),
     #[error("version not found: {0}")]
     VersionNotFound(String),
+    #[error("validation error: {0}")]
+    Validation(String),
     #[error("webhook error: {0}")]
     WebhookError(String),
     #[error("openapi error: {0}")]

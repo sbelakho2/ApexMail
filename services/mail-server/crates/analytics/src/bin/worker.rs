@@ -160,7 +160,7 @@ fn next_scheduled_time(
     now: chrono::DateTime<chrono::Utc>,
     target_hour: u32,
 ) -> chrono::DateTime<chrono::Utc> {
-    use chrono::{Duration, Timelike};
+    use chrono::{TimeDelta, Timelike};
 
     let current_hour = now.hour();
     let hours_until = if current_hour < target_hour {
@@ -169,7 +169,7 @@ fn next_scheduled_time(
         24 - current_hour + target_hour
     };
 
-    now + Duration::hours(hours_until as i64)
-        - Duration::minutes(now.minute() as i64)
-        - Duration::seconds(now.second() as i64)
+    now + TimeDelta::try_hours(hours_until as i64).unwrap_or(TimeDelta::zero())
+        - TimeDelta::try_minutes(now.minute() as i64).unwrap_or(TimeDelta::zero())
+        - TimeDelta::try_seconds(now.second() as i64).unwrap_or(TimeDelta::zero())
 }

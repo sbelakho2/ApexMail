@@ -96,6 +96,16 @@
     min-height: 100vh;
     text-rendering: optimizeLegibility;
   }
+
+  button,
+  [role='button'],
+  a[role='button'],
+  input[type='button'],
+  input[type='submit'],
+  input[type='reset'] {
+    min-height: 44px;
+  }
+
   p {
     @apply max-w-[65ch];
   }

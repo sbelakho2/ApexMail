@@ -63,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
     let health_pool = pool.clone();
     let health_redis = redis_pool.clone();
     let health_port = config.health_port;
-    tokio::spawn(async move {
+    // #152: Store health server handle for proper shutdown
+    let health_handle = tokio::spawn(async move {
         let app = Router::new()
             .route("/health", get(|| async { "OK" }))
             .route(
@@ -90,7 +91,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Inbound server
-    let inbound = if config.inbound.enabled {
+    // #151: Keep server references for graceful stop() calls
+    let (inbound_srv, inbound_handle) = if config.inbound.enabled {
         let srv = Arc::new(InboundServer::new(
             config.inbound.clone(),
             config.rate_limit.clone(),
@@ -101,17 +103,17 @@ async fn main() -> anyhow::Result<()> {
         ));
         let s = srv.clone();
         let tls = tls_acceptor.clone();
-        Some(tokio::spawn(async move {
+        (Some(srv), Some(tokio::spawn(async move {
             if let Err(e) = s.start(tls).await {
                 error!(error = %e, "Inbound server failed");
             }
-        }))
+        })))
     } else {
-        None
+        (None, None)
     };
 
     // Bounce server
-    let bounce = if config.bounce.enabled {
+    let (bounce_srv, bounce_handle) = if config.bounce.enabled {
         let srv = Arc::new(BounceServer::new(
             config.bounce.clone(),
             pool.clone(),
@@ -119,17 +121,17 @@ async fn main() -> anyhow::Result<()> {
             config.bounce.hostname.clone(),
         ));
         let s = srv.clone();
-        Some(tokio::spawn(async move {
+        (Some(srv), Some(tokio::spawn(async move {
             if let Err(e) = s.start().await {
                 error!(error = %e, "Bounce server failed");
             }
-        }))
+        })))
     } else {
-        None
+        (None, None)
     };
 
     // Feedback loop server
-    let fbl = if config.feedback.enabled {
+    let (fbl_srv, fbl_handle) = if config.feedback.enabled {
         let srv = Arc::new(FeedbackLoopServer::new(
             config.feedback.clone(),
             pool.clone(),
@@ -138,13 +140,13 @@ async fn main() -> anyhow::Result<()> {
             &[],
         ));
         let s = srv.clone();
-        Some(tokio::spawn(async move {
+        (Some(srv), Some(tokio::spawn(async move {
             if let Err(e) = s.start().await {
                 error!(error = %e, "FBL server failed");
             }
-        }))
+        })))
     } else {
-        None
+        (None, None)
     };
 
     // Wait for shutdown signal
@@ -152,16 +154,21 @@ async fn main() -> anyhow::Result<()> {
     signal::ctrl_c().await?;
     info!("Shutting down...");
 
-    // Abort server tasks
-    if let Some(h) = inbound { h.abort(); }
-    if let Some(h) = bounce { h.abort(); }
-    if let Some(h) = fbl { h.abort(); }
+    // #151: Signal graceful shutdown on all servers before aborting
+    if let Some(ref srv) = inbound_srv { srv.stop(); }
+    if let Some(ref srv) = bounce_srv { srv.stop(); }
+    if let Some(ref srv) = fbl_srv { srv.stop(); }
 
-    // Grace period
-    tokio::time::sleep(std::time::Duration::from_secs(
-        config.graceful_shutdown_timeout.min(5),
-    ))
-    .await;
+    // #150: Use .max(5) so grace period is AT LEAST 5s (was .min(5) = at most 5s)
+    let grace = std::time::Duration::from_secs(config.graceful_shutdown_timeout.max(5));
+    let _ = tokio::time::timeout(grace, async {
+        if let Some(h) = inbound_handle { let _ = h.await; }
+        if let Some(h) = bounce_handle { let _ = h.await; }
+        if let Some(h) = fbl_handle { let _ = h.await; }
+    }).await;
+
+    // #152: Abort health server last
+    health_handle.abort();
 
     pool.close().await;
     info!("MTA server stopped");
@@ -173,7 +180,7 @@ fn load_tls_acceptor(cert_path: &str, key_path: &str) -> anyhow::Result<tokio_ru
     use std::fs::File;
     use std::io::BufReader;
     use tokio_rustls::rustls;
-    use tokio_rustls::rustls::pki_types::PrivateKeyDer;
+    
 
     let cert_file = File::open(cert_path)?;
     let key_file = File::open(key_path)?;

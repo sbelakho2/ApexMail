@@ -51,9 +51,9 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
 
  return (
  <div className="code-block overflow-hidden">
- <pre className="p-4 text-[13px] leading-relaxed whitespace-pre-wrap break-words">
+ <pre className="p-4 text-[13px] leading-relaxed overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
  <code
- className="font-mono block whitespace-pre-wrap break-words"
+ className="font-mono block whitespace-pre break-normal"
  dangerouslySetInnerHTML={{
  __html: highlightCode(code, language),
  }}

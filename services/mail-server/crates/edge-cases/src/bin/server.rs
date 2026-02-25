@@ -20,7 +20,7 @@ use edge_cases::services::{
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = EdgeCasesConfig::from_env();
+    let config = EdgeCasesConfig::from_env()?;
     info!(port = config.port, "Starting edge-cases server");
 
     // Database pool
@@ -56,15 +56,18 @@ async fn main() -> anyhow::Result<()> {
         attachment,
         calendar,
         delivery,
+        api_key: config.api_key.clone(),
     });
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
+    let mut cors = CorsLayer::new()
         .allow_methods(Any)
         .allow_headers(vec![
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
         ]);
+    if config.node_env == "development" {
+        cors = cors.allow_origin(Any);
+    }
 
     let app = routes::router(state).layer(cors);
 

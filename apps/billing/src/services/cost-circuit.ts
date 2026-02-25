@@ -369,19 +369,20 @@ export class CostCircuitService {
     ];
 
     // Get daily trend
+    const computeRatePerMessage = COST_RATES.computePerHour / 100;
     const trendResult = await this.db.query<{
       date: Date;
       cost: number;
     }>(
       `SELECT DATE(created_at) as date,
-              COUNT(*) * ${COST_RATES.computePerHour / 100} as cost
+              COUNT(*) * $4 as cost
        FROM messages
        WHERE tenant_id = $1
          AND created_at >= $2
          AND created_at < $3
        GROUP BY DATE(created_at)
        ORDER BY date ASC`,
-      [tenantId, periodStart, periodEnd]
+      [tenantId, periodStart, periodEnd, computeRatePerMessage]
     );
 
     const trend = trendResult.ok ? trendResult.value.rows : [];

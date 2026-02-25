@@ -3,9 +3,11 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
-import { Play, Copy, Check, Terminal, Loader2 } from '@/components/ui/icons';
+import { Copy, Check, Terminal, ExternalLink } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
 
 const curlCommand = `curl -X POST https://api.apexmail.ee/v1/messages \\
   -H "X-API-Key: demo_key_xxx" \\
@@ -112,34 +114,26 @@ const languages = [
 export function LiveAPIConsole() {
   const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [email, setEmail] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [sendResult, setSendResult] = useState<{ success: boolean; message: string } | null>(null);
   const [selectedLanguage, setSelectedLanguage] = useState('typescript');
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'err'>('idle');
+  const [emailTouched, setEmailTouched] = useState(false);
 
-  const handleSend = async () => {
-    if (!email || !email.includes('@')) {
-      setSendResult({ success: false, message: 'Please enter a valid email address' });
-      return;
+  const emailError =
+    emailTouched && (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      ? 'Please enter a valid email address'
+      : '';
+
+  const handleCopy = async () => {
+    const text = curlCommand.replace('YOUR_EMAIL', email || 'your@email.com');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied('ok');
+    } catch {
+      // Clipboard write failed (permissions denied or insecure context)
+      setCopied('err');
+    } finally {
+      setTimeout(() => setCopied('idle'), 2500);
     }
-
-    setIsSending(true);
-    setSendResult(null);
-
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1500));
-
-    setIsSending(false);
-    setSendResult({
-      success: true,
-      message: `Test email sent to ${email}! Check your inbox in a few seconds.`,
-    });
-  };
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(curlCommand.replace('YOUR_EMAIL', email || 'test@example.com'));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -152,11 +146,11 @@ export function LiveAPIConsole() {
           className="text-center mb-12"
         >
           <h2 className="section-title mb-4">
-            <span className="text-surface-900">Try It</span>{' '}
-            <span className="text-brand-500">Right Now</span>
+            <span className="text-surface-900">The</span>{' '}
+            <span className="text-brand-500">Developer API</span>
           </h2>
           <p className="text-surface-600 text-lg max-w-2xl mx-auto leading-relaxed">
-            Send a real email in under 10 seconds. No signup, no credit card, no BS.
+            A clean, idiomatic API with official SDKs for every major language. Create a free account to start sending.
           </p>
         </motion.div>
 
@@ -167,91 +161,88 @@ export function LiveAPIConsole() {
           transition={{ delay: 0.2 }}
           className="grid lg:grid-cols-2 gap-8 mb-16"
         >
-          {/* Left - Interactive Demo */}
+          {/* Left - cURL Preview + Sign-up CTA */}
           <div className="p-6 sm:p-8 bg-white rounded-lg border border-surface-200 shadow-sm">
             <div className="flex flex-wrap items-center gap-3 mb-8">
               <div className="w-10 h-10 rounded-sm bg-surface-50 flex items-center justify-center border border-surface-200 text-surface-900">
                 <Terminal className="w-5 h-5" strokeWidth={1.5} />
               </div>
               <div>
-                <h3 className="font-bold text-surface-900 text-[14px]">Live API Console</h3>
-                <p className="text-[14px] text-surface-500 font-medium">Test delivery speed in real-time</p>
+                <h3 className="font-bold text-surface-900 text-[14px]">API Preview</h3>
+                <p className="text-[14px] text-surface-500 font-medium">Real sending requires a free account</p>
               </div>
-              <span className="ml-auto text-[14px] px-2 py-1 rounded-sm bg-surface-50 text-surface-600 border border-surface-200 font-bold">
-                No Login
-              </span>
             </div>
 
-            {/* Email Input */}
+            {/* Recipient preview (cosmetic only — not submitted) */}
             <div className="mb-6">
-              <label htmlFor="api-console-email" className="block text-[14px] font-semibold text-surface-700 mb-2">Your email address</label>
+              <label htmlFor="api-console-email" className="block text-[14px] font-semibold text-surface-700 mb-2">
+                Recipient address <span className="text-surface-400 font-normal">(preview only)</span>
+              </label>
               <input
                 id="api-console-email"
                 type="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (!emailTouched) setEmailTouched(true);
+                }}
+                onBlur={() => setEmailTouched(true)}
                 placeholder="you@example.com"
                 aria-describedby="email-hint"
                 className="w-full px-4 py-3 bg-white border border-surface-200 rounded-sm text-surface-900 placeholder-surface-400 focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/10 transition-colors"
               />
-              <span id="email-hint" className="sr-only">Enter your email to receive a test email from the API</span>
+              <span id="email-hint" className="text-xs text-surface-400 mt-1 block">
+                Updates the cURL preview below. No email is sent from this page.
+              </span>
+              {emailError ? (
+                <p className="mt-2 text-xs font-semibold text-red-600" role="alert" aria-live="assertive">
+                  {emailError}
+                </p>
+              ) : null}
             </div>
 
             {/* Curl Command Preview */}
             <div className="mb-8">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-[14px] font-semibold text-surface-700">cURL command</span>
-                <button
+                <Button
                   onClick={handleCopy}
-                  aria-label={copied ? 'Copied to clipboard' : 'Copy cURL command'}
-                  className="flex items-center gap-1.5 text-[14px] font-bold text-surface-600 hover:text-surface-900 transition-colors bg-white px-3 h-10 rounded-sm border border-surface-200 hover:bg-surface-50"
+                  aria-label={
+                    copied === 'ok'
+                      ? 'Copied to clipboard'
+                      : copied === 'err'
+                      ? 'Copy failed — try manually'
+                      : 'Copy cURL command'
+                  }
+                  variant="outline"
+                  size="sm"
+                  className={cn('gap-1.5 text-[14px]', copied === 'err' && 'text-red-600 border-red-200')}
                 >
-                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  {copied ? 'Copied' : 'Copy'}
-                </button>
+                  {copied === 'ok' ? (
+                    <><Check className="w-4 h-4" /> Copied</>
+                  ) : copied === 'err' ? (
+                    <>Failed—copy manually</>
+                  ) : (
+                    <><Copy className="w-4 h-4" /> Copy</>
+                  )}
+                </Button>
               </div>
               <div className="bg-surface-900 rounded-lg p-5 text-[13px] font-mono overflow-x-auto border border-surface-800 shadow-inner">
-                <pre className="text-surface-300 whitespace-pre-wrap leading-relaxed">{curlCommand.replace('YOUR_EMAIL', email || 'your@email.com')}</pre>
+                <pre className="text-surface-300 whitespace-pre leading-relaxed">{curlCommand.replace('YOUR_EMAIL', email || 'your@email.com')}</pre>
               </div>
             </div>
 
-            {/* Send Button */}
-            <button
-              onClick={handleSend}
-              disabled={isSending}
-              className={cn(
-                'w-full inline-flex items-center justify-center px-6 py-3.5 text-sm font-bold text-white bg-brand-500 rounded-md border border-brand-500 hover:bg-brand-600 transition-colors disabled:opacity-70 disabled:cursor-not-allowed',
-              )}
+            {/* CTA — real sending requires an account */}
+            <Link
+              href="/signup"
+              className="btn-primary w-full flex items-center justify-center gap-2 py-3 text-sm font-semibold"
             >
-              {isSending ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  Processing Delivery...
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-current mr-2" />
-                  Run Request
-                </>
-              )}
-            </button>
-
-            {/* Result Message */}
-            {sendResult && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={cn(
-                  'mt-6 p-4 rounded-lg border text-sm font-semibold flex items-center gap-3',
-                  sendResult.success
-                    ? 'bg-emerald-50 border-emerald-100 text-emerald-700'
-                    : 'bg-red-50 border-red-100 text-red-700'
-                )}
-              >
-                <div className={cn('w-2 h-2 rounded-full shrink-0', sendResult.success ? 'bg-emerald-500' : 'bg-red-500')} />
-                {sendResult.message}
-              </motion.div>
-            )}
+              <ExternalLink className="w-4 h-4" aria-hidden="true" />
+              Create free account &amp; send real emails
+            </Link>
+            <p className="text-center text-xs text-surface-400 mt-3">
+              No credit card required · Free tier included
+            </p>
           </div>
 
           {/* Right - SDK Examples */}

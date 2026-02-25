@@ -400,6 +400,7 @@ export const Menu = createIcon('menu');
 export const LogOut = createIcon('logout');
 export const MoreHorizontal = createIcon('more');
 export const Loader2 = createIcon('spinner');
+export const RefreshCw = Loader2;
 export const Lightbulb = createIcon('lightbulb');
 export const Brain = createIcon('brain');
 export const Gauge = createIcon('gauge');

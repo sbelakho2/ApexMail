@@ -5,6 +5,7 @@ import { AutoDPA } from '@/components/compliance/AutoDPA';
 import { RightToBeForgotten } from '@/components/compliance/RightToBeForgotten';
 import { AuditTrail } from '@/components/compliance/AuditTrail';
 import { ComplianceCTA } from '@/components/compliance/ComplianceCTA';
+import { DemoErrorBoundary } from '@/components/ui/DemoErrorBoundary';
 
 export const metadata: Metadata = {
   title: 'Compliance-as-Code | GDPR, HIPAA, SOC 2',
@@ -19,10 +20,11 @@ export default function CompliancePage() {
   return (
     <>
       <ComplianceHero />
-      <ConsentLedger />
-      <AutoDPA />
-      <RightToBeForgotten />
-      <AuditTrail />
+      {/* Illustrative demos below show feature capabilities. Each section is a product illustration, not live customer data. */}
+      <DemoErrorBoundary demoName="Consent Ledger"><ConsentLedger /></DemoErrorBoundary>
+      <DemoErrorBoundary demoName="Auto DPA"><AutoDPA /></DemoErrorBoundary>
+      <DemoErrorBoundary demoName="Right to Be Forgotten"><RightToBeForgotten /></DemoErrorBoundary>
+      <DemoErrorBoundary demoName="Audit Trail"><AuditTrail /></DemoErrorBoundary>
       <ComplianceCTA />
     </>
   );

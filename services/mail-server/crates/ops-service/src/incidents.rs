@@ -231,36 +231,45 @@ impl IncidentManager {
     }
 
     /// List all incidents that are **not** resolved.
-    pub fn list_active(&self) -> Vec<Incident> {
+    pub fn list_active(&self, limit: usize, offset: usize) -> Vec<Incident> {
         self.cache
             .read()
             .iter()
             .filter(|i| i.status != IncidentStatus::Resolved)
+            .skip(offset)
+            .take(limit)
             .cloned()
             .collect()
     }
 
     /// List active incidents from database (async).
-    pub async fn list_active_from_db(&self) -> Result<Vec<Incident>, sqlx::Error> {
-        let db_incidents = IncidentRepo::list_active(&self.db).await?;
+    pub async fn list_active_from_db(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Incident>, sqlx::Error> {
+        let db_incidents = IncidentRepo::list_active(&self.db, limit, offset).await?;
         Ok(db_incidents
             .into_iter()
-            .map(|i| Incident {
-                id: Uuid::parse_str(&i.id).unwrap_or_default(),
-                title: i.title,
-                severity: IncidentSeverity::P2, // Default, not stored in DB schema
-                status: match i.status.as_str() {
-                    "investigating" => IncidentStatus::Investigating,
-                    "identified" => IncidentStatus::Identified,
-                    "monitoring" => IncidentStatus::Monitoring,
-                    "resolved" => IncidentStatus::Resolved,
-                    _ => IncidentStatus::Open,
-                },
-                started_at: i.created_at,
-                resolved_at: i.resolved_at,
-                affected_services: i.affected_components,
+            .map(|i| {
+                let id = parse_incident_id(&i.id)?;
+                Ok(Incident {
+                    id,
+                    title: i.title,
+                    severity: severity_from_impact(&i.impact),
+                    status: match i.status.as_str() {
+                        "investigating" => IncidentStatus::Investigating,
+                        "identified" => IncidentStatus::Identified,
+                        "monitoring" => IncidentStatus::Monitoring,
+                        "resolved" => IncidentStatus::Resolved,
+                        _ => IncidentStatus::Open,
+                    },
+                    started_at: i.created_at,
+                    resolved_at: i.resolved_at,
+                    affected_services: i.affected_components,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, sqlx::Error>>()?)
     }
 
     /// Retrieve an incident by id from cache.
@@ -271,21 +280,27 @@ impl IncidentManager {
     /// Retrieve an incident by id from database (async).
     pub async fn get_by_id_from_db(&self, id: Uuid) -> Result<Option<Incident>, sqlx::Error> {
         let db_incident = IncidentRepo::get_by_id(&self.db, &id.to_string()).await?;
-        Ok(db_incident.map(|i| Incident {
-            id: Uuid::parse_str(&i.id).unwrap_or_default(),
-            title: i.title,
-            severity: IncidentSeverity::P2,
-            status: match i.status.as_str() {
-                "investigating" => IncidentStatus::Investigating,
-                "identified" => IncidentStatus::Identified,
-                "monitoring" => IncidentStatus::Monitoring,
-                "resolved" => IncidentStatus::Resolved,
-                _ => IncidentStatus::Open,
-            },
-            started_at: i.created_at,
-            resolved_at: i.resolved_at,
-            affected_services: i.affected_components,
-        }))
+        match db_incident {
+            Some(i) => {
+                let id = parse_incident_id(&i.id)?;
+                Ok(Some(Incident {
+                    id,
+                    title: i.title,
+                    severity: severity_from_impact(&i.impact),
+                    status: match i.status.as_str() {
+                        "investigating" => IncidentStatus::Investigating,
+                        "identified" => IncidentStatus::Identified,
+                        "monitoring" => IncidentStatus::Monitoring,
+                        "resolved" => IncidentStatus::Resolved,
+                        _ => IncidentStatus::Open,
+                    },
+                    started_at: i.created_at,
+                    resolved_at: i.resolved_at,
+                    affected_services: i.affected_components,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Return the timeline entries for a given incident from cache.
@@ -304,10 +319,11 @@ impl IncidentManager {
         let mut cache = self.cache.write();
         cache.clear();
         for i in db_incidents {
+            let id = parse_incident_id(&i.id)?;
             cache.push(Incident {
-                id: Uuid::parse_str(&i.id).unwrap_or_default(),
+                id,
                 title: i.title,
-                severity: IncidentSeverity::P2, // Default
+                severity: severity_from_impact(&i.impact),
                 status: match i.status.as_str() {
                     "investigating" => IncidentStatus::Investigating,
                     "identified" => IncidentStatus::Identified,
@@ -324,6 +340,20 @@ impl IncidentManager {
     }
 }
 
+fn severity_from_impact(impact: &str) -> IncidentSeverity {
+    match impact {
+        "critical" => IncidentSeverity::P1,
+        "major" => IncidentSeverity::P2,
+        "minor" => IncidentSeverity::P3,
+        "none" => IncidentSeverity::P4,
+        _ => IncidentSeverity::P2,
+    }
+}
+
+fn parse_incident_id(id: &str) -> Result<Uuid, sqlx::Error> {
+    Uuid::parse_str(id).map_err(|e| sqlx::Error::Decode(Box::new(e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,7 +363,7 @@ mod tests {
         let mgr = IncidentManager::new_in_memory();
         let id = mgr.create_incident_sync("DB outage", IncidentSeverity::P1, vec!["db".into()]);
 
-        let active = mgr.list_active();
+        let active = mgr.list_active(50, 0);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, id);
         assert_eq!(active[0].status, IncidentStatus::Open);
@@ -357,7 +387,7 @@ mod tests {
         let id = mgr.create_incident_sync("High latency", IncidentSeverity::P2, vec!["api".into()]);
 
         mgr.resolve_sync(id, "Fixed");
-        let active = mgr.list_active();
+        let active = mgr.list_active(50, 0);
         assert!(active.is_empty());
 
         let inc = mgr.get_by_id(id).unwrap();

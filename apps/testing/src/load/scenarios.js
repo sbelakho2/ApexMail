@@ -127,7 +127,7 @@ function login() {
     const start = Date.now();
     const payload = JSON.stringify({
         email: `loadtest-${__VU}@apexmail.test`,
-        password: 'TestPassword123!',
+        password: __ENV.E2E_LOAD_TEST_PASSWORD || 'TestPassword123!',
     });
     
     const response = http.post(`${API_URL}/auth/login`, payload, {
@@ -406,7 +406,7 @@ export function setup() {
             `${API_URL}/auth/register`,
             JSON.stringify({
                 email: `loadtest-${i}@apexmail.test`,
-                password: 'TestPassword123!',
+                password: __ENV.E2E_LOAD_TEST_PASSWORD || 'TestPassword123!',
                 name: `Load Test User ${i}`,
             }),
             { headers: { 'Content-Type': 'application/json' } }

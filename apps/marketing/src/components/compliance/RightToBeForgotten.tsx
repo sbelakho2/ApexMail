@@ -26,6 +26,8 @@ export function RightToBeForgotten() {
  const [ref, inView] = useInView({ triggerOnce: true, threshold: 0.1 });
  const [currentStage, setCurrentStage] = useState<DeletionStage>('pending');
  const [isAnimating, setIsAnimating] = useState(false);
+ const prefersReducedMotion = typeof window !== 'undefined'
+   && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
  const startDemo = () => {
  if (isAnimating) return;
@@ -33,6 +35,14 @@ export function RightToBeForgotten() {
  setCurrentStage('pending');
 
  const stages: DeletionStage[] = ['primary', 'replicas', 'backups', 'logs', 'complete'];
+
+ if (prefersReducedMotion) {
+   // Skip animation, jump to complete immediately
+   setCurrentStage('complete');
+   setIsAnimating(false);
+   return;
+ }
+
  let index = 0;
 
  const interval = setInterval(() => {
@@ -51,9 +61,10 @@ export function RightToBeForgotten() {
 
  useEffect(() => {
  if (inView && !isAnimating) {
- const timeout = setTimeout(startDemo, 1000);
+ const timeout = setTimeout(startDemo, prefersReducedMotion ? 0 : 1000);
  return () => clearTimeout(timeout);
  }
+ // eslint-disable-next-line react-hooks/exhaustive-deps
  }, [inView]);
 
  const getStageStatus = (stepId: DeletionStage): 'pending' | 'active' | 'complete' => {
@@ -112,6 +123,8 @@ export function RightToBeForgotten() {
  <button
  onClick={startDemo}
  disabled={isAnimating}
+ aria-label={isAnimating ? 'Processing deletion demo…' : 'Run Right-to-be-Forgotten demo'}
+ data-demo-id="rtbf-demo"
  className={cn(
  'px-5 py-2.5 rounded-md font-semibold text-sm transition-all shadow-sm',
  isAnimating

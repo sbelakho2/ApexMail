@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -116,7 +116,17 @@ async fn handle_webhook_test(
         .send_test_webhook(&body.url, &body.event_type)
         .await
     {
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response(),
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to serialize webhook test result");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": "failed to serialize response" })),
+                )
+                    .into_response()
+            }
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -132,10 +142,30 @@ async fn handle_openapi(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// GET /onboarding/checklist — return the onboarding checklist.
-async fn handle_onboarding_checklist(State(state): State<AppState>) -> impl IntoResponse {
-    // In a full implementation the tenant_id would come from auth middleware.
-    let checklist = state.onboarding.get_checklist("default");
-    Json(checklist)
+#[derive(serde::Deserialize)]
+struct OnboardingQuery {
+    tenant_id: Option<String>,
+}
+
+async fn handle_onboarding_checklist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OnboardingQuery>,
+) -> impl IntoResponse {
+    let tenant_id = query
+        .tenant_id
+        .or_else(|| tenant_id_from_headers(&headers));
+
+    let Some(tenant_id) = tenant_id else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "tenant_id is required" })),
+        )
+            .into_response();
+    };
+
+    let checklist = state.onboarding.get_checklist(&tenant_id);
+    Json(checklist).into_response()
 }
 
 /// Health response.
@@ -151,6 +181,14 @@ async fn handle_health() -> impl IntoResponse {
         status: "healthy",
         service: "devex",
     })
+}
+
+fn tenant_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-apexmail-tenant-id")
+        .or_else(|| headers.get("x-tenant-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

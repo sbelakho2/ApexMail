@@ -17,6 +17,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -24,11 +25,14 @@ use axum::{
 use chrono::Datelike;
 use serde::Deserialize;
 use uuid::Uuid;
+use axum::middleware::Next;
+use axum::response::Response;
 
 use crate::{invoices, plans, subscriptions, types::MeterEventType, usage, AppState};
 
 /// Build the full Axum router for billing.
 pub fn router(state: Arc<AppState>) -> Router {
+    let shared = state.clone();
     Router::new()
         // Plans
         .route("/plans", get(list_plans))
@@ -46,6 +50,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Health
         .route("/health", get(health))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(shared, require_service_auth))
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +76,7 @@ async fn get_plan(
 ) -> Result<impl IntoResponse, ApiError> {
     let plan = plans::get_plan_by_name(&state.db, &name).await?;
     match plan {
-        Some(p) => Ok((StatusCode::OK, Json(serde_json::to_value(p).unwrap())).into_response()),
+        Some(p) => Ok((StatusCode::OK, Json(to_json_value(p)?)).into_response()),
         None => Ok((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "Plan not found" })),
@@ -95,10 +100,9 @@ async fn get_usage(
     let period_start = now
         .date_naive()
         .with_day(1)
-        .unwrap()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc();
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc())
+        .unwrap_or_else(|| now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc());
     let period_end = period_start + chrono::Months::new(1);
     let summary = usage::get_usage(&state.db, q.tenant_id, period_start, period_end).await?;
     Ok(Json(summary))
@@ -153,13 +157,26 @@ fn default_limit() -> i64 {
     50
 }
 
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
+}
+
+fn clamp_offset(offset: i64, max: i64) -> i64 {
+    offset.clamp(0, max)
+}
+
 /// GET /invoices?tenant_id=...&limit=...&offset=...
 async fn list_invoices(
     State(state): State<Arc<AppState>>,
     Query(q): Query<InvoiceListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let invoices =
-        invoices::list_invoices(&state.db, q.tenant_id, q.limit, q.offset).await?;
+    let invoices = invoices::list_invoices(
+        &state.db,
+        q.tenant_id,
+        clamp_limit(q.limit, 500),
+        clamp_offset(q.offset, 100_000),
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "invoices": invoices })))
 }
 
@@ -172,7 +189,7 @@ async fn get_invoice(
     let invoice = invoices::get_invoice_by_id(&state.db, id).await?;
     match invoice {
         Some(inv) if inv.tenant_id == q.tenant_id => {
-            Ok((StatusCode::OK, Json(serde_json::to_value(inv).unwrap())).into_response())
+            Ok((StatusCode::OK, Json(to_json_value(inv)?)).into_response())
         }
         Some(_) | None => Ok((
             StatusCode::NOT_FOUND,
@@ -254,6 +271,45 @@ impl IntoResponse for ApiError {
         )
             .into_response()
     }
+}
+
+fn to_json_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(value)
+        .map_err(|e| ApiError::Plans(sqlx::Error::Decode(Box::new(e))))
+}
+
+async fn require_service_auth(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if req.uri().path() == "/health" {
+        return Ok(next.run(req).await);
+    }
+
+    let token = extract_token(req.headers());
+    if token.as_deref() == Some(state.config.service_auth_token.as_str())
+        && !state.config.service_auth_token.is_empty()
+    {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get("x-api-key") {
+        return value.to_str().ok().map(|s| s.to_string());
+    }
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(raw) = value.to_str() {
+            let raw = raw.trim();
+            if let Some(token) = raw.strip_prefix("Bearer ") {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

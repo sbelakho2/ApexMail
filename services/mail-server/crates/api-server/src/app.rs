@@ -1,5 +1,6 @@
 //! Application builder — assembles all middleware and routes into an Axum `Router`.
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::{Json, Router};
@@ -9,7 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::middleware::request_logger;
+use crate::middleware::{auth, idempotency, rate_limiter, request_logger};
 use crate::routes;
 use crate::state::AppState;
 
@@ -56,6 +57,8 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/auth", routes::auth::router());
 
     // ── Authenticated v1 routes ─────────────────────────────
+    //  Fix #6: Wrap with auth middleware so every route requires authentication.
+    //  Fix #7: Wire rate limiting and idempotency middleware.
     let authenticated = Router::new()
         .nest("/v1/messages", routes::messages::router())
         .nest("/v1/domains", routes::domains::router())
@@ -70,7 +73,19 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/contacts", routes::contacts::router())
         .nest("/v1/automations", routes::automations::router())
         .nest("/v1/ai", routes::ai_insights::router())
-        .nest("/v1/dedicated-ips", routes::dedicated_ips::router());
+        .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            idempotency::idempotency_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limiter::rate_limit_middleware,
+        ));
 
     // ── Assemble ────────────────────────────────────────────
     Router::new()
@@ -81,13 +96,26 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn(request_logger::request_logger))
         .layer(CompressionLayer::new())
+        // Fix #8: Limit request body to 10 MiB to prevent memory exhaustion.
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
 }
 
-// ─── Security headers ──────────────────────────────────────────
+// ─── Security headers (Fix #9: use from_static, no runtime panics) ─────────
+
+static HDR_API_VERSION: HeaderValue = HeaderValue::from_static("v1");
+static HDR_HSTS: HeaderValue =
+    HeaderValue::from_static("max-age=31536000; includeSubDomains");
+static HDR_FRAME_OPTIONS: HeaderValue = HeaderValue::from_static("DENY");
+static HDR_CONTENT_TYPE_OPTIONS: HeaderValue = HeaderValue::from_static("nosniff");
+static HDR_XSS_PROTECTION: HeaderValue = HeaderValue::from_static("0");
+static HDR_REFERRER_POLICY: HeaderValue =
+    HeaderValue::from_static("strict-origin-when-cross-origin");
+static HDR_CACHE_CONTROL: HeaderValue =
+    HeaderValue::from_static("no-store, no-cache, must-revalidate");
 
 async fn security_headers(
     req: axum::extract::Request,
@@ -95,22 +123,13 @@ async fn security_headers(
 ) -> axum::response::Response {
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
-    headers.insert("X-API-Version", "v1".parse().unwrap());
-    headers.insert(
-        "Strict-Transport-Security",
-        "max-age=31536000; includeSubDomains".parse().unwrap(),
-    );
-    headers.insert("X-Frame-Options", "DENY".parse().unwrap());
-    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
-    headers.insert("X-XSS-Protection", "0".parse().unwrap());
-    headers.insert(
-        "Referrer-Policy",
-        "strict-origin-when-cross-origin".parse().unwrap(),
-    );
-    headers.insert(
-        "Cache-Control",
-        "no-store, no-cache, must-revalidate".parse().unwrap(),
-    );
+    headers.insert("X-API-Version", HDR_API_VERSION.clone());
+    headers.insert("Strict-Transport-Security", HDR_HSTS.clone());
+    headers.insert("X-Frame-Options", HDR_FRAME_OPTIONS.clone());
+    headers.insert("X-Content-Type-Options", HDR_CONTENT_TYPE_OPTIONS.clone());
+    headers.insert("X-XSS-Protection", HDR_XSS_PROTECTION.clone());
+    headers.insert("Referrer-Policy", HDR_REFERRER_POLICY.clone());
+    headers.insert("Cache-Control", HDR_CACHE_CONTROL.clone());
     resp
 }
 

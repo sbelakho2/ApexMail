@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use deadpool_redis::Pool as RedisPool;
+use reqwest::Client;
 use sqlx::PgPool;
 
 use crate::config::Config;
@@ -15,11 +16,17 @@ pub struct AppStateInner {
     pub db: PgPool,
     pub redis: RedisPool,
     pub config: Config,
+    pub http_client: Client,
 }
 
 impl AppStateInner {
-    pub fn new(db: PgPool, redis: RedisPool, config: Config) -> AppState {
-        Arc::new(Self { db, redis, config })
+    pub fn new(db: PgPool, redis: RedisPool, config: Config, http_client: Client) -> AppState {
+        Arc::new(Self {
+            db,
+            redis,
+            config,
+            http_client,
+        })
     }
 }
 

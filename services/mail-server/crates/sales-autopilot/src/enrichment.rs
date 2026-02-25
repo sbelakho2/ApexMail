@@ -1,4 +1,5 @@
 use chrono::Utc;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::types::{Company, SalesError};
@@ -12,7 +13,6 @@ use crate::types::{Company, SalesError};
 #[derive(Debug, Clone)]
 pub struct EnrichmentService {
     /// Base URL of the external enrichment API (unused in mock mode).
-    #[allow(dead_code)]
     api_url: String,
 }
 
@@ -45,6 +45,9 @@ impl EnrichmentService {
 
     /// Look up (or mock) company data for a domain.
     pub fn enrich_company(&self, domain: &str) -> Result<Company, SalesError> {
+        if !self.api_url.is_empty() {
+            debug!(api_url = %self.api_url, "using mock enrichment backend");
+        }
         // Deterministic mock data keyed on domain.
         let (name, industry, size, revenue) = match domain {
             "acme.com" => ("Acme Corp", "SaaS", "50-200", "$5M-$20M"),

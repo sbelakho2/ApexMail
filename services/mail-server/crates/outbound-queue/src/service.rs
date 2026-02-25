@@ -19,6 +19,8 @@ use mail_proto::generated::{
 };
 use crate::queue::{EmailQueue, QueuedEmail, EmailStatus};
 
+const MAX_BULK_EMAILS: usize = 1_000;
+
 /// Outbound gRPC service
 pub struct OutboundServiceImpl {
     queue: Arc<EmailQueue>,
@@ -52,7 +54,7 @@ impl OutboundService for OutboundServiceImpl {
             from_address: req.from,
             to_addresses: req.to,
             subject: req.subject,
-            text_body: if req.text_body.is_empty() { None } else { Some(req.text_body) },
+            text_body: Some(req.text_body),  // #118: Preserve empty string as Some("")
             html_body: if req.html_body.is_empty() { None } else { Some(req.html_body) },
             headers: serde_json::Value::Object(
                 req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
@@ -106,7 +108,7 @@ impl OutboundService for OutboundServiceImpl {
             from_address: req.from.clone(),
             to_addresses: req.to.clone(),
             subject: req.subject,
-            text_body: if req.text_body.is_empty() { None } else { Some(req.text_body) },
+            text_body: Some(req.text_body),  // #118: Preserve empty string
             html_body: if req.html_body.is_empty() { None } else { Some(req.html_body) },
             headers: serde_json::Value::Object(
                 req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()
@@ -127,12 +129,13 @@ impl OutboundService for OutboundServiceImpl {
         
         match self.queue.enqueue(email.clone()).await {
             Ok(id) => {
+                // #116: Report queued status, not accepted:true — delivery hasn't happened yet
                 info!(email_id = %id, "Email queued for immediate delivery");
                 
                 let recipients: Vec<RecipientResult> = req.to.iter().map(|email| {
                     RecipientResult {
                         email: email.clone(),
-                        accepted: true,
+                        accepted: false, // Not yet delivered
                         error: String::new(),
                     }
                 }).collect();
@@ -140,7 +143,7 @@ impl OutboundService for OutboundServiceImpl {
                 Ok(Response::new(SendEmailResponse {
                     email_id: id.to_string(),
                     message_id: format!("<{}@apexmail.ee>", id),
-                    success: true,
+                    success: true, // Queued successfully
                     error: String::new(),
                     recipients,
                 }))
@@ -209,6 +212,39 @@ impl OutboundService for OutboundServiceImpl {
         let email_id = Uuid::parse_str(&req.email_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid email ID: {}", e)))?;
         
+        // #117: Check current state before cancelling — don't overwrite Sent/Failed
+        let email = self.queue.get_email(&email_id).await
+            .map_err(|e| Status::internal(format!("Failed to look up email: {}", e)))?;
+        
+        let email = match email {
+            Some(e) => e,
+            None => return Err(Status::not_found("Email not found")),
+        };
+        
+        match email.status {
+            EmailStatus::Sent => {
+                return Ok(Response::new(CancelEmailResponse {
+                    success: false,
+                    error: "Cannot cancel: email already delivered".to_string(),
+                }));
+            }
+            EmailStatus::Failed => {
+                return Ok(Response::new(CancelEmailResponse {
+                    success: false,
+                    error: "Cannot cancel: email already permanently failed".to_string(),
+                }));
+            }
+            EmailStatus::Processing => {
+                return Ok(Response::new(CancelEmailResponse {
+                    success: false,
+                    error: "Cannot cancel: email is currently being sent".to_string(),
+                }));
+            }
+            EmailStatus::Pending | EmailStatus::Deferred => {
+                // Safe to cancel
+            }
+        }
+        
         match self.queue.mark_failed(&email_id, "Cancelled by user", false).await {
             Ok(()) => {
                 info!(email_id = %email_id, "Email cancelled");
@@ -233,6 +269,12 @@ impl OutboundService for OutboundServiceImpl {
         request: Request<QueueBulkEmailsRequest>,
     ) -> Result<Response<QueueBulkEmailsResponse>, Status> {
         let req = request.into_inner();
+        if req.emails.len() > MAX_BULK_EMAILS {
+            return Err(Status::invalid_argument(format!(
+                "bulk email request limited to {} entries",
+                MAX_BULK_EMAILS
+            )));
+        }
         let mut results = Vec::with_capacity(req.emails.len());
         let mut queued_count = 0i32;
         let mut failed_count = 0i32;
@@ -243,7 +285,7 @@ impl OutboundService for OutboundServiceImpl {
                 from_address: email_req.from,
                 to_addresses: email_req.to,
                 subject: email_req.subject,
-                text_body: if email_req.text_body.is_empty() { None } else { Some(email_req.text_body) },
+                text_body: Some(email_req.text_body),  // #118: Preserve empty string
                 html_body: if email_req.html_body.is_empty() { None } else { Some(email_req.html_body) },
                 headers: serde_json::Value::Object(
                     email_req.headers.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect()

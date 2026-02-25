@@ -28,14 +28,13 @@
 -- Step 1: Rename the existing table
 ALTER TABLE IF EXISTS events RENAME TO events_old;
 
--- Step 2: Create the new partitioned table with the same schema
+-- Step 2: Create the new partitioned table matching the existing schema exactly
 CREATE TABLE events (
     id VARCHAR(26) NOT NULL,
     tenant_id VARCHAR(26) NOT NULL,
     message_id VARCHAR(26),
-    event_type VARCHAR(50) NOT NULL,
+    type VARCHAR(50) NOT NULL,
     recipient VARCHAR(255),
-    recipient_email VARCHAR(255),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_agent TEXT,
     ip_address VARCHAR(45),
@@ -46,30 +45,39 @@ CREATE TABLE events (
     diagnostic_code TEXT,
     complaint_type VARCHAR(50),
     complaint_user_agent TEXT,
-    raw_data JSONB,
-    deduplication_key VARCHAR(64),
+    message_data JSONB,
+    deduplication_key VARCHAR(255),
     processed_at TIMESTAMPTZ,
+    metadata JSONB,
     domain VARCHAR(255),
     provider VARCHAR(100),
     provider_message_id VARCHAR(255),
     feedback_id VARCHAR(255),
-    location JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (id, timestamp)
 ) PARTITION BY RANGE (timestamp);
 
--- Step 3: Recreate indexes on the partitioned table
+-- Step 3: Drop old indexes from renamed table (they keep original names after RENAME)
+DROP INDEX IF EXISTS idx_events_tenant;
+DROP INDEX IF EXISTS idx_events_message;
+DROP INDEX IF EXISTS idx_events_type;
+DROP INDEX IF EXISTS idx_events_timestamp;
+DROP INDEX IF EXISTS idx_events_recipient;
+DROP INDEX IF EXISTS idx_events_dedup;
+DROP INDEX IF EXISTS idx_events_tenant_timestamp;
+DROP INDEX IF EXISTS idx_events_tenant_type_timestamp;
+
+-- Step 4: Recreate indexes on the partitioned table
 -- (These will be automatically created on each partition)
 CREATE INDEX idx_events_tenant ON events(tenant_id);
 CREATE INDEX idx_events_message ON events(message_id);
-CREATE INDEX idx_events_type ON events(event_type);
+CREATE INDEX idx_events_type ON events(type);
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 CREATE INDEX idx_events_recipient ON events(recipient);
 CREATE INDEX idx_events_dedup ON events(deduplication_key) WHERE deduplication_key IS NOT NULL;
 CREATE INDEX idx_events_tenant_timestamp ON events(tenant_id, timestamp);
-CREATE INDEX idx_events_tenant_type_timestamp ON events(tenant_id, event_type, timestamp);
+CREATE INDEX idx_events_tenant_type_timestamp ON events(tenant_id, type, timestamp);
 
--- Step 4: Create monthly partitions (2024-01 through 2027-12)
+-- Step 5: Create monthly partitions (2024-01 through 2027-12)
 -- Using a DO block to generate them programmatically
 DO $$
 DECLARE
@@ -85,7 +93,7 @@ BEGIN
         partition_name := 'events_' || TO_CHAR(current_start, 'YYYY_MM');
         
         EXECUTE format(
-            'CREATE TABLE %I PARTITION OF events FOR VALUES FROM (%L) TO (%L)',
+            'CREATE TABLE %I PARTITION OF events FOR VALUES FROM (CAST(%L AS timestamptz)) TO (CAST(%L AS timestamptz))',
             partition_name,
             current_start,
             current_end
@@ -95,12 +103,12 @@ BEGIN
     END LOOP;
 END $$;
 
--- Step 5: Create a default partition for any data outside the defined ranges
+-- Step 6: Create a default partition for any data outside the defined ranges
 CREATE TABLE events_default PARTITION OF events DEFAULT;
 
--- Step 6: Migrate existing data from the old table
+-- Step 7: Migrate existing data from the old table
 -- This INSERT will route each row to the correct partition based on timestamp
 INSERT INTO events SELECT * FROM events_old;
 
--- Step 7: Drop the old table
+-- Step 8: Drop the old table
 DROP TABLE events_old;

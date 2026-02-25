@@ -210,6 +210,43 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 );
 CREATE INDEX IF NOT EXISTS idx_support_tickets_tenant ON support_tickets(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(tenant_id, status);
+
+-- ── Status Page Incidents ───────────────────────────────────────
+-- #211: Missing tables that repos query
+CREATE TABLE IF NOT EXISTS status_page_incidents (
+    id              TEXT PRIMARY KEY,
+    title           TEXT        NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'investigating',
+    impact          TEXT        NOT NULL DEFAULT 'minor',
+    affected_components TEXT[]  NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON status_page_incidents(status);
+
+-- ── Status Page Incident Updates ────────────────────────────────
+CREATE TABLE IF NOT EXISTS status_page_incident_updates (
+    id              TEXT PRIMARY KEY,
+    incident_id     TEXT        NOT NULL REFERENCES status_page_incidents(id) ON DELETE CASCADE,
+    status          TEXT        NOT NULL,
+    body            TEXT        NOT NULL,
+    author          TEXT        NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_incident_updates_incident ON status_page_incident_updates(incident_id);
+
+-- ── ISP Warmup Schedules ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS isp_warmup_schedules (
+    id              TEXT PRIMARY KEY,
+    isp_name        TEXT        NOT NULL,
+    mx_patterns     JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    warmup_schedule JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_warmup_isp ON isp_warmup_schedules(isp_name);
 "#;
 
 /// Individual table DDL constants (for selective setup in tests).

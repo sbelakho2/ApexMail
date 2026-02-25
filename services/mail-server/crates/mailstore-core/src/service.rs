@@ -22,6 +22,7 @@ use mail_proto::generated::{
     GetFlagsRequest, GetFlagsResponse,
     MoveMessageRequest, MoveMessageResponse,
     CopyMessageRequest, CopyMessageResponse,
+    FlagOperation,
     CreateMailboxRequest, CreateMailboxResponse,
     DeleteMailboxRequest, DeleteMailboxResponse,
     ListMailboxesRequest, ListMailboxesResponse,
@@ -35,7 +36,7 @@ use mail_proto::generated::{
     mailbox_event, MailboxUpdated,
     MessageMeta, Mailbox, MessageFlags, EmailEnvelope, Quota,
 };
-use crate::models::{Mailbox as StoredMailbox, MessageQuery, StoredMessage};
+use crate::models::{Mailbox as StoredMailbox, MessageFlags as StoredMessageFlags, MessageQuery, StoredMessage};
 use crate::storage::MessageStorage;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
@@ -55,12 +56,7 @@ impl MailstoreServiceImpl {
     }
 
     fn message_uid(message: &StoredMessage) -> u64 {
-        let millis = message.date.timestamp_millis();
-        if millis < 0 {
-            0
-        } else {
-            millis as u64
-        }
+        message.uid.max(0) as u64
     }
 
     fn message_to_meta(message: &StoredMessage, mailbox_name: &str) -> MessageMeta {
@@ -118,11 +114,59 @@ impl MailstoreServiceImpl {
             delimiter: "/".to_string(),
             attributes,
             uidvalidity,
-            uidnext: (mailbox.total_messages.max(0) as u64).saturating_add(1),
+            uidnext: mailbox.uidnext.max(1) as u64,
             exists: mailbox.total_messages.max(0) as u32,
             recent: 0,
             unseen: mailbox.unread_messages.max(0) as u32,
         }
+    }
+
+    fn proto_to_stored_flags(flags: &MessageFlags) -> StoredMessageFlags {
+        StoredMessageFlags {
+            is_read: flags.seen,
+            is_starred: flags.flagged,
+            is_deleted: flags.deleted,
+            is_spam: false,
+        }
+    }
+
+    fn stored_to_proto_flags(flags: &StoredMessageFlags) -> MessageFlags {
+        MessageFlags {
+            seen: flags.is_read,
+            answered: false,
+            flagged: flags.is_starred,
+            deleted: flags.is_deleted,
+            draft: false,
+            recent: false,
+            custom: vec![],
+        }
+    }
+
+    fn apply_flag_operation(
+        current: &StoredMessageFlags,
+        update: &MessageFlags,
+        operation: FlagOperation,
+    ) -> StoredMessageFlags {
+        let update_flags = Self::proto_to_stored_flags(update);
+        match operation {
+            FlagOperation::Add => StoredMessageFlags {
+                is_read: current.is_read || update_flags.is_read,
+                is_starred: current.is_starred || update_flags.is_starred,
+                is_deleted: current.is_deleted || update_flags.is_deleted,
+                is_spam: current.is_spam || update_flags.is_spam,
+            },
+            FlagOperation::Remove => StoredMessageFlags {
+                is_read: if update_flags.is_read { false } else { current.is_read },
+                is_starred: if update_flags.is_starred { false } else { current.is_starred },
+                is_deleted: if update_flags.is_deleted { false } else { current.is_deleted },
+                is_spam: if update_flags.is_spam { false } else { current.is_spam },
+            },
+            FlagOperation::Set | FlagOperation::Unspecified => update_flags,
+        }
+    }
+
+    fn clamp_limit(limit: i64, max: i64) -> i64 {
+        limit.clamp(1, max)
     }
 
     async fn resolve_account_mailbox(
@@ -183,6 +227,7 @@ impl MailstoreService for MailstoreServiceImpl {
             id: Uuid::new_v4(),
             account_id,
             mailbox_id: mailbox.id,
+            uid: 0,
             message_id: Uuid::new_v4().to_string(),
             from_address: String::new(),
             from_name: None,
@@ -205,14 +250,14 @@ impl MailstoreService for MailstoreServiceImpl {
             updated_at: chrono::Utc::now(),
         };
 
-        self.storage
+        let (_id, uid) = self.storage
             .store_message(&stored)
             .await
             .map_err(|e| Status::internal(format!("Failed to store message: {}", e)))?;
 
         let blob_hash = format!("{:x}", md5::compute(&req.raw_message));
         let message_id = stored.id.to_string();
-        let uid = Self::message_uid(&stored);
+        let uid = uid.max(0) as u64;
         
         info!(
             account_id = %account_id,
@@ -239,21 +284,11 @@ impl MailstoreService for MailstoreServiceImpl {
             .resolve_account_mailbox(&req.account_id, &req.mailbox)
             .await?;
 
-        let messages = self
+        let message = self
             .storage
-            .list_messages(&MessageQuery {
-                account_id,
-                mailbox_id: Some(mailbox.id),
-                limit: 1000,
-                offset: 0,
-                ..Default::default()
-            })
+            .get_message_by_uid(&account_id, &mailbox.id, req.uid as i64)
             .await
-            .map_err(|e| Status::internal(format!("Failed to list messages: {}", e)))?;
-
-        let message = messages
-            .into_iter()
-            .find(|m| Self::message_uid(m) == req.uid)
+            .map_err(|e| Status::internal(format!("Failed to fetch message: {}", e)))?
             .ok_or_else(|| Status::not_found("Message not found"))?;
 
         let meta = Self::message_to_meta(&message, &mailbox.name);
@@ -286,7 +321,10 @@ impl MailstoreService for MailstoreServiceImpl {
             "Listing messages"
         );
 
-        let limit = if req.limit > 0 { req.limit as i64 } else { 100 };
+        let limit = Self::clamp_limit(
+            if req.limit > 0 { req.limit as i64 } else { 100 },
+            1000,
+        );
         let messages = self
             .storage
             .list_messages(&MessageQuery {
@@ -322,6 +360,10 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<SearchMessagesRequest>,
     ) -> Result<Response<SearchMessagesResponse>, Status> {
         let req = request.into_inner();
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
         
         debug!(
             account_id = %req.account_id,
@@ -329,10 +371,25 @@ impl MailstoreService for MailstoreServiceImpl {
             "Searching messages"
         );
         
-        Ok(Response::new(SearchMessagesResponse {
-            messages: vec![],
-            total: 0,
-        }))
+        let limit = Self::clamp_limit(
+            if req.limit > 0 { req.limit as i64 } else { 100 },
+            1000,
+        );
+        let offset = if req.offset > 0 { req.offset as i64 } else { 0 };
+
+        let (messages, total) = self
+            .storage
+            .search_messages(&account_id, &mailbox.id, &req.query, limit, offset)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to search messages: {}", e)))?;
+
+        let metas = messages
+            .into_iter()
+            .map(|message| Self::message_to_meta(&message, &mailbox.name))
+            .collect();
+
+        let total = total.min(i32::MAX as i64) as i32;
+        Ok(Response::new(SearchMessagesResponse { messages: metas, total }))
     }
     
     /// Set flags on messages
@@ -341,9 +398,45 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<SetFlagsRequest>,
     ) -> Result<Response<SetFlagsResponse>, Status> {
         let req = request.into_inner();
-        
-        let updated = req.uids.len() as u32;
-        
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
+        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        if uids.is_empty() {
+            return Ok(Response::new(SetFlagsResponse { updated_count: 0 }));
+        }
+
+        let current_flags = self
+            .storage
+            .get_message_flags_by_uids(&account_id, &mailbox.id, &uids)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to fetch flags: {}", e)))?;
+
+        let update_flags = req.flags.unwrap_or_default();
+        let operation = FlagOperation::try_from(req.operation).unwrap_or(FlagOperation::Set);
+
+        let mut updated = 0u32;
+        for uid in &uids {
+            if let Some(current) = current_flags.get(uid) {
+                let merged = Self::apply_flag_operation(current, &update_flags, operation);
+                let rows = self
+                    .storage
+                    .update_message_flags_by_uid(&account_id, &mailbox.id, *uid, &merged)
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to update flags: {}", e)))?;
+                updated += rows as u32;
+            }
+        }
+
+        if updated > 0 {
+            self.storage
+                .refresh_mailbox_counts(&mailbox.id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to refresh mailbox counts: {}", e)))?;
+        }
+
         debug!(
             account_id = %req.account_id,
             mailbox = %req.mailbox,
@@ -351,10 +444,8 @@ impl MailstoreService for MailstoreServiceImpl {
             count = %updated,
             "Setting flags"
         );
-        
-        Ok(Response::new(SetFlagsResponse {
-            updated_count: updated,
-        }))
+
+        Ok(Response::new(SetFlagsResponse { updated_count: updated }))
     }
     
     /// Get flags for messages
@@ -363,15 +454,28 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<GetFlagsRequest>,
     ) -> Result<Response<GetFlagsResponse>, Status> {
         let req = request.into_inner();
-        
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
+        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let flags = self
+            .storage
+            .get_message_flags_by_uids(&account_id, &mailbox.id, &uids)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to fetch flags: {}", e)))?;
+
         let mut flags_map = HashMap::new();
         for uid in req.uids {
-            flags_map.insert(uid, MessageFlags::default());
+            let flag = flags
+                .get(&(uid as i64))
+                .map(Self::stored_to_proto_flags)
+                .unwrap_or_default();
+            flags_map.insert(uid, flag);
         }
-        
-        Ok(Response::new(GetFlagsResponse {
-            flags: flags_map,
-        }))
+
+        Ok(Response::new(GetFlagsResponse { flags: flags_map }))
     }
     
     /// Move messages to another mailbox
@@ -380,24 +484,45 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<MoveMessageRequest>,
     ) -> Result<Response<MoveMessageResponse>, Status> {
         let req = request.into_inner();
-        
-        let mut uid_mapping = HashMap::new();
-        let base_uid = chrono::Utc::now().timestamp_millis() as u64;
-        for (i, uid) in req.uids.iter().enumerate() {
-            uid_mapping.insert(*uid, base_uid + i as u64);
+
+        let (account_id, source_mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.source_mailbox)
+            .await?;
+        let (_, dest_mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.dest_mailbox)
+            .await?;
+
+        if source_mailbox.id == dest_mailbox.id {
+            return Err(Status::invalid_argument("source and destination mailboxes are the same"));
         }
-        
+
+        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let messages = self
+            .storage
+            .get_messages_by_uids(&account_id, &source_mailbox.id, &uids)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to load messages: {}", e)))?;
+
+        let mut uid_mapping = HashMap::new();
+        for message in messages {
+            let old_uid = message.uid.max(0) as u64;
+            let new_uid = self
+                .storage
+                .move_message(&message.id, &dest_mailbox.id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to move message: {}", e)))?;
+            uid_mapping.insert(old_uid, new_uid.max(0) as u64);
+        }
+
         info!(
             account_id = %req.account_id,
             source = %req.source_mailbox,
             dest = %req.dest_mailbox,
-            count = %req.uids.len(),
+            count = %uid_mapping.len(),
             "Messages moved"
         );
-        
-        Ok(Response::new(MoveMessageResponse {
-            uid_mapping,
-        }))
+
+        Ok(Response::new(MoveMessageResponse { uid_mapping }))
     }
     
     /// Copy messages to another mailbox
@@ -406,24 +531,49 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<CopyMessageRequest>,
     ) -> Result<Response<CopyMessageResponse>, Status> {
         let req = request.into_inner();
-        
+
+        let (account_id, source_mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.source_mailbox)
+            .await?;
+        let (_, dest_mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.dest_mailbox)
+            .await?;
+
+        let uids: Vec<i64> = req.uids.iter().map(|uid| *uid as i64).collect();
+        let messages = self
+            .storage
+            .get_messages_by_uids(&account_id, &source_mailbox.id, &uids)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to load messages: {}", e)))?;
+
         let mut uid_mapping = HashMap::new();
-        let base_uid = chrono::Utc::now().timestamp_millis() as u64;
-        for (i, uid) in req.uids.iter().enumerate() {
-            uid_mapping.insert(*uid, base_uid + i as u64);
+        for message in messages {
+            let old_uid = message.uid.max(0) as u64;
+            let now = chrono::Utc::now();
+            let mut cloned = message.clone();
+            cloned.id = Uuid::new_v4();
+            cloned.mailbox_id = dest_mailbox.id;
+            cloned.uid = 0;
+            cloned.created_at = now;
+            cloned.updated_at = now;
+
+            let (_, new_uid) = self
+                .storage
+                .store_message(&cloned)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to copy message: {}", e)))?;
+            uid_mapping.insert(old_uid, new_uid.max(0) as u64);
         }
-        
+
         info!(
             account_id = %req.account_id,
             source = %req.source_mailbox,
             dest = %req.dest_mailbox,
-            count = %req.uids.len(),
+            count = %uid_mapping.len(),
             "Messages copied"
         );
-        
-        Ok(Response::new(CopyMessageResponse {
-            uid_mapping,
-        }))
+
+        Ok(Response::new(CopyMessageResponse { uid_mapping }))
     }
     
     /// Create a mailbox
@@ -432,30 +582,49 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<CreateMailboxRequest>,
     ) -> Result<Response<CreateMailboxResponse>, Status> {
         let req = request.into_inner();
-        
-        let mailbox = Mailbox {
-            name: req.name.clone(),
-            delimiter: "/".to_string(),
-            attributes: if !req.special_use.is_empty() {
-                vec![req.special_use]
-            } else {
-                vec![]
-            },
-            uidvalidity: chrono::Utc::now().timestamp() as u64,
-            uidnext: 1,
-            exists: 0,
-            recent: 0,
-            unseen: 0,
+
+        let account_id = Uuid::parse_str(req.account_id.trim())
+            .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+
+        let account = self
+            .storage
+            .get_account(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        if account.is_none() {
+            return Err(Status::not_found("Account not found"));
+        }
+
+        let special_use = if req.special_use.trim().is_empty() {
+            None
+        } else {
+            Some(req.special_use.trim())
         };
-        
+
+        let mailbox = self
+            .storage
+            .create_mailbox(&account_id, &req.name, special_use)
+            .await
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("already exists") {
+                    Status::already_exists(message)
+                } else if message.contains("required") {
+                    Status::invalid_argument(message)
+                } else {
+                    Status::internal(format!("Failed to create mailbox: {}", message))
+                }
+            })?;
+
         info!(
             account_id = %req.account_id,
             name = %req.name,
             "Mailbox created"
         );
-        
+
         Ok(Response::new(CreateMailboxResponse {
-            mailbox: Some(mailbox),
+            mailbox: Some(Self::mailbox_to_proto(&mailbox)),
         }))
     }
     
@@ -465,16 +634,44 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<DeleteMailboxRequest>,
     ) -> Result<Response<DeleteMailboxResponse>, Status> {
         let req = request.into_inner();
-        
+
+        let account_id = Uuid::parse_str(req.account_id.trim())
+            .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+
+        let account = self
+            .storage
+            .get_account(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        if account.is_none() {
+            return Err(Status::not_found("Account not found"));
+        }
+
+        let deleted = self
+            .storage
+            .delete_mailbox(&account_id, &req.name)
+            .await
+            .map_err(|e| {
+                let message = e.to_string();
+                if message.contains("Cannot delete system mailbox") {
+                    Status::failed_precondition(message)
+                } else {
+                    Status::internal(format!("Failed to delete mailbox: {}", message))
+                }
+            })?;
+
+        if !deleted {
+            return Err(Status::not_found("Mailbox not found"));
+        }
+
         info!(
             account_id = %req.account_id,
             name = %req.name,
             "Mailbox deleted"
         );
-        
-        Ok(Response::new(DeleteMailboxResponse {
-            success: true,
-        }))
+
+        Ok(Response::new(DeleteMailboxResponse { success: true }))
     }
     
     /// List mailboxes for an account
@@ -482,62 +679,38 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<ListMailboxesRequest>,
     ) -> Result<Response<ListMailboxesResponse>, Status> {
-        let _req = request.into_inner();
-        
-        // Return default mailboxes
-        let mailboxes = vec![
-            Mailbox {
-                name: "INBOX".to_string(),
-                delimiter: "/".to_string(),
-                attributes: vec![],
-                uidvalidity: 1,
-                uidnext: 1,
-                exists: 0,
-                recent: 0,
-                unseen: 0,
-            },
-            Mailbox {
-                name: "Sent".to_string(),
-                delimiter: "/".to_string(),
-                attributes: vec!["\\Sent".to_string()],
-                uidvalidity: 1,
-                uidnext: 1,
-                exists: 0,
-                recent: 0,
-                unseen: 0,
-            },
-            Mailbox {
-                name: "Drafts".to_string(),
-                delimiter: "/".to_string(),
-                attributes: vec!["\\Drafts".to_string()],
-                uidvalidity: 1,
-                uidnext: 1,
-                exists: 0,
-                recent: 0,
-                unseen: 0,
-            },
-            Mailbox {
-                name: "Trash".to_string(),
-                delimiter: "/".to_string(),
-                attributes: vec!["\\Trash".to_string()],
-                uidvalidity: 1,
-                uidnext: 1,
-                exists: 0,
-                recent: 0,
-                unseen: 0,
-            },
-            Mailbox {
-                name: "Spam".to_string(),
-                delimiter: "/".to_string(),
-                attributes: vec!["\\Junk".to_string()],
-                uidvalidity: 1,
-                uidnext: 1,
-                exists: 0,
-                recent: 0,
-                unseen: 0,
-            },
-        ];
-        
+        let req = request.into_inner();
+
+        let account_id = Uuid::parse_str(req.account_id.trim())
+            .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+
+        let account = self
+            .storage
+            .get_account(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        if account.is_none() {
+            return Err(Status::not_found("Account not found"));
+        }
+
+        let mut mailboxes = self
+            .storage
+            .list_mailboxes(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list mailboxes: {}", e)))?;
+
+        let pattern = req.pattern.trim();
+        if !pattern.is_empty() && pattern != "*" {
+            let needle = pattern.to_lowercase();
+            mailboxes.retain(|m| m.name.to_lowercase().contains(&needle));
+        }
+
+        let mailboxes = mailboxes
+            .iter()
+            .map(Self::mailbox_to_proto)
+            .collect();
+
         Ok(Response::new(ListMailboxesResponse { mailboxes }))
     }
     
@@ -547,21 +720,16 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<GetMailboxStatusRequest>,
     ) -> Result<Response<GetMailboxStatusResponse>, Status> {
         let req = request.into_inner();
-        
-        let mailbox = Mailbox {
-            name: req.mailbox.clone(),
-            delimiter: "/".to_string(),
-            attributes: vec![],
-            uidvalidity: 1,
-            uidnext: 1,
-            exists: 0,
-            recent: 0,
-            unseen: 0,
-        };
-        
+
+        let (_account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
+        let highest_modseq = mailbox.updated_at.timestamp().max(0) as u64;
+
         Ok(Response::new(GetMailboxStatusResponse {
-            mailbox: Some(mailbox),
-            highest_modseq: 0,
+            mailbox: Some(Self::mailbox_to_proto(&mailbox)),
+            highest_modseq,
         }))
     }
     
@@ -571,16 +739,30 @@ impl MailstoreService for MailstoreServiceImpl {
         request: Request<ExpungeRequest>,
     ) -> Result<Response<ExpungeResponse>, Status> {
         let req = request.into_inner();
-        
+
+        let (account_id, mailbox) = self
+            .resolve_account_mailbox(&req.account_id, &req.mailbox)
+            .await?;
+
+        let expunged = self
+            .storage
+            .expunge_deleted_messages(&account_id, &mailbox.id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to expunge messages: {}", e)))?;
+
+        let expunged_uids: Vec<u64> = expunged
+            .into_iter()
+            .map(|uid| uid.max(0) as u64)
+            .collect();
+
         info!(
             account_id = %req.account_id,
             mailbox = %req.mailbox,
+            count = %expunged_uids.len(),
             "Expunge completed"
         );
-        
-        Ok(Response::new(ExpungeResponse {
-            expunged_uids: vec![],
-        }))
+
+        Ok(Response::new(ExpungeResponse { expunged_uids }))
     }
     
     /// Create a new account
@@ -727,13 +909,32 @@ impl MailstoreService for MailstoreServiceImpl {
         &self,
         request: Request<GetQuotaRequest>,
     ) -> Result<Response<GetQuotaResponse>, Status> {
-        let _req = request.into_inner();
-        
+        let req = request.into_inner();
+
+        let account_id = Uuid::parse_str(req.account_id.trim())
+            .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+
+        let account = self
+            .storage
+            .get_account(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Storage error: {}", e)))?;
+
+        if account.is_none() {
+            return Err(Status::not_found("Account not found"));
+        }
+
+        let (used_bytes, max_bytes, used_messages) = self
+            .storage
+            .get_account_quota(&account_id)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to load quota: {}", e)))?;
+
         Ok(Response::new(GetQuotaResponse {
             quota: Some(Quota {
-                used_bytes: 0,
-                max_bytes: 1024 * 1024 * 1024, // 1GB default
-                used_messages: 0,
+                used_bytes: used_bytes.max(0) as u64,
+                max_bytes: max_bytes.max(0) as u64,
+                used_messages: used_messages.max(0) as u64,
                 max_messages: 100000,
             }),
         }))

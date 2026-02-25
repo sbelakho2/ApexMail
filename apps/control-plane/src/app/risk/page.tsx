@@ -50,6 +50,13 @@ export default function RiskMonitoringPage() {
     const [loading, setLoading] = useState(true);
     const [selectedTenant, setSelectedTenant] = useState<TenantRisk | null>(null);
     const [filterLevel, setFilterLevel] = useState<string>('all');
+    const [thresholds, setThresholds] = useState({
+        bounceRateWarn: 5,
+        bounceRateCritical: 10,
+        complaintRateWarn: 1,
+        complaintRateCritical: 3,
+    });
+    const [thresholdError, setThresholdError] = useState<string | null>(null);
 
     useEffect(() => {
         loadTenants();
@@ -126,6 +133,93 @@ export default function RiskMonitoringPage() {
                 </button>
             </div>
 
+            <div className="mb-6 rounded-xl border border-border bg-card p-4">
+                <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-sm font-semibold text-foreground">Risk Thresholds</h2>
+                    <span className="text-xs text-muted-foreground">Units: percentages (%)</span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <label className="text-xs text-muted-foreground">
+                        Bounce warn
+                        <input
+                            type="number"
+                            value={thresholds.bounceRateWarn}
+                            onChange={(event) => {
+                                const next = Number(event.target.value);
+                                setThresholds(prev => ({ ...prev, bounceRateWarn: next }));
+                                setThresholdError(null);
+                            }}
+                            title="Warn threshold for bounce rate percentage"
+                            className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
+                        />
+                    </label>
+                    <label className="text-xs text-muted-foreground">
+                        Bounce critical
+                        <input
+                            type="number"
+                            value={thresholds.bounceRateCritical}
+                            onChange={(event) => {
+                                const next = Number(event.target.value);
+                                setThresholds(prev => ({ ...prev, bounceRateCritical: next }));
+                                setThresholdError(null);
+                            }}
+                            title="Critical threshold for bounce rate percentage"
+                            className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
+                        />
+                    </label>
+                    <label className="text-xs text-muted-foreground">
+                        Complaint warn
+                        <input
+                            type="number"
+                            value={thresholds.complaintRateWarn}
+                            onChange={(event) => {
+                                const next = Number(event.target.value);
+                                setThresholds(prev => ({ ...prev, complaintRateWarn: next }));
+                                setThresholdError(null);
+                            }}
+                            title="Warn threshold for complaint rate percentage"
+                            className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
+                        />
+                    </label>
+                    <label className="text-xs text-muted-foreground">
+                        Complaint critical
+                        <input
+                            type="number"
+                            value={thresholds.complaintRateCritical}
+                            onChange={(event) => {
+                                const next = Number(event.target.value);
+                                setThresholds(prev => ({ ...prev, complaintRateCritical: next }));
+                                setThresholdError(null);
+                            }}
+                            title="Critical threshold for complaint rate percentage"
+                            className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
+                        />
+                    </label>
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                    <button
+                        onClick={() => {
+                            if (
+                                thresholds.bounceRateWarn < 0 ||
+                                thresholds.bounceRateCritical < 0 ||
+                                thresholds.complaintRateWarn < 0 ||
+                                thresholds.complaintRateCritical < 0 ||
+                                thresholds.bounceRateWarn >= thresholds.bounceRateCritical ||
+                                thresholds.complaintRateWarn >= thresholds.complaintRateCritical
+                            ) {
+                                setThresholdError('Thresholds invalid: warning must be lower than critical and all values must be non-negative.');
+                                return;
+                            }
+                            setThresholdError(null);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium"
+                    >
+                        Validate Thresholds
+                    </button>
+                    {thresholdError && <span className="text-xs text-destructive">{thresholdError}</span>}
+                </div>
+            </div>
+
             {/* Risk Summary */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                 {[
@@ -165,6 +259,11 @@ export default function RiskMonitoringPage() {
                     </div>
                 </div>
                 <div className="divide-y divide-border">
+                    {filteredTenants.length === 0 && (
+                        <div className="p-8 text-center text-muted-foreground">
+                            No tenants are available for risk scoring yet. Complete onboarding for your first tenant to start risk monitoring.
+                        </div>
+                    )}
                     {filteredTenants.map(tenant => (
                         <div
                             key={tenant.tenantId}
@@ -196,8 +295,8 @@ export default function RiskMonitoringPage() {
                                         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-0.5">Bounce Rate</div>
                                         <div className={cn(
                                             'font-semibold px-1.5 rounded',
-                                            tenant.metrics.bounceRate > 0.1 ? 'text-destructive bg-destructive/10' :
-                                            tenant.metrics.bounceRate > 0.05 ? 'text-amber-600 bg-amber-500/10' :
+                                            tenant.metrics.bounceRate * 100 > thresholds.bounceRateCritical ? 'text-destructive bg-destructive/10' :
+                                            tenant.metrics.bounceRate * 100 > thresholds.bounceRateWarn ? 'text-amber-600 bg-amber-500/10' :
                                             'text-emerald-600 bg-emerald-500/10'
                                         )}>
                                             {(tenant.metrics.bounceRate * 100).toFixed(2)}%

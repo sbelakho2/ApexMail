@@ -5,7 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -91,16 +91,16 @@ async fn create_lead(
         body.title,
         if body.source.is_empty() { "api".into() } else { body.source },
     );
-    Ok(Json(serde_json::to_value(&lead).unwrap()))
+    json_response(&lead)
 }
 
 async fn list_leads(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LeadQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, SalesError> {
     if let Some(ref search) = q.q {
         let results = state.crm.search_leads(search);
-        return Json(serde_json::to_value(&results).unwrap());
+        return json_response(&results);
     }
     let status = q.status.and_then(|s| match s.as_str() {
         "new" => Some(LeadStatus::New),
@@ -111,7 +111,7 @@ async fn list_leads(
         _ => None,
     });
     let leads = state.crm.list_leads(status, q.source.as_deref());
-    Json(serde_json::to_value(&leads).unwrap())
+    json_response(&leads)
 }
 
 async fn get_lead(
@@ -119,7 +119,7 @@ async fn get_lead(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let lead = state.crm.get_lead(id)?;
-    Ok(Json(serde_json::to_value(&lead).unwrap()))
+    json_response(&lead)
 }
 
 // -- Companies / Enrichment -------------------------------------------------
@@ -148,7 +148,7 @@ struct EnrichedCompanyRow {
     description: Option<String>,
     linkedin_url: Option<String>,
     email_provider: Option<String>,
-    confidence_score: sqlx::types::BigDecimal,
+    confidence_score: f64,
     last_enriched_at: chrono::DateTime<chrono::Utc>,
     created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -157,25 +157,26 @@ async fn list_companies(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CompanyQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
-    let limit = q.limit.unwrap_or(100).min(500);
-    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0).clamp(0, 100_000);
 
     let rows = if let Some(ref industry) = q.industry {
+        let escaped = escape_like_pattern(industry);
         sqlx::query_as::<_, EnrichedCompanyRow>(
             "SELECT id, domain, company_name, industry, employee_count, annual_revenue,
                     funding_stage, headquarters, founded_year, description, linkedin_url,
                     email_provider, confidence_score, last_enriched_at, created_at
              FROM enriched_companies
-             WHERE industry ILIKE $1
+             WHERE industry ILIKE $1 ESCAPE '\\'
              ORDER BY last_enriched_at DESC
              LIMIT $2 OFFSET $3",
         )
-        .bind(format!("%{}%", industry))
+        .bind(format!("%{}%", escaped))
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.db)
         .await
-        .map_err(|e| SalesError::Internal(e.to_string()))?
+        .map_err(|e| SalesError::Internal(anyhow::anyhow!(e)))?
     } else {
         sqlx::query_as::<_, EnrichedCompanyRow>(
             "SELECT id, domain, company_name, industry, employee_count, annual_revenue,
@@ -189,10 +190,10 @@ async fn list_companies(
         .bind(offset)
         .fetch_all(&state.db)
         .await
-        .map_err(|e| SalesError::Internal(e.to_string()))?
+        .map_err(|e| SalesError::Internal(anyhow::anyhow!(e)))?
     };
 
-    Ok(Json(serde_json::to_value(&rows).unwrap()))
+    json_response(&rows)
 }
 
 #[derive(Deserialize)]
@@ -235,9 +236,9 @@ async fn enrich(
     .bind(company.enriched_at)
     .execute(&state.db)
     .await
-    .map_err(|e| SalesError::Internal(e.to_string()))?;
+    .map_err(|e| SalesError::Internal(anyhow::anyhow!(e)))?;
 
-    Ok(Json(serde_json::to_value(&company).unwrap()))
+    json_response(&company)
 }
 
 // -- Campaigns --------------------------------------------------------------
@@ -257,14 +258,14 @@ async fn create_campaign(
     let c = state
         .campaigns
         .create_campaign(body.name, body.template_id, body.audience)?;
-    Ok(Json(serde_json::to_value(&c).unwrap()))
+    json_response(&c)
 }
 
 async fn list_campaigns(
     State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, SalesError> {
     let campaigns = state.campaigns.list_campaigns();
-    Json(serde_json::to_value(&campaigns).unwrap())
+    json_response(&campaigns)
 }
 
 // -- Calendar ---------------------------------------------------------------
@@ -278,7 +279,7 @@ struct CalendarQuery {
 async fn list_calendar(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CalendarQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, SalesError> {
     use chrono::{DateTime, Utc};
     let from: DateTime<Utc> = q
         .from
@@ -289,7 +290,7 @@ async fn list_calendar(
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| from + chrono::Duration::days(7));
     let events = state.calendar.list_events(from, to);
-    Json(serde_json::to_value(&events).unwrap())
+    json_response(&events)
 }
 
 // -- Inbox ------------------------------------------------------------------
@@ -302,7 +303,7 @@ struct InboxQuery {
 async fn list_inbox(
     State(state): State<Arc<AppState>>,
     Query(q): Query<InboxQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, SalesError> {
     use crate::types::MessageCategory;
     let cat = q.category.and_then(|c| match c.as_str() {
         "lead" => Some(MessageCategory::Lead),
@@ -314,10 +315,22 @@ async fn list_inbox(
     let msgs = if let Some(c) = cat {
         state.inbox.list_by_category(c)
     } else {
-        // return all
-        state.inbox.list_by_category(MessageCategory::Lead)
+        state.inbox.list_all()
     };
-    Json(serde_json::to_value(&msgs).unwrap())
+    json_response(&msgs)
+}
+
+fn json_response<T: Serialize>(value: &T) -> Result<Json<serde_json::Value>, SalesError> {
+    serde_json::to_value(value)
+        .map(Json)
+        .map_err(|err| SalesError::Internal(anyhow::anyhow!(err)))
+}
+
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 // ---------------------------------------------------------------------------
@@ -329,10 +342,16 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use sqlx::PgPool;
     use tower::ServiceExt;
 
     fn test_app() -> Router {
+        let db = PgPool::connect_lazy(
+            "postgres://postgres:postgres@localhost:5432/apexmail",
+        )
+        .unwrap();
         let state = AppState {
+            db,
             crm: CrmService::new(),
             enrichment: EnrichmentService::new("http://mock"),
             campaigns: CampaignManager::new(10),

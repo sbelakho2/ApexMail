@@ -2,13 +2,14 @@
 //! loop detection, auto-responder detection, MX resolution, greylisting.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use moka::sync::Cache;
 use regex::Regex;
+use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tracing::{debug, warn};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
@@ -104,6 +105,10 @@ pub struct DeliveryService {
     auto_responder_subject_patterns: Vec<Regex>,
 }
 
+static DELIVERY_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
 impl DeliveryService {
     pub fn new(
         pool: PgPool,
@@ -112,8 +117,7 @@ impl DeliveryService {
         loop_config: LoopDetectionConfig,
         subject_patterns: &[String],
     ) -> Self {
-        let resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let resolver = DELIVERY_RESOLVER.clone();
 
         let greylist_patterns: Vec<Regex> = [
             r"(?i)greylist",
@@ -486,7 +490,7 @@ impl DeliveryService {
     }
 
     /// Check if domain is a known greylister.
-    pub async fn is_known_greylister(&self, domain: &str) -> bool {
+    pub async fn is_known_greylister(&self, domain: &str) -> anyhow::Result<bool> {
         // Redis cache
         if let Ok(mut conn) = self.redis.get().await {
             let key = format!("greylist:known:{domain}");
@@ -504,8 +508,7 @@ impl DeliveryService {
         )
         .bind(format!("%.{domain}"))
         .fetch_one(&self.pool)
-        .await
-        .unwrap_or(0);
+        .await?;
 
         let is_known = count > 10;
 
@@ -522,7 +525,7 @@ impl DeliveryService {
                 .ok();
         }
 
-        is_known
+        Ok(is_known)
     }
 
     // ── internal ───────────────────────────────────────────────────────────────
@@ -536,7 +539,8 @@ impl DeliveryService {
     }
 
     fn extract_retry_delay(&self, message: &str) -> Option<u64> {
-        let re = Regex::new(r"(\d+)\s*(second|minute|hour)").ok()?;
+        let re = RETRY_DELAY_RE
+            .get_or_init(|| Regex::new(r"(\d+)\s*(second|minute|hour)").expect("retry regex"));
         let caps = re.captures(message)?;
         let n: u64 = caps[1].parse().ok()?;
         let unit = &caps[2];
@@ -551,12 +555,14 @@ impl DeliveryService {
 // ── helpers ────────────────────────────────────────────────────────────────────
 
 fn extract_enhanced_status(message: &str) -> Option<String> {
-    let re = Regex::new(r"(\d\.\d+\.\d+)").ok()?;
+    let re = ENHANCED_STATUS_RE
+        .get_or_init(|| Regex::new(r"(\d\.\d+\.\d+)").expect("status regex"));
     re.captures(message).map(|c| c[1].to_string())
 }
 
 fn extract_host_from_received(header: &str) -> Option<String> {
-    let re = Regex::new(r"from\s+(\S+)").ok()?;
+    let re = RECEIVED_HOST_RE
+        .get_or_init(|| Regex::new(r"from\s+(\S+)").expect("received regex"));
     re.captures(header).map(|c| c[1].to_lowercase())
 }
 
@@ -609,6 +615,10 @@ fn rand_idx(max: usize) -> usize {
         .subsec_nanos() as usize;
     seed % max
 }
+
+static RETRY_DELAY_RE: OnceLock<Regex> = OnceLock::new();
+static ENHANCED_STATUS_RE: OnceLock<Regex> = OnceLock::new();
+static RECEIVED_HOST_RE: OnceLock<Regex> = OnceLock::new();
 
 // ── tests ──────────────────────────────────────────────────────────────────────
 

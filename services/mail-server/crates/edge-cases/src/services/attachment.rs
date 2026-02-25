@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::config::{AttachmentLimits, ClamAVConfig, BASE64_OVERHEAD};
 

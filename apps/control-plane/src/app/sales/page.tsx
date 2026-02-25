@@ -330,7 +330,7 @@ export default function AutomatedSalesPage() {
                                 <div
                                     key={source.id}
                                     className={cn(
-                                        'flex items-center justify-between p-4 rounded-xl border transition-colors cursor-pointer',
+                                        'flex items-center justify-between p-4 rounded-xl border transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30',
                                         source.enabled
                                             ? 'border-primary/20 bg-primary/5'
                                             : 'border-border bg-muted/30 hover:bg-muted/50'
@@ -339,7 +339,12 @@ export default function AutomatedSalesPage() {
                                     role="checkbox"
                                     aria-checked={source.enabled}
                                     tabIndex={0}
-                                    onKeyDown={(e) => e.key === 'Enter' && toggleSource(source.id)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') {
+                                            e.preventDefault();
+                                            toggleSource(source.id);
+                                        }
+                                    }}
                                 >
                                     <div className="flex items-center gap-4">
                                         <span className="text-2xl">{source.icon}</span>

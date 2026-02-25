@@ -17,6 +17,7 @@ import {
     Shield,
     FileText,
     Code2,
+    RefreshCw,
 } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -40,6 +41,7 @@ import {
 import { ApexAreaChart, ApexBarChart } from '@/components/charts';
 import { cn, formatNumber, formatPercent, formatRelativeTime } from '@/lib/utils';
 import { EmptyState } from '@/components/ui/empty-state';
+import { StatusIndicator } from '@/components/ui/status-indicator';
 
 // ---------- Types matching GET /v1/analytics/dashboard response ----------
 
@@ -64,37 +66,70 @@ interface RecentMessage {
     sent: number; openRate: number; clickRate: number;
 }
 
+interface DashboardSourcesStatus {
+    overview: 'ok' | 'error';
+    volume: 'ok' | 'error';
+    engagement: 'ok' | 'error';
+    campaigns: 'ok' | 'error';
+}
+
 // ---------- Data fetching hook ----------
 
-function useDashboard() {
+function useDashboard(windowDays: number, refreshKey: number) {
     const [data, setData] = React.useState<DashboardData | null>(null);
     const [volume, setVolume] = React.useState<VolumePoint[]>([]);
     const [engagement, setEngagement] = React.useState<EngagementPoint[]>([]);
     const [campaigns, setCampaigns] = React.useState<RecentMessage[]>([]);
     const [loading, setLoading] = React.useState(true);
     const [error, setError] = React.useState<string | null>(null);
+    const [lastUpdated, setLastUpdated] = React.useState<string | null>(null);
+    const pollDelayRef = React.useRef(60_000);
+    const [sourcesStatus, setSourcesStatus] = React.useState<DashboardSourcesStatus>({
+        overview: 'ok',
+        volume: 'ok',
+        engagement: 'ok',
+        campaigns: 'ok',
+    });
 
     React.useEffect(() => {
         let cancelled = false;
-        async function load() {
+        let timerId: number | null = null;
+
+        const load = async () => {
+            if (cancelled) return;
             try {
-                const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+                setLoading(true);
+                setError(null);
+                const since = new Date(Date.now() - windowDays * 86_400_000).toISOString();
                 const until = new Date().toISOString();
                 const [dashRes, volRes, engRes, campRes] = await Promise.allSettled([
-                    fetch(`/api/v1/analytics/dashboard?since=${since}&until=${until}`),
-                    fetch(`/api/v1/analytics/volume?since=${since}&until=${until}&granularity=day`),
-                    fetch(`/api/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`),
-                    fetch('/api/v1/messages?limit=5&sort=createdAt:desc'),
+                    fetch(`/v1/analytics/dashboard?since=${since}&until=${until}`),
+                    fetch(`/v1/analytics/volume?since=${since}&until=${until}&granularity=day`),
+                    fetch(`/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`),
+                    fetch('/v1/messages?limit=5&sort=createdAt:desc'),
                 ]);
                 if (cancelled) return;
+                const nextStatus: DashboardSourcesStatus = {
+                    overview: dashRes.status === 'fulfilled' && dashRes.value.ok ? 'ok' : 'error',
+                    volume: volRes.status === 'fulfilled' && volRes.value.ok ? 'ok' : 'error',
+                    engagement: engRes.status === 'fulfilled' && engRes.value.ok ? 'ok' : 'error',
+                    campaigns: campRes.status === 'fulfilled' && campRes.value.ok ? 'ok' : 'error',
+                };
+
                 if (dashRes.status === 'fulfilled' && dashRes.value.ok) {
                     setData((await dashRes.value.json()).dashboard);
+                } else {
+                    setData(null);
                 }
                 if (volRes.status === 'fulfilled' && volRes.value.ok) {
                     setVolume((await volRes.value.json()).volume ?? []);
+                } else {
+                    setVolume([]);
                 }
                 if (engRes.status === 'fulfilled' && engRes.value.ok) {
                     setEngagement((await engRes.value.json()).engagement ?? []);
+                } else {
+                    setEngagement([]);
                 }
                 if (campRes.status === 'fulfilled' && campRes.value.ok) {
                     const json = await campRes.value.json();
@@ -105,18 +140,40 @@ function useDashboard() {
                         sentAt: m.sentAt, scheduledAt: m.scheduledAt,
                         sent: m.recipientCount ?? 0, openRate: 0, clickRate: 0,
                     })));
+                } else {
+                    setCampaigns([]);
                 }
+
+                setSourcesStatus(nextStatus);
+                const hasAnyError = Object.values(nextStatus).some((status) => status === 'error');
+                if (Object.values(nextStatus).every((status) => status === 'error')) {
+                    setError('All analytics sources are currently unavailable.');
+                }
+
+                pollDelayRef.current = hasAnyError ? Math.min(pollDelayRef.current * 2, 300_000) : 60_000;
             } catch (err) {
                 if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
+                pollDelayRef.current = Math.min(pollDelayRef.current * 2, 300_000);
             } finally {
-                if (!cancelled) setLoading(false);
+                if (!cancelled) {
+                    setLastUpdated(new Date().toISOString());
+                    setLoading(false);
+                }
             }
-        }
-        load();
-        return () => { cancelled = true; };
-    }, []);
+            if (!cancelled) {
+                timerId = window.setTimeout(load, pollDelayRef.current);
+            }
+        };
 
-    return { data, volume, engagement, campaigns, loading, error };
+        pollDelayRef.current = 60_000;
+        load();
+        return () => {
+            cancelled = true;
+            if (timerId !== null) window.clearTimeout(timerId);
+        };
+    }, [windowDays, refreshKey]);
+
+    return { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus };
 }
 
 // ---------- Stat builder ----------
@@ -132,13 +189,6 @@ function buildStats(d: DashboardData | null) {
         { title: 'Click Rate', value: clickRate, change: clickRate, changeType: (clickRate >= 2 ? 'positive' : 'negative') as 'positive' | 'negative', icon: MousePointer, color: 'text-danger', bgColor: 'bg-danger/10', isPercent: true },
     ];
 }
-
-const statusStyles: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'secondary' }> = {
-    sent: { label: 'Sent', variant: 'success' }, delivered: { label: 'Delivered', variant: 'success' },
-    sending: { label: 'Sending', variant: 'warning' }, queued: { label: 'Queued', variant: 'secondary' },
-    scheduled: { label: 'Scheduled', variant: 'secondary' }, draft: { label: 'Draft', variant: 'default' },
-    failed: { label: 'Failed', variant: 'default' }, paused: { label: 'Paused', variant: 'default' },
-};
 
 function DashboardSkeleton() {
     return (
@@ -158,8 +208,13 @@ function DashboardSkeleton() {
 }
 
 export default function DashboardPage() {
-    const { data, volume, engagement, campaigns, loading, error } = useDashboard();
+    const [windowDays, setWindowDays] = React.useState<7 | 30 | 90>(30);
+    const [refreshKey, setRefreshKey] = React.useState(0);
+    const { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus } = useDashboard(windowDays, refreshKey);
     const stats = buildStats(data);
+    const lastUpdatedLabel = lastUpdated ? formatRelativeTime(new Date(lastUpdated)) : 'just now';
+    const isStale = Boolean(lastUpdated) && Date.now() - new Date(lastUpdated as string).getTime() > 60_000;
+    const countFormatter = React.useCallback((value: number) => formatNumber(value), []);
 
     if (loading) {
         return <DashboardSkeleton />;
@@ -171,10 +226,40 @@ export default function DashboardPage() {
                 title="Dashboard"
                 description="Enterprise delivery performance and engagement analytics"
                 actions={<>
-                    <Button variant="outline" className="hidden sm:flex border-surface-200 shadow-sm"><Calendar className="mr-2 h-4 w-4" />Last 30 Days</Button>
+                    <div className="hidden sm:flex items-center gap-2">
+                        {[7, 30, 90].map((days) => (
+                            <Button
+                                key={days}
+                                type="button"
+                                variant={windowDays === days ? 'default' : 'outline'}
+                                className="border-surface-200 shadow-sm"
+                                onClick={() => setWindowDays(days as 7 | 30 | 90)}
+                            >
+                                <Calendar className="mr-2 h-4 w-4" />Last {days} Days
+                            </Button>
+                        ))}
+                    </div>
+                    <Button variant="outline" className="border-surface-200 shadow-sm" onClick={() => setRefreshKey((prev) => prev + 1)}>
+                        <RefreshCw className="mr-2 h-4 w-4" />Refresh
+                    </Button>
                     <Button className="bg-primary shadow-lg shadow-primary/20"><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
                 </>}
             />
+
+            {isStale ? (
+                <Card className="border-warning/40 bg-warning/10" data-testid="metrics-stale-badge">
+                    <CardContent className="p-3 text-sm text-foreground">Metrics are stale while background revalidation runs.</CardContent>
+                </Card>
+            ) : null}
+
+            {data && (parseFloat(data.engagement.rates.bounce) > 2 || parseFloat(data.engagement.rates.delivery) < 95) ? (
+                <Card className="border-warning/40 bg-warning/10">
+                    <CardContent className="p-4 text-sm text-foreground">
+                        <p className="font-semibold">Anomaly detected in deliverability trends.</p>
+                        <p className="text-muted-foreground mt-1">Bounce or delivery thresholds exceeded in the selected window. Review recent activity and suppression changes.</p>
+                    </CardContent>
+                </Card>
+            ) : null}
 
             {error && (
                 <Card className="border-destructive/50 bg-destructive/10">
@@ -225,17 +310,25 @@ export default function DashboardPage() {
                             <div>
                                 <CardTitle className="text-lg font-bold">Engagement Trends</CardTitle>
                                 <CardDescription>Unique opens and clicks across all regions</CardDescription>
+                                <p className="mt-1 text-xs text-muted-foreground">Last updated {lastUpdatedLabel}</p>
                             </div>
-                            <Badge variant="secondary" className="bg-brand-50 text-brand-700 border-brand-100 font-bold">Live</Badge>
+                            <Badge variant="secondary" className="bg-brand-50 text-brand-700 border-brand-100 font-bold">{sourcesStatus.engagement === 'ok' ? 'Live' : 'Unavailable'}</Badge>
                         </div>
                     </CardHeader>
                     <CardContent className="pt-8">
-                        <ApexAreaChart
-                            data={engagement.length > 0 ? engagement : [{ date: 'No data', opens: 0, clicks: 0 }]}
-                            xKey="date"
-                            areas={[{ key: 'opens', name: 'Opens', color: '#2563eb' }, { key: 'clicks', name: 'Clicks', color: '#16a34a' }]}
-                            height={320}
-                        />
+                        {sourcesStatus.engagement === 'error' ? (
+                            <div className="rounded-xl border border-border bg-muted/30 p-6 text-sm text-muted-foreground">
+                                Engagement metrics are temporarily unavailable. Try refreshing in a moment.
+                            </div>
+                        ) : (
+                            <ApexAreaChart
+                                data={engagement.length > 0 ? engagement : [{ date: 'No data', opens: 0, clicks: 0 }]}
+                                xKey="date"
+                                areas={[{ key: 'opens', name: 'Opens', color: '#2563eb' }, { key: 'clicks', name: 'Clicks', color: '#16a34a' }]}
+                                formatter={countFormatter}
+                                height={320}
+                            />
+                        )}
                     </CardContent>
                 </Card>
                 <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-volume">
@@ -244,16 +337,24 @@ export default function DashboardPage() {
                             <div>
                                 <CardTitle className="text-lg font-bold">Sending Volume</CardTitle>
                                 <CardDescription>Daily message throughput analysis</CardDescription>
+                                <p className="mt-1 text-xs text-muted-foreground">Last updated {lastUpdatedLabel}</p>
                             </div>
                         </div>
                     </CardHeader>
                     <CardContent className="pt-8">
-                        <ApexBarChart
-                            data={volume.length > 0 ? volume.map(v => ({ date: v.date, sent: v.sent })) : [{ date: 'No data', sent: 0 }]}
-                            xKey="date"
-                            bars={[{ key: 'sent', name: 'Emails Sent', color: '#2563eb' }]}
-                            height={320}
-                        />
+                        {sourcesStatus.volume === 'error' ? (
+                            <div className="rounded-xl border border-border bg-muted/30 p-6 text-sm text-muted-foreground">
+                                Sending volume metrics are temporarily unavailable. Try refreshing in a moment.
+                            </div>
+                        ) : (
+                            <ApexBarChart
+                                data={volume.length > 0 ? volume.map(v => ({ date: v.date, sent: v.sent })) : [{ date: 'No data', sent: 0 }]}
+                                xKey="date"
+                                bars={[{ key: 'sent', name: 'Emails Sent', color: '#2563eb' }]}
+                                formatter={countFormatter}
+                                height={320}
+                            />
+                        )}
                     </CardContent>
                 </Card>
             </div>
@@ -265,11 +366,16 @@ export default function DashboardPage() {
                         <div>
                             <CardTitle className="text-lg font-bold">Recent Activity</CardTitle>
                             <CardDescription>Latest transactional and marketing deliveries</CardDescription>
+                            <p className="mt-1 text-xs text-muted-foreground">Last updated {lastUpdatedLabel}</p>
                         </div>
                         <Button variant="ghost" size="sm" className="text-brand-600 font-bold hover:bg-brand-50">View Analytics</Button>
                     </CardHeader>
                     <CardContent className="p-0">
-                        {campaigns.length === 0 ? (
+                        {sourcesStatus.campaigns === 'error' ? (
+                            <div className="p-8 text-sm text-muted-foreground">
+                                Recent activity is temporarily unavailable. You can continue using the dashboard while this data source recovers.
+                            </div>
+                        ) : campaigns.length === 0 ? (
                             <div className="p-12">
                                 <EmptyState
                                     icon={Mail}
@@ -295,7 +401,6 @@ export default function DashboardPage() {
                                 </TableHeader>
                                 <TableBody>
                                     {campaigns.map((c) => {
-                                        const style = statusStyles[c.status] || { label: c.status, variant: 'default' as const };
                                         return (
                                             <TableRow key={c.id} className="group hover:bg-surface-50/50 transition-colors">
                                                 <TableCell className="pl-6 min-w-0">
@@ -307,14 +412,14 @@ export default function DashboardPage() {
                                                     </p>
                                                 </TableCell>
                                                 <TableCell>
-                                                    <Badge variant={style.variant} className="font-bold rounded-full px-3">{style.label}</Badge>
+                                                    <StatusIndicator status={c.status} className="font-bold rounded-full px-3" />
                                                 </TableCell>
                                                 <TableCell className="text-right font-medium apex-metric-number">{formatNumber(c.sent)}</TableCell>
                                                 <TableCell className="text-right font-bold apex-metric-number text-surface-900">{c.openRate > 0 ? `${c.openRate.toFixed(1)}%` : '-'}</TableCell>
                                                 <TableCell className="text-right font-bold apex-metric-number text-surface-900">{c.clickRate > 0 ? `${c.clickRate.toFixed(1)}%` : '-'}</TableCell>
                                                 <TableCell className="pr-6 text-right">
                                                     <DropdownMenu>
-                                                        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-brand-50 hover:text-brand-600"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+                                                        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="Campaign row actions" className="h-8 w-8 hover:bg-brand-50 hover:text-brand-600"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                                                         <DropdownMenuContent align="end" className="rounded-xl shadow-xl border-surface-100"><DropdownMenuItem className="font-medium">View Details</DropdownMenuItem><DropdownMenuItem className="font-medium text-brand-600">Re-send Message</DropdownMenuItem></DropdownMenuContent>
                                                     </DropdownMenu>
                                                 </TableCell>
@@ -331,6 +436,7 @@ export default function DashboardPage() {
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <CardTitle className="text-lg font-bold">Sender Reputation</CardTitle>
                         <CardDescription>Global delivery health metrics</CardDescription>
+                        <p className="mt-1 text-xs text-muted-foreground">Last updated {lastUpdatedLabel}</p>
                     </CardHeader>
                     <CardContent className="space-y-8 pt-8">
                         {data ? (
@@ -355,9 +461,17 @@ export default function DashboardPage() {
                                 </div>
                             </>
                         ) : (
-                            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                                <Loader2 className="h-8 w-8 mb-4 animate-spin text-brand-600" data-testid="spinner" />
-                                <p className="text-sm font-medium">Synchronizing metrics...</p>
+                            <div className="animate-pulse py-6 space-y-5" aria-label="Loading sender reputation metrics">
+                                <div className="h-24 rounded-2xl bg-muted" />
+                                <div className="space-y-3">
+                                    <div className="h-8 rounded-lg bg-muted" />
+                                    <div className="h-8 rounded-lg bg-muted" />
+                                    <div className="h-8 rounded-lg bg-muted" />
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="h-14 rounded-lg bg-muted" />
+                                    <div className="h-14 rounded-lg bg-muted" />
+                                </div>
                             </div>
                         )}
                     </CardContent>

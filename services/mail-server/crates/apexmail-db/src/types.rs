@@ -25,6 +25,7 @@ pub struct User {
     pub tenant_id: Uuid,
     pub email: String,
     pub name: Option<String>,
+    #[serde(skip_serializing)]
     pub password_hash: String,
     pub role: String,
     pub status: String,
@@ -39,6 +40,7 @@ pub struct ApiKey {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    #[serde(skip_serializing)]
     pub key_hash: String,
     pub key_prefix: String,
     pub scopes: serde_json::Value,
@@ -64,6 +66,7 @@ pub struct Domain {
     pub tlsrpt_verified: bool,
     pub dkim_selector: Option<String>,
     pub dkim_public_key: Option<String>,
+    #[serde(skip_serializing)]
     pub dkim_private_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -139,6 +142,7 @@ pub struct Webhook {
     pub tenant_id: Uuid,
     pub url: String,
     pub events: serde_json::Value,
+    #[serde(skip_serializing)]
     pub secret: String,
     pub status: String,
     pub created_at: DateTime<Utc>,

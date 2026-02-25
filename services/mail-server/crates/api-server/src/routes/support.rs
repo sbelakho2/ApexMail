@@ -61,11 +61,17 @@ pub struct ListTicketsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
     pub status: Option<String>,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -121,13 +127,15 @@ async fn list_tickets(
 ) -> Result<Json<Vec<TicketResponse>>, ApiError> {
     require_scopes(&auth, &["support:read"])?;
 
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, TicketRow>(
         "SELECT id, subject, description, priority, status, assigned_to, created_at, updated_at
          FROM support_tickets WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
-    .bind(params.limit.min(100))
-    .bind(params.offset)
+    .bind(clamp_limit(params.limit, 100))
+    // Fix #58: Clamp offset to valid range.
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 

@@ -58,6 +58,35 @@ const EU_COUNTRIES = [
   'DE', 'GR', 'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL',
   'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE',
 ];
+const EU_VAT_RATES: Record<string, number> = {
+  AT: 20,
+  BE: 21,
+  BG: 20,
+  HR: 25,
+  CY: 19,
+  CZ: 21,
+  DK: 25,
+  EE: 22,
+  FI: 24,
+  FR: 20,
+  DE: 19,
+  GR: 24,
+  HU: 27,
+  IE: 23,
+  IT: 22,
+  LV: 21,
+  LT: 21,
+  LU: 17,
+  MT: 18,
+  NL: 21,
+  PL: 23,
+  PT: 23,
+  RO: 19,
+  SK: 20,
+  SI: 22,
+  ES: 21,
+  SE: 25,
+};
 
 /**
  * Invoice generation service
@@ -92,11 +121,14 @@ export class InvoiceService {
     customerCountry: string,
     customerVatNumber: string | null
   ): { vatRate: number; vatAmount: number } {
+    const computeVatAmount = (amountCents: number, ratePercent: number): number =>
+      Math.floor((amountCents * ratePercent + 50) / 100);
+
     // Estonia: Always charge VAT
     if (customerCountry === 'EE') {
       return {
         vatRate: ESTONIA_VAT_RATE,
-        vatAmount: Math.round(subtotal * (ESTONIA_VAT_RATE / 100)),
+        vatAmount: computeVatAmount(subtotal, ESTONIA_VAT_RATE),
       };
     }
 
@@ -105,11 +137,12 @@ export class InvoiceService {
       return { vatRate: 0, vatAmount: 0 };
     }
 
-    // EU B2C: Charge local VAT (simplified: use Estonia rate)
+    // EU B2C: Charge destination VAT rate
     if (EU_COUNTRIES.includes(customerCountry)) {
+      const rate = EU_VAT_RATES[customerCountry] ?? ESTONIA_VAT_RATE;
       return {
-        vatRate: ESTONIA_VAT_RATE,
-        vatAmount: Math.round(subtotal * (ESTONIA_VAT_RATE / 100)),
+        vatRate: rate,
+        vatAmount: computeVatAmount(subtotal, rate),
       };
     }
 
@@ -160,7 +193,9 @@ export class InvoiceService {
       country: string;
       email: string;
     }>(
-      `SELECT * FROM billing_addresses WHERE tenant_id = $1`,
+      `SELECT company_name, vat_number, address_line1, address_line2,
+              city, state, postal_code, country, email
+       FROM billing_addresses WHERE tenant_id = $1`,
       [input.tenantId]
     );
 
@@ -279,7 +314,7 @@ export class InvoiceService {
   /**
    * Generate PDF content for invoice
    */
-  generatePdfContent(invoice: Invoice): string {
+  generateInvoiceHtml(invoice: Invoice): string {
     const formatCurrency = (cents: number): string => 
       `€${(cents / 100).toFixed(2)}`;
 
@@ -558,7 +593,11 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM invoices WHERE id = $1`,
+      `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
+              subtotal, vat_total, total, line_items, billing_address,
+              issued_at, due_at, paid_at, period_start, period_end,
+              purchase_order_number, notes, pdf_url, xml_url, created_at, updated_at
+       FROM invoices WHERE id = $1`,
       [invoiceId]
     );
 
@@ -653,7 +692,11 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
       created_at: Date;
       updated_at: Date;
     }>(
-      `SELECT * FROM invoices 
+      `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
+              subtotal, vat_total, total, line_items, billing_address,
+              issued_at, due_at, paid_at, period_start, period_end,
+              purchase_order_number, notes, pdf_url, xml_url, created_at, updated_at
+       FROM invoices 
        WHERE tenant_id = $1
        ORDER BY issued_at DESC
        LIMIT $2 OFFSET $3`,

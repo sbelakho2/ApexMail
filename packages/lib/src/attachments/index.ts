@@ -133,8 +133,8 @@ export class LocalAttachmentStorage implements AttachmentStorage {
         // Generate content hash for deduplication
         const hash = crypto.createHash('sha256').update(buffer).digest('hex');
         
-        // Generate unique ID
-        const id = `${tenantId}_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+        // Generate content-addressed ID for deduplication
+        const id = this.buildAttachmentId(tenantId, hash);
         
         // Ensure directories exist
         await fs.mkdir(this.basePath, { recursive: true });
@@ -179,24 +179,34 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     }
     
     async download(id: string): Promise<{ content: Buffer; metadata: AttachmentMetadata }> {
+        this.validateAttachmentId(id);
         const metadata = await this.getMetadata(id);
         if (!metadata) {
             throw new Error(`Attachment not found: ${id}`);
         }
         
         const filePath = path.join(this.basePath, metadata.tenantId, id);
+        const resolved = path.resolve(filePath);
+        if (!resolved.startsWith(path.resolve(this.basePath))) {
+            throw new Error('Invalid attachment path');
+        }
         const content = await fs.readFile(filePath);
         
         return { content, metadata };
     }
     
     async delete(id: string): Promise<void> {
+        this.validateAttachmentId(id);
         const metadata = await this.getMetadata(id);
         if (!metadata) {
             throw new Error(`Attachment not found: ${id}`);
         }
         
         const filePath = path.join(this.basePath, metadata.tenantId, id);
+        const resolved = path.resolve(filePath);
+        if (!resolved.startsWith(path.resolve(this.basePath))) {
+            throw new Error('Invalid attachment path');
+        }
         const metadataFilePath = path.join(this.metadataPath, `${id}.json`);
         
         await fs.unlink(filePath).catch(() => {});
@@ -206,13 +216,36 @@ export class LocalAttachmentStorage implements AttachmentStorage {
     }
     
     async getMetadata(id: string): Promise<AttachmentMetadata | null> {
+        this.validateAttachmentId(id);
         try {
             const metadataPath = path.join(this.metadataPath, `${id}.json`);
+            const resolved = path.resolve(metadataPath);
+            if (!resolved.startsWith(path.resolve(this.metadataPath))) {
+                throw new Error('Invalid metadata path');
+            }
             const content = await fs.readFile(metadataPath, 'utf-8');
             return JSON.parse(content);
         } catch {
             return null;
         }
+    }
+
+    /** Reject IDs containing path traversal characters. */
+    private validateAttachmentId(id: string): void {
+        if (/[/\\]|\.\./.test(id)) {
+            throw new Error('Invalid attachment ID');
+        }
+    }
+
+    private validateTenantId(tenantId: string): void {
+        if (!/^[a-zA-Z0-9_-]+$/.test(tenantId)) {
+            throw new Error('Invalid tenant ID');
+        }
+    }
+
+    private buildAttachmentId(tenantId: string, hash: string): string {
+        this.validateTenantId(tenantId);
+        return `${tenantId}_${hash}`;
     }
     
     getUrl(id: string): string {
@@ -308,8 +341,9 @@ export class S3AttachmentStorage implements AttachmentStorage {
             throw new Error(`Content type ${contentType} is not allowed`);
         }
         
+        this.validateTenantId(tenantId);
         const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-        const id = `${tenantId}/${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+        const id = `${tenantId}/${hash}`;
         
         // Use AWS SDK v3 style signing
         const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
@@ -368,6 +402,7 @@ export class S3AttachmentStorage implements AttachmentStorage {
     }
     
     async download(id: string): Promise<{ content: Buffer; metadata: AttachmentMetadata }> {
+        this.validateObjectKey(id);
         const url = this.getInternalUrl(id);
         const headers = this.getAuthHeaders('GET', `/${id}`);
         
@@ -396,6 +431,7 @@ export class S3AttachmentStorage implements AttachmentStorage {
     }
     
     async delete(id: string): Promise<void> {
+        this.validateObjectKey(id);
         const url = this.getInternalUrl(id);
         const headers = this.getAuthHeaders('DELETE', `/${id}`);
         
@@ -412,6 +448,7 @@ export class S3AttachmentStorage implements AttachmentStorage {
     }
     
     async getMetadata(id: string): Promise<AttachmentMetadata | null> {
+        this.validateObjectKey(id);
         const url = this.getInternalUrl(id);
         const headers = this.getAuthHeaders('HEAD', `/${id}`);
         
@@ -454,6 +491,18 @@ export class S3AttachmentStorage implements AttachmentStorage {
     private getInternalUrl(id: string): string {
         const endpoint = this.config.endpoint || `https://${this.config.bucket}.s3.${this.config.region}.amazonaws.com`;
         return `${endpoint}${this.config.forcePathStyle ? `/${this.config.bucket}` : ''}/${id}`;
+    }
+
+    private validateTenantId(tenantId: string): void {
+        if (!/^[a-zA-Z0-9_-]+$/.test(tenantId)) {
+            throw new Error('Invalid tenant ID');
+        }
+    }
+
+    private validateObjectKey(key: string): void {
+        if (!key || key.startsWith('/') || /\\/.test(key) || key.includes('..')) {
+            throw new Error('Invalid attachment key');
+        }
     }
     
     private getAuthHeaders(method: string, path: string): Record<string, string> {

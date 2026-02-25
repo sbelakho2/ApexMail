@@ -18,6 +18,28 @@ const dateFormatter = new Intl.DateTimeFormat('en-US', {
     minute: '2-digit',
 });
 
+const dateOnlyFormatter = new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+});
+
+const shortDateFormatter = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+});
+
+const timeFormatter = new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+});
+
+const timeWithSecondsFormatter = new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+});
+
 const numberFormatter = new Intl.NumberFormat('en-US');
 
 /** Cache keyed by currency code — FIX-500-443: capped at 50 entries to prevent unbounded growth */
@@ -40,6 +62,30 @@ function getCurrencyFormatter(currency: string): Intl.NumberFormat {
 
 export function formatDate(date: string | Date): string {
     return dateFormatter.format(new Date(date));
+}
+
+export function formatDateTime(date: string | Date): string {
+    return formatDate(date);
+}
+
+export function formatDateOnly(date: string | Date): string {
+    return dateOnlyFormatter.format(new Date(date));
+}
+
+export function formatShortDate(date: string | Date): string {
+    return shortDateFormatter.format(new Date(date));
+}
+
+export function formatTime(date: string | Date): string {
+    return timeFormatter.format(new Date(date));
+}
+
+export function formatTimeWithSeconds(date: string | Date): string {
+    return timeWithSecondsFormatter.format(new Date(date));
+}
+
+export function getLocalTimeZone(): string {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
 export function formatCurrency(amount: number, currency = 'EUR'): string {
@@ -76,6 +122,40 @@ export function getStatusColor(status: string): string {
         failed: 'text-destructive bg-destructive/10 border border-destructive/20',
     };
     return colors[status] || 'text-muted-foreground bg-muted border border-border';
+}
+
+export function getStatusChipClasses(status: string): string {
+    const taxonomy: Record<string, string> = {
+        active: 'text-success bg-success/10 border border-success/20',
+        running: 'text-success bg-success/10 border border-success/20',
+        healthy: 'text-success bg-success/10 border border-success/20',
+        completed: 'text-success bg-success/10 border border-success/20',
+        resolved: 'text-success bg-success/10 border border-success/20',
+
+        paused: 'text-warning bg-warning/10 border border-warning/20',
+        warning: 'text-warning bg-warning/10 border border-warning/20',
+        degraded: 'text-warning bg-warning/10 border border-warning/20',
+        in_progress: 'text-warning bg-warning/10 border border-warning/20',
+        waiting_on_customer: 'text-warning bg-warning/10 border border-warning/20',
+
+        critical: 'text-destructive bg-destructive/10 border border-destructive/20',
+        error: 'text-destructive bg-destructive/10 border border-destructive/20',
+        failed: 'text-destructive bg-destructive/10 border border-destructive/20',
+        no_show: 'text-destructive bg-destructive/10 border border-destructive/20',
+        suspended: 'text-destructive bg-destructive/10 border border-destructive/20',
+
+        idle: 'text-info bg-info/10 border border-info/20',
+        scheduled: 'text-info bg-info/10 border border-info/20',
+        trialing: 'text-info bg-info/10 border border-info/20',
+
+        closed: 'text-muted-foreground bg-muted border border-border',
+        cancelled: 'text-muted-foreground bg-muted border border-border',
+        inactive: 'text-muted-foreground bg-muted border border-border',
+        stopped: 'text-muted-foreground bg-muted border border-border',
+        churned: 'text-muted-foreground bg-muted border border-border',
+    };
+
+    return taxonomy[status] || 'text-muted-foreground bg-muted border border-border';
 }
 
 export function truncate(str: string, length: number): string {

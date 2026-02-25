@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import { useState } from 'react';
 import { Send, Clock, CheckCircle, Copy, Play } from '@/components/ui/icons';
-import { cn } from '@/lib/utils';
+import { cn, formatTime, getLocalTimeZone } from '@/lib/utils';
 import DOMPurify from 'isomorphic-dompurify';
 
 /**
@@ -37,7 +37,8 @@ export function InteractiveConsole() {
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<Record<string, unknown> | null>(null);
   const [webhooks, setWebhooks] = useState<WebhookEvent[]>([]);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'err'>('idle');
+  const timezone = getLocalTimeZone();
 
   const [requestBody, setRequestBody] = useState({
     to: 'test@example.com',
@@ -49,7 +50,7 @@ export function InteractiveConsole() {
     setIsLoading(true);
     setActiveTab('response');
 
-    // Simulate API call
+    // Sandbox simulation — no real email is sent from this demo
     await new Promise((resolve) => setTimeout(resolve, 800));
 
     const mockResponse = {
@@ -58,19 +59,20 @@ export function InteractiveConsole() {
       to: requestBody.to,
       subject: requestBody.subject,
       created_at: new Date().toISOString(),
+      _note: 'Sandbox simulation — no email was delivered',
     };
 
     setResponse(mockResponse);
     setIsLoading(false);
 
-    // Simulate webhooks
+    // Simulated webhook events (sandbox only)
     setTimeout(() => {
       setWebhooks((prev) => [
         {
           id: `evt_${Math.random().toString(36).slice(2, 11)}`,
           type: 'email.sent',
           timestamp: new Date().toISOString(),
-          data: { message_id: mockResponse.id, recipient: requestBody.to },
+          data: { message_id: mockResponse.id, recipient: requestBody.to, _sandbox: true },
         },
         ...prev,
       ]);
@@ -82,26 +84,41 @@ export function InteractiveConsole() {
           id: `evt_${Math.random().toString(36).slice(2, 11)}`,
           type: 'email.delivered',
           timestamp: new Date().toISOString(),
-          data: { message_id: mockResponse.id, recipient: requestBody.to, mx_host: 'mx.example.com' },
+          data: { message_id: mockResponse.id, recipient: requestBody.to, mx_host: 'mx.example.com', _sandbox: true },
         },
         ...prev,
       ]);
     }, 3000);
   };
 
-  const copyCode = () => {
+  const copyCode = async () => {
     const code = `curl -X POST https://api.apexmail.ee/v1/messages \\
   -H "X-API-Key: YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
   -d '${JSON.stringify(requestBody, null, 2)}'`;
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied('ok');
+    } catch {
+      setCopied('err');
+    } finally {
+      setTimeout(() => setCopied('idle'), 2500);
+    }
   };
 
   return (
     <section ref={ref} className="py-12 lg:py-20 relative bg-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        {/* Section head with cross-link to real product */}
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-lg font-bold text-surface-900 sr-only">Interactive API Sandbox</h2>
+          <p className="text-xs text-surface-400">
+            This is a read-only sandbox. No real emails are sent.{' '}
+            <a href="/signup" className="text-primary-600 underline hover:text-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded">
+              Sign up to send real emails →
+            </a>
+          </p>
+        </div>
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
@@ -110,30 +127,40 @@ export function InteractiveConsole() {
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 bg-white border-b border-surface-200">
             <div className="flex items-center gap-2">
-              <div className="flex gap-1.5 mr-4">
+              <div className="flex gap-1.5 mr-4" aria-hidden="true">
                 <div className="w-3 h-3 rounded-full bg-surface-200" />
                 <div className="w-3 h-3 rounded-full bg-surface-200" />
                 <div className="w-3 h-3 rounded-full bg-surface-200" />
               </div>
               <span className="text-xs font-bold text-surface-600 font-mono">POST /v1/messages</span>
+              <span className="ml-2 px-2 py-0.5 text-[10px] font-bold rounded bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wide" role="note" aria-label="Sandbox: no real emails sent">
+                Sandbox
+              </span>
             </div>
             <div className="flex items-center gap-3">
               <button
                 onClick={copyCode}
-                className="flex items-center gap-1 px-3 py-1 text-xs font-medium text-surface-500 hover:text-primary-600 transition-colors"
+                aria-label={copied === 'ok' ? 'Copied to clipboard' : copied === 'err' ? 'Copy failed — try manually' : 'Copy cURL command'}
+                className={cn(
+                  'flex items-center gap-1 px-3 py-1 text-xs font-medium transition-colors',
+                  copied === 'err' ? 'text-red-500' : 'text-surface-500 hover:text-primary-600'
+                )}
               >
-                <Copy className="w-4 h-4" />
-                {copied ? 'Copied!' : 'Copy cURL'}
+                <Copy className="w-4 h-4" aria-hidden="true" />
+                {copied === 'ok' ? 'Copied!' : copied === 'err' ? 'Failed — copy manually' : 'Copy cURL'}
               </button>
               <button
                 onClick={handleSend}
                 disabled={isLoading}
+                aria-label={isLoading ? 'Sending sandbox request…' : 'Run sandbox request'}
+                aria-busy={isLoading}
+                data-demo-id="sandbox-send"
                 className="btn-primary flex items-center gap-2 py-2 px-4 text-xs font-medium"
               >
                 {isLoading ? (
-                  <Clock className="w-4 h-4 animate-spin" />
+                  <Clock className="w-4 h-4 animate-spin" aria-hidden="true" />
                 ) : (
-                  <Play className="w-4 h-4" />
+                  <Play className="w-4 h-4" aria-hidden="true" />
                 )}
                 Send Request
               </button>
@@ -141,7 +168,7 @@ export function InteractiveConsole() {
           </div>
 
           {/* Tabs */}
-          <div className="flex bg-white px-6 border-b border-surface-200">
+          <div className="flex bg-white px-6 border-b border-surface-200" role="tablist" aria-label="Console panels">
             {[
               { id: 'request', label: 'Request' },
               { id: 'response', label: 'Response' },
@@ -149,9 +176,24 @@ export function InteractiveConsole() {
             ].map((tab) => (
               <button
                 key={tab.id}
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                aria-controls={`panel-${tab.id}`}
+                id={`tab-${tab.id}`}
                 onClick={() => setActiveTab(tab.id as TabType)}
+                onKeyDown={(e) => {
+                  const tabs: TabType[] = ['request', 'response', 'webhook'];
+                  const idx = tabs.indexOf(tab.id as TabType);
+                  if (e.key === 'ArrowRight') {
+                    setActiveTab(tabs[(idx + 1) % tabs.length]);
+                    e.preventDefault();
+                  } else if (e.key === 'ArrowLeft') {
+                    setActiveTab(tabs[(idx + tabs.length - 1) % tabs.length]);
+                    e.preventDefault();
+                  }
+                }}
                 className={cn(
-                  'px-4 py-3 text-xs font-medium transition-all border-b-2',
+                  'px-4 py-3 text-xs font-medium transition-all border-b-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
                   activeTab === tab.id
                     ? 'text-primary-600 border-primary-600'
                     : 'text-surface-400 border-transparent hover:text-surface-900'
@@ -167,7 +209,7 @@ export function InteractiveConsole() {
             {/* Left Panel - Editor */}
             <div className="p-6 border-r border-surface-200 bg-white">
               {activeTab === 'request' && (
-                <div className="space-y-4">
+                <div role="tabpanel" id="panel-request" aria-labelledby="tab-request" className="space-y-4">
                   <div>
                     <label className="block text-xs font-medium text-surface-500 mb-2">To</label>
                     <input
@@ -199,17 +241,18 @@ export function InteractiveConsole() {
               )}
 
               {activeTab === 'response' && (
-                <div>
+                <div role="tabpanel" id="panel-response" aria-labelledby="tab-response">
                   {isLoading ? (
                     <div className="flex flex-col items-center justify-center h-64 text-surface-400">
                       <Clock className="w-8 h-8 animate-spin mb-4 text-primary-200" />
-                      <span className="text-xs font-medium">Waiting for response...</span>
+                      <span className="text-xs font-medium">Simulating request (~800ms)…</span>
                     </div>
                   ) : response ? (
                     <div className="space-y-4">
                       <div className="flex items-center gap-2 text-emerald-600">
-                        <CheckCircle className="w-5 h-5" strokeWidth={2} />
+                        <CheckCircle className="w-5 h-5" strokeWidth={2} aria-hidden="true" />
                         <span className="text-xs font-bold">200 OK</span>
+                        <span className="ml-auto text-xs text-amber-600 font-medium px-2 py-0.5 rounded bg-amber-50 border border-amber-200">Sandbox — no email delivered</span>
                       </div>
                       <pre className="text-xs text-surface-300 font-mono bg-surface-900 p-4 rounded-lg overflow-auto shadow-inner border border-surface-800">
                         {JSON.stringify(response, null, 2)}
@@ -218,22 +261,23 @@ export function InteractiveConsole() {
                   ) : (
                     <div className="flex flex-col items-center justify-center h-64 text-surface-400 text-center">
                       <div className="w-12 h-12 rounded-full bg-surface-50 flex items-center justify-center mb-4">
-                        <Play className="w-6 h-6 text-surface-200" />
+                        <Play className="w-6 h-6 text-surface-200" aria-hidden="true" />
                       </div>
-                      <span className="text-xs font-medium">Click "Send Request" to see the response</span>
+                      <span className="text-xs font-medium">Click &ldquo;Send Request&rdquo; to see the sandboxed response</span>
                     </div>
                   )}
                 </div>
               )}
 
               {activeTab === 'webhook' && (
-                <div>
+                <div role="tabpanel" id="panel-webhook" aria-labelledby="tab-webhook">
+                  <p className="text-xs text-surface-500 mb-3">Simulated events — times shown in {timezone}</p>
                   {webhooks.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-64 text-surface-400 text-center">
                       <div className="w-12 h-12 rounded-full bg-surface-50 flex items-center justify-center mb-4 animate-pulse">
                         <Send className="w-6 h-6 text-surface-200" />
                       </div>
-                      <span className="text-xs font-medium">Webhooks will appear here in real-time</span>
+                      <span className="text-xs font-medium">Simulated webhook events will appear here</span>
                     </div>
                   ) : (
                     <div className="space-y-3">
@@ -247,7 +291,7 @@ export function InteractiveConsole() {
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-primary-600 font-mono text-xs font-semibold">{webhook.type}</span>
                             <span className="text-xs font-medium text-surface-600 tabular-nums">
-                              {new Date(webhook.timestamp).toLocaleTimeString()}
+                              {formatTime(webhook.timestamp, { second: '2-digit' })}
                             </span>
                           </div>
                           <pre className="text-xs text-surface-500 font-mono bg-white p-2 rounded border border-surface-200 overflow-auto">

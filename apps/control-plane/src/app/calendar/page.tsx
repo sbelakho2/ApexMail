@@ -1,7 +1,9 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { formatDate, cn } from '../../lib/utils';
+import { useState, useEffect, useRef } from 'react';
+import { formatDate, formatTime, getLocalTimeZone, cn, getStatusChipClasses } from '../../lib/utils';
+import { PageEmptyState, PageErrorState, PageLoadingState } from '../../components/ui/async-state';
+import { Button } from '../../components/ui/button';
 
 /**
  * Demo Calendar - Schedule discovery calls and demos with interested leads
@@ -26,6 +28,10 @@ interface CalendarEvent {
     notes: string;
     outcome?: 'qualified' | 'not_qualified' | 'needs_follow_up' | 'closed_won' | 'closed_lost';
     meetingLink: string;
+    createdAt?: string;
+    updatedAt?: string;
+    createdBy?: string;
+    noShowReason?: string;
 }
 
 interface AvailabilitySlot {
@@ -58,14 +64,46 @@ export default function CalendarPage() {
     const [events, setEvents] = useState<CalendarEvent[]>([]);
     const [availability, setAvailability] = useState<AvailabilitySlot[]>([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<'upcoming' | 'past' | 'availability'>('upcoming');
+    const [statusFilter, setStatusFilter] = useState<'all' | CalendarEvent['status']>('all');
+    const [eventSearch, setEventSearch] = useState('');
+    const [displayTimezone, setDisplayTimezone] = useState<'local' | 'UTC'>('local');
     const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+    const [showNoShowCapture, setShowNoShowCapture] = useState(false);
+    const [noShowReasonInput, setNoShowReasonInput] = useState('');
+    const timezone = getLocalTimeZone();
+    const modalRef = useRef<HTMLDivElement>(null);
+    const lastFocusedElementRef = useRef<HTMLElement | null>(null);
 
     useEffect(() => {
         loadData();
+
+        try {
+            const saved = localStorage.getItem('calendar-page-preferences');
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                if (parsed.activeTab) setActiveTab(parsed.activeTab);
+                if (parsed.statusFilter) setStatusFilter(parsed.statusFilter);
+                if (parsed.eventSearch) setEventSearch(parsed.eventSearch);
+                if (parsed.displayTimezone) setDisplayTimezone(parsed.displayTimezone);
+            }
+        } catch {
+            // ignore invalid local storage payload
+        }
     }, []);
 
+    useEffect(() => {
+        try {
+            localStorage.setItem('calendar-page-preferences', JSON.stringify({ activeTab, statusFilter, eventSearch, displayTimezone }));
+        } catch {
+            // ignore local persistence failure
+        }
+    }, [activeTab, statusFilter, eventSearch, displayTimezone]);
+
     async function loadData() {
+        setLoading(true);
+        setLoadError(null);
         try {
             const response = await fetch('/api/calendar', { credentials: 'include' });
             if (!response.ok) throw new Error(`Failed to fetch calendar: ${response.status}`);
@@ -74,31 +112,174 @@ export default function CalendarPage() {
             setAvailability(data.availability);
         } catch (err) {
             console.error('Failed to load calendar data:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load calendar data');
         } finally {
             setLoading(false);
         }
     }
 
-    function toggleAvailability(slotId: string) {
-        setAvailability(prev => prev.map(s =>
-            s.id === slotId ? { ...s, enabled: !s.enabled } : s
+    async function toggleAvailability(slotId: string) {
+        const previousAvailability = availability;
+        const slot = availability.find((currentSlot) => currentSlot.id === slotId);
+        const nextEnabled = slot ? !slot.enabled : true;
+
+        setAvailability((prev) => prev.map((currentSlot) =>
+            currentSlot.id === slotId ? { ...currentSlot, enabled: nextEnabled } : currentSlot
         ));
+
+        try {
+            const response = await fetch(`/api/calendar/availability/${slotId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ enabled: nextEnabled }),
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to update availability: ${response.status}`);
+            }
+        } catch (err) {
+            setAvailability(previousAvailability);
+            setLoadError(err instanceof Error ? err.message : 'Failed to update availability');
+        }
     }
 
-    function updateEventStatus(eventId: string, status: CalendarEvent['status']) {
-        setEvents(prev => prev.map(e =>
-            e.id === eventId ? { ...e, status } : e
+    async function updateEventStatus(eventId: string, status: CalendarEvent['status'], noShowReason?: string) {
+        const previousEvents = events;
+        const previousSelected = selectedEvent;
+
+        setEvents((prev) => prev.map((event) =>
+            event.id === eventId ? { ...event, status, noShowReason } : event
         ));
         if (selectedEvent?.id === eventId) {
-            setSelectedEvent(prev => prev ? { ...prev, status } : null);
+            setSelectedEvent((prev) => prev ? { ...prev, status, noShowReason } : null);
+        }
+
+        try {
+            const response = await fetch(`/api/calendar/events/${eventId}/status`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ status, noShowReason }),
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to update event status: ${response.status}`);
+            }
+        } catch (err) {
+            setEvents(previousEvents);
+            setSelectedEvent(previousSelected);
+            setLoadError(err instanceof Error ? err.message : 'Failed to update event status');
         }
     }
 
     const [now, setNow] = useState(() => new Date('2026-01-15T10:00:00Z'));
     useEffect(() => { setNow(new Date()); }, []);
 
-    const upcomingEvents = events.filter(e => new Date(e.startTime) > now && e.status === 'scheduled');
-    const pastEvents = events.filter(e => new Date(e.startTime) <= now || e.status !== 'scheduled');
+    function isValidMeetingLink(link: string): boolean {
+        try {
+            const parsed = new URL(link);
+            return parsed.protocol === 'https:';
+        } catch {
+            return false;
+        }
+    }
+
+    function formatEventDate(iso: string): string {
+        if (displayTimezone === 'UTC') {
+            return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(iso));
+        }
+        return formatDate(iso);
+    }
+
+    function formatEventTime(iso: string): string {
+        if (displayTimezone === 'UTC') {
+            return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' }).format(new Date(iso));
+        }
+        return formatTime(iso);
+    }
+
+    function toMinutes(value: string): number {
+        const [hours, minutes] = value.split(':').map(Number);
+        return (hours * 60) + minutes;
+    }
+
+    const filteredEvents = events.filter((event) => {
+        const matchesStatus = statusFilter === 'all' ? true : event.status === statusFilter;
+        const query = eventSearch.trim().toLowerCase();
+        const matchesSearch = !query
+            ? true
+            : event.title.toLowerCase().includes(query) || event.leadName.toLowerCase().includes(query) || event.leadCompany.toLowerCase().includes(query);
+        return matchesStatus && matchesSearch;
+    });
+
+    const upcomingEvents = filteredEvents.filter(e => new Date(e.startTime) > now && e.status === 'scheduled');
+    const pastEvents = filteredEvents.filter(e => new Date(e.startTime) <= now || e.status !== 'scheduled');
+
+    const availabilityConflicts = availability.reduce<string[]>((acc, slot) => {
+        if (!slot.enabled) return acc;
+        const sameDaySlots = availability.filter(other => other.id !== slot.id && other.dayOfWeek === slot.dayOfWeek && other.enabled);
+        const slotStart = toMinutes(slot.startTime);
+        const slotEnd = toMinutes(slot.endTime);
+        const hasOverlap = sameDaySlots.some(other => {
+            const otherStart = toMinutes(other.startTime);
+            const otherEnd = toMinutes(other.endTime);
+            return slotStart < otherEnd && otherStart < slotEnd;
+        });
+        if (hasOverlap) {
+            acc.push(`${DAYS[slot.dayOfWeek]} ${slot.startTime}-${slot.endTime}`);
+        }
+        return acc;
+    }, []);
+
+    useEffect(() => {
+        if (!selectedEvent) return;
+
+        lastFocusedElementRef.current = document.activeElement as HTMLElement | null;
+        const timer = window.setTimeout(() => {
+            const focusables = modalRef.current?.querySelectorAll<HTMLElement>(
+                'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+            );
+            if (focusables && focusables.length > 0) {
+                focusables[0].focus();
+            } else {
+                modalRef.current?.focus();
+            }
+        }, 0);
+
+        return () => {
+            window.clearTimeout(timer);
+            lastFocusedElementRef.current?.focus();
+        };
+    }, [selectedEvent]);
+
+    function handleModalKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+        if (e.key === 'Escape') {
+            setSelectedEvent(null);
+            return;
+        }
+
+        if (e.key !== 'Tab') return;
+
+        const focusables = modalRef.current?.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+
+        if (!focusables || focusables.length === 0) {
+            e.preventDefault();
+            return;
+        }
+
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+
+        if (e.shiftKey && active === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }
 
     // Stats
     const scheduledCount = events.filter(e => e.status === 'scheduled').length;
@@ -107,10 +288,16 @@ export default function CalendarPage() {
     const showRate = completedCount > 0 ? ((completedCount / (completedCount + noShowCount)) * 100).toFixed(0) : 'N/A';
 
     if (loading) {
+        return <PageLoadingState label="Loading calendar..." />;
+    }
+
+    if (loadError) {
         return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
+            <PageErrorState
+                title="Failed to load calendar"
+                description={loadError}
+                onRetry={loadData}
+            />
         );
     }
 
@@ -120,16 +307,25 @@ export default function CalendarPage() {
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Demo Calendar</h1>
                     <p className="text-muted-foreground mt-1">
-                        Schedule and manage discovery calls and demos
+                        Schedule and manage discovery calls and demos • Times shown in {displayTimezone === 'UTC' ? 'UTC' : timezone}
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted font-medium text-foreground transition-colors">
+                    <select
+                        value={displayTimezone}
+                        onChange={(event) => setDisplayTimezone(event.target.value as 'local' | 'UTC')}
+                        className="px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none"
+                        aria-label="Timezone display"
+                    >
+                        <option value="local">Local Time</option>
+                        <option value="UTC">UTC</option>
+                    </select>
+                    <Button variant="outline" size="md">
                         Connect Calendar
-                    </button>
-                    <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
+                    </Button>
+                    <Button variant="default" size="md">
                         Copy Booking Link
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -177,13 +373,36 @@ export default function CalendarPage() {
                 </nav>
             </div>
 
+            <div className="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <input
+                    type="text"
+                    value={eventSearch}
+                    onChange={(event) => setEventSearch(event.target.value)}
+                    placeholder="Search by title, lead, or company"
+                    className="px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none"
+                />
+                <select
+                    value={statusFilter}
+                    onChange={(event) => setStatusFilter(event.target.value as 'all' | CalendarEvent['status'])}
+                    className="px-3 py-2 border border-border rounded-lg text-sm bg-background focus:ring-2 focus:ring-primary focus:border-primary outline-none"
+                >
+                    <option value="all">All statuses</option>
+                    <option value="scheduled">Scheduled</option>
+                    <option value="completed">Completed</option>
+                    <option value="no_show">No show</option>
+                    <option value="rescheduled">Rescheduled</option>
+                    <option value="cancelled">Cancelled</option>
+                </select>
+            </div>
+
             {/* Upcoming Events */}
             {activeTab === 'upcoming' && (
                 <div className="bg-card rounded-xl border border-border shadow-sm">
                     {upcomingEvents.length === 0 ? (
-                        <div className="p-8 text-center text-muted-foreground">
-                            No upcoming meetings scheduled
-                        </div>
+                        <PageEmptyState
+                            title="No upcoming meetings"
+                            description="New discovery calls and demos will appear here once booked."
+                        />
                     ) : (
                         <div className="divide-y divide-border">
                             {upcomingEvents.map(event => {
@@ -208,22 +427,26 @@ export default function CalendarPage() {
                                         </div>
                                         <div className="text-right">
                                             <div className="text-sm font-medium text-foreground">
-                                                {formatDate(event.startTime)}
+                                                {formatEventDate(event.startTime)}
                                             </div>
                                             <div className="text-sm text-muted-foreground">
-                                                {new Date(event.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} -
-                                                {new Date(event.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                {formatEventTime(event.startTime)} -
+                                                {formatEventTime(event.endTime)}
                                             </div>
                                         </div>
-                                        <a
-                                            href={event.meetingLink}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="px-3 py-1.5 bg-primary text-primary-foreground rounded text-sm hover:bg-primary/90 font-medium transition-colors"
-                                        >
-                                            Join
-                                        </a>
+                                        {isValidMeetingLink(event.meetingLink) ? (
+                                            <a
+                                                href={event.meetingLink}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                onClick={(e) => e.stopPropagation()}
+                                                className="inline-flex items-center justify-center min-h-[44px] px-3 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors"
+                                            >
+                                                Join
+                                            </a>
+                                        ) : (
+                                            <span className="text-xs text-warning">Invalid meeting link</span>
+                                        )}
                                     </div>
                                 );
                             })}
@@ -236,9 +459,10 @@ export default function CalendarPage() {
             {activeTab === 'past' && (
                 <div className="bg-card rounded-xl border border-border shadow-sm">
                     {pastEvents.length === 0 ? (
-                        <div className="p-8 text-center text-muted-foreground">
-                            No past meetings
-                        </div>
+                        <PageEmptyState
+                            title="No past meetings"
+                            description="Completed and closed meetings will appear here."
+                        />
                     ) : (
                         <div className="divide-y divide-border">
                             {pastEvents.map(event => {
@@ -254,7 +478,7 @@ export default function CalendarPage() {
                                         <div className="flex-1">
                                             <div className="flex items-center gap-2 mb-1">
                                                 <span className="font-medium text-foreground">{event.title}</span>
-                                                <span className={cn('text-sm font-medium', statusConfig.color)}>
+                                                <span className={cn('text-xs font-medium px-2 py-0.5 rounded-full border', getStatusChipClasses(event.status))}>
                                                     {statusConfig.label}
                                                 </span>
                                             </div>
@@ -263,7 +487,7 @@ export default function CalendarPage() {
                                             </div>
                                         </div>
                                         <div className="text-sm text-muted-foreground">
-                                            {formatDate(event.startTime)}
+                                            {formatEventDate(event.startTime)}
                                         </div>
                                     </div>
                                 );
@@ -280,6 +504,11 @@ export default function CalendarPage() {
                     <p className="text-sm text-muted-foreground mb-6">
                         Set the times when prospects can book meetings with you.
                     </p>
+                    {availabilityConflicts.length > 0 && (
+                        <div className="mb-4 rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 text-xs text-warning">
+                            Overlapping availability detected: {availabilityConflicts.join(', ')}
+                        </div>
+                    )}
                     <div className="space-y-4">
                         {[1, 2, 3, 4, 5].map(day => {
                             const daySlots = availability.filter(s => s.dayOfWeek === day);
@@ -301,7 +530,7 @@ export default function CalendarPage() {
                                                 {slot.startTime} - {slot.endTime}
                                             </button>
                                         ))}
-                                        <button className="px-3 py-1.5 border border-dashed border-border rounded text-sm text-muted-foreground hover:border-foreground hover:text-foreground">
+                                        <button type="button" className="px-3 py-1.5 border border-dashed border-border rounded text-sm text-muted-foreground hover:border-foreground hover:text-foreground">
                                             + Add
                                         </button>
                                     </div>
@@ -351,22 +580,36 @@ export default function CalendarPage() {
 
             {/* Event Detail Modal */}
             {selectedEvent && (
-                <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedEvent(null)}>
-                    <div className="bg-card rounded-xl p-6 w-full max-w-lg shadow-xl border border-border" onClick={(e) => e.stopPropagation()}>
+                <div
+                    className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-stretch justify-end z-50"
+                    onClick={() => setSelectedEvent(null)}
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="calendar-event-title"
+                    tabIndex={-1}
+                    onKeyDown={handleModalKeyDown}
+                >
+                    <div
+                        ref={modalRef}
+                        className="bg-card p-6 w-full max-w-lg shadow-xl border-l border-border h-full overflow-y-auto"
+                        onClick={(e) => e.stopPropagation()}
+                        tabIndex={-1}
+                    >
                         <div className="flex items-start justify-between mb-4">
                             <div>
-                                <h2 className="text-xl font-bold text-foreground">{selectedEvent.title}</h2>
+                                <h2 id="calendar-event-title" className="text-xl font-bold text-foreground">{selectedEvent.title}</h2>
                                 <div className="text-sm text-muted-foreground mt-1">
-                                    {formatDate(selectedEvent.startTime)} • {new Date(selectedEvent.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    {formatEventDate(selectedEvent.startTime)} • {formatEventTime(selectedEvent.startTime)}
                                 </div>
                             </div>
-                            <button 
+                            <Button
                                 onClick={() => setSelectedEvent(null)} 
-                                className="text-muted-foreground hover:text-foreground transition-colors"
+                                variant="ghost"
+                                size="sm"
                                 aria-label="Close modal"
                             >
                                 Close
-                            </button>
+                            </Button>
                         </div>
 
                         <div className="space-y-4 mb-6">
@@ -384,7 +627,7 @@ export default function CalendarPage() {
                             </div>
                             <div className="flex items-center gap-3">
                                 <span className="text-muted-foreground w-20">Status:</span>
-                                <span className={STATUS_CONFIG[selectedEvent.status].color}>
+                                <span className={cn('text-xs font-medium px-2 py-0.5 rounded-full border', getStatusChipClasses(selectedEvent.status))}>
                                     {STATUS_CONFIG[selectedEvent.status].label}
                                 </span>
                             </div>
@@ -394,42 +637,98 @@ export default function CalendarPage() {
                                     <p className="text-sm bg-muted/50 rounded-lg p-3 text-foreground border border-border">{selectedEvent.notes}</p>
                                 </div>
                             )}
+                            <div className="border border-border rounded-lg p-3 bg-muted/20">
+                                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Audit Fields (Immutable)</div>
+                                <div className="text-xs text-muted-foreground space-y-1">
+                                    <div>Event ID: <span className="text-foreground font-mono">{selectedEvent.id}</span></div>
+                                    <div>Created: <span className="text-foreground">{selectedEvent.createdAt ? formatEventDate(selectedEvent.createdAt) : 'Unknown'}</span></div>
+                                    <div>Updated: <span className="text-foreground">{selectedEvent.updatedAt ? formatEventDate(selectedEvent.updatedAt) : 'Unknown'}</span></div>
+                                    <div>Created by: <span className="text-foreground">{selectedEvent.createdBy || 'System'}</span></div>
+                                </div>
+                            </div>
                         </div>
 
                         <div className="flex gap-2">
                             {selectedEvent.status === 'scheduled' && (
                                 <>
-                                    <a
-                                        href={selectedEvent.meetingLink}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-center hover:bg-primary/90 font-medium transition-colors"
-                                    >
-                                        Join Meeting
-                                    </a>
-                                    <button
+                                    {isValidMeetingLink(selectedEvent.meetingLink) ? (
+                                        <a
+                                            href={selectedEvent.meetingLink}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="flex-1 inline-flex items-center justify-center min-h-[44px] px-4 py-2 bg-primary text-primary-foreground rounded-lg text-center hover:bg-primary/90 font-medium transition-colors"
+                                        >
+                                            Join Meeting
+                                        </a>
+                                    ) : (
+                                        <span className="flex-1 inline-flex items-center justify-center min-h-[44px] px-4 py-2 rounded-lg text-sm bg-warning/10 text-warning border border-warning/20">
+                                            Invalid meeting URL
+                                        </span>
+                                    )}
+                                    <Button
                                         onClick={() => updateEventStatus(selectedEvent.id, 'completed')}
-                                        className="px-4 py-2 bg-success/10 text-success rounded-lg hover:bg-success/20 font-medium transition-colors"
+                                        variant="outline"
+                                        size="md"
+                                        className="text-success border-success/30 hover:bg-success/10"
                                     >
                                         Mark Complete
-                                    </button>
-                                    <button
-                                        onClick={() => updateEventStatus(selectedEvent.id, 'no_show')}
-                                        className="px-4 py-2 bg-destructive/10 text-destructive rounded-lg hover:bg-destructive/20 font-medium transition-colors"
+                                    </Button>
+                                    <Button
+                                        onClick={() => setShowNoShowCapture(true)}
+                                        variant="outline"
+                                        size="md"
+                                        className="text-destructive border-destructive/30 hover:bg-destructive/10"
                                     >
                                         No Show
-                                    </button>
+                                    </Button>
                                 </>
                             )}
                             {selectedEvent.status !== 'scheduled' && (
-                                <button
+                                <Button
                                     onClick={() => setSelectedEvent(null)}
-                                    className="flex-1 px-4 py-2 bg-muted text-muted-foreground rounded-lg hover:bg-muted/80 font-medium transition-colors"
+                                    variant="outline"
+                                    size="md"
+                                    className="flex-1"
                                 >
                                     Close
-                                </button>
+                                </Button>
                             )}
                         </div>
+                        {showNoShowCapture && (
+                            <div className="mt-4 border border-destructive/20 rounded-lg p-3 bg-destructive/5">
+                                <label className="block text-xs font-medium text-foreground mb-2">No-show reason</label>
+                                <textarea
+                                    value={noShowReasonInput}
+                                    onChange={(event) => setNoShowReasonInput(event.target.value)}
+                                    placeholder="Capture reason (traffic, conflict, no response, etc.)"
+                                    className="w-full min-h-[80px] px-3 py-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary outline-none"
+                                />
+                                <div className="mt-2 flex justify-end gap-2">
+                                    <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => {
+                                            setShowNoShowCapture(false);
+                                            setNoShowReasonInput('');
+                                        }}
+                                    >
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="text-destructive border-destructive/30 hover:bg-destructive/10"
+                                        onClick={async () => {
+                                            await updateEventStatus(selectedEvent.id, 'no_show', noShowReasonInput.trim() || undefined);
+                                            setShowNoShowCapture(false);
+                                            setNoShowReasonInput('');
+                                        }}
+                                    >
+                                        Save Reason
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

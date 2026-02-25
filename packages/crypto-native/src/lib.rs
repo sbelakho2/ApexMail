@@ -370,16 +370,16 @@ pub fn generate_dkim_key_pair(bits: u32) -> Result<AsyncTask<GenerateDkimKeyPair
 /// lengths differ, to prevent length-based leakage.
 #[napi]
 pub fn timing_safe_equal(a: Buffer, b: Buffer) -> bool {
-    if a.len() != b.len() {
-        // Perform a dummy comparison to keep timing uniform
-        let _: u8 = a
-            .iter()
-            .zip(b.iter())
-            .fold(0u8, |acc, (x, y)| acc | x.ct_eq(y).unwrap_u8());
-        return false;
+    let max_len = a.len().max(b.len());
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+
+    for idx in 0..max_len {
+        let x = a.get(idx).copied().unwrap_or(0);
+        let y = b.get(idx).copied().unwrap_or(0);
+        diff |= x ^ y;
     }
-    // True constant-time compare via subtle
-    a.ct_eq(&b).into()
+
+    diff == 0
 }
 
 // ─── Secure random bytes ──────────────────────────────────────────────────────

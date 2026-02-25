@@ -9,9 +9,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::fs::File;
 use std::io::BufReader as StdBufReader;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error, info, warn};
+use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, pki_types::PrivateKeyDer};
 use rustls_pemfile::{certs, private_key};
@@ -45,9 +45,9 @@ struct Args {
     #[arg(long, default_value = "true")]
     require_auth: bool,
     
-    /// Enable STARTTLS
-    #[arg(long, default_value = "true")]
-    enable_starttls: bool,
+    /// #176: Enable STARTTLS — auto-detected from cert/key presence when not explicit
+    #[arg(long)]
+    enable_starttls: Option<bool>,
 
     /// TLS certificate path (PEM)
     #[arg(long, env = "TLS_CERT_PATH")]
@@ -56,6 +56,10 @@ struct Args {
     /// TLS private key path (PEM)
     #[arg(long, env = "TLS_KEY_PATH")]
     tls_key_path: Option<String>,
+
+    /// #175: Maximum concurrent connections
+    #[arg(long, env = "MAX_CONNECTIONS", default_value = "512")]
+    max_connections: usize,
 }
 
 /// Server state shared across connections
@@ -118,7 +122,12 @@ async fn main() -> Result<()> {
     let db_pool = sqlx::PgPool::connect(&args.database_url).await?;
     info!("Connected to database");
 
-    let tls_acceptor = if args.enable_starttls {
+    // #176: Auto-detect STARTTLS from cert/key presence if not explicitly set
+    let enable_starttls = args.enable_starttls.unwrap_or_else(|| {
+        args.tls_cert_path.is_some() && args.tls_key_path.is_some()
+    });
+
+    let tls_acceptor = if enable_starttls {
         let cert_path = args.tls_cert_path.clone().ok_or_else(|| {
             anyhow!("TLS_CERT_PATH is required when STARTTLS is enabled")
         })?;
@@ -127,6 +136,9 @@ async fn main() -> Result<()> {
         })?;
         Some(load_tls_acceptor(&cert_path, &key_path)?)
     } else {
+        if args.tls_cert_path.is_some() || args.tls_key_path.is_some() {
+            warn!("Both --tls-cert-path and --tls-key-path needed for STARTTLS; TLS disabled");
+        }
         None
     };
     
@@ -134,26 +146,38 @@ async fn main() -> Result<()> {
     let state = Arc::new(ServerState {
         hostname: args.hostname,
         require_auth: args.require_auth,
-        enable_starttls: args.enable_starttls,
+        enable_starttls,
         outbound_url: args.outbound_url,
         db_pool,
         tls_acceptor,
     });
     
+    // #175: Connection limiter
+    let conn_semaphore = Arc::new(Semaphore::new(args.max_connections));
+
     // Bind to address
     let addr: SocketAddr = args.listen.parse()?;
     let listener = TcpListener::bind(addr).await?;
-    info!(address = %addr, "Submission server listening");
+    info!(address = %addr, max_connections = args.max_connections, "Submission server listening");
     
     // Accept connections
     loop {
         match listener.accept().await {
             Ok((stream, peer_addr)) => {
+                let permit = match conn_semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(peer = %peer_addr, "Connection rejected: max connections reached");
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let state = Arc::clone(&state);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, peer_addr, state).await {
                         error!(peer = %peer_addr, error = %e, "Connection error");
                     }
+                    drop(permit);
                 });
             }
             Err(e) => {

@@ -2,6 +2,7 @@
 //!
 //! Wraps trust-dns-resolver queries and converts them to our record types.
 
+use std::sync::LazyLock;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
@@ -19,6 +20,8 @@ pub enum DnsError {
     Timeout(String),
     #[error("Invalid domain: {0}")]
     InvalidDomain(String),
+    #[error("Invalid config: {0}")]
+    InvalidConfig(String),
 }
 
 /// Thin wrapper around trust-dns-resolver for email-specific lookups.
@@ -26,21 +29,52 @@ pub struct DnsLookup {
     resolver: TokioAsyncResolver,
 }
 
+static DEFAULT_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
+    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+});
+
 impl DnsLookup {
     /// Create a new resolver with system defaults.
     pub fn new() -> Result<Self, DnsError> {
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
-        Ok(Self { resolver })
+        Ok(Self {
+            resolver: DEFAULT_RESOLVER.clone(),
+        })
     }
 
-    /// Create from config (custom nameservers not yet wired, uses defaults).
+    /// Create from config, honoring custom nameservers if provided.
     pub fn from_config(config: &DnsConfig) -> Result<Self, DnsError> {
+        config
+            .validate()
+            .map_err(DnsError::InvalidConfig)?;
         let mut opts = ResolverOpts::default();
         opts.timeout = config.query_timeout();
         opts.attempts = config.retries as usize;
         opts.use_hosts_file = false;
 
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), opts);
+        // #193: Wire custom nameservers from config instead of always using system defaults
+        let resolver_config = if config.nameservers.is_empty() {
+            ResolverConfig::default()
+        } else {
+            let mut rc = ResolverConfig::new();
+            for ns in &config.nameservers {
+                if let Ok(addr) = ns.parse::<std::net::SocketAddr>() {
+                    rc.add_name_server(trust_dns_resolver::config::NameServerConfig::new(
+                        addr,
+                        trust_dns_resolver::config::Protocol::Udp,
+                    ));
+                } else if let Ok(ip) = ns.parse::<std::net::IpAddr>() {
+                    rc.add_name_server(trust_dns_resolver::config::NameServerConfig::new(
+                        std::net::SocketAddr::new(ip, 53),
+                        trust_dns_resolver::config::Protocol::Udp,
+                    ));
+                } else {
+                    tracing::warn!(nameserver = %ns, "Skipping unparseable nameserver");
+                }
+            }
+            rc
+        };
+
+        let resolver = TokioAsyncResolver::tokio(resolver_config, opts);
         Ok(Self { resolver })
     }
 

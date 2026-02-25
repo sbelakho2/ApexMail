@@ -151,11 +151,17 @@ impl CachedDnsResolver {
     }
 
     /// Invalidate all cached records for a domain.
+    /// #184: DKIM cache key uses `dkim:{selector}._domainkey.{domain}` format,
+    /// so we cannot simply invalidate `dkim:{domain}`. Instead, perform a broader
+    /// invalidation of all keys matching the domain suffix.
     pub fn invalidate_domain(&self, domain: &str) {
         debug!(domain, "Invalidating DNS cache for domain");
-        for prefix in &["mx", "spf", "dkim", "dmarc", "can_receive"] {
+        for prefix in &["mx", "spf", "dmarc", "can_receive"] {
             self.cache.invalidate(&format!("{prefix}:{domain}"));
         }
+        // DKIM keys are stored as `dkim:{selector}._domainkey.{domain}`,
+        // so we need to invalidate by suffix match
+        self.cache.invalidate_by_domain_suffix(domain);
     }
 
     /// Clear entire cache.

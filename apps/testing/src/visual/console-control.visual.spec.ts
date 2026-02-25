@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const WEB_URL = process.env.WEB_URL || 'http://localhost:3000';
+const WEB_URL = process.env.WEB_URL || 'http://127.0.0.1:3010';
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'http://localhost:3020';
 const E2E_BYPASS_KEY = process.env.E2E_BYPASS_KEY || 'apexmail-e2e-bypass-key';
 const FIXED_VISUAL_TIME = '2025-02-01T12:00:00.000Z';

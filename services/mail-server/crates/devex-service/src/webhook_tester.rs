@@ -5,6 +5,7 @@
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::types::{DevExError, WebhookTestResult};
@@ -98,6 +99,26 @@ impl WebhookTester {
         url: &str,
         event_type: &str,
     ) -> Result<WebhookTestResult, DevExError> {
+        // SSRF protection: only allow https (or http) with public hostnames
+        let parsed = url::Url::parse(url)
+            .map_err(|_| DevExError::Validation("Invalid webhook URL".into()))?;
+
+        match parsed.scheme() {
+            "https" | "http" => {}
+            _ => return Err(DevExError::Validation("Only http/https URLs are allowed".into())),
+        }
+
+        // Block requests to private/internal networks
+        if let Some(host) = parsed.host_str() {
+            if is_private_host(host) {
+                return Err(DevExError::Validation(
+                    "Webhook URLs pointing to private/internal networks are not allowed".into(),
+                ));
+            }
+        } else {
+            return Err(DevExError::Validation("Webhook URL must have a host".into()));
+        }
+
         let payload = Self::build_test_payload(event_type);
         let body = serde_json::to_vec(&payload)?;
         let signature = self.sign_payload(&body);
@@ -157,6 +178,39 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+fn is_private_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return is_private_ip(ip);
+    }
+
+    let lower = host.to_lowercase();
+    lower == "localhost"
+        || lower == "::1"
+        || lower == "[::1]"
+        || lower == "0.0.0.0"
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+        || lower == "metadata.google.internal"
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_unspecified()
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

@@ -4,10 +4,12 @@
 use chrono::Utc;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use reqwest::Client;
 use sha2::{Sha256, Digest};
 use sqlx::PgPool;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 use uuid::Uuid;
 
@@ -21,11 +23,16 @@ const BATCH_SIZE: i64 = 10_000;
 pub struct BackupService {
     pool: PgPool,
     config: Arc<Config>,
+    http_client: Client,
 }
 
 impl BackupService {
     pub fn new(pool: PgPool, config: Arc<Config>) -> Self {
-        Self { pool, config }
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        Self { pool, config, http_client }
     }
 
     // ── Create Backup ──────────────────────────────────────
@@ -150,19 +157,28 @@ impl BackupService {
     /// Stream a table's rows in batches using cursor-based pagination.
     async fn stream_table(&self, table: &str) -> Result<Vec<u8>, String> {
         // Sanitize table name (prevent SQL injection)
-        if !table.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+        if !Self::is_valid_identifier(table) {
             return Err(format!("Invalid table name: {table}"));
         }
 
         let mut all_data = Vec::new();
-        let mut offset: i64 = 0;
+        let mut tx = self.pool.begin().await
+            .map_err(|e| format!("Begin cursor transaction: {e}"))?;
+        let cursor_name = format!("backup_cursor_{}", Uuid::new_v4().simple());
+        let declare = format!(
+            "DECLARE {cursor} NO SCROLL CURSOR FOR SELECT row_to_json(t)::text FROM {table} t",
+            cursor = cursor_name,
+            table = table
+        );
+        sqlx::query(&declare)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Declare cursor {table}: {e}"))?;
 
         loop {
-            let query = format!(
-                "SELECT row_to_json(t)::text FROM (SELECT * FROM {table} ORDER BY 1 LIMIT {BATCH_SIZE} OFFSET {offset}) t"
-            );
-            let rows: Vec<(String,)> = sqlx::query_as(&query)
-                .fetch_all(&self.pool)
+            let fetch = format!("FETCH FORWARD {BATCH_SIZE} FROM {cursor}", cursor = cursor_name);
+            let rows: Vec<(String,)> = sqlx::query_as(&fetch)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(|e| format!("Stream table {table}: {e}"))?;
 
@@ -178,8 +194,11 @@ impl BackupService {
             if (rows.len() as i64) < BATCH_SIZE {
                 break;
             }
-            offset += BATCH_SIZE;
         }
+
+        let close = format!("CLOSE {cursor}", cursor = cursor_name);
+        let _ = sqlx::query(&close).execute(&mut *tx).await;
+        tx.commit().await.map_err(|e| format!("Commit cursor transaction: {e}"))?;
         Ok(all_data)
     }
 
@@ -284,11 +303,16 @@ impl BackupService {
             }
 
             // Real S3 download using reqwest with presigned URL or aws-sdk
+            let presigned_base = std::env::var("BACKUP_PRESIGNED_URL_BASE").ok();
+            if presigned_base.is_none() && std::env::var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD").ok().as_deref() != Some("true") {
+                return Err("Missing BACKUP_PRESIGNED_URL_BASE (or set ALLOW_UNAUTHENTICATED_S3_DOWNLOAD=true)".into());
+            }
             let s3_endpoint = std::env::var("S3_ENDPOINT")
                 .unwrap_or_else(|_| format!("https://{}.s3.amazonaws.com", bucket));
-            let url = format!("{}/{}", s3_endpoint, key);
+            let base = presigned_base.unwrap_or(s3_endpoint);
+            let url = format!("{}/{}", base.trim_end_matches('/'), key);
 
-            let response = reqwest::get(&url).await
+            let response = self.http_client.get(url).send().await
                 .map_err(|e| format!("S3 download failed: {e}"))?;
 
             if !response.status().is_success() {
@@ -307,8 +331,19 @@ impl BackupService {
         }
     }
 
+    /// Validate that an identifier (table or column name) contains only safe characters.
+    fn is_valid_identifier(name: &str) -> bool {
+        !name.is_empty()
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+    }
+
     /// Restore a single table from backup data
     async fn restore_table(&self, table: &str, data: &[u8]) -> Result<(), String> {
+        // Sanitize table name (prevent SQL injection)
+        if !Self::is_valid_identifier(table) {
+            return Err(format!("Invalid table name: {table}"));
+        }
+
         // Parse the backup format: table data is JSONL with table markers
         let content = String::from_utf8_lossy(data);
 
@@ -345,25 +380,15 @@ impl BackupService {
             // Parse JSONL row and generate INSERT
             if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(obj) = row.as_object() {
-                    let columns: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-                    let placeholders: Vec<String> = (1..=columns.len())
-                        .map(|i| format!("${}", i))
-                        .collect();
-
                     let insert_sql = format!(
-                        "INSERT INTO {} ({}) VALUES ({})",
-                        table,
-                        columns.join(", "),
-                        placeholders.join(", ")
+                        "INSERT INTO {table} SELECT * FROM json_populate_record(NULL::{table}, $1)",
+                        table = table
                     );
 
-                    let mut query = sqlx::query(&insert_sql);
-                    for col in &columns {
-                        let val = &obj[*col];
-                        query = query.bind(val.to_string());
-                    }
-
-                    query.execute(&mut *tx).await
+                    sqlx::query(&insert_sql)
+                        .bind(serde_json::Value::Object(obj.clone()))
+                        .execute(&mut *tx)
+                        .await
                         .map_err(|e| format!("Insert into {}: {e}", table))?;
                     row_count += 1;
                 }
@@ -417,7 +442,7 @@ impl BackupService {
         let mut rows_verified = 0u64;
 
         for table in tables {
-            if !table.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+            if !Self::is_valid_identifier(table) {
                 continue;
             }
             let cnt: Option<CountRow> = sqlx::query_as::<_, CountRow>(
@@ -467,10 +492,12 @@ impl BackupService {
         .map(|_| true)
         .unwrap_or(true);
 
+        let checksum_match = tables_verified as usize == tables.len();
+
         Ok(VerificationResult {
             tables_verified,
             rows_verified,
-            checksum_match: true, // Would verify actual checksums in production
+            checksum_match,
             index_health: index_ok,
             constraint_valid: constraint_ok,
             sequence_valid: sequence_ok,

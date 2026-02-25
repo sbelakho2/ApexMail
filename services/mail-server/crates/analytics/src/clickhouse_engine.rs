@@ -7,13 +7,11 @@
 //! - 730-day retention with columnar compression
 //! - Real-time event ingestion via async inserts
 
-use std::sync::Arc;
-use std::time::Duration;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::ClickHouseConfig;
 use crate::types::*;
@@ -233,12 +231,21 @@ impl ClickHouseEngine {
             _ => "toDate(timestamp)",
         };
 
+        // Allowlist valid event types to prevent SQL injection (#178)
+        const ALLOWED_EVENT_TYPES: &[&str] = &[
+            "sent", "delivered", "bounced", "deferred", "dropped",
+            "opened", "clicked", "complained", "unsubscribed",
+        ];
         let event_filter = if let Some(types) = event_types {
-            if types.is_empty() {
+            let safe: Vec<String> = types
+                .iter()
+                .filter(|t| ALLOWED_EVENT_TYPES.contains(&t.as_str()))
+                .map(|t| format!("'{}'", t))
+                .collect();
+            if safe.is_empty() {
                 String::new()
             } else {
-                let quoted: Vec<_> = types.iter().map(|t| format!("'{}'", t)).collect();
-                format!(" AND event_type IN ({})", quoted.join(","))
+                format!(" AND event_type IN ({})", safe.join(","))
             }
         } else {
             String::new()
@@ -345,8 +352,20 @@ impl ClickHouseEngine {
             return Ok(Vec::new());
         }
 
-        let quoted_stages: Vec<_> = stages.iter().map(|s| format!("'{}'", s)).collect();
-        let stages_list = quoted_stages.join(",");
+        // Allowlist stages to prevent SQL injection (#178)
+        const ALLOWED_STAGES: &[&str] = &[
+            "sent", "delivered", "bounced", "deferred", "dropped",
+            "opened", "clicked", "complained", "unsubscribed",
+        ];
+        let safe_stages: Vec<String> = stages
+            .iter()
+            .filter(|s| ALLOWED_STAGES.contains(s))
+            .map(|s| format!("'{}'", s))
+            .collect();
+        if safe_stages.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stages_list = safe_stages.join(",");
 
         let query = format!(
             r#"

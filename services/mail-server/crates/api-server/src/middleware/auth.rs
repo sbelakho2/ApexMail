@@ -10,7 +10,6 @@ use chrono::{DateTime, Utc};
 use deadpool_redis::redis::AsyncCommands;
 use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -83,15 +82,16 @@ impl FromRequestParts<AppState> for AuthUser {
 // ─── API Key authentication ────────────────────────────────────
 
 async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, ApiError> {
-    let hash_bytes = Sha256::digest(key.as_bytes());
-    let key_hash = hash_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    // Fix #10: Use HMAC-SHA256 with the configured secret instead of plain SHA-256.
+    // This prevents offline brute-force if the database is compromised.
+    let key_hash = apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);
 
     // Check Redis cache first
     if let Ok(cached) = lookup_cached_api_key(&key_hash, state).await {
         return Ok(cached);
     }
 
-    // DB look-up
+    // DB look-up (try HMAC hash first, fall back to legacy SHA-256 for migration)
     let row = sqlx::query_as::<_, ApiKeyRow>(
         "SELECT id, tenant_id, scopes, expires_at FROM api_keys WHERE key_hash = $1",
     )
@@ -101,8 +101,26 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
     .map_err(|e| {
         tracing::error!(error = %e, "api key lookup failed");
         ApiError::Internal("authentication error".into())
-    })?
-    .ok_or_else(|| ApiError::Unauthorized("invalid API key".into()))?;
+    })?;
+
+    // Fall back to legacy SHA-256 hash for keys created before migration
+    let row = match row {
+        Some(r) => r,
+        None => {
+            let legacy_hash = apexmail_lib::hash_api_key(key);
+            sqlx::query_as::<_, ApiKeyRow>(
+                "SELECT id, tenant_id, scopes, expires_at FROM api_keys WHERE key_hash = $1",
+            )
+            .bind(&legacy_hash)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "api key lookup failed (legacy)");
+                ApiError::Internal("authentication error".into())
+            })?
+            .ok_or_else(|| ApiError::Unauthorized("invalid API key".into()))?
+        }
+    };
 
     // Check expiry
     if let Some(exp) = row.expires_at {
@@ -111,8 +129,11 @@ async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, A
         }
     }
 
-    let scopes: Vec<String> = serde_json::from_value(row.scopes.clone())
-        .unwrap_or_default();
+    // Fix #13: Proper error for scope deserialization.
+    let scopes: Vec<String> = serde_json::from_value(row.scopes.clone()).map_err(|e| {
+        tracing::warn!(error = %e, api_key_id = %row.id, "malformed scopes in api_keys table");
+        ApiError::Internal("invalid API key scopes configuration".into())
+    })?;
 
     let auth_user = AuthUser {
         tenant_id: row.tenant_id,
@@ -168,7 +189,8 @@ async fn cache_api_key(key_hash: &str, user: &AuthUser, state: &AppState) {
 
 async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
     // Check token blacklist
-    if is_token_blacklisted(token, state).await {
+    // Fix #11: fail-closed — if Redis is down in production, reject the token.
+    if is_token_blacklisted(token, state).await? {
         return Err(ApiError::Unauthorized("token has been revoked".into()));
     }
 
@@ -185,6 +207,29 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
     let tenant_id = Uuid::parse_str(&claims.tenant_id)
         .map_err(|_| ApiError::Unauthorized("invalid tenant ID in token".into()))?;
 
+    // Fix #12: Verify the user still exists and is active in the database.
+    let user_active: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM users WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "user existence check failed");
+        ApiError::Internal("authentication error".into())
+    })?;
+
+    match user_active {
+        None => return Err(ApiError::Unauthorized("user no longer exists".into())),
+        Some((status,)) if status != "active" => {
+            return Err(ApiError::Unauthorized(
+                format!("user account is {status}"),
+            ));
+        }
+        _ => {}
+    }
+
     Ok(AuthUser {
         tenant_id,
         user_id: Some(user_id),
@@ -193,13 +238,45 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
     })
 }
 
-async fn is_token_blacklisted(token: &str, state: &AppState) -> bool {
-    let key = format!("{TOKEN_BLACKLIST_PREFIX}{}", &token[..16.min(token.len())]);
-    if let Ok(mut conn) = state.redis.get().await {
-        let exists: Result<bool, _> = conn.exists(&key).await;
-        return exists.unwrap_or(false);
-    }
-    false
+/// Check if a JWT has been blacklisted (revoked).
+///
+/// Fix #11: Returns `Err` when Redis is unreachable so the caller can fail-closed.
+async fn is_token_blacklisted(token: &str, state: &AppState) -> Result<bool, ApiError> {
+    use sha2::{Sha256, Digest};
+    let hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let key = format!("{TOKEN_BLACKLIST_PREFIX}{hash}");
+    let mut conn = state.redis.get().await.map_err(|e| {
+        tracing::error!(error = %e, "Redis unavailable for token blacklist check");
+        ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+    })?;
+    let exists: bool = conn.exists(&key).await.map_err(|e| {
+        tracing::error!(error = %e, "Redis EXISTS failed for token blacklist");
+        ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+    })?;
+    Ok(exists)
+}
+
+// ─── Auth middleware (used by app.rs via from_fn_with_state) ───
+
+/// Middleware that rejects unauthenticated requests before they hit the route handler.
+///
+/// Extracts `AuthUser` via the `FromRequestParts` impl above, then inserts
+/// the identity into request extensions so downstream handlers can retrieve
+/// it cheaply with `Extension<AuthUser>`.
+pub async fn require_auth(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    // Extract the auth user from the request parts.
+    let (mut parts, body) = req.into_parts();
+    let auth_user = AuthUser::from_request_parts(&mut parts, &state).await?;
+
+    // Insert the authenticated identity into extensions for downstream use.
+    parts.extensions.insert(auth_user);
+
+    req = axum::http::Request::from_parts(parts, body);
+    Ok(next.run(req).await)
 }
 
 // ─── Scope guard extractor ─────────────────────────────────────

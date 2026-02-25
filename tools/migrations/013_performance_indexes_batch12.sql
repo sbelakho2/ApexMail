@@ -1,3 +1,4 @@
+-- no-transaction
 -- Migration 013: Additional performance indexes (Batch 12, items #221-228)
 --
 -- These indexes cover common query patterns identified during production
@@ -13,11 +14,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_logs_tenant_created
 
 -- #223: Partial index on smtp_credentials for active-only lookups
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_smtp_credentials_active
-  ON smtp_credentials (tenant_id, domain_id) WHERE active = true;
+  ON smtp_credentials (tenant_id) WHERE is_active = true;
 
 -- #224: Functional index on events for domain extraction (used by domain stats)
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_tenant_type_created
-  ON events (tenant_id, event_type, created_at DESC);
+  ON events (tenant_id, type, created_at DESC);
 
 -- #225: Composite index on messages (tenant_id, to_address, created_at)
 -- Used by recipient history, unsubscribe lookups, and message search

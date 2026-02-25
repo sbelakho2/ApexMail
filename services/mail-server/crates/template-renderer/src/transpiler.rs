@@ -95,14 +95,15 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         }
     }
 
-    // Basic bracket balance
-    let open_braces = source.chars().filter(|c| *c == '{').count();
-    let close_braces = source.chars().filter(|c| *c == '}').count();
-    if open_braces != close_braces {
+    // #197: Only count template expression braces `{{ }}`, not CSS/JSON braces.
+    // Template double-brace placeholders should be balanced.
+    let double_open = source.matches("{{").count();
+    let double_close = source.matches("}}").count();
+    if double_open != double_close {
         errors.push(ValidationError {
             message: format!(
-                "Unbalanced braces: {} open vs {} close",
-                open_braces, close_braces
+                "Unbalanced template braces: {} '{{{{' vs {} '}}}}'",
+                double_open, double_close
             ),
             line: None,
             column: None,

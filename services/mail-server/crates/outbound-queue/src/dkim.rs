@@ -95,14 +95,16 @@ impl DkimSigner {
         };
         
         // Build DKIM-Signature header (without b= value)
+        // #110: Safe fallback if system clock is before epoch
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         
+        // #111: Use lowercased header names in h= tag (RFC 6376 §3.5)
         let signed_headers: Vec<String> = self.config.headers_to_sign.iter()
             .filter(|h| headers.contains_key(h.to_lowercase().as_str()))
-            .cloned()
+            .map(|h| h.to_lowercase())
             .collect();
         
         let dkim_header = format!(
@@ -117,14 +119,21 @@ impl DkimSigner {
         // Canonicalize headers for signing
         let mut headers_to_hash = String::new();
         for header_name in &signed_headers {
-            if let Some(value) = headers.get(header_name.to_lowercase().as_str()) {
+            // header_name is already lowercased from #111 fix above
+            if let Some(value) = headers.get(header_name.as_str()) {
                 let canonical = self.canonicalize_header_relaxed(header_name, value);
                 headers_to_hash.push_str(&canonical);
             }
         }
         
-        // Add DKIM-Signature header (without trailing CRLF for signing)
-        headers_to_hash.push_str(&format!("dkim-signature:{}", dkim_header.to_lowercase()));
+        // Add DKIM-Signature header for signing:
+        // #109: Only lowercase the header name per relaxed canonicalization (RFC 6376 §3.4.2)
+        // Do NOT lowercase the header value — bh= contains case-sensitive base64
+        let dkim_value_canonical = dkim_header
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        headers_to_hash.push_str(&format!("dkim-signature:{}", dkim_value_canonical));
         
         // Sign
         let signing_key: SigningKey<Sha256> = SigningKey::new(self.private_key.clone());

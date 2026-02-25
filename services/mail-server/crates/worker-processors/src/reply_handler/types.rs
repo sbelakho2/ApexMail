@@ -25,26 +25,6 @@ pub enum ReplyClassification {
 }
 
 impl ReplyClassification {
-    /// Convert from string.
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "out_of_office" | "ooo" => Self::OutOfOffice,
-            "not_interested" => Self::NotInterested,
-            "interested" => Self::Interested,
-            "tell_me_more" => Self::TellMeMore,
-            "wrong_person" => Self::WrongPerson,
-            "referral" => Self::Referral,
-            "unsubscribe" => Self::Unsubscribe,
-            "bounce" => Self::Bounce,
-            "positive_intent" => Self::PositiveIntent,
-            "meeting_request" => Self::MeetingRequest,
-            "question" => Self::Question,
-            "complaint" => Self::Complaint,
-            "spam" => Self::Spam,
-            _ => Self::Unknown,
-        }
-    }
-
     /// Convert to string.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -63,6 +43,36 @@ impl ReplyClassification {
             Self::Spam => "spam",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+/// Fix #96: Implement std::str::FromStr trait instead of shadowing it.
+impl std::str::FromStr for ReplyClassification {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
+            "out_of_office" | "ooo" => Self::OutOfOffice,
+            "not_interested" => Self::NotInterested,
+            "interested" => Self::Interested,
+            "tell_me_more" => Self::TellMeMore,
+            "wrong_person" => Self::WrongPerson,
+            "referral" => Self::Referral,
+            "unsubscribe" => Self::Unsubscribe,
+            "bounce" => Self::Bounce,
+            "positive_intent" => Self::PositiveIntent,
+            "meeting_request" => Self::MeetingRequest,
+            "question" => Self::Question,
+            "complaint" => Self::Complaint,
+            "spam" => Self::Spam,
+            _ => Self::Unknown,
+        })
+    }
+}
+
+impl std::fmt::Display for ReplyClassification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

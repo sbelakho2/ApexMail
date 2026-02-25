@@ -12,9 +12,9 @@ use tracing::{debug, error, info, warn};
 
 use super::classifier::classify;
 use super::types::{
-    ActionType, ClassificationResult, InboundMessage, ProcessedReply, ReplyClassification,
+    ActionType, ClassificationResult, InboundMessage, ReplyClassification,
 };
-use crate::common::{ProcessorError, ProcessorResult, ReplyHandlerConfig};
+use crate::common::{ProcessorResult, ReplyHandlerConfig};
 
 /// Reply handler processor.
 pub struct ReplyHandler {
@@ -186,7 +186,7 @@ impl ReplyHandler {
         )
         .bind(classification.classification.as_str())
         .bind(classification.confidence)
-        .bind(serde_json::to_value(&classification.suggested_action).unwrap_or_default())
+        .bind(serde_json::to_value(&classification.suggested_action)?)
         .bind(&action_taken)
         .bind(&msg.id)
         .execute(&self.db)

@@ -51,6 +51,11 @@ export interface Attachment {
     contentType?: string;
 }
 
+export interface Tag {
+    name: string;
+    value?: string;
+}
+
 export interface SendEmailOptions {
     /** Sender email address */
     from: EmailRecipient;
@@ -73,7 +78,7 @@ export interface SendEmailOptions {
     /** Custom headers */
     headers?: Record<string, string>;
     /** Tags for categorization */
-    tags?: string[];
+    tags?: Array<string | Tag>;
     /** Schedule send time (ISO 8601) */
     scheduledAt?: string | Date;
     /** FIX-500-274: Idempotency key to prevent duplicate sends */
@@ -385,11 +390,13 @@ class HttpClient {
 
         try {
             // FIX-500-274: Include X-Idempotency-Key header when provided
-            const headers: Record<string, string> = {
+                const headers: Record<string, string> = {
                     'X-API-Key': this.apiKey,
-                    'Content-Type': 'application/json',
                     'User-Agent': '@apexmail/node/1.0.0',
-            };
+                };
+                if (body != null) {
+                headers['Content-Type'] = 'application/json';
+                }
             if (options?.idempotencyKey) {
                 headers['X-Idempotency-Key'] = options.idempotencyKey;
             }
@@ -513,7 +520,7 @@ class HttpClient {
     private handleError(response: Response, data: Record<string, unknown>): never {
         const serverMessage = (data.message as string) || 'Request failed';
         const code = (data.code as string) || 'UNKNOWN_ERROR';
-        const bodyPreview = JSON.stringify(data).slice(0, 200);
+        const bodyPreview = this.debug ? JSON.stringify(data).slice(0, 200) : '[redacted]';
 
         switch (response.status) {
             case 400:
@@ -540,10 +547,6 @@ class HttpClient {
                     `Conflict (409): ${serverMessage}. The resource may already exist or was modified concurrently.`,
                     data.details as Record<string, unknown>,
                 );
-            case 429: {
-                const retryAfter = parseInt(response.headers.get('Retry-After') || '60', 10);
-                throw new RateLimitError(retryAfter);
-            }
             default:
                 throw new ApexMailError(
                     `Request failed (${response.status}): ${serverMessage}. Response: ${bodyPreview}`,
@@ -615,23 +618,32 @@ class EmailsApi {
             throw new ValidationError('"text" body must not be empty or whitespace-only');
         }
 
+        const validateRecipients = (recipients: EmailRecipient | EmailRecipient[] | undefined, field: string): void => {
+            if (!recipients) {
+                return;
+            }
+            const list = Array.isArray(recipients) ? recipients : [recipients];
+            if (list.length === 0) {
+                throw new ValidationError(`"${field}" must contain at least one recipient`);
+            }
+            for (const recipient of list) {
+                const email = typeof recipient === 'string' ? recipient : recipient.email;
+                if (!EmailsApi.EMAIL_REGEX.test(email)) {
+                    throw new ValidationError(`Invalid "${field}" email format: ${email}`);
+                }
+            }
+        };
+
         // Email format: from
         const fromEmail = typeof options.from === 'string' ? options.from : options.from.email;
         if (!EmailsApi.EMAIL_REGEX.test(fromEmail)) {
             throw new ValidationError(`Invalid "from" email format: ${fromEmail}`);
         }
 
-        // Email format: to (validate each recipient)
-        const toList = Array.isArray(options.to) ? options.to : [options.to];
-        if (toList.length === 0) {
-            throw new ValidationError('"to" must contain at least one recipient');
-        }
-        for (const recipient of toList) {
-            const email = typeof recipient === 'string' ? recipient : recipient.email;
-            if (!EmailsApi.EMAIL_REGEX.test(email)) {
-                throw new ValidationError(`Invalid "to" email format: ${email}`);
-            }
-        }
+        // Email format: to/cc/bcc
+        validateRecipients(options.to, 'to');
+        validateRecipients(options.cc, 'cc');
+        validateRecipients(options.bcc, 'bcc');
 
         // String length limits
         if (options.subject.length > 998) {

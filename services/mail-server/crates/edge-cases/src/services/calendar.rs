@@ -32,16 +32,17 @@ impl CalendarMethod {
             Self::Publish => "PUBLISH",
         }
     }
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_str(s: &str) -> Result<Self, String> {
         match s.to_uppercase().as_str() {
-            "REQUEST" => Self::Request,
-            "REPLY" => Self::Reply,
-            "CANCEL" => Self::Cancel,
-            "REFRESH" => Self::Refresh,
-            "COUNTER" => Self::Counter,
-            "DECLINECOUNTER" => Self::DeclineCounter,
-            "ADD" => Self::Add,
-            _ => Self::Publish,
+            "REQUEST" => Ok(Self::Request),
+            "REPLY" => Ok(Self::Reply),
+            "CANCEL" => Ok(Self::Cancel),
+            "REFRESH" => Ok(Self::Refresh),
+            "COUNTER" => Ok(Self::Counter),
+            "DECLINECOUNTER" => Ok(Self::DeclineCounter),
+            "ADD" => Ok(Self::Add),
+            "PUBLISH" => Ok(Self::Publish),
+            _ => Err(format!("Unknown calendar method: {s}")),
         }
     }
 }
@@ -358,7 +359,7 @@ fn generate_rrule(rule: &RecurrenceRule) -> String {
 fn fold_lines(content: &str) -> String {
     let mut result = String::new();
     for line in content.split("\r\n") {
-        if line.len() <= 75 {
+        if line.chars().count() <= 75 {
             result.push_str(line);
             result.push_str("\r\n");
         } else {
@@ -366,18 +367,34 @@ fn fold_lines(content: &str) -> String {
             let mut first = true;
             while !remaining.is_empty() {
                 let max = if first { 75 } else { 74 }; // continuation line has leading space
-                let take = remaining.len().min(max);
+                let (head, tail) = split_at_char_boundary(remaining, max);
                 if !first {
                     result.push(' ');
                 }
-                result.push_str(&remaining[..take]);
+                result.push_str(head);
                 result.push_str("\r\n");
-                remaining = &remaining[take..];
+                remaining = tail;
                 first = false;
             }
         }
     }
     result
+}
+
+fn split_at_char_boundary(s: &str, max_chars: usize) -> (&str, &str) {
+    let mut count = 0usize;
+    let mut split_idx = s.len();
+    for (idx, _) in s.char_indices() {
+        if count == max_chars {
+            split_idx = idx;
+            break;
+        }
+        count += 1;
+    }
+    if count < max_chars {
+        split_idx = s.len();
+    }
+    (&s[..split_idx], &s[split_idx..])
 }
 
 fn escape_ics(text: &str) -> String {
@@ -437,7 +454,8 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
         }
         if line == "END:VEVENT" {
             if let Some(builder) = current.take() {
-                if let Ok(event) = builder.build() {
+                if let Ok(mut event) = builder.build() {
+                    event.method = method;
                     events.push(event);
                 }
             }
@@ -456,7 +474,9 @@ fn parse_ics_content(content: &str) -> anyhow::Result<ParsedCalendar> {
 
         if !in_event {
             match prop {
-                "METHOD" => method = CalendarMethod::from_str(value),
+                "METHOD" => {
+                    method = CalendarMethod::from_str(value).map_err(|e| anyhow::anyhow!(e))?
+                }
                 "PRODID" => product_id = value.to_string(),
                 _ => {}
             }
@@ -806,8 +826,8 @@ mod tests {
 
     #[test]
     fn test_calendar_method() {
-        assert_eq!(CalendarMethod::from_str("REQUEST"), CalendarMethod::Request);
-        assert_eq!(CalendarMethod::from_str("cancel"), CalendarMethod::Cancel);
+        assert_eq!(CalendarMethod::from_str("REQUEST").unwrap(), CalendarMethod::Request);
+        assert_eq!(CalendarMethod::from_str("cancel").unwrap(), CalendarMethod::Cancel);
         assert_eq!(CalendarMethod::Request.as_str(), "REQUEST");
     }
 

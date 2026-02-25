@@ -28,6 +28,8 @@ pub struct ListEventsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
     pub event_type: Option<String>,
     #[serde(default)]
     pub message_id: Option<Uuid>,
@@ -35,6 +37,10 @@ pub struct ListEventsQuery {
 
 fn default_limit() -> i64 {
     50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 #[derive(Debug, Serialize)]
@@ -81,15 +87,40 @@ async fn list_events(
 ) -> Result<Json<Vec<EventResponse>>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    let rows = sqlx::query_as::<_, EventRow>(
-        "SELECT id, message_id, event_type, recipient, metadata, timestamp
-         FROM events WHERE tenant_id = $1 ORDER BY timestamp DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(auth.tenant_id)
-    .bind(params.limit.min(200))
-    .bind(params.offset)
-    .fetch_all(&state.db)
-    .await?;
+    // Fix #32: Validate offset >= 0.
+    // Fix #58: Clamp offset to valid range.
+        let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+
+    // Fix #31: Build dynamic query to use event_type and message_id filters.
+    let mut sql = String::from(
+        "SELECT id, message_id, event_type, recipient, metadata, timestamp FROM events WHERE tenant_id = $1",
+    );
+    let mut param_idx = 2u8;
+
+    if params.event_type.is_some() {
+        sql.push_str(&format!(" AND event_type = ${param_idx}"));
+        param_idx += 1;
+    }
+    if params.message_id.is_some() {
+        sql.push_str(&format!(" AND message_id = ${param_idx}"));
+        param_idx += 1;
+    }
+    sql.push_str(&format!(
+        " ORDER BY timestamp DESC LIMIT ${param_idx} OFFSET ${}",
+        param_idx + 1
+    ));
+
+    // Build query dynamically
+    let mut query = sqlx::query_as::<_, EventRow>(&sql).bind(auth.tenant_id);
+    if let Some(ref event_type) = params.event_type {
+        query = query.bind(event_type);
+    }
+    if let Some(ref message_id) = params.message_id {
+        query = query.bind(message_id);
+    }
+    query = query.bind(clamp_limit(params.limit, 200)).bind(offset);
+
+    let rows = query.fetch_all(&state.db).await?;
 
     Ok(Json(rows.into_iter().map(Into::into).collect()))
 }

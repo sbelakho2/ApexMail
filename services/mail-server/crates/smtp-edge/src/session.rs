@@ -1,7 +1,7 @@
 //! SMTP Session Handler
 
 use anyhow::Result;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -14,6 +14,12 @@ use mail_proto::generated::{
     StoreMessageRequest,
 };
 
+// #156: Shared DNS resolver — avoids re-reading /etc/resolv.conf per message
+static EDGE_RESOLVER: LazyLock<Resolver> = LazyLock::new(|| {
+    Resolver::new_system_conf()
+        .expect("Failed to create system DNS resolver at startup")
+});
+
 pub struct SmtpConfig {
     pub hostname: String,
     pub mailstore_addr: String,
@@ -23,6 +29,51 @@ pub struct SmtpConfig {
     pub tls_acceptor: Option<TlsAcceptor>,
     /// Domains this server accepts mail for
     pub local_domains: Vec<String>,
+    /// #157: Cached gRPC channel to mailstore — reused across messages
+    grpc_channel: tokio::sync::Mutex<Option<tonic::transport::Channel>>,
+}
+
+impl SmtpConfig {
+    /// Create a new SmtpConfig.
+    pub fn new(
+        hostname: String,
+        mailstore_addr: String,
+        max_message_size: usize,
+        max_recipients: usize,
+        enable_starttls: bool,
+        tls_acceptor: Option<TlsAcceptor>,
+        local_domains: Vec<String>,
+    ) -> Self {
+        Self {
+            hostname,
+            mailstore_addr,
+            max_message_size,
+            max_recipients,
+            enable_starttls,
+            tls_acceptor,
+            local_domains,
+            grpc_channel: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// #157: Get or create a shared gRPC mailstore client.
+    /// Re-uses the underlying HTTP/2 channel across messages.
+    pub async fn grpc_client(
+        &self,
+        endpoint: &str,
+    ) -> Result<MailstoreServiceClient<tonic::transport::Channel>> {
+        let mut guard = self.grpc_channel.lock().await;
+        if let Some(ref channel) = *guard {
+            return Ok(MailstoreServiceClient::new(channel.clone()));
+        }
+        let channel = tonic::transport::Channel::from_shared(endpoint.to_string())
+            .map_err(|e| anyhow::anyhow!("Invalid mailstore endpoint: {}", e))?
+            .connect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to mailstore: {}", e))?;
+        *guard = Some(channel.clone());
+        Ok(MailstoreServiceClient::new(channel))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -32,6 +83,8 @@ struct SmtpState {
     rcpt_to: Vec<String>,
     data_mode: bool,
     data_buffer: Vec<u8>,
+    data_too_large: bool,
+    #[allow(dead_code)]
     authenticated: bool,
 }
 
@@ -82,10 +135,11 @@ impl SessionStream {
 pub async fn handle_connection(
     socket: TcpStream,
     config: Arc<SmtpConfig>,
-    peer: String,
+    peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
     let mut stream = SessionStream::Plain(BufStream::new(socket));
     let mut state = SmtpState::default();
+    let peer = peer_addr.to_string();
     
     // Send greeting
     let greeting = format!("220 {} ESMTP ApexMail ready\r\n", config.hostname);
@@ -105,34 +159,40 @@ pub async fn handle_connection(
                     if line.trim() == "." {
                         // End of data
                         state.data_mode = false;
-                        
-                        // Process message
-                        let result = process_message(&state, &config, &peer).await;
-                        
-                        match result {
-                            Ok(_) => {
-                                info!(
-                                    peer = %peer,
-                                    from = ?state.mail_from,
-                                    to = ?state.rcpt_to,
-                                    size = state.data_buffer.len(),
-                                    "Message accepted"
-                                );
-                                stream.write_all(b"250 2.0.0 Message accepted for delivery\r\n").await?;
-                                stream.flush().await?;
-                            }
-                            Err(e) => {
-                                warn!(peer = %peer, error = %e, "Message rejected");
-                                let response = format!("550 5.7.1 Message rejected: {}\r\n", e);
-                                stream.write_all(response.as_bytes()).await?;
-                                stream.flush().await?;
+                        if state.data_too_large {
+                            stream.write_all(b"552 5.3.4 Message too large\r\n").await?;
+                            stream.flush().await?;
+                            state.data_too_large = false;
+                        } else {
+                            // Process message
+                            let result = process_message(&state, &config, peer_addr).await;
+
+                            match result {
+                                Ok(_) => {
+                                    info!(
+                                        peer = %peer,
+                                        from = ?state.mail_from,
+                                        to = ?state.rcpt_to,
+                                        size = state.data_buffer.len(),
+                                        "Message accepted"
+                                    );
+                                    stream.write_all(b"250 2.0.0 Message accepted for delivery\r\n").await?;
+                                    stream.flush().await?;
+                                }
+                                Err(e) => {
+                                    warn!(peer = %peer, error = %e, "Message rejected");
+                                    let response = format!("550 5.7.1 Message rejected: {}\r\n", e);
+                                    stream.write_all(response.as_bytes()).await?;
+                                    stream.flush().await?;
+                                }
                             }
                         }
-                        
+
                         // Reset state for next message
                         state.mail_from = None;
                         state.rcpt_to.clear();
                         state.data_buffer.clear();
+                        state.data_too_large = false;
                     } else {
                         // Handle dot-stuffing
                         let data_line = if line.starts_with("..") {
@@ -140,13 +200,12 @@ pub async fn handle_connection(
                         } else {
                             &line
                         };
-                        
-                        if state.data_buffer.len() + data_line.len() > config.max_message_size {
-                            state.data_mode = false;
-                            stream.write_all(b"552 5.3.4 Message too large\r\n").await?;
-                            stream.flush().await?;
+
+                        if !state.data_too_large && state.data_buffer.len() + data_line.len() > config.max_message_size {
+                            // Keep draining until end-of-data to avoid desync
+                            state.data_too_large = true;
                             state.data_buffer.clear();
-                        } else {
+                        } else if !state.data_too_large {
                             state.data_buffer.extend_from_slice(data_line.as_bytes());
                         }
                     }
@@ -323,6 +382,7 @@ async fn handle_command(
             
             state.data_mode = true;
             state.data_buffer.clear();
+            state.data_too_large = false;
             "354 Start mail input; end with <CRLF>.<CRLF>\r\n".to_string()
         }
         
@@ -330,6 +390,7 @@ async fn handle_command(
             state.mail_from = None;
             state.rcpt_to.clear();
             state.data_buffer.clear();
+            state.data_too_large = false;
             "250 2.0.0 OK\r\n".to_string()
         }
         
@@ -366,36 +427,37 @@ fn parse_rcpt_to(args: &str) -> Option<String> {
 }
 
 fn extract_address(s: &str) -> Option<String> {
-    // Handle <address> format
+    // Handle <address> format (including null sender <>)
     if s.starts_with('<') {
         if let Some(end) = s.find('>') {
-            return Some(s[1..end].to_string());
+            let inner = &s[1..end];
+            // Empty <> is the null sender — valid in SMTP
+            return Some(inner.to_string());
         }
+        // Malformed: '<' without '>'
+        return None;
     }
     
-    // Handle bare address
+    // #161: Handle bare address — take token up to first whitespace.
+    // Bare addresses are valid in SMTP (RFC 5321 §4.1.1.2 allows local-part only).
     let addr = s.split_whitespace().next()?;
-    if addr.contains('@') {
-        return Some(addr.to_string());
+    if addr.is_empty() {
+        return None;
     }
-    
-    None
+    Some(addr.to_string())
 }
 
 fn is_local_domain(addr: &str, config: &SmtpConfig) -> bool {
     let domain = addr.split('@').nth(1).unwrap_or("").to_lowercase();
-    // Always accept localhost for development
-    if domain == "localhost" {
-        return true;
-    }
-    // Check against configured local domains
+    // #160: Removed unconditional localhost acceptance — prevents relay to
+    // internal services. Localhost must be explicitly configured if needed.
     config.local_domains.iter().any(|d| d.to_lowercase() == domain)
 }
 
 async fn process_message(
     state: &SmtpState,
     config: &SmtpConfig,
-    peer: &str,
+    peer_addr: std::net::SocketAddr,
 ) -> Result<()> {
     let from_addr = state.mail_from.as_deref().unwrap_or("<>");
     let helo_domain = state.helo.as_deref().unwrap_or("unknown");
@@ -409,16 +471,10 @@ async fn process_message(
         .to_lowercase();
     
     // Parse the peer IP address
-    let peer_ip: std::net::IpAddr = peer
-        .split(':')
-        .next()
-        .unwrap_or(peer)
-        .parse()
-        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let peer_ip: std::net::IpAddr = peer_addr.ip();
     
-    // Create DNS resolver for authentication checks
-    let resolver = Resolver::new_system_conf()
-        .map_err(|e| anyhow::anyhow!("Failed to create DNS resolver: {}", e))?;
+    // #156: Use shared DNS resolver instead of creating one per message
+    let resolver = &*EDGE_RESOLVER;
     
     // ── SPF verification ───────────────────────────────────────────────
     let spf_result = if !from_domain.is_empty() {
@@ -437,7 +493,7 @@ async fn process_message(
                     SpfResult::None => "none",
                 };
                 info!(
-                    peer = %peer,
+                    peer = %peer_addr,
                     from = %from_addr,
                     spf = %spf_status,
                     "SPF verification result"
@@ -448,12 +504,6 @@ async fn process_message(
     } else {
         "none".to_string()
     };
-    
-    // Hard fail SPF = reject
-    if spf_result == "fail" {
-        warn!(peer = %peer, from = %from_addr, "SPF hard fail — rejecting message");
-        return Err(anyhow::anyhow!("SPF check failed: mail from {} not authorized by {}", peer, from_domain));
-    }
     
     // ── DKIM verification ──────────────────────────────────────────────
     let dkim_result = match AuthenticatedMessage::parse(message_data) {
@@ -480,7 +530,7 @@ async fn process_message(
                 }
             }
             info!(
-                peer = %peer,
+                peer = %peer_addr,
                 from = %from_addr,
                 dkim = %overall,
                 "DKIM verification result"
@@ -488,17 +538,17 @@ async fn process_message(
             overall.to_string()
         }
         None => {
-            debug!(peer = %peer, "Could not parse message for DKIM verification");
+            debug!(peer = %peer_addr, "Could not parse message for DKIM verification");
             "none".to_string()
         }
     };
     
-    // ── DMARC evaluation ───────────────────────────────────────────────
-    // DMARC passes if either SPF or DKIM passes AND aligns with From domain
-    let dmarc_result = if !from_domain.is_empty() {
-        let spf_aligned = spf_result == "pass";
-        let dkim_aligned = dkim_result == "pass";
-        
+    // ── #158: DMARC evaluation with DNS record lookup ──────────────────
+    let spf_aligned = spf_result == "pass";
+    let dkim_aligned = dkim_result == "pass";
+
+    // Determine raw DMARC alignment result
+    let dmarc_aligned = if !from_domain.is_empty() {
         if spf_aligned || dkim_aligned {
             "pass"
         } else if spf_result == "fail" && dkim_result == "fail" {
@@ -509,28 +559,62 @@ async fn process_message(
     } else {
         "none"
     };
-    
+
+    // #158: Fetch the actual DMARC DNS record to determine the domain's policy
+    let dmarc_policy = if !from_domain.is_empty() {
+        fetch_dmarc_policy(resolver, &from_domain).await
+    } else {
+        "none".to_string() // no domain → no policy
+    };
+
+    // Apply DMARC policy to determine final action
+    let dmarc_result = dmarc_aligned;
+
     info!(
-        peer = %peer,
+        peer = %peer_addr,
         from = %from_addr,
         spf = %spf_result,
         dkim = %dkim_result,
         dmarc = %dmarc_result,
+        dmarc_policy = %dmarc_policy,
         "Authentication-Results summary"
     );
-    
-    // Reject on DMARC fail (SPF fail + DKIM fail)
+
+    // #159: SPF hard-fail rejection is now deferred to DMARC policy.
+    // Only reject if the DMARC policy mandates it (p=reject or p=quarantine).
     if dmarc_result == "fail" {
-        warn!(
-            peer = %peer,
-            from = %from_addr,
-            "DMARC fail — both SPF and DKIM failed, rejecting"
-        );
-        return Err(anyhow::anyhow!(
-            "Message failed authentication checks (SPF={}, DKIM={}, DMARC=fail)",
-            spf_result,
-            dkim_result
-        ));
+        match dmarc_policy.as_str() {
+            "reject" => {
+                warn!(
+                    peer = %peer_addr,
+                    from = %from_addr,
+                    dmarc_policy = "reject",
+                    "DMARC reject — SPF and DKIM both failed, domain policy demands rejection"
+                );
+                return Err(anyhow::anyhow!(
+                    "Message failed authentication (SPF={}, DKIM={}, DMARC=fail, policy=reject)",
+                    spf_result, dkim_result
+                ));
+            }
+            "quarantine" => {
+                warn!(
+                    peer = %peer_addr,
+                    from = %from_addr,
+                    dmarc_policy = "quarantine",
+                    "DMARC quarantine — SPF and DKIM both failed, marking suspicious"
+                );
+                // We still accept but could flag — for now, log and continue
+            }
+            _ => {
+                // p=none or no policy — accept the message
+                info!(
+                    peer = %peer_addr,
+                    from = %from_addr,
+                    dmarc_policy = %dmarc_policy,
+                    "DMARC fail but policy is none/missing — accepting message"
+                );
+            }
+        }
     }
     
     // ── Build Authentication-Results header ────────────────────────────
@@ -548,15 +632,14 @@ async fn process_message(
     let mut final_message = auth_results_header.into_bytes();
     final_message.extend_from_slice(message_data);
     
-    // ── Store via mailstore gRPC ───────────────────────────────────────
+    // ── #157: Store via mailstore gRPC — use shared client ─────────────
     let mailstore_endpoint = if config.mailstore_addr.starts_with("http://") || config.mailstore_addr.starts_with("https://") {
         config.mailstore_addr.clone()
     } else {
         format!("http://{}", config.mailstore_addr)
     };
 
-    let mut client = MailstoreServiceClient::connect(mailstore_endpoint.clone())
-        .await
+    let mut client = config.grpc_client(&mailstore_endpoint).await
         .map_err(|e| anyhow::anyhow!("Failed to connect to mailstore at {}: {}", mailstore_endpoint, e))?;
 
     let internal_date = chrono::Utc::now().timestamp();
@@ -597,7 +680,7 @@ async fn process_message(
         .and_then(|m| m.subject().map(|s| s.to_string()));
     
     info!(
-        peer = %peer,
+        peer = %peer_addr,
         from = %from_addr,
         to = ?state.rcpt_to,
         subject = ?parsed_subject,
@@ -609,4 +692,45 @@ async fn process_message(
     );
     
     Ok(())
+}
+
+/// #158: Fetch the DMARC policy from DNS for a given domain.
+/// Queries `_dmarc.{domain}` TXT record, falls back to parent domain.
+/// Returns the policy value: "reject", "quarantine", "none", or "none" if not found.
+async fn fetch_dmarc_policy(resolver: &Resolver, domain: &str) -> String {
+    // Try exact domain first
+    if let Some(policy) = query_dmarc_txt(resolver, domain).await {
+        return policy;
+    }
+    // Fallback to organizational domain (parent): e.g. sub.example.com → example.com
+    if let Some(dot_pos) = domain.find('.') {
+        let parent = &domain[dot_pos + 1..];
+        if parent.contains('.') {
+            if let Some(policy) = query_dmarc_txt(resolver, parent).await {
+                return policy;
+            }
+        }
+    }
+    "none".to_string()
+}
+
+/// Query `_dmarc.{domain}` TXT record and extract `p=` value.
+async fn query_dmarc_txt(resolver: &Resolver, domain: &str) -> Option<String> {
+    let qname = format!("_dmarc.{domain}");
+    let raw = resolver.txt_raw_lookup(&qname).await.ok()?;
+    let txt = String::from_utf8_lossy(&raw).to_lowercase();
+    if txt.starts_with("v=dmarc1") {
+        // Extract p= tag
+        for part in txt.split(';') {
+            let part = part.trim();
+            if part.starts_with("p=") {
+                let value = part[2..].trim();
+                match value {
+                    "reject" | "quarantine" | "none" => return Some(value.to_string()),
+                    _ => return Some("none".to_string()),
+                }
+            }
+        }
+    }
+    None
 }

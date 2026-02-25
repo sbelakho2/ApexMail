@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use aho_corasick::{AhoCorasick, Match};
+use aho_corasick::AhoCorasick;
 use regex::Regex;
 
 use super::types::{
@@ -153,11 +153,24 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
     let combined = format!("{} {}", subject, body);
     let text = combined.to_lowercase();
 
-    // Quick scan for obvious patterns
-    let quick_matches: Vec<Match> = QUICK_PATTERNS.find_iter(&text).collect();
+    // Fix #88/#91: Use Aho-Corasick quick scan results for early return on no-match
+    let quick_match_count = QUICK_PATTERNS.find_iter(&text).count();
+    if quick_match_count == 0 {
+        // No obvious patterns matched - return Unknown early to save regex work
+        return ClassificationResult {
+            classification: ReplyClassification::Unknown,
+            confidence: 0.3,
+            sub_type: None,
+            extracted_data: ExtractedData::default(),
+            reasoning: "No quick patterns matched".to_string(),
+            suggested_action: build_suggested_action(ReplyClassification::Unknown, Sentiment::Neutral),
+        };
+    }
 
     // Score each classification
-    let mut scores: Vec<(ReplyClassification, usize, &str)> = Vec::new();
+    // Fix #72: (classification, priority_score, actual_matches, reasoning)
+    // priority_score is for sorting; actual_matches is for confidence calculation
+    let mut scores: Vec<(ReplyClassification, usize, usize, &str)> = Vec::new();
 
     // Out of office
     let ooo_matches: usize = PATTERNS
@@ -166,7 +179,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if ooo_matches > 0 {
-        scores.push((ReplyClassification::OutOfOffice, ooo_matches, "OOO patterns matched"));
+        scores.push((ReplyClassification::OutOfOffice, ooo_matches, ooo_matches, "OOO patterns matched"));
     }
 
     // Not interested
@@ -176,7 +189,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if ni_matches > 0 {
-        scores.push((ReplyClassification::NotInterested, ni_matches, "Not interested patterns matched"));
+        scores.push((ReplyClassification::NotInterested, ni_matches, ni_matches, "Not interested patterns matched"));
     }
 
     // Interested
@@ -186,7 +199,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if int_matches > 0 {
-        scores.push((ReplyClassification::Interested, int_matches, "Interest patterns matched"));
+        scores.push((ReplyClassification::Interested, int_matches, int_matches, "Interest patterns matched"));
     }
 
     // Wrong person
@@ -196,7 +209,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if wp_matches > 0 {
-        scores.push((ReplyClassification::WrongPerson, wp_matches, "Wrong person patterns matched"));
+        scores.push((ReplyClassification::WrongPerson, wp_matches, wp_matches, "Wrong person patterns matched"));
     }
 
     // Unsubscribe
@@ -206,7 +219,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if unsub_matches > 0 {
-        scores.push((ReplyClassification::Unsubscribe, unsub_matches, "Unsubscribe patterns matched"));
+        scores.push((ReplyClassification::Unsubscribe, unsub_matches, unsub_matches, "Unsubscribe patterns matched"));
     }
 
     // Meeting request (check before Interested since patterns overlap)
@@ -216,8 +229,8 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if meet_matches > 0 {
-        // Boost meeting request score to take precedence over generic "interested"
-        scores.push((ReplyClassification::MeetingRequest, meet_matches + 10, "Meeting request patterns matched"));
+        // Boost priority to take precedence over generic "interested", but keep actual matches for confidence
+        scores.push((ReplyClassification::MeetingRequest, meet_matches + 10, meet_matches, "Meeting request patterns matched"));
     }
 
     // Complaint
@@ -227,7 +240,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if comp_matches > 0 {
-        scores.push((ReplyClassification::Complaint, comp_matches, "Complaint patterns matched"));
+        scores.push((ReplyClassification::Complaint, comp_matches, comp_matches, "Complaint patterns matched"));
     }
 
     // Spam
@@ -237,7 +250,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         .filter(|r| r.is_match(&combined))
         .count();
     if spam_matches > 0 {
-        scores.push((ReplyClassification::Spam, spam_matches, "Spam patterns matched"));
+        scores.push((ReplyClassification::Spam, spam_matches, spam_matches, "Spam patterns matched"));
     }
 
     // Determine sentiment
@@ -260,16 +273,17 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
         Sentiment::Neutral
     };
 
-    // Pick the best classification
+    // Pick the best classification (sort by priority score)
     scores.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let (classification, match_count, reasoning) = scores
+    // Extract: classification, _priority, actual_matches, reasoning
+    let (classification, actual_matches, reasoning) = scores
         .first()
-        .map(|(c, n, r)| (*c, *n, *r))
+        .map(|(c, _priority, actual, r)| (*c, *actual, *r))
         .unwrap_or((ReplyClassification::Unknown, 0, "No patterns matched"));
 
-    // Calculate confidence (0.0 - 1.0)
-    let confidence = match match_count {
+    // Calculate confidence based on actual pattern matches (not boosted priority)
+    let confidence = match actual_matches {
         0 => 0.3,
         1 => 0.5,
         2 => 0.7,
@@ -305,7 +319,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
 }
 
 /// Build suggested action based on classification.
-fn build_suggested_action(classification: ReplyClassification, sentiment: Sentiment) -> SuggestedAction {
+fn build_suggested_action(classification: ReplyClassification, _sentiment: Sentiment) -> SuggestedAction {
     match classification {
         ReplyClassification::OutOfOffice => SuggestedAction {
             action: ActionType::Snooze,

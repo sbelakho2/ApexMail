@@ -102,6 +102,7 @@ export class HttpClient {
   private readonly defaultTimeout: number;
   private readonly circuitBreakers: Map<string, CircuitBreaker> = new Map();
   private readonly circuitBreakerConfig: CircuitBreakerConfig;
+  private static readonly MAX_BREAKERS = 1000;
 
   constructor(options: {
     baseUrl?: string;
@@ -128,6 +129,16 @@ export class HttpClient {
     let breaker = this.circuitBreakers.get(host);
     if (!breaker) {
       breaker = new CircuitBreaker(this.circuitBreakerConfig);
+      if (this.circuitBreakers.size >= HttpClient.MAX_BREAKERS) {
+        const oldestKey = this.circuitBreakers.keys().next().value as string | undefined;
+        if (oldestKey) {
+          this.circuitBreakers.delete(oldestKey);
+        }
+      }
+      this.circuitBreakers.set(host, breaker);
+    } else {
+      // Refresh insertion order for LRU-style eviction.
+      this.circuitBreakers.delete(host);
       this.circuitBreakers.set(host, breaker);
     }
     return breaker;
@@ -150,6 +161,7 @@ export class HttpClient {
     const retries = options.retries ?? 3;
     const baseRetryDelay = options.retryDelay ?? 1000;
     const maxRetryDelay = options.maxRetryDelay ?? 30000;
+    const isIdempotent = ['GET', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'TRACE'].includes(method.toUpperCase());
 
     let lastError: Error | null = null;
 
@@ -208,8 +220,8 @@ export class HttpClient {
         // Consider 5xx as failures for circuit breaker
         if (response.statusCode >= 500) {
           circuitBreaker.recordFailure();
-          
-          if (attempt < retries) {
+
+          if (attempt < retries && isIdempotent) {
             // FIX-500-374: Add randomized jitter to prevent thundering herd
             const jitter = Math.random() * baseRetryDelay * 0.5;
             const delay = Math.min(
@@ -219,6 +231,8 @@ export class HttpClient {
             await this.sleep(delay);
             continue;
           }
+
+          return Result.err(new Error(`HTTP ${response.statusCode} from ${fullUrl}`));
         } else {
           circuitBreaker.recordSuccess();
         }
@@ -243,7 +257,7 @@ export class HttpClient {
 
         circuitBreaker.recordFailure();
 
-        if (attempt < retries) {
+        if (attempt < retries && isIdempotent) {
           // FIX-500-374: Add randomized jitter to prevent thundering herd
           const jitter = Math.random() * baseRetryDelay * 0.5;
           const delay = Math.min(

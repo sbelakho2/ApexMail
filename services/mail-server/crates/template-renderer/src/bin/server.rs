@@ -55,6 +55,10 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    if let Err(err) = config.validate() {
+        anyhow::bail!("Invalid renderer config: {err}");
+    }
+
     let state = Arc::new(AppState {
         db,
         sandbox: Sandbox::new(config.sandbox.clone()),

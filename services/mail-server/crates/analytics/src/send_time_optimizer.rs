@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info};
 
 use crate::types::*;
 

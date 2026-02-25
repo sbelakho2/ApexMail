@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use reqwest::Client;
 use tokio::sync::Semaphore;
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::config::{InferenceConfig, PoolingStrategy};
+use crate::config::InferenceConfig;
 use crate::types::{EmbeddingError, InferenceRequest, InferenceResponse};
 
 /// Service for generating text embeddings via an inference sidecar.
@@ -18,19 +18,19 @@ pub struct EmbeddingService {
 }
 
 impl EmbeddingService {
-    pub fn new(config: InferenceConfig) -> Self {
+    pub fn new(config: InferenceConfig) -> Result<Self, EmbeddingError> {
         let client = Client::builder()
             .timeout(Duration::from_millis(config.timeout_ms))
             .build()
-            .expect("Failed to build HTTP client");
+            .map_err(EmbeddingError::Http)?;
 
         let semaphore = Arc::new(Semaphore::new(config.max_concurrency));
 
-        Self {
+        Ok(Self {
             client,
             config,
             semaphore,
-        }
+        })
     }
 
     /// Generate an embedding for a single text input.
@@ -247,7 +247,7 @@ mod tests {
             timeout_ms: 5000,
             pooling: PoolingStrategy::Mean,
         };
-        let svc = EmbeddingService::new(config);
+        let svc = EmbeddingService::new(config).unwrap();
         assert_eq!(svc.dimension(), 384);
     }
 }

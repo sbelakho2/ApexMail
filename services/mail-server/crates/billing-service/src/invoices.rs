@@ -8,6 +8,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::types::{Invoice, InvoiceLineItem, InvoiceStatus};
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -15,11 +17,33 @@ use crate::types::{Invoice, InvoiceLineItem, InvoiceStatus};
 
 const ESTONIA_VAT_RATE: i32 = 22;
 
-const EU_COUNTRIES: &[&str] = &[
-    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
-    "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
-    "SI", "ES", "SE",
-];
+static EU_COUNTRIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    let default = vec![
+        "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
+        "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK",
+        "SI", "ES", "SE",
+    ];
+    let raw = std::env::var("EU_COUNTRIES").unwrap_or_else(|_| default.join(","));
+    raw.split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_uppercase())
+        .collect()
+});
+
+static EU_VAT_RATES: LazyLock<HashMap<String, i32>> = LazyLock::new(|| {
+    let mut map = HashMap::new();
+    if let Ok(raw) = std::env::var("EU_VAT_RATES") {
+        for pair in raw.split(',') {
+            let mut parts = pair.split('=');
+            if let (Some(country), Some(rate)) = (parts.next(), parts.next()) {
+                if let Ok(rate) = rate.trim().parse::<i32>() {
+                    map.insert(country.trim().to_uppercase(), rate);
+                }
+            }
+        }
+    }
+    map
+});
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -28,8 +52,9 @@ const EU_COUNTRIES: &[&str] = &[
 /// Calculate the VAT rate and amount for a given subtotal, customer country and
 /// optional VAT number.
 pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (i32, i64) {
+    let country = country.to_uppercase();
     if country == "EE" {
-        let amt = ((subtotal as f64) * (ESTONIA_VAT_RATE as f64 / 100.0)).round() as i64;
+        let amt = ((subtotal * ESTONIA_VAT_RATE as i64) + 50) / 100;
         return (ESTONIA_VAT_RATE, amt);
     }
 
@@ -38,9 +63,10 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
             // EU B2B reverse charge
             return (0, 0);
         }
-        // EU B2C – simplified: charge Estonia rate
-        let amt = ((subtotal as f64) * (ESTONIA_VAT_RATE as f64 / 100.0)).round() as i64;
-        return (ESTONIA_VAT_RATE, amt);
+        // EU B2C – charge destination VAT rate when known
+        let rate = EU_VAT_RATES.get(&country).copied().unwrap_or(ESTONIA_VAT_RATE);
+        let amt = ((subtotal * rate as i64) + 50) / 100;
+        return (rate, amt);
     }
 
     // Non-EU

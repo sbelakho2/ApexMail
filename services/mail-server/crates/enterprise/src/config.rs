@@ -1,5 +1,29 @@
 use serde::{Deserialize, Serialize};
 use std::env;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+// ── Sensitive string wrapper that zeroizes on drop ─────────────────────
+
+/// A wrapper for sensitive strings that zeroizes memory on drop.
+/// This prevents secrets from lingering in memory after use.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(s: String) -> Self {
+        Self(s)
+    }
+    
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
 
 // ── Enums ──────────────────────────────────────────────────────────────
 
@@ -125,9 +149,12 @@ impl DatabaseConfig {
 
     pub fn url(&self) -> String {
         let ssl = if self.ssl { "?sslmode=require" } else { "" };
+        // URL-encode user and password to handle special characters
+        let encoded_user = urlencoding::encode(&self.user);
+        let encoded_password = urlencoding::encode(&self.password);
         format!(
             "postgres://{}:{}@{}:{}/{}{}",
-            self.user, self.password, self.host, self.port, self.name, ssl
+            encoded_user, encoded_password, self.host, self.port, self.name, ssl
         )
     }
 }
@@ -165,7 +192,8 @@ pub struct SamlConfig {
     pub acs_url: String,
     pub slo_url: String,
     pub certificate: String,
-    pub private_key: String,
+    /// Private key wrapped in SecretString for secure zeroize on drop
+    pub private_key: SecretString,
     pub allow_sha1: bool,
 }
 
@@ -246,7 +274,32 @@ pub struct Config {
 }
 
 impl Config {
+    /// Load configuration from environment variables.
+    /// 
+    /// # Panics
+    /// Panics in production mode if `JWT_SECRET` is not set or is the default dev secret.
     pub fn from_env() -> Self {
+        let node_env = env::var("NODE_ENV").unwrap_or_default();
+        let is_production = node_env == "production" || node_env == "prod";
+        
+        // JWT secret with production enforcement
+        let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| {
+            if is_production {
+                panic!("JWT_SECRET environment variable must be set in production");
+            }
+            "dev-secret-change-in-production-please-32ch".into()
+        });
+        
+        // Validate JWT secret in production
+        if is_production {
+            if jwt_secret == "dev-secret-change-in-production-please-32ch" {
+                panic!("JWT_SECRET must not be the default dev secret in production");
+            }
+            if jwt_secret.len() < 32 {
+                panic!("JWT_SECRET must be at least 32 characters in production");
+            }
+        }
+        
         Self {
             port: env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(3000),
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
@@ -255,8 +308,8 @@ impl Config {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect(),
-            node_env: env::var("NODE_ENV").unwrap_or_default(),
-            jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret-change-in-production-please-32ch".into()),
+            node_env,
+            jwt_secret,
             db: DatabaseConfig::from_env(),
             redis: RedisConfig::from_env(),
             sso: SSOConfig {
@@ -266,7 +319,7 @@ impl Config {
                     acs_url: env::var("SAML_ACS_URL").unwrap_or_else(|_| "http://localhost:3000/api/sso/saml/callback".into()),
                     slo_url: env::var("SAML_SLO_URL").unwrap_or_else(|_| "http://localhost:3000/api/sso/saml/logout".into()),
                     certificate: env::var("SAML_CERTIFICATE").unwrap_or_default(),
-                    private_key: env::var("SAML_PRIVATE_KEY").unwrap_or_default(),
+                    private_key: SecretString::new(env::var("SAML_PRIVATE_KEY").unwrap_or_default()),
                     allow_sha1: env::var("SAML_ALLOW_SHA1").map(|v| v == "true").unwrap_or(false),
                 },
                 oidc: OidcConfig {
@@ -317,6 +370,28 @@ impl Config {
                 auto_approve_threshold: env::var("TEMPLATE_AUTO_APPROVE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
             },
         }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("PORT must be > 0".into());
+        }
+        if self.host.trim().is_empty() {
+            return Err("HOST must not be empty".into());
+        }
+        if self.db.port == 0 {
+            return Err("DB_PORT must be > 0".into());
+        }
+        if self.db.max_connections == 0 {
+            return Err("DB_MAX_CONNECTIONS must be > 0".into());
+        }
+        if self.node_env == "production" && self.db.password.trim().is_empty() {
+            return Err("DB_PASSWORD must be set in production".into());
+        }
+        if self.cors_origins.is_empty() {
+            return Err("CORS_ORIGINS must not be empty".into());
+        }
+        Ok(())
     }
 }
 

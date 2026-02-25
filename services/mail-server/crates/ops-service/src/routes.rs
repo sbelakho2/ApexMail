@@ -2,21 +2,26 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
+    middleware,
+    response::Response,
     routing::get,
     Json, Router,
 };
+use axum::middleware::Next;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use uuid::Uuid;
+use dashmap::DashMap;
 
 use crate::health::HealthChecker;
 use crate::incidents::IncidentManager;
 use crate::slo::SloTracker;
 use crate::status::StatusPageGenerator;
 use crate::trust::{TenantMetrics, TrustScorer};
-use crate::types::IncidentSeverity;
+use crate::types::{IncidentSeverity, TrustScore};
 use crate::warmup::IpWarmupManager;
 
 /// Shared application state available to all route handlers.
@@ -27,10 +32,21 @@ pub struct AppState {
     pub incidents: IncidentManager,
     pub slo: SloTracker,
     pub warmup: IpWarmupManager,
+    pub api_key: String,
+    pub trust_cache: Arc<DashMap<Uuid, TrustCacheEntry>>,
 }
+
+#[derive(Debug, Clone)]
+pub struct TrustCacheEntry {
+    pub score: TrustScore,
+    pub cached_at: Instant,
+}
+
+const TRUST_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Build the full [`Router`] with all ops endpoints.
 pub fn router(state: AppState) -> Router {
+    let shared = Arc::new(state);
     Router::new()
         .route("/health/checks", get(get_health_checks))
         .route("/incidents", get(get_incidents).post(create_incident))
@@ -38,7 +54,8 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(get_status))
         .route("/warmup/{ip}", get(get_warmup))
         .route("/trust/{tenant_id}", get(get_trust))
-        .with_state(Arc::new(state))
+        .with_state(shared.clone())
+        .layer(middleware::from_fn_with_state(shared, require_api_key))
 }
 
 // ---------------------------------------------------------------------------
@@ -50,8 +67,19 @@ async fn get_health_checks(State(state): State<Arc<AppState>>) -> Json<serde_jso
     Json(serde_json::json!({ "checks": checks }))
 }
 
-async fn get_incidents(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let active = state.incidents.list_active();
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+async fn get_incidents(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListQuery>,
+) -> Json<serde_json::Value> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let active = state.incidents.list_active(limit, offset);
     Json(serde_json::json!({ "incidents": active, "count": active.len() }))
 }
 
@@ -70,14 +98,20 @@ struct CreateIncidentResponse {
 async fn create_incident(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateIncidentPayload>,
-) -> Result<(StatusCode, Json<CreateIncidentResponse>), StatusCode> {
+) -> Result<(StatusCode, Json<CreateIncidentResponse>), (StatusCode, Json<serde_json::Value>)> {
     match state.incidents.create_incident(
         payload.title,
         payload.severity,
         payload.affected_services,
     ).await {
         Ok(id) => Ok((StatusCode::CREATED, Json(CreateIncidentResponse { id }))),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(err) => {
+            tracing::error!(error = %err, "Failed to create incident");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to create incident"})),
+            ))
+        }
     }
 }
 
@@ -108,6 +142,12 @@ async fn get_trust(
     State(state): State<Arc<AppState>>,
     Path(tenant_id): Path<Uuid>,
 ) -> Json<serde_json::Value> {
+    if let Some(entry) = state.trust_cache.get(&tenant_id) {
+        if entry.cached_at.elapsed() < TRUST_CACHE_TTL {
+            return Json(serde_json::json!(entry.score));
+        }
+        state.trust_cache.remove(&tenant_id);
+    }
     // Query real metrics from the analytics database
     let metrics_row: Option<(f64, f64, f64, i64, i32)> = sqlx::query_as(
         "WITH recent_stats AS (
@@ -143,8 +183,8 @@ async fn get_trust(
             bounce_rate,
             complaint_rate,
             engagement_rate,
-            age_days,
-            volume,
+            age_days: age_days as u64,
+            volume: volume as u64,
         },
         None => {
             // Fallback for new tenants with no data
@@ -168,15 +208,55 @@ async fn get_trust(
          ON CONFLICT (tenant_id, computed_at) DO UPDATE SET trust_score = $2"
     )
         .bind(tenant_id)
-        .bind(score.overall)
+        .bind(score.score)
         .bind(metrics.bounce_rate)
         .bind(metrics.complaint_rate)
         .bind(metrics.engagement_rate)
-        .bind(metrics.volume)
+        .bind(metrics.volume as i64)
         .execute(&state.db)
         .await;
 
+    state.trust_cache.insert(
+        tenant_id,
+        TrustCacheEntry {
+            score: score.clone(),
+            cached_at: Instant::now(),
+        },
+    );
+
     Json(serde_json::json!(score))
+}
+
+async fn require_api_key(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if state.api_key.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let provided = extract_api_key(req.headers());
+    if provided.as_deref() == Some(state.api_key.as_str()) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers.get("x-api-key") {
+        return value.to_str().ok().map(|s| s.to_string());
+    }
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(raw) = value.to_str() {
+            let raw = raw.trim();
+            if let Some(token) = raw.strip_prefix("Bearer ") {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +290,8 @@ mod tests {
             incidents: IncidentManager::new(db.clone()),
             slo: SloTracker::new(),
             warmup: IpWarmupManager::new(db),
+            api_key: "test-key".into(),
+            trust_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -218,6 +300,7 @@ mod tests {
         let app = router(test_state().await);
         let req = Request::builder()
             .uri("/health/checks")
+            .header("x-api-key", "test-key")
             .body(Body::empty())
             .unwrap();
 
@@ -240,6 +323,7 @@ mod tests {
             .method("POST")
             .uri("/incidents")
             .header("content-type", "application/json")
+            .header("x-api-key", "test-key")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
 
@@ -252,6 +336,7 @@ mod tests {
         let app = router(test_state().await);
         let req = Request::builder()
             .uri("/status")
+            .header("x-api-key", "test-key")
             .body(Body::empty())
             .unwrap();
 

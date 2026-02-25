@@ -69,13 +69,18 @@ impl FailoverService {
         let mut cnt = self.failure_count.write().await;
         *cnt += 1;
         warn!(component, count = *cnt, threshold = self.config.failover.threshold, "Failure reported");
+        let mut trigger = false;
         if *cnt >= self.config.failover.threshold {
-            let current_state = self.state.read().await.clone();
-            if current_state == FailoverState::Normal {
-                drop(cnt);
-                info!("Failure threshold reached — initiating automatic failover");
-                self.initiate_failover(FailoverType::Automatic, Some(format!("Component {component} failures exceeded threshold"))).await?;
+            let mut state = self.state.write().await;
+            if *state == FailoverState::Normal {
+                *state = FailoverState::Detecting;
+                trigger = true;
             }
+        }
+        drop(cnt);
+        if trigger {
+            info!("Failure threshold reached — initiating automatic failover");
+            self.initiate_failover(FailoverType::Automatic, Some(format!("Component {component} failures exceeded threshold"))).await?;
         }
         Ok(())
     }
@@ -92,11 +97,13 @@ impl FailoverService {
         failover_type: FailoverType,
         reason: Option<String>,
     ) -> Result<FailoverEvent, String> {
-        // Transition state: Normal → Detecting → FailingOver
+        let started_at = Utc::now();
+        // Transition state: Normal/Detecting → Detecting → FailingOver
         {
             let mut s = self.state.write().await;
             match *s {
                 FailoverState::Normal => *s = FailoverState::Detecting,
+                FailoverState::Detecting => {},
                 FailoverState::FailedOver if failover_type == FailoverType::Manual => {
                     // Allow manual re-failover
                     *s = FailoverState::Detecting;
@@ -132,6 +139,8 @@ impl FailoverService {
 
         // Record the event
         let event_id = Uuid::new_v4();
+        let completed_at = Utc::now();
+        let duration_ms = (completed_at - started_at).num_milliseconds().max(0);
         let event = FailoverEvent {
             id: event_id,
             from_node: current_primary.clone(),
@@ -139,14 +148,16 @@ impl FailoverService {
             failover_type: failover_type.to_string(),
             state: "completed".into(),
             reason,
-            started_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-            duration_ms: Some(0),
+            started_at,
+            completed_at: Some(completed_at),
+            duration_ms: Some(duration_ms),
             data_loss: false,
             metadata: None,
         };
 
-        let _ = self.record_event(&event).await;
+        if let Err(e) = self.record_event(&event).await {
+            tracing::warn!(error = %e, event_id = %event_id, "Failed to record failover event — audit trail gap");
+        }
 
         // Update primary
         {
@@ -164,7 +175,9 @@ impl FailoverService {
         self.reset_failures().await;
 
         // Publish state to Redis
-        let _ = self.publish_state_change("failed_over").await;
+        if let Err(e) = self.publish_state_change("failed_over").await {
+            tracing::warn!(error = %e, "Failed to publish failover state change to Redis");
+        }
 
         info!(from = current_primary, to = target, "Failover completed");
         Ok(event)
@@ -172,6 +185,7 @@ impl FailoverService {
 
     /// Initiate failback to the original primary.
     pub async fn initiate_failback(&self) -> Result<FailoverEvent, String> {
+        let started_at = Utc::now();
         if !self.config.failover.failback_enabled {
             return Err("Failback is disabled".into());
         }
@@ -190,6 +204,8 @@ impl FailoverService {
 
         info!(from = current, to = original, "Failback initiated");
 
+        let completed_at = Utc::now();
+        let duration_ms = (completed_at - started_at).num_milliseconds().max(0);
         let event = FailoverEvent {
             id: Uuid::new_v4(),
             from_node: current,
@@ -197,9 +213,9 @@ impl FailoverService {
             failover_type: "failback".into(),
             state: "completed".into(),
             reason: Some("Failback to original primary".into()),
-            started_at: Utc::now(),
-            completed_at: Some(Utc::now()),
-            duration_ms: Some(0),
+            started_at,
+            completed_at: Some(completed_at),
+            duration_ms: Some(duration_ms),
             data_loss: false,
             metadata: None,
         };
@@ -228,10 +244,7 @@ impl FailoverService {
             .map_err(|e| e.to_string())?;
 
         // Look for multiple nodes claiming primary via SCAN
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("ha:primary:*")
-            .query_async(&mut conn).await
-            .unwrap_or_default();
+        let keys = Self::scan_keys(&mut conn, "ha:primary:*").await?;
 
         if keys.len() > 1 {
             warn!(primaries = keys.len(), "Split-brain detected: multiple primary claims");
@@ -251,10 +264,7 @@ impl FailoverService {
             .map_err(|e| e.to_string())?;
 
         // Remove all primary claims
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("ha:primary:*")
-            .query_async(&mut conn).await
-            .unwrap_or_default();
+        let keys = Self::scan_keys(&mut conn, "ha:primary:*").await?;
 
         for key in &keys {
             let _: () = redis::cmd("DEL").arg(key)
@@ -281,6 +291,31 @@ impl FailoverService {
 
         info!("Split-brain resolved");
         Ok(())
+    }
+
+    async fn scan_keys(
+        conn: &mut redis::aio::MultiplexedConnection,
+        pattern: &str,
+    ) -> Result<Vec<String>, String> {
+        let mut cursor: u64 = 0;
+        let mut keys: Vec<String> = Vec::new();
+        loop {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(200u64)
+                .query_async(conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            keys.extend(batch);
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(keys)
     }
 
     /// Get failover event history from DB.

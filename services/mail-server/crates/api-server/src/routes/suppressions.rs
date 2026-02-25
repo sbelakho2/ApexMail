@@ -50,11 +50,17 @@ pub struct ListSuppressionsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
+    pub cursor: Option<i64>,
+    #[serde(default)]
     pub reason: Option<String>,
 }
 
 fn default_limit() -> i64 {
     50
+}
+
+fn clamp_limit(limit: i64, max: i64) -> i64 {
+    limit.clamp(1, max)
 }
 
 #[derive(Debug, Serialize)]
@@ -80,7 +86,11 @@ pub struct BulkEntry {
 pub struct BulkSuppressResponse {
     pub created: usize,
     pub duplicates: usize,
+    pub invalid: usize,
 }
+
+// Fix #40: Maximum entries in bulk suppress request
+const MAX_BULK_ENTRIES: usize = 10_000;
 
 // ─── Handlers ──────────────────────────────────────────────────
 
@@ -142,14 +152,14 @@ async fn list_suppressions(
     Query(params): Query<ListSuppressionsQuery>,
 ) -> Result<Json<Vec<SuppressionResponse>>, ApiError> {
     require_scopes(&auth, &["suppressions:read"])?;
-
+    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, SuppressionRow>(
         "SELECT id, email, reason, source, created_at
          FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(auth.tenant_id)
-    .bind(params.limit.min(100))
-    .bind(params.offset)
+    .bind(clamp_limit(params.limit, 100))
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -204,40 +214,76 @@ async fn bulk_suppress(
 ) -> Result<Json<BulkSuppressResponse>, ApiError> {
     require_scopes(&auth, &["suppressions:write"])?;
 
-    let mut created = 0usize;
-    let mut duplicates = 0usize;
-
-    for entry in &body.entries {
-        let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2",
-        )
-        .bind(auth.tenant_id)
-        .bind(&entry.email)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
-
-        if exists > 0 {
-            duplicates += 1;
-            continue;
-        }
-
-        let _ = sqlx::query(
-            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
-             VALUES ($1,$2,$3,$4,'bulk',$5)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(auth.tenant_id)
-        .bind(&entry.email)
-        .bind(&entry.reason)
-        .bind(Utc::now())
-        .execute(&state.db)
-        .await;
-
-        created += 1;
+    // Fix #40: Limit bulk entries count
+    if body.entries.len() > MAX_BULK_ENTRIES {
+        return Err(ApiError::BadRequest(format!(
+            "bulk suppress limited to {} entries, got {}",
+            MAX_BULK_ENTRIES,
+            body.entries.len()
+        )));
     }
 
-    Ok(Json(BulkSuppressResponse { created, duplicates }))
+    let mut created = 0usize;
+    let mut duplicates = 0usize;
+    let mut invalid = 0usize;
+
+    // Fix #41: Validate all email addresses first
+    // Fix #39: Filter valid entries and batch check duplicates
+    let mut valid_entries: Vec<&BulkEntry> = Vec::with_capacity(body.entries.len());
+    for entry in &body.entries {
+        if !apexmail_lib::validation::is_valid_email(&entry.email) {
+            invalid += 1;
+            continue;
+        }
+        valid_entries.push(entry);
+    }
+
+    // Batch query for existing emails to avoid N+1
+    if !valid_entries.is_empty() {
+        let emails: Vec<&str> = valid_entries.iter().map(|e| e.email.as_str()).collect();
+        let existing: Vec<(String,)> = sqlx::query_as(
+            "SELECT email FROM suppressions WHERE tenant_id = $1 AND email = ANY($2)",
+        )
+        .bind(auth.tenant_id)
+        .bind(&emails)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+        let existing_set: std::collections::HashSet<&str> =
+            existing.iter().map(|(e,)| e.as_str()).collect();
+
+        // Batch insert non-duplicates
+        let now = Utc::now();
+        for entry in &valid_entries {
+            if existing_set.contains(entry.email.as_str()) {
+                duplicates += 1;
+                continue;
+            }
+
+            match sqlx::query(
+                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+                 VALUES ($1,$2,$3,$4,'bulk',$5)
+                 ON CONFLICT (tenant_id, email) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(auth.tenant_id)
+            .bind(&entry.email)
+            .bind(&entry.reason)
+            .bind(now)
+            .execute(&state.db)
+            .await
+            {
+                Ok(r) if r.rows_affected() > 0 => created += 1,
+                Ok(_) => duplicates += 1, // ON CONFLICT hit
+                Err(e) => {
+                    tracing::error!(email = %entry.email, error = %e, "bulk suppress insert failed");
+                }
+            }
+        }
+    }
+
+    Ok(Json(BulkSuppressResponse { created, duplicates, invalid }))
 }
 
 // ─── Row types ─────────────────────────────────────────────────

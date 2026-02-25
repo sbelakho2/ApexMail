@@ -130,10 +130,21 @@ fn parse_duration_hours(key: &str, val: &str) -> Result<Duration, ConfigError> {
 }
 
 fn parse_csv(val: &str) -> Vec<String> {
-    val.split(',')
+    let items: Vec<String> = val.split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .collect()
+        .collect();
+    
+    // Fix #60: Warn if both wildcard and specific origins are present.
+    // With "*" in the list, specific origins are ignored.
+    if items.iter().any(|s| s == "*") && items.len() > 1 {
+        tracing::warn!(
+            "CORS_ORIGINS contains '*' along with {} other origin(s). \
+             The wildcard will take precedence and specific origins will be ignored.",
+            items.len() - 1
+        );
+    }
+    items
 }
 
 impl Config {
@@ -211,10 +222,16 @@ impl Config {
     }
 
     /// Build a Postgres connection URL from the config.
+    ///
+    /// User and password are percent-encoded so that special characters
+    /// (like `@`, `:`, `/`) do not corrupt the URL.
     pub fn database_url(&self) -> String {
+        use url::form_urlencoded;
+        let encoded_user: String = form_urlencoded::byte_serialize(self.db_user.as_bytes()).collect();
+        let encoded_pass: String = form_urlencoded::byte_serialize(self.db_password.as_bytes()).collect();
         format!(
             "postgres://{}:{}@{}:{}/{}",
-            self.db_user, self.db_password, self.db_host, self.db_port, self.db_name
+            encoded_user, encoded_pass, self.db_host, self.db_port, self.db_name
         )
     }
 
@@ -249,10 +266,26 @@ impl Config {
                 "WEBHOOK_SIGNING_SECRET must be at least 32 characters in production".into(),
             ));
         }
-        if self.jwt_secret == "dev-secret" || self.api_key_hash_secret == "dev-secret" {
+        // Fix #3: Reject empty DB password in production
+        if self.db_password.is_empty() {
             return Err(ConfigError::SecurityCheck(
-                "dev default secrets must not be used in production".into(),
+                "DB_PASSWORD must not be empty in production".into(),
             ));
+        }
+        // Fix #4: Check all secrets for dev defaults (including webhook_signing_secret)
+        let dev_defaults = ["dev-secret", "secret", "changeme", "password"];
+        for secret_name in ["jwt_secret", "api_key_hash_secret", "webhook_signing_secret"] {
+            let value = match secret_name {
+                "jwt_secret" => &self.jwt_secret,
+                "api_key_hash_secret" => &self.api_key_hash_secret,
+                "webhook_signing_secret" => &self.webhook_signing_secret,
+                _ => unreachable!(),
+            };
+            if dev_defaults.iter().any(|d| value == *d) {
+                return Err(ConfigError::SecurityCheck(
+                    format!("{secret_name} must not use a dev default value in production"),
+                ));
+            }
         }
         if self.cors_origins.iter().any(|o| o == "*") {
             return Err(ConfigError::SecurityCheck(

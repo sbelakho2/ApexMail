@@ -126,7 +126,10 @@ impl CalendarService {
     /// Returns `true` if the timestamp is within working hours (09–17 UTC).
     fn is_within_working_hours(dt: DateTime<Utc>) -> bool {
         let hour = dt.hour();
-        hour >= WORK_START_HOUR && hour < WORK_END_HOUR
+        let weekday = dt.weekday();
+        matches!(weekday, chrono::Weekday::Mon | chrono::Weekday::Tue | chrono::Weekday::Wed | chrono::Weekday::Thu | chrono::Weekday::Fri)
+            && hour >= WORK_START_HOUR
+            && hour < WORK_END_HOUR
     }
 }
 

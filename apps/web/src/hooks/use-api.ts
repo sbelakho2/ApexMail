@@ -268,81 +268,119 @@ export interface DashboardStats {
 // Specific API hooks for campaigns
 export function useCampaigns(page = 1, pageSize = 20) {
     return useAPI<PaginatedResponse<Campaign>>(
-        `/api/campaigns?page=${page}&pageSize=${pageSize}`
+        `/v1/campaigns?page=${page}&pageSize=${pageSize}`
     );
 }
 
 export function useCampaign(id: string | null) {
-    return useAPI<Campaign>(id ? `/api/campaigns/${id}` : null);
+    return useAPI<Campaign>(id ? `/v1/campaigns/${id}` : null);
 }
 
 export function useCreateCampaign() {
-    return useAPIMutation<Campaign, Partial<Campaign>>('/api/campaigns', {
+    return useAPIMutation<Campaign, Partial<Campaign>>('/v1/campaigns', {
         onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/api/campaigns'));
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
         },
     });
 }
 
 export function useUpdateCampaign(id: string) {
-    return useAPIPut<Campaign, Partial<Campaign>>(`/api/campaigns/${id}`, {
+    return useAPIPut<Campaign, Partial<Campaign>>(`/v1/campaigns/${id}`, {
         onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/api/campaigns'));
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
         },
     });
 }
 
 export function useDeleteCampaign(id: string) {
-    return useAPIDelete<void>(`/api/campaigns/${id}`, {
+    return useAPIDelete<void>(`/v1/campaigns/${id}`, {
         onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/api/campaigns'));
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
         },
     });
 }
 
 // Specific API hooks for contacts
-export function useContacts(page = 1, pageSize = 50, listId?: string) {
+export function useContacts(
+    page = 1,
+    pageSize = 50,
+    listId?: string,
+    options?: {
+        status?: string;
+        search?: string;
+        sortField?: 'name' | 'score' | 'lastActivity';
+        sortOrder?: 'asc' | 'desc';
+    }
+) {
     const params = new URLSearchParams({
         page: String(page),
         pageSize: String(pageSize),
     });
     if (listId) params.set('listId', listId);
-    return useAPI<PaginatedResponse<Contact>>(`/api/contacts?${params}`);
+    if (options?.status && options.status !== 'all') params.set('status', options.status);
+    if (options?.search) params.set('search', options.search);
+    if (options?.sortField) params.set('sortField', options.sortField);
+    if (options?.sortOrder) params.set('sortOrder', options.sortOrder);
+    return useAPI<PaginatedResponse<Contact>>(`/v1/contacts?${params}`);
 }
 
 export function useContact(id: string | null) {
-    return useAPI<Contact>(id ? `/api/contacts/${id}` : null);
+    return useAPI<Contact>(id ? `/v1/contacts/${id}` : null);
 }
 
 export function useCreateContact() {
-    return useAPIMutation<Contact, Partial<Contact>>('/api/contacts', {
+    return useAPIMutation<Contact, Partial<Contact>>('/v1/contacts', {
         onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/api/contacts'));
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
+        },
+    });
+}
+
+export function useUpdateContact(id: string) {
+    return useAPIPut<Contact, Partial<Contact>>(`/v1/contacts/${id}`, {
+        onSuccess: () => {
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
+        },
+    });
+}
+
+export function useDeleteContact(id: string) {
+    return useAPIDelete<void>(`/v1/contacts/${id}`, {
+        onSuccess: () => {
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
         },
     });
 }
 
 // Specific API hooks for lists
 export function useLists() {
-    return useAPI<List[]>('/api/lists');
+    return useAPI<List[]>('/v1/lists');
+}
+
+export function useCreateList() {
+    return useAPIMutation<List, Partial<List>>('/v1/lists', {
+        onSuccess: () => {
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/lists'));
+        },
+    });
 }
 
 export function useList(id: string | null) {
-    return useAPI<List>(id ? `/api/lists/${id}` : null);
+    return useAPI<List>(id ? `/v1/lists/${id}` : null);
 }
 
 // Specific API hooks for templates
 export function useTemplates() {
-    return useAPI<Template[]>('/api/templates');
+    return useAPI<Template[]>('/v1/templates');
 }
 
 export function useTemplate(id: string | null) {
-    return useAPI<Template>(id ? `/api/templates/${id}` : null);
+    return useAPI<Template>(id ? `/v1/templates/${id}` : null);
 }
 
 // Dashboard stats hook
 export function useDashboardStats() {
-    return useAPI<DashboardStats>('/api/dashboard/stats');
+    return useAPI<DashboardStats>('/v1/dashboard/stats');
 }
 
 // Support tickets types & hooks

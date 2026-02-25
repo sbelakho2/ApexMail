@@ -36,8 +36,8 @@ export default function CompliancePage() {
 
     React.useEffect(() => {
         Promise.allSettled([
-            fetch('/api/v1/suppressions?limit=50'),
-            fetch('/api/v1/analytics/dashboard'),
+            fetch('/v1/suppressions?limit=50'),
+            fetch('/v1/analytics/dashboard'),
         ]).then(async ([supRes, dashRes]) => {
             if (supRes.status === 'fulfilled' && supRes.value.ok) {
                 const json = await supRes.value.json();
@@ -53,7 +53,12 @@ export default function CompliancePage() {
     const filtered = suppressions.filter(s => !search || s.email.toLowerCase().includes(search.toLowerCase()));
 
     async function removeSuppression(id: string) {
-        const res = await fetch(`/api/v1/suppressions/${id}`, { method: 'DELETE' });
+        const confirmed = window.confirm(
+            'Remove this suppression entry? Email delivery to this recipient may resume immediately. Re-add the suppression if this was accidental.'
+        );
+        if (!confirmed) return;
+
+        const res = await fetch(`/v1/suppressions/${id}`, { method: 'DELETE' });
         if (res.ok) setSuppressions(prev => prev.filter(s => s.id !== id));
     }
 

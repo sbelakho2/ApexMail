@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Pool } from 'pg';
 import { ok, err, type Result } from '@apexmail/lib';
+import type { DatabasePool } from '../pool.js';
 
 // =============================================================================
 // Types
@@ -46,7 +46,7 @@ export interface SubscriptionStatus {
 // =============================================================================
 
 export class SubscriptionsRepository {
-    constructor(private pool: Pool) {}
+    constructor(private readonly db: DatabasePool) {}
 
     // -------------------------------------------------------------------------
     // Email Categories
@@ -59,42 +59,44 @@ export class SubscriptionsRepository {
     }): Promise<Result<EmailCategory, Error>> {
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO email_categories (id, tenant_id, name, description, display_order)
-                 VALUES ($1, $2, $3, $4, $5)
-                 RETURNING *`,
-                [id, tenantId, data.name, data.description, data.displayOrder ?? 0]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO email_categories (id, tenant_id, name, description, display_order)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING *`,
+            [id, tenantId, data.name, data.description, data.displayOrder ?? 0]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to create category'));
-            }
-            return ok(this.mapCategoryRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to create category'));
+        }
+        return ok(this.mapCategoryRow(row));
     }
 
     async findCategoryById(id: string, tenantId: string): Promise<EmailCategory | null> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM email_categories WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return result.rows[0] ? this.mapCategoryRow(result.rows[0]) : null;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0] ? this.mapCategoryRow(result.value.rows[0]) : null;
     }
 
     async findCategoriesByTenant(tenantId: string): Promise<EmailCategory[]> {
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM email_categories 
              WHERE tenant_id = $1 AND active = true
              ORDER BY display_order, name`,
             [tenantId]
         );
 
-        return result.rows.map(row => this.mapCategoryRow(row));
+        if (!result.ok) throw result.error;
+        return result.value.rows.map(row => this.mapCategoryRow(row));
     }
 
     async updateCategory(id: string, tenantId: string, data: {
@@ -131,36 +133,37 @@ export class SubscriptionsRepository {
 
         values.push(id, tenantId);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `UPDATE email_categories 
-                 SET ${fields.join(', ')}
-                 WHERE id = $${paramIndex++} AND tenant_id = $${paramIndex}
-                 RETURNING *`,
-                values
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `UPDATE email_categories 
+             SET ${fields.join(', ')}
+             WHERE id = $${paramIndex++} AND tenant_id = $${paramIndex}
+             RETURNING *`,
+            values
+        );
 
-            if (result.rows.length === 0) {
-                return err(new Error('Category not found'));
-            }
-
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Category not found'));
-            }
-            return ok(this.mapCategoryRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        if (result.value.rows.length === 0) {
+            return err(new Error('Category not found'));
+        }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Category not found'));
+        }
+        return ok(this.mapCategoryRow(row));
     }
 
     async deleteCategory(id: string, tenantId: string): Promise<boolean> {
-        const result = await this.pool.query(
+        const result = await this.db.query(
             `DELETE FROM email_categories WHERE id = $1 AND tenant_id = $2`,
             [id, tenantId]
         );
 
-        return (result.rowCount ?? 0) > 0;
+        if (!result.ok) throw result.error;
+        return (result.value.rowCount ?? 0) > 0;
     }
 
     // -------------------------------------------------------------------------
@@ -174,14 +177,16 @@ export class SubscriptionsRepository {
         const categories = await this.findCategoriesByTenant(tenantId);
 
         // Get existing preferences
-        const result = await this.pool.query<Record<string, unknown>>(
+        const result = await this.db.query<Record<string, unknown>>(
             `SELECT * FROM subscription_preferences
              WHERE tenant_id = $1 AND email = $2`,
             [tenantId, normalizedEmail]
         );
 
+        if (!result.ok) throw result.error;
+
         const prefMap = new Map<string, { subscribed: boolean; updatedAt: Date }>();
-        for (const row of result.rows) {
+        for (const row of result.value.rows) {
             prefMap.set(row.category as string, {
                 subscribed: row.subscribed as boolean,
                 updatedAt: new Date(row.updated_at as string)
@@ -189,12 +194,13 @@ export class SubscriptionsRepository {
         }
 
         // Check for global unsubscribe
-        const suppressionResult = await this.pool.query<{ count: string }>(
+        const suppressionResult = await this.db.query<{ count: string }>(
             `SELECT COUNT(*) as count FROM suppressions
              WHERE tenant_id = $1 AND email = $2 AND reason = 'unsubscribe'`,
             [tenantId, normalizedEmail]
         );
-        const globalUnsubscribe = parseInt(suppressionResult.rows[0]?.count ?? '0', 10) > 0;
+        if (!suppressionResult.ok) throw suppressionResult.error;
+        const globalUnsubscribe = parseInt(suppressionResult.value.rows[0]?.count ?? '0', 10) > 0;
 
         return {
             email: normalizedEmail,
@@ -211,31 +217,31 @@ export class SubscriptionsRepository {
         const normalizedEmail = email.toLowerCase().trim();
         const id = randomUUID().replace(/-/g, '').slice(0, 26);
 
-        try {
-            const result = await this.pool.query<Record<string, unknown>>(
-                `INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (tenant_id, email, category)
-                 DO UPDATE SET subscribed = EXCLUDED.subscribed, updated_at = NOW()
-                 RETURNING *`,
-                [id, tenantId, normalizedEmail, category, subscribed]
-            );
+        const result = await this.db.query<Record<string, unknown>>(
+            `INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id, email, category)
+             DO UPDATE SET subscribed = EXCLUDED.subscribed, updated_at = NOW()
+             RETURNING *`,
+            [id, tenantId, normalizedEmail, category, subscribed]
+        );
 
-            const row = result.rows[0];
-            if (!row) {
-                return err(new Error('Failed to set preference'));
-            }
-            return ok(this.mapPreferenceRow(row));
-        } catch (error) {
-            return err(error instanceof Error ? error : new Error(String(error)));
+        if (!result.ok) {
+            return err(result.error);
         }
+
+        const row = result.value.rows[0];
+        if (!row) {
+            return err(new Error('Failed to set preference'));
+        }
+        return ok(this.mapPreferenceRow(row));
     }
 
     async setPreferences(tenantId: string, email: string, preferences: Record<string, boolean>): Promise<Result<SubscriptionPreference[], Error>> {
         const normalizedEmail = email.toLowerCase().trim();
         const results: SubscriptionPreference[] = [];
 
-        const client = await this.pool.connect();
+        const client = await this.db.getClient();
         try {
             await client.query('BEGIN');
 
@@ -287,24 +293,26 @@ export class SubscriptionsRepository {
         const normalizedEmail = email.toLowerCase().trim();
 
         // Check global unsubscribe first
-        const suppressionResult = await this.pool.query<{ count: string }>(
+        const suppressionResult = await this.db.query<{ count: string }>(
             `SELECT COUNT(*) as count FROM suppressions
              WHERE tenant_id = $1 AND email = $2 AND reason = 'unsubscribe'`,
             [tenantId, normalizedEmail]
         );
-        if (parseInt(suppressionResult.rows[0]?.count ?? '0', 10) > 0) {
+        if (!suppressionResult.ok) throw suppressionResult.error;
+        if (parseInt(suppressionResult.value.rows[0]?.count ?? '0', 10) > 0) {
             return false;
         }
 
         // Check category preference
-        const result = await this.pool.query<{ subscribed: boolean }>(
+        const result = await this.db.query<{ subscribed: boolean }>(
             `SELECT subscribed FROM subscription_preferences
              WHERE tenant_id = $1 AND email = $2 AND category = $3`,
             [tenantId, normalizedEmail, category]
         );
 
         // Default to subscribed if no preference exists
-        return result.rows[0]?.subscribed ?? true;
+        if (!result.ok) throw result.error;
+        return result.value.rows[0]?.subscribed ?? true;
     }
 
     // -------------------------------------------------------------------------

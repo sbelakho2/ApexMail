@@ -159,16 +159,39 @@ pub fn load() -> Result<Config> {
         &var_or("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
     );
 
+    let redirect_status = var_or_u16("TRACKING_REDIRECT_STATUS", 302);
+    let max_connections = var_or_u32("DB_MAX_CONNECTIONS", 50);
+    let pool_size = var_or_usize("REDIS_POOL_SIZE", 16);
+    let max_per_minute = var_or_u32("RATE_LIMIT_MAX_PER_MINUTE", 1000);
+    let metrics_port = var_or_u16("METRICS_PORT", 9092);
+
+    // #199: Runtime validation of config values
+    if max_connections == 0 || max_connections > 10_000 {
+        anyhow::bail!("DB_MAX_CONNECTIONS must be between 1 and 10,000 (got {max_connections})");
+    }
+    if pool_size == 0 || pool_size > 1_000 {
+        anyhow::bail!("REDIS_POOL_SIZE must be between 1 and 1,000 (got {pool_size})");
+    }
+    if max_per_minute == 0 {
+        anyhow::bail!("RATE_LIMIT_MAX_PER_MINUTE must be > 0");
+    }
+    if redirect_status != 301 && redirect_status != 302 && redirect_status != 307 && redirect_status != 308 {
+        anyhow::bail!("TRACKING_REDIRECT_STATUS must be 301, 302, 307, or 308 (got {redirect_status})");
+    }
+    if port == metrics_port {
+        anyhow::bail!("TRACKING_PORT and METRICS_PORT must differ (both {port})");
+    }
+
     Ok(Config {
         server: ServerConfig { addr },
         database: DatabaseConfig {
             url: db_url,
-            max_connections: var_or_u32("DB_MAX_CONNECTIONS", 50),
+            max_connections,
         },
         redis: RedisConfig {
             url: redis_url,
             key_prefix: "tracking:".into(),
-            pool_size: var_or_usize("REDIS_POOL_SIZE", 16),
+            pool_size,
         },
         tracking: TrackingConfig {
             base_url: var_or("TRACKING_BASE_URL", "https://t.apexmail.ee"),
@@ -181,16 +204,16 @@ pub fn load() -> Result<Config> {
                 "TRACKING_UNSUBSCRIBE_CONFIRMATION_URL",
                 "https://apexmail.ee/unsubscribed",
             ),
-            redirect_status: var_or_u16("TRACKING_REDIRECT_STATUS", 302),
+            redirect_status,
             trusted_proxies,
         },
         rate_limit: RateLimitConfig {
             enabled: var_or_bool("RATE_LIMIT_ENABLED", true),
-            max_per_minute: var_or_u32("RATE_LIMIT_MAX_PER_MINUTE", 1000),
+            max_per_minute,
         },
         metrics: MetricsConfig {
             enabled: var_or_bool("METRICS_ENABLED", true),
-            port: var_or_u16("METRICS_PORT", 9092),
+            port: metrics_port,
         },
         secret_key: zeroize::Zeroizing::new(secret_key),
     })

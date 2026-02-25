@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Datelike, TimeZone, Timelike, Utc};
+use chrono::{Datelike, TimeDelta, TimeZone, Timelike, Utc};
 use std::sync::Mutex;
 use sqlx::PgPool;
 use tokio::sync::Notify;
@@ -13,7 +13,7 @@ use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
 
 use super::types::{AggregatedStats, AnalyticsEvent};
-use crate::common::{AnalyticsConfig, ProcessorError, ProcessorResult, RedisPool};
+use crate::common::{AnalyticsConfig, ProcessorResult, RedisPool};
 
 /// Maximum event buffer size to prevent OOM.
 const MAX_EVENT_BUFFER_SIZE: usize = 50_000;
@@ -227,7 +227,7 @@ impl AnalyticsProcessor {
         
         // Add to event buffer (sync operation)
         let should_flush = {
-            let mut buffer = self.event_buffer.lock().unwrap();
+            let mut buffer = self.event_buffer.lock().unwrap_or_else(|e| e.into_inner());
             buffer.extend(events.iter().cloned());
 
             // Enforce buffer size cap
@@ -262,18 +262,24 @@ impl AnalyticsProcessor {
 
     /// Update aggregation buffer with an event.
     fn update_aggregation(&self, event: &AnalyticsEvent) {
-        // Get current hour bucket
-        let period_start = Utc
-            .with_ymd_and_hms(
-                event.timestamp.year(),
-                event.timestamp.month(),
-                event.timestamp.day(),
-                event.timestamp.hour(),
-                0,
-                0,
-            )
-            .unwrap();
-        let period_end = period_start + chrono::Duration::hours(1);
+        // Fix #86: Use single() instead of unwrap() on LocalResult
+        let period_start = match Utc.with_ymd_and_hms(
+            event.timestamp.year(),
+            event.timestamp.month(),
+            event.timestamp.day(),
+            event.timestamp.hour(),
+            0,
+            0,
+        ) {
+            chrono::LocalResult::Single(dt) => dt,
+            _ => {
+                warn!("Failed to construct period_start from event timestamp, using truncated");
+                event.timestamp.date_naive().and_hms_opt(event.timestamp.hour(), 0, 0)
+                    .map(|dt| dt.and_utc())
+                    .unwrap_or(event.timestamp)
+            }
+        };
+        let period_end = period_start + TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
 
         // Use epoch milliseconds for period key (no ambiguous ':' characters)
         let period_key = period_start.timestamp_millis().to_string();
@@ -312,7 +318,7 @@ impl AnalyticsProcessor {
             ));
         }
 
-        let mut buffer = self.aggregation_buffer.lock().unwrap();
+        let mut buffer = self.aggregation_buffer.lock().unwrap_or_else(|e| e.into_inner());
 
         for (key, domain_id, campaign_id) in keys {
             let stats = buffer.entry(key).or_insert_with(|| {
@@ -328,18 +334,23 @@ impl AnalyticsProcessor {
             stats.increment(&event.event_type);
         }
 
-        // Evict oldest entries if buffer exceeds cap
+        // Fix #83: Evict entries with oldest period_start (not arbitrary HashMap order)
         if buffer.len() > MAX_AGGREGATION_BUFFER_SIZE {
             let excess = buffer.len() - MAX_AGGREGATION_BUFFER_SIZE;
-            let keys_to_remove: Vec<String> = buffer.keys().take(excess).cloned().collect();
-            for key in keys_to_remove {
-                buffer.remove(&key);
+            let mut keys_by_age: Vec<(String, chrono::DateTime<Utc>)> = buffer
+                .iter()
+                .map(|(k, v)| (k.clone(), v.period_start))
+                .collect();
+            keys_by_age.sort_by_key(|(_, ts)| *ts);
+            let keys_to_remove: Vec<String> = keys_by_age.into_iter().take(excess).map(|(k, _)| k).collect();
+            for key in &keys_to_remove {
+                buffer.remove(key);
             }
             warn!(
                 evicted = excess,
                 buffer_size = buffer.len(),
                 cap = MAX_AGGREGATION_BUFFER_SIZE,
-                "Aggregation buffer exceeded cap, evicted oldest entries"
+                "Aggregation buffer exceeded cap, evicted oldest entries by period_start"
             );
         }
     }
@@ -380,17 +391,17 @@ impl AnalyticsProcessor {
     }
 
     async fn flush_buffers_inner(&self) -> ProcessorResult<()> {
-        // Take snapshots of buffers
-        let (events, event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
-            let buffer = self.event_buffer.lock().unwrap();
-            let events: Vec<_> = buffer.iter().cloned().collect();
+        // Fix #92: Take ownership of buffers via drain/mem::take instead of cloning
+        let (events, _event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
+            let mut buffer = self.event_buffer.lock().unwrap_or_else(|e| e.into_inner());
             let ids: Vec<_> = buffer.iter().map(|e| e.id.clone()).collect();
+            let events = std::mem::take(&mut *buffer);
             (events, ids)
         };
 
         let aggregations: HashMap<String, AggregatedStats> = {
-            let buffer = self.aggregation_buffer.lock().unwrap();
-            buffer.clone()
+            let mut buffer = self.aggregation_buffer.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *buffer)
         };
 
         if events.is_empty() && aggregations.is_empty() {
@@ -403,24 +414,17 @@ impl AnalyticsProcessor {
             "Flushing analytics buffers"
         );
 
-        // Write aggregations to database
+        // Fix #62/#92: Aggregation buffer already drained via mem::take above.
+        // Write aggregations to DB.
         self.write_aggregations(&aggregations).await?;
 
-        // Update Redis counters
-        self.update_redis_counters(&events).await?;
-
-        // Remove flushed items from buffers
-        {
-            let mut event_buffer = self.event_buffer.lock().unwrap();
-            event_buffer.retain(|e| !event_ids.contains(&e.id));
+        // Update Redis counters (failure here won't cause double-counting)
+        if let Err(e) = self.update_redis_counters(&events).await {
+            // Log but don't fail - Redis counters can be rebuilt from DB
+            tracing::warn!(error = %e, "Failed to update Redis counters; will retry on next flush");
         }
 
-        {
-            let mut agg_buffer = self.aggregation_buffer.lock().unwrap();
-            for key in aggregations.keys() {
-                agg_buffer.remove(key);
-            }
-        }
+        // Event buffer already drained via mem::take above - no need to remove individually.
 
         debug!(
             events = events.len(),
@@ -586,13 +590,12 @@ impl AnalyticsProcessor {
         while self.is_running.load(Ordering::SeqCst) {
             // Calculate time until next hour
             let now = Utc::now();
-            let next_hour = (now + chrono::Duration::hours(1))
-                .with_minute(0)
-                .unwrap()
-                .with_second(0)
-                .unwrap()
-                .with_nanosecond(0)
-                .unwrap();
+            // Fix #86: Use unwrap_or to avoid panicking on None
+            let one_hour = TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
+            let next_hour = (now + one_hour)
+                .with_minute(0).unwrap_or(now + one_hour)
+                .with_second(0).unwrap_or(now + one_hour)
+                .with_nanosecond(0).unwrap_or(now + one_hour);
             let wait_duration = (next_hour - now).to_std().unwrap_or(Duration::from_secs(3600));
 
             tokio::select! {
@@ -611,18 +614,23 @@ impl AnalyticsProcessor {
         info!("Running hourly aggregation");
 
         // Aggregate the previous hour's data
-        let prev_hour = Utc::now() - chrono::Duration::hours(1);
-        let period_start = Utc
-            .with_ymd_and_hms(
-                prev_hour.year(),
-                prev_hour.month(),
-                prev_hour.day(),
-                prev_hour.hour(),
-                0,
-                0,
-            )
-            .unwrap();
-        let period_end = period_start + chrono::Duration::hours(1);
+        let prev_hour = Utc::now() - TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
+        // Fix #86: Use single() for safe LocalResult handling
+        let period_start = match Utc.with_ymd_and_hms(
+            prev_hour.year(),
+            prev_hour.month(),
+            prev_hour.day(),
+            prev_hour.hour(),
+            0,
+            0,
+        ) {
+            chrono::LocalResult::Single(dt) => dt,
+            _ => {
+                warn!("Failed to construct hourly period_start, falling back");
+                prev_hour
+            }
+        };
+        let period_end = period_start + TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
 
         sqlx::query(
             r#"

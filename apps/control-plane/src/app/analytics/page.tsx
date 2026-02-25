@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { cn } from '../../lib/utils';
+import { cn, formatDateOnly, formatDateTime, formatShortDate, getLocalTimeZone } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
 import {
     StatCard,
@@ -47,7 +47,7 @@ function generateTimeSeries(days: number, baseValue: number, variance: number) {
         const date = new Date(STABLE_BASE_DATE);
         date.setDate(date.getDate() - (days - 1 - i));
         return {
-            date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            date: formatShortDate(date),
             value: Math.round(baseValue + (random() - 0.5) * variance * 2),
         };
     });
@@ -73,6 +73,9 @@ export default function AnalyticsPage() {
     const [timeRange, setTimeRange] = useState<TimeRange>('30d');
     const [activeSection, setActiveSection] = useState<'overview' | 'email' | 'tenants' | 'revenue' | 'sales'>('overview');
     const printRef = useRef<HTMLDivElement>(null);
+    const timezone = getLocalTimeZone();
+    const generatedAt = STABLE_BASE_DATE;
+    const dataSource: 'simulated' | 'live' = 'simulated';
 
     // Generate demo data
     const emailVolumeData = generateTimeSeries(30, 45000, 15000);
@@ -85,7 +88,7 @@ export default function AnalyticsPage() {
         const date = new Date(STABLE_BASE_DATE);
         date.setDate(date.getDate() - (29 - i));
         return {
-            date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            date: formatShortDate(date),
             delivered: Math.round(40000 + multiSeriesRandom() * 20000),
             opened: Math.round(15000 + multiSeriesRandom() * 10000),
             clicked: Math.round(3000 + multiSeriesRandom() * 3000),
@@ -114,11 +117,11 @@ export default function AnalyticsPage() {
                 <div className="flex items-center justify-between">
                     <div>
                         <h1 className="text-2xl font-bold text-surface-900">ApexMail Analytics Report</h1>
-                        <p className="text-sm text-surface-500">Generated on {STABLE_BASE_DATE.toLocaleDateString()}</p>
+                        <p className="text-sm text-surface-500">Generated on {formatDateOnly(STABLE_BASE_DATE)}</p>
                     </div>
                     <div className="text-right">
                         <p className="text-sm font-medium text-surface-700">Control Plane</p>
-                        <p className="text-xs text-surface-500">Period: Last {timeRange}</p>
+                        <p className="text-xs text-surface-500">Period: Last {timeRange} • TZ: {timezone}</p>
                     </div>
                 </div>
             </div>
@@ -127,7 +130,19 @@ export default function AnalyticsPage() {
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 no-print">
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Analytics & Insights</h1>
-                    <p className="text-muted-foreground mt-1">Deep business intelligence across all operations</p>
+                    <p className="text-muted-foreground mt-1">Deep business intelligence across all operations • Times shown in {timezone}</p>
+                    <p className="text-xs text-muted-foreground mt-1">Last updated {formatDateTime(generatedAt)}</p>
+                    <div className="mt-2 flex items-center gap-2 text-xs">
+                        <span className={cn(
+                            'inline-flex items-center rounded-full px-2 py-0.5 border',
+                            dataSource === 'simulated'
+                                ? 'bg-warning/10 text-warning border-warning/30'
+                                : 'bg-success/10 text-success border-success/30'
+                        )}>
+                            Source: {dataSource === 'simulated' ? 'Simulated Demo Data' : 'Live Production Data'}
+                        </span>
+                        <span className="text-muted-foreground">Legend: chart values tagged as simulated are illustrative only.</span>
+                    </div>
                 </div>
                 <div className="flex items-center gap-3 overflow-x-auto">
                     {/* Time Range Selector */}
@@ -147,10 +162,10 @@ export default function AnalyticsPage() {
                             </button>
                         ))}
                     </div>
-                    <button onClick={handleExport} className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted shadow-sm transition-colors">
+                    <button type="button" onClick={handleExport} className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted shadow-sm transition-colors">
                         Export
                     </button>
-                    <button onClick={handlePrint} className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
+                    <button type="button" onClick={handlePrint} className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
                         Print Report
                     </button>
                 </div>
@@ -200,6 +215,7 @@ export default function AnalyticsPage() {
                             <div>
                                 <h3 className="text-lg font-semibold text-foreground">Email Volume Trend</h3>
                                 <p className="text-sm text-muted-foreground">Daily email volume over the selected period</p>
+                                <p className="text-xs text-muted-foreground mt-1">Last updated {formatDateTime(generatedAt)}</p>
                             </div>
                             <div className="flex items-center gap-4">
                                 <Sparkline data={emailVolumeData.slice(-7).map(d => d.value)} color={CHART_COLORS.primary} />
@@ -248,6 +264,7 @@ export default function AnalyticsPage() {
                     <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break">
                         <h3 className="text-lg font-semibold text-foreground mb-2">API Activity Heatmap</h3>
                         <p className="text-sm text-muted-foreground mb-4">Email sends by day and hour (last 7 days)</p>
+                        <p className="text-xs text-muted-foreground mb-4">Last updated {formatDateTime(generatedAt)}</p>
                         <div className="overflow-x-auto -mx-6 px-6">
                             <HeatMap data={heatMapData} width={700} height={160} />
                         </div>

@@ -5,6 +5,7 @@
  * category/title enforcement, and analytics queries.
  */
 
+import crypto from 'node:crypto';
 import { createLogger } from '@apexmail/lib';
 import type { DatabasePool } from '../pool.js';
 
@@ -92,7 +93,7 @@ export class SupportTicketsRepository {
   /* --- Create ---------------------------------------------------- */
 
   async create(input: CreateTicketInput): Promise<SupportTicket> {
-    const id = `tkt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `tkt-${crypto.randomUUID()}`;
     const now = new Date();
 
     const result = await this.db.query<{
@@ -131,7 +132,7 @@ export class SupportTicketsRepository {
   /* --- Add message ----------------------------------------------- */
 
   async addMessage(input: AddMessageInput): Promise<SupportTicketMessage> {
-    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `msg-${crypto.randomUUID()}`;
 
     const result = await this.db.query<{
       id: string; ticket_id: string; content: string; author: string;
@@ -151,15 +152,16 @@ export class SupportTicketsRepository {
       ]
     );
 
-    // Update ticket's updated_at
+    if (!result.ok) throw result.error;
+    const row = result.value.rows[0];
+    if (!row) throw new Error('Failed to add message');
+
+    // Update ticket's updated_at after successful insert
     await this.db.query(
       `UPDATE support_tickets SET updated_at = NOW() WHERE id = $1`,
       [input.ticketId]
     );
 
-    if (!result.ok) throw result.error;
-    const row = result.value.rows[0];
-    if (!row) throw new Error('Failed to add message');
     return {
       id: row.id,
       ticketId: row.ticket_id,
@@ -177,8 +179,10 @@ export class SupportTicketsRepository {
     const setClauses: string[] = ['updated_at = NOW()'];
     const params: unknown[] = [];
     let paramIdx = 1;
+    let statusParamIndex: number | null = null;
 
     if (input.status !== undefined) {
+      statusParamIndex = paramIdx;
       setClauses.push(`status = $${paramIdx++}`);
       params.push(input.status);
     }
@@ -193,6 +197,12 @@ export class SupportTicketsRepository {
     if (input.category !== undefined) {
       setClauses.push(`category = $${paramIdx++}`);
       params.push(input.category);
+    }
+
+    if (statusParamIndex !== null) {
+      setClauses.push(
+        `resolved_at = CASE WHEN $${statusParamIndex} IN ('resolved', 'closed') THEN NOW() ELSE NULL END`
+      );
     }
 
     params.push(ticketId);
@@ -334,10 +344,11 @@ export class SupportTicketsRepository {
       ),
       this.db.query<{ avg_hours: string }>(
         `SELECT COALESCE(
-           AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 3600), 0
+           AVG(EXTRACT(EPOCH FROM (resolved_at - created_at)) / 3600), 0
          )::text AS avg_hours
          FROM support_tickets
-         WHERE status IN ('resolved', 'closed')`
+         WHERE status IN ('resolved', 'closed')
+           AND resolved_at IS NOT NULL`
       ),
     ]);
 

@@ -59,6 +59,36 @@ fn default_max_output_len() -> usize { 2 * 1024 * 1024 }
 fn default_cache_max() -> u64 { 1000 }
 fn default_cache_ttl() -> u64 { 3600 }
 
+impl RendererConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.db.url.trim().is_empty() {
+            return Err("DATABASE_URL must not be empty".into());
+        }
+        if self.db.max_connections == 0 {
+            return Err("DB_MAX_CONNECTIONS must be > 0".into());
+        }
+        if self.server.host.trim().is_empty() {
+            return Err("HOST must not be empty".into());
+        }
+        if self.server.port == 0 {
+            return Err("PORT must be > 0".into());
+        }
+        if self.sandbox.timeout_ms == 0 {
+            return Err("SANDBOX_TIMEOUT_MS must be > 0".into());
+        }
+        if self.sandbox.max_memory_bytes == 0
+            || self.sandbox.max_source_length == 0
+            || self.sandbox.max_output_length == 0
+        {
+            return Err("Sandbox limits must be > 0".into());
+        }
+        if self.cache.max_entries == 0 || self.cache.ttl_secs == 0 {
+            return Err("Cache limits must be > 0".into());
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

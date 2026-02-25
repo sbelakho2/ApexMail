@@ -1,6 +1,5 @@
 //! ISP warmup schedules repository.
 
-use chrono::Utc;
 use sqlx::PgPool;
 
 use crate::types::IspWarmupSchedule;
@@ -103,6 +102,8 @@ impl WarmupRepo {
     }
 
     /// Match an MX host against patterns to find the ISP.
+    /// Note: This loads all schedules into memory. For production scale,
+    /// consider caching schedules in-memory or adding a database-side pattern match.
     pub async fn find_by_mx_pattern(pool: &PgPool, mx_host: &str) -> Result<Option<IspWarmupSchedule>, sqlx::Error> {
         // Get all schedules and match patterns
         let schedules = Self::list(pool).await?;
@@ -137,6 +138,7 @@ impl WarmupRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_warmup_repo_is_stateless() {

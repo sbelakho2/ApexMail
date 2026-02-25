@@ -74,16 +74,21 @@ impl EventsRepo {
         .await
     }
 
-    /// Count events by type for a tenant.
+    /// Count events by type for a tenant within a time window.
+    /// #222: Added time bound to prevent expensive full table scans
     pub async fn count_by_type(
         pool: &PgPool,
         tenant_id: Uuid,
+        since_hours: i32,
     ) -> Result<Vec<EventTypeCount>, sqlx::Error> {
+        let since_hours = since_hours.clamp(1, 8760); // Max 1 year
         sqlx::query_as::<_, EventTypeCount>(
             "SELECT event_type, COUNT(*) as count \
-             FROM events WHERE tenant_id = $1 GROUP BY event_type ORDER BY count DESC"
+             FROM events WHERE tenant_id = $1 AND timestamp > NOW() - make_interval(hours => $2) \
+             GROUP BY event_type ORDER BY count DESC"
         )
         .bind(tenant_id)
+        .bind(since_hours)
         .fetch_all(pool)
         .await
     }

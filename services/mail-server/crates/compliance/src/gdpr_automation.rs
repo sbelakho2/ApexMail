@@ -10,7 +10,7 @@
 //! Consent: Upsert on (tenant_id, subscriber_id, consent_type). Marketing
 //! cascade: withdrawing marketing revokes analytics and profiling.
 
-use chrono::{Duration, Utc};
+use chrono::{TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -296,50 +296,55 @@ impl GdprAutomation {
         let email = &request.email;
         let mut total_deleted: i64 = 0;
 
+        // #284: Run erasure operations in a single transaction to avoid partial deletion.
+        let mut tx = self.db.begin().await.map_err(|e| format!("DB: {e}"))?;
+
         // 1. Delete subscriber profile
         let r = sqlx::query("DELETE FROM subscribers WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         // 2. Delete message events
         let r = sqlx::query("DELETE FROM message_events WHERE recipient_email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         // 3. Delete engagement events
         let r = sqlx::query("DELETE FROM engagement_events WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         // 4. Delete consent records
         let r = sqlx::query("DELETE FROM consent_records WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         // 5. Delete from suppression list
         let r = sqlx::query("DELETE FROM suppression_list WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         // 6. Delete tracking data
         let r = sqlx::query("DELETE FROM tracking_events WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
         // 7. Delete analytics data
         let r = sqlx::query("DELETE FROM subscriber_analytics WHERE email = $1 AND tenant_id = $2")
             .bind(email).bind(tid)
-            .execute(&self.db).await.map_err(|e| format!("DB: {e}"))?;
+            .execute(&mut *tx).await.map_err(|e| format!("DB: {e}"))?;
         total_deleted += r.rows_affected() as i64;
 
+        tx.commit().await.map_err(|e| format!("DB: {e}"))?;
+
         // Clear Redis keys
-        self.clear_redis_keys(tid, email).await;
+        self.clear_redis_keys(tid, email).await?;
 
         // Create deletion confirmation
         let confirmation = serde_json::json!({
@@ -522,7 +527,7 @@ impl GdprAutomation {
         // Marketing cascade: withdrawing marketing also withdraws analytics + profiling
         if !granted && consent_type == ConsentType::Marketing {
             for cascade_type in &[ConsentType::Analytics, ConsentType::Profiling] {
-                let _ = self
+                if let Err(e) = self
                     .record_consent(
                         tenant_id,
                         subscriber_id,
@@ -532,7 +537,17 @@ impl GdprAutomation {
                         ConsentSource::System,
                         ip_address,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        error = %e,
+                        tenant_id = %tenant_id,
+                        email = %email,
+                        cascade_type = %cascade_type,
+                        "GDPR VIOLATION: Failed to cascade consent withdrawal — manual intervention required"
+                    );
+                    return Err(format!("Failed to cascade {cascade_type} consent withdrawal: {e}"));
+                }
             }
         }
 
@@ -571,7 +586,7 @@ impl GdprAutomation {
     ) -> Result<String, String> {
         let token = Uuid::new_v4().to_string();
         let token_hash = sha256_hex(&token);
-        let expires_at = Utc::now() + Duration::hours(24); // 24h default
+        let expires_at = Utc::now() + TimeDelta::try_hours(24).unwrap_or(TimeDelta::zero()); // 24h default
 
         sqlx::query(
             "INSERT INTO double_opt_in_tokens
@@ -856,20 +871,21 @@ impl GdprAutomation {
         }
     }
 
-    async fn clear_redis_keys(&self, tenant_id: &str, email: &str) {
-        if let Ok(mut conn) = self.redis.get().await {
-            let keys = [
-                format!("subscriber:{}:{}", tenant_id, email),
-                format!("engagement:{}:{}", tenant_id, email),
-                format!("consent:{}:{}", tenant_id, email),
-            ];
-            for key in &keys {
-                let _ = redis::cmd("DEL")
-                    .arg(key)
-                    .query_async::<()>(&mut *conn)
-                    .await;
-            }
+    async fn clear_redis_keys(&self, tenant_id: &str, email: &str) -> Result<(), String> {
+        let mut conn = self.redis.get().await.map_err(|e| format!("Redis pool: {e}"))?;
+        let keys = [
+            format!("subscriber:{}:{}", tenant_id, email),
+            format!("engagement:{}:{}", tenant_id, email),
+            format!("consent:{}:{}", tenant_id, email),
+        ];
+        for key in &keys {
+            redis::cmd("DEL")
+                .arg(key)
+                .query_async::<()>(&mut *conn)
+                .await
+                .map_err(|e| format!("Redis DEL {}: {e}", key))?;
         }
+        Ok(())
     }
 }
 

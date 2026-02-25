@@ -99,7 +99,7 @@ export default function CampaignsPage() {
                         Manage automated email sequences for lead nurturing
                     </p>
                 </div>
-                <button className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
+                <button type="button" className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
                     + Create Campaign
                 </button>
             </div>
@@ -190,11 +190,11 @@ export default function CampaignsPage() {
                                         </button>
                                     )}
                                     {campaign.status === 'draft' && (
-                                        <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm">
+                                        <button type="button" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm">
                                             Start
                                         </button>
                                     )}
-                                    <button className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+                                    <button type="button" className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
                                         Settings
                                     </button>
                                 </div>
@@ -232,6 +232,7 @@ export default function CampaignsPage() {
                                 <p className="text-sm text-muted-foreground mt-1">{selectedCampaign.description}</p>
                             </div>
                             <button 
+                                type="button"
                                 onClick={() => setSelectedCampaign(null)} 
                                 className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
                                 aria-label="Close modal"

@@ -141,7 +141,7 @@ impl AnalyticsPredictor {
                     .iter()
                     .enumerate()
                     .min_by(|(_, a), (_, b)| {
-                        (score - *a).abs().partial_cmp(&(score - *b).abs()).unwrap()
+                        (score - *a).abs().partial_cmp(&(score - *b).abs()).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(idx, _)| idx)
                     .unwrap();

@@ -12,8 +12,6 @@
 #   Production:  docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 # =============================================================================
 
-version: '3.8'
-
 services:
   # ===========================================================================
   # DATABASE
@@ -63,14 +61,14 @@ services:
       --appendonly yes 
       --maxmemory 256mb 
       --maxmemory-policy allkeys-lru
-      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+      --requirepass ${REDIS_PASSWORD:-apexmail_dev_redis}
     volumes:
       - redis_data:/data
     # SECURITY: Port exposure controlled via environment variable
     ports:
       - "${REDIS_PORT:-127.0.0.1:6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "${REDIS_PASSWORD:+-a ${REDIS_PASSWORD}}", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"${REDIS_PASSWORD:-apexmail_dev_redis}\" ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -113,7 +111,7 @@ services:
       TRACKING_HOST: 0.0.0.0
       TRACKING_PORT: 3001
       # ── Tracking URLs ─────────────────────────────────────────────────────
-      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-https://t.apexmail.ee}
+      TRACKING_BASE_URL: ${TRACKING_BASE_URL:-https://track.apexmail.ee}
       # ── Network / security ────────────────────────────────────────────────
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       # ── Rate limiting ─────────────────────────────────────────────────────
@@ -127,12 +125,12 @@ services:
       # ── ClickHouse analytics ──────────────────────────────────────────────
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-apexmail}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-apexmail_dev_clickhouse}
       CLICKHOUSE_MAX_CONNECTIONS: ${CLICKHOUSE_MAX_CONNECTIONS:-20}
     ports:
-      - "${TRACKING_PORT:-3001}:3001"
-      - "${TRACKING_METRICS_PORT:-9092}:9092"
+      - "127.0.0.1:${TRACKING_PORT:-3001}:3001"
+      - "127.0.0.1:${TRACKING_METRICS_PORT:-9092}:9092"
     logging:
       driver: json-file
       options:
@@ -165,7 +163,7 @@ services:
       - "${MAILPIT_SMTP_PORT:-1025}:1025"  # SMTP
       - "${MAILPIT_WEB_PORT:-8025}:8025"   # Web UI
     environment:
-      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: ${MAILPIT_ALLOW_INSECURE:-0}
       MP_MAX_MESSAGES: 5000
     networks:
       - apexmail
@@ -181,9 +179,9 @@ services:
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE:-apexmail}
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-apexmail_dev_clickhouse}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
@@ -224,11 +222,17 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=15d'
     ports:
-      - "${PROMETHEUS_PORT:-9091}:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     networks:
       - apexmail
     profiles:
       - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # ===========================================================================
   # GRAFANA (Optional dashboards)

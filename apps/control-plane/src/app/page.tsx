@@ -12,7 +12,7 @@ import {
     Lock,
     ArrowRight,
 } from '../components/ui/icons';
-import { cn, formatNumber, timeAgo } from '../lib/utils';
+import { cn, formatNumber, formatTimeWithSeconds, getLocalTimeZone, timeAgo } from '../lib/utils';
 
 /**
  * Control Plane Dashboard
@@ -61,14 +61,37 @@ interface DashboardStats {
     };
 }
 
+function DashboardLoadingSkeleton() {
+    return (
+        <div className="max-w-7xl mx-auto animate-pulse">
+            <div className="mb-10">
+                <div className="h-10 w-48 rounded bg-muted" />
+                <div className="mt-2 h-4 w-96 rounded bg-muted" />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                {Array.from({ length: 4 }).map((_, idx) => (
+                    <div key={idx} className="h-36 rounded-xl bg-muted" />
+                ))}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 h-72 rounded-xl bg-muted" />
+                <div className="h-72 rounded-xl bg-muted" />
+            </div>
+        </div>
+    );
+}
+
 export default function ControlPlaneDashboard() {
     const [stats, setStats] = useState<DashboardStats | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [currentTime, setCurrentTime] = useState<string>('');
+    const timezone = getLocalTimeZone();
 
     useEffect(() => {
-        setCurrentTime(new Date().toLocaleTimeString());
+        setCurrentTime(formatTimeWithSeconds(new Date()));
     }, []);
 
     useEffect(() => {
@@ -124,14 +147,7 @@ export default function ControlPlaneDashboard() {
     }, []);
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="flex flex-col items-center gap-3">
-                    <div className="animate-spin rounded-full h-10 w-10 border-2 border-primary border-t-transparent"></div>
-                    <span className="text-sm text-muted-foreground">Loading dashboard...</span>
-                </div>
-            </div>
-        );
+        return <DashboardLoadingSkeleton />;
     }
 
     if (!stats) return null;
@@ -143,7 +159,7 @@ export default function ControlPlaneDashboard() {
                     <div>
                         <h1 className="text-3xl font-bold text-foreground tracking-tight">Control Plane</h1>
                         <p className="text-surface-500 mt-1 font-medium">
-                            Platform operations & infrastructure governance • Last updated: {currentTime}
+                            Platform operations & infrastructure governance • Last updated: {currentTime} ({timezone})
                         </p>
                     </div>
                     {error && (

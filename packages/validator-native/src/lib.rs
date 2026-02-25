@@ -28,8 +28,8 @@ static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Known disposable email domains.
-static DISPOSABLE_DOMAINS: LazyLock<std::collections::HashSet<&'static str>> = LazyLock::new(|| {
-    [
+static DISPOSABLE_DOMAINS: LazyLock<std::collections::HashSet<String>> = LazyLock::new(|| {
+    let mut domains: std::collections::HashSet<String> = [
         "mailinator.com", "guerrillamail.com", "tempmail.com", "throwaway.email",
         "yopmail.com", "sharklasers.com", "guerrillamailblock.com", "grr.la",
         "dispostable.com", "trashmail.com", "temp-mail.org", "fakeinbox.com",
@@ -37,7 +37,26 @@ static DISPOSABLE_DOMAINS: LazyLock<std::collections::HashSet<&'static str>> = L
         "mohmal.com", "tempail.com", "burner.kiwi", "mailcatch.com",
         "minutemail.com", "emailondeck.com", "tempr.email", "33mail.com",
         "mytemp.email", "harakirimail.com", "incognitomail.org", "tempinbox.com",
-    ].into_iter().collect()
+        "maildrop.cc", "10minutemail.com", "maildrop.me", "guerrillamail.net",
+        "guerrillamail.org", "guerrillamail.biz", "guerrillamail.de",
+        "guerrillamail.info", "guerrillamailblock.com", "mailinator.net",
+        "mailinator.org", "mailinator2.com", "trash-mail.com", "trashmail.net",
+        "tempmail.net", "tempmail.ninja", "tempmaildev.com", "temp-mail.io",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    if let Ok(extra) = std::env::var("APEXMAIL_DISPOSABLE_DOMAINS") {
+        for entry in extra.split(',') {
+            let trimmed = entry.trim().to_lowercase();
+            if !trimmed.is_empty() {
+                domains.insert(trimmed);
+            }
+        }
+    }
+
+    domains
 });
 
 static RESOLVER: OnceLock<TokioAsyncResolver> = OnceLock::new();
@@ -171,7 +190,7 @@ fn validate_email_sync(email: &str) -> ValidationResult {
         warnings.push("Address contains international characters (EAI/RFC 6531)".into());
     }
 
-    let is_disposable = DISPOSABLE_DOMAINS.contains(domain.to_lowercase().as_str());
+    let is_disposable = DISPOSABLE_DOMAINS.contains(&domain.to_lowercase());
     if is_disposable {
         warnings.push("Disposable email domain detected".into());
     }
@@ -216,7 +235,7 @@ pub async fn validate_email_with_mx(email: String) -> Result<ValidationResult> {
         let resolver = get_resolver();
 
         let has_mx = match resolver.mx_lookup(&domain).await {
-            Ok(mx) => !mx.iter().next().is_none(),
+            Ok(mx) => mx.iter().next().is_some(),
             Err(_) => {
                 // Fallback: check A record
                 resolver.ipv4_lookup(&domain).await.is_ok()

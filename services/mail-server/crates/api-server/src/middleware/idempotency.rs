@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use deadpool_redis::redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
+use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
@@ -42,11 +43,12 @@ pub async fn idempotency_middleware(
         None => return next.run(req).await,
     };
 
-    // Extract tenant_id from extensions (set by auth layer).
+    // Fix #15: Extract tenant_id from AuthUser (set by require_auth middleware)
+    // instead of raw Uuid. Previously always fell through to "global".
     let tenant_id = req
         .extensions()
-        .get::<uuid::Uuid>()
-        .map(|id| id.to_string())
+        .get::<AuthUser>()
+        .map(|u| u.tenant_id.to_string())
         .unwrap_or_else(|| "global".to_string());
 
     let cache_key = format!("apexmail:idempotency:{tenant_id}:{idempotency_key}");
@@ -107,12 +109,20 @@ async fn store_response(state: &AppState, cache_key: &str, ttl: u64, resp: Respo
 
     let body_bytes = match to_bytes(body, MAX_BODY_SIZE).await {
         Ok(b) => b,
-        Err(_) => {
-            // Body too large to cache — just return it without caching.
-            return Response::from_parts(
-                parts,
-                axum::body::Body::from(bytes::Bytes::new()),
-            );
+        Err(e) => {
+            // Fix #16: Body too large to cache — reconstruct a proper error
+            // response instead of returning an empty body.
+            tracing::warn!(cache_key, error = %e, "response body too large to cache for idempotency");
+            return (
+                parts.status,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "INTERNAL_ERROR",
+                        "message": "response too large to cache"
+                    }
+                })),
+            )
+                .into_response();
         }
     };
 

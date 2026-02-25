@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class EmailStatus(str, Enum):
@@ -97,6 +97,12 @@ class SendEmailRequest(BaseModel):
     headers: Optional[dict[str, str]] = None
     scheduled_at: Optional[datetime] = Field(default=None, alias="scheduledAt")
     metadata: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def validate_body(self) -> "SendEmailRequest":
+        if not self.html and not self.text:
+            raise ValueError("Either 'html' or 'text' must be provided")
+        return self
 
 
 class SendEmailResponse(BaseModel):

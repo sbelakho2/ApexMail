@@ -9,7 +9,7 @@ path = "src/bin/server.rs"
 [dependencies]
 apexmail-lib = { path = "../apexmail-lib" }
 apexmail-db = { path = "../apexmail-db" }
-dns-resolver = { path = "../dns-resolver" }
+dns-resolver = { path = "../dns-resolver", package = "apexmail-dns-resolver" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
@@ -34,9 +34,11 @@ bytes = { workspace = true }
 ipnetwork = { workspace = true }
 url = { workspace = true }
 hex = { workspace = true }
+futures = { workspace = true }
 jsonwebtoken = "9.3"
 headers = "0.4"
 http = "1.0"
+dirs = "5.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
