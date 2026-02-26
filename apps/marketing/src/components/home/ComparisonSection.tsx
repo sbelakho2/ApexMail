@@ -89,68 +89,53 @@ export function ComparisonSection() {
           transition={{ delay: 0.2 }}
           className="overflow-x-auto bg-white rounded-lg border border-surface-200 shadow-sm"
         >
-          {/* Table Header */}
-          <div className="min-w-0">
-            <div className="grid grid-cols-5 gap-2 sm:gap-4 p-3 sm:p-4 lg:p-6 border-b border-surface-200 bg-surface-50/50">
-              <div className="font-bold text-surface-900 text-sm flex items-center">Feature</div>
-              <div className="text-center">
-                <div className="font-bold text-brand-700 text-xs sm:text-base">ApexMail</div>
-                <div className="text-[11px] sm:text-sm text-brand-500 font-medium">Our Platform</div>
-              </div>
-              <div className="text-center text-surface-900">
-                <div className="font-semibold text-surface-700 text-xs sm:text-base">SendGrid</div>
-                <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Twilio</div>
-              </div>
-              <div className="text-center text-surface-900">
-                <div className="font-semibold text-surface-700 text-xs sm:text-base">Mailchimp</div>
-                <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Intuit</div>
-              </div>
-              <div className="text-center text-surface-900">
-                <div className="font-semibold text-surface-700 text-xs sm:text-base">AWS SES</div>
-                <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Amazon</div>
-              </div>
-            </div>
-
-            {/* Categories */}
-            {comparisonData.categories.map((category, categoryIndex) => (
-              <div key={category.name}>
-                {/* Category Header */}
-                  <div className="px-3 sm:px-4 lg:px-6 py-2 bg-surface-50/30 border-b border-surface-100">
-                  <span className="text-sm font-bold uppercase tracking-widest text-surface-600">
+          <table className="min-w-[760px] w-full border-collapse">
+            <thead>
+              <tr className="border-b border-surface-200 bg-surface-50/50">
+                <th scope="col" className="p-3 sm:p-4 lg:p-6 text-left font-bold text-surface-900 text-sm">Feature</th>
+                <th scope="col" className="p-3 sm:p-4 lg:p-6 text-center">
+                  <div className="font-bold text-brand-700 text-xs sm:text-base">ApexMail</div>
+                  <div className="text-[11px] sm:text-sm text-brand-500 font-medium">Our Platform</div>
+                </th>
+                <th scope="col" className="p-3 sm:p-4 lg:p-6 text-center text-surface-900">
+                  <div className="font-semibold text-surface-700 text-xs sm:text-base">SendGrid</div>
+                  <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Twilio</div>
+                </th>
+                <th scope="col" className="p-3 sm:p-4 lg:p-6 text-center text-surface-900">
+                  <div className="font-semibold text-surface-700 text-xs sm:text-base">Mailchimp</div>
+                  <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Intuit</div>
+                </th>
+                <th scope="col" className="p-3 sm:p-4 lg:p-6 text-center text-surface-900">
+                  <div className="font-semibold text-surface-700 text-xs sm:text-base">AWS SES</div>
+                  <div className="text-[11px] sm:text-sm text-surface-500 font-medium">Amazon</div>
+                </th>
+              </tr>
+            </thead>
+            {comparisonData.categories.map((category) => (
+              <tbody key={category.name}>
+                <tr className="bg-surface-50/30 border-b border-surface-100">
+                  <th colSpan={5} scope="colgroup" className="px-3 sm:px-4 lg:px-6 py-2 text-left text-sm font-bold uppercase tracking-widest text-surface-600">
                     {category.name}
-                  </span>
-                </div>
-
-                {/* Features */}
+                  </th>
+                </tr>
                 {category.features.map((feature, featureIndex) => (
-                  <motion.div
+                  <tr
                     key={feature.name}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={inView ? { opacity: 1, x: 0 } : {}}
-                    transition={{ delay: categoryIndex * 0.1 + featureIndex * 0.05 }}
                     className={cn(
-                      'grid grid-cols-5 gap-2 sm:gap-4 px-3 sm:px-4 lg:px-6 py-3 sm:py-4 items-center hover:bg-surface-50/50 transition-colors',
+                      'hover:bg-surface-50/50 transition-colors',
                       featureIndex !== category.features.length - 1 && 'border-b border-surface-100'
                     )}
                   >
-                    <div className="text-xs sm:text-sm font-semibold text-surface-700 break-words">{feature.name}</div>
-                    <div className="flex justify-center font-bold text-brand-700">
-                      {renderValue(feature.apexmail)}
-                    </div>
-                    <div className="flex justify-center text-surface-500">
-                      {renderValue(feature.sendgrid)}
-                    </div>
-                    <div className="flex justify-center text-surface-500">
-                      {renderValue(feature.mailchimp)}
-                    </div>
-                    <div className="flex justify-center text-surface-500">
-                      {renderValue(feature.ses)}
-                    </div>
-                  </motion.div>
+                    <th scope="row" className="px-3 sm:px-4 lg:px-6 py-3 sm:py-4 text-left text-xs sm:text-sm font-semibold text-surface-700 break-words">{feature.name}</th>
+                    <td className="px-3 sm:px-4 lg:px-6 py-3 sm:py-4 text-center font-bold text-brand-700">{renderValue(feature.apexmail)}</td>
+                    <td className="px-3 sm:px-4 lg:px-6 py-3 sm:py-4 text-center text-surface-500">{renderValue(feature.sendgrid)}</td>
+                    <td className="px-3 sm:px-4 lg:px-6 py-3 sm:py-4 text-center text-surface-500">{renderValue(feature.mailchimp)}</td>
+                    <td className="px-3 sm:px-4 lg:px-6 py-3 sm:py-4 text-center text-surface-500">{renderValue(feature.ses)}</td>
+                  </tr>
                 ))}
-              </div>
+              </tbody>
             ))}
-          </div>
+          </table>
         </motion.div>
 
         {/* Bottom CTA */}
@@ -168,7 +153,7 @@ export function ComparisonSection() {
               Full Feature List
               <ArrowRight className="w-4 h-4" />
             </Link>
-            <Link href="/contact" className="btn-primary flex items-center gap-2">
+            <Link href="/private-cloud" className="btn-primary flex items-center gap-2">
               Talk to Sales
               <ArrowRight className="w-4 h-4" />
             </Link>

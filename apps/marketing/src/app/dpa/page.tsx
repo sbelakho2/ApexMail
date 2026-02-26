@@ -3,15 +3,27 @@ import type { Metadata } from 'next';
 export const metadata: Metadata = {
     title: 'Data Processing Agreement',
     description: 'ApexMail DPA — GDPR-compliant data processing terms.',
+    openGraph: {
+        title: 'Data Processing Agreement | ApexMail',
+        description: 'ApexMail DPA — GDPR-compliant data processing terms.',
+        type: 'website',
+        images: ['/og-image.png'],
+    },
+    twitter: {
+        card: 'summary_large_image',
+        title: 'Data Processing Agreement | ApexMail',
+        description: 'ApexMail DPA — GDPR-compliant data processing terms.',
+        images: ['/og-image.png'],
+    },
 };
 
 export default function DpaPage() {
     return (
         <div className="max-w-3xl mx-auto px-6 py-24">
             <h1 className="text-4xl font-bold mb-4">Data Processing Agreement</h1>
-            <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
+            <p className="text-surface-500 mb-8">Last updated: February 2026</p>
 
-            <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
+            <div className="prose prose-neutral max-w-none space-y-6 text-[15px] leading-relaxed">
                 <p>
                     This Data Processing Agreement (&ldquo;DPA&rdquo;) forms part of the Terms of Service
                     between you (&ldquo;Controller&rdquo;) and Bel Consulting OÜ (&ldquo;Processor&rdquo;).

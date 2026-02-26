@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { useRouter } from 'next/navigation';
 import {
  Bell,
  Search,
@@ -27,7 +28,8 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { SimpleTooltip } from '@/components/ui/tooltip';
-import { useUIStore } from '@/stores';
+import { formatRelativeTime } from '@/lib/utils';
+import { useNotificationStore, useUIStore, useUserStore } from '@/stores';
 
 /** Resolve the effective theme ('light' | 'dark') from the store value */
 function resolveTheme(theme: 'light' | 'dark' | 'system'): 'light' | 'dark' {
@@ -43,23 +45,42 @@ interface HeaderProps {
 }
 
 export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps) {
+ const router = useRouter();
  // FIX-095: Use zustand UIStore for persisted theme preference
  const storeTheme = useUIStore((s) => s.theme);
  const setStoreTheme = useUIStore((s) => s.setTheme);
  const [searchOpen, setSearchOpen] = React.useState(false);
+ const [searchQuery, setSearchQuery] = React.useState('');
+ const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+ const lastAppliedThemeRef = React.useRef<'light' | 'dark' | null>(null);
+ const user = useUserStore((s) => s.user);
+ const unreadCount = useNotificationStore((s) => s.unreadCount);
+ const notifications = useNotificationStore((s) => s.notifications);
+ const markAllAsRead = useNotificationStore((s) => s.markAllAsRead);
 
- // Apply theme class to <html> whenever storeTheme changes or system pref changes
+ // Apply theme class to <html> whenever theme changes; avoid redundant reflows.
  React.useEffect(() => {
    const apply = () => {
      const effective = resolveTheme(storeTheme);
-     document.documentElement.classList.toggle('dark', effective === 'dark');
+     if (lastAppliedThemeRef.current === effective) {
+       return;
+     }
+     const shouldEnableDark = effective === 'dark';
+     const hasDarkClass = document.documentElement.classList.contains('dark');
+     if (hasDarkClass !== shouldEnableDark) {
+       document.documentElement.classList.toggle('dark', shouldEnableDark);
+     }
+     lastAppliedThemeRef.current = effective;
    };
    apply();
 
-   // Listen for OS-level preference changes when set to 'system'
-   const mq = window.matchMedia('(prefers-color-scheme: dark)');
-   mq.addEventListener('change', apply);
-   return () => mq.removeEventListener('change', apply);
+   if (storeTheme !== 'system') {
+     return;
+   }
+
+   const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+   mediaQuery.addEventListener('change', apply);
+   return () => mediaQuery.removeEventListener('change', apply);
  }, [storeTheme]);
 
  const effectiveTheme = resolveTheme(storeTheme);
@@ -70,6 +91,58 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
    const idx = order.indexOf(storeTheme);
    setStoreTheme(order[(idx + 1) % order.length]!);
  };
+
+ const displayName = user?.name?.trim() || 'Account';
+ const displayEmail = user?.email?.trim() || 'Authenticated user';
+ const avatarFallback = displayName
+   .split(/\s+/)
+   .filter(Boolean)
+   .slice(0, 2)
+   .map((part) => part[0]?.toUpperCase() || '')
+   .join('') || 'AM';
+
+ const handleLogout = async () => {
+   try {
+     await fetch('/api/auth/logout', {
+       method: 'POST',
+       credentials: 'include',
+     });
+   } catch {
+     // fallback redirect below
+   }
+
+   window.location.href = '/login';
+ };
+
+ const handleSearchSubmit = React.useCallback(() => {
+   const query = searchQuery.trim().toLowerCase();
+   if (!query) return;
+
+   if (query.includes('campaign')) {
+     router.push('/campaigns');
+   } else if (query.includes('contact')) {
+     router.push('/contacts');
+   } else if (query.includes('report')) {
+     router.push('/reports');
+   } else if (query.includes('setting') || query.includes('profile') || query.includes('billing')) {
+     router.push('/settings');
+   } else {
+     router.push('/dashboard');
+   }
+ }, [router, searchQuery]);
+
+ React.useEffect(() => {
+   const onKeyDown = (event: KeyboardEvent) => {
+     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+       event.preventDefault();
+       setSearchOpen(true);
+       window.requestAnimationFrame(() => searchInputRef.current?.focus());
+     }
+   };
+
+   window.addEventListener('keydown', onKeyDown);
+   return () => window.removeEventListener('keydown', onKeyDown);
+ }, []);
 
  return (
  <header
@@ -95,8 +168,19 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
         <div className="relative hidden md:block">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-surface-400" />
           <Input
+            ref={searchInputRef}
             type="search"
+            role="searchbox"
+            aria-label="Search campaigns and contacts"
             placeholder="Search campaigns, contacts..."
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                handleSearchSubmit();
+              }
+            }}
             className="w-64 pl-9 lg:w-80 border-surface-200/70 bg-background/90 shadow-sm focus:ring-primary/10 dark:border-surface-200/80 dark:bg-surface-100/80"
           />
           <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded-sm border border-surface-200 bg-surface-50 px-1.5 font-mono text-[13px] font-bold text-surface-400 shadow-[0_1px_1px_0_rgba(0,0,0,0.05)] dark:border-surface-300 dark:bg-surface-100 dark:text-surface-500">
@@ -149,51 +233,40 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  <DropdownMenuTrigger asChild>
  <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
  <Bell className="h-5 w-5" />
- <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-[10px] font-bold text-destructive-foreground">
- 3
+ <span className="sr-only">{unreadCount > 0 ? `${unreadCount} unread notifications` : 'No unread notifications'}</span>
+ {unreadCount > 0 ? (
+ <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[1rem] items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground">
+ {unreadCount > 99 ? '99+' : unreadCount}
  </span>
+ ) : null}
  </Button>
  </DropdownMenuTrigger>
  <DropdownMenuContent align="end" className="w-80">
  <DropdownMenuLabel className="flex items-center justify-between">
  Notifications
  <Badge variant="secondary" size="sm">
- 3 new
+ {unreadCount} new
  </Badge>
  </DropdownMenuLabel>
  <DropdownMenuSeparator />
  <div className="max-h-64 overflow-y-auto">
- <DropdownMenuItem className="flex flex-col items-start gap-1 p-3">
+ {notifications.length === 0 ? (
+ <div className="p-3 text-sm text-muted-foreground">No notifications</div>
+ ) : (
+ notifications.slice(0, 10).map((notification) => (
+ <DropdownMenuItem key={notification.id} className="flex flex-col items-start gap-1 p-3">
  <div className="flex w-full items-center justify-between">
- <span className="font-medium">Campaign Sent</span>
- <span className="text-xs text-muted-foreground">2m ago</span>
+ <span className="font-medium">{notification.title}</span>
+ <span className="text-xs text-muted-foreground">{formatRelativeTime(notification.createdAt)}</span>
  </div>
- <p className="text-sm text-muted-foreground">
- "Summer Sale" was sent to 12,458 subscribers
- </p>
+ <p className="text-sm text-muted-foreground">{notification.message ?? 'New activity'}</p>
  </DropdownMenuItem>
- <DropdownMenuItem className="flex flex-col items-start gap-1 p-3">
- <div className="flex w-full items-center justify-between">
- <span className="font-medium">High Bounce Rate</span>
- <span className="text-xs text-muted-foreground">1h ago</span>
- </div>
- <p className="text-sm text-muted-foreground">
- List "Newsletter" has 15% bounce rate
- </p>
- </DropdownMenuItem>
- <DropdownMenuItem className="flex flex-col items-start gap-1 p-3">
- <div className="flex w-full items-center justify-between">
- <span className="font-medium">New Subscriber</span>
- <span className="text-xs text-muted-foreground">3h ago</span>
- </div>
- <p className="text-sm text-muted-foreground">
- 500 new subscribers this week!
- </p>
- </DropdownMenuItem>
+ ))
+ )}
  </div>
  <DropdownMenuSeparator />
- <DropdownMenuItem className="justify-center text-primary">
- View all notifications
+ <DropdownMenuItem className="justify-center text-primary" onClick={markAllAsRead}>
+ Mark all as read
  </DropdownMenuItem>
  </DropdownMenuContent>
  </DropdownMenu>
@@ -204,16 +277,16 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  <Button variant="ghost" className="relative h-11 w-11 rounded-full" aria-label="User menu" data-testid="user-menu">
  <Avatar size="sm">
  <AvatarImage src="/avatar.png" alt="User" />
- <AvatarFallback>JD</AvatarFallback>
+ <AvatarFallback>{avatarFallback}</AvatarFallback>
  </Avatar>
  </Button>
  </DropdownMenuTrigger>
  <DropdownMenuContent align="end" className="w-56" data-testid="user-dropdown">
  <DropdownMenuLabel className="font-normal">
  <div className="flex flex-col space-y-1">
- <p className="text-sm font-medium leading-none">John Doe</p>
+ <p className="text-sm font-medium leading-none">{displayName}</p>
  <p className="text-xs leading-none text-muted-foreground">
- john@example.com
+ {displayEmail}
  </p>
  </div>
  </DropdownMenuLabel>
@@ -229,7 +302,7 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  </DropdownMenuItem>
  </DropdownMenuGroup>
  <DropdownMenuSeparator />
- <DropdownMenuItem>
+ <DropdownMenuItem onClick={handleLogout}>
  <span>Log out</span>
  </DropdownMenuItem>
  </DropdownMenuContent>
@@ -243,7 +316,18 @@ export function Header({ className, onMenuClick, isMobileMenuOpen }: HeaderProps
  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
  <Input
  type="search"
+ role="searchbox"
+ aria-label="Search"
  placeholder="Search..."
+ value={searchQuery}
+ onChange={(event) => setSearchQuery(event.target.value)}
+ onKeyDown={(event) => {
+ if (event.key === 'Enter') {
+ event.preventDefault();
+ handleSearchSubmit();
+ setSearchOpen(false);
+ }
+ }}
  className="w-full pl-9"
  autoFocus
  />

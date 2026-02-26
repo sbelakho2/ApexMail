@@ -5,21 +5,37 @@
 -- 1. Enterprise App - Create ent_ prefixed views
 -- ============================================
 
--- Views for sub_accounts to ent_sub_accounts mapping
-CREATE OR REPLACE VIEW ent_sub_accounts AS SELECT * FROM sub_accounts;
-CREATE OR REPLACE VIEW ent_sub_account_api_keys AS SELECT * FROM sub_account_api_keys;  
-CREATE OR REPLACE VIEW ent_sub_account_events AS SELECT * FROM sub_account_events;
+-- Views for sub_accounts to ent_sub_accounts mapping (guarded to avoid missing-table failures)
+DO $$
+BEGIN
+    IF to_regclass('public.sub_accounts') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_sub_accounts AS SELECT * FROM sub_accounts';
+    END IF;
+    IF to_regclass('public.sub_account_api_keys') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_sub_account_api_keys AS SELECT * FROM sub_account_api_keys';
+    END IF;
+    IF to_regclass('public.sub_account_events') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_sub_account_events AS SELECT * FROM sub_account_events';
+    END IF;
 
--- Views for SSO tables
-CREATE OR REPLACE VIEW ent_sso_configurations AS SELECT * FROM sso_configurations;
+    IF to_regclass('public.sso_configurations') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_sso_configurations AS SELECT * FROM sso_configurations';
+    END IF;
 
--- Views for compliance tables
-CREATE OR REPLACE VIEW ent_compliance_configs AS SELECT * FROM compliance_configs;
-CREATE OR REPLACE VIEW ent_compliance_audit_logs AS SELECT * FROM compliance_audit_logs;
+    IF to_regclass('public.compliance_configs') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_compliance_configs AS SELECT * FROM compliance_configs';
+    END IF;
+    IF to_regclass('public.compliance_audit_logs') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_compliance_audit_logs AS SELECT * FROM compliance_audit_logs';
+    END IF;
 
--- Views for whitelabel tables
-CREATE OR REPLACE VIEW ent_whitelabel_configs AS SELECT * FROM whitelabel_configs;
-CREATE OR REPLACE VIEW ent_whitelabel_domains AS SELECT * FROM whitelabel_domains;
+    IF to_regclass('public.whitelabel_configs') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_whitelabel_configs AS SELECT * FROM whitelabel_configs';
+    END IF;
+    IF to_regclass('public.whitelabel_domains') IS NOT NULL THEN
+        EXECUTE 'CREATE OR REPLACE VIEW ent_whitelabel_domains AS SELECT * FROM whitelabel_domains';
+    END IF;
+END $$;
 
 -- ============================================
 -- 2. Missing Enterprise tables
@@ -67,15 +83,22 @@ CREATE INDEX IF NOT EXISTS idx_ent_ip_warming_status ON ent_ip_warming_plans(sta
 -- ============================================
 
 -- iso_org_members (code expects this but schema has iso_workspace_members)
-CREATE OR REPLACE VIEW iso_org_members AS 
-SELECT 
-    id,
-    workspace_id as org_id,
-    user_id,
-    role,
-    created_at,
-    updated_at
-FROM iso_workspace_members;
+DO $$
+BEGIN
+    IF to_regclass('public.iso_workspace_members') IS NOT NULL THEN
+        EXECUTE $view$
+            CREATE OR REPLACE VIEW iso_org_members AS
+            SELECT
+                id,
+                workspace_id as org_id,
+                user_id,
+                role,
+                created_at,
+                updated_at
+            FROM iso_workspace_members
+        $view$;
+    END IF;
+END $$;
 
 -- iso_cleanup_queue - missing
 CREATE TABLE IF NOT EXISTS iso_cleanup_queue (
@@ -95,20 +118,27 @@ CREATE INDEX IF NOT EXISTS idx_iso_cleanup_scheduled ON iso_cleanup_queue(schedu
 CREATE INDEX IF NOT EXISTS idx_iso_cleanup_tenant ON iso_cleanup_queue(tenant_id);
 
 -- iso_access_audit_logs (code expects this but schema has iso_access_attempts)
-CREATE OR REPLACE VIEW iso_access_audit_logs AS
-SELECT 
-    id,
-    tenant_id,
-    user_id,
-    action as access_type,
-    resource_id,
-    resource_type,
-    ip_address,
-    user_agent,
-    allowed as success,
-    NULL as metadata,
-    created_at
-FROM iso_access_attempts;
+DO $$
+BEGIN
+    IF to_regclass('public.iso_access_attempts') IS NOT NULL THEN
+        EXECUTE $view$
+            CREATE OR REPLACE VIEW iso_access_audit_logs AS
+            SELECT
+                id,
+                tenant_id,
+                user_id,
+                action as access_type,
+                resource_id,
+                resource_type,
+                ip_address,
+                user_agent,
+                allowed as success,
+                NULL as metadata,
+                created_at
+            FROM iso_access_attempts
+        $view$;
+    END IF;
+END $$;
 
 -- ============================================
 -- 4. HA App - Missing tables

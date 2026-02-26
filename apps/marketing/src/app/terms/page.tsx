@@ -3,15 +3,27 @@ import type { Metadata } from 'next';
 export const metadata: Metadata = {
     title: 'Terms of Service',
     description: 'ApexMail Terms of Service — the agreement governing your use of our platform.',
+    openGraph: {
+        title: 'Terms of Service | ApexMail',
+        description: 'ApexMail Terms of Service — the agreement governing your use of our platform.',
+        type: 'website',
+        images: ['/og-image.png'],
+    },
+    twitter: {
+        card: 'summary_large_image',
+        title: 'Terms of Service | ApexMail',
+        description: 'ApexMail Terms of Service — the agreement governing your use of our platform.',
+        images: ['/og-image.png'],
+    },
 };
 
 export default function TermsPage() {
     return (
         <div className="max-w-3xl mx-auto px-6 py-24">
             <h1 className="text-4xl font-bold mb-4">Terms of Service</h1>
-            <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
+            <p className="text-surface-500 mb-8">Last updated: February 2026</p>
 
-            <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
+            <div className="prose prose-neutral max-w-none space-y-6 text-[15px] leading-relaxed">
                 <h2 className="text-xl font-semibold mt-8">1. Acceptance</h2>
                 <p>
                     By accessing or using the ApexMail service (&ldquo;Service&rdquo;), operated by

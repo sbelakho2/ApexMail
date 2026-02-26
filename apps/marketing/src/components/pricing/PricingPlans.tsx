@@ -31,7 +31,7 @@ const plans: Plan[] = [
  'Community support',
  ],
  cta: 'Start Free',
- ctaLink: '/signup',
+ ctaLink: 'https://app.apexmail.ee/signup',
  },
  {
  name: 'Starter',
@@ -47,7 +47,7 @@ const plans: Plan[] = [
  'Email support',
  ],
  cta: 'Start Trial',
- ctaLink: '/signup?plan=starter',
+ ctaLink: 'https://app.apexmail.ee/signup?plan=starter',
  },
  {
  name: 'Pro',
@@ -63,7 +63,7 @@ const plans: Plan[] = [
  'Dedicated IP add-on ($30/mo)',
  ],
  cta: 'Start Trial',
- ctaLink: '/signup?plan=pro',
+ ctaLink: 'https://app.apexmail.ee/signup?plan=pro',
  },
  {
  name: 'Growth',
@@ -79,7 +79,7 @@ const plans: Plan[] = [
  '90-day data retention',
  ],
  cta: 'Start Trial',
- ctaLink: '/signup?plan=growth',
+ ctaLink: 'https://app.apexmail.ee/signup?plan=growth',
  popular: true,
  },
  {
@@ -96,7 +96,7 @@ const plans: Plan[] = [
  'Phone support & dedicated CSM',
  ],
  cta: 'Contact Sales',
- ctaLink: '/contact/sales',
+ ctaLink: '/private-cloud',
  },
 ];
 
@@ -225,7 +225,7 @@ export function PricingPlans() {
               </div>
             </div>
             <Link
-              href="/contact/enterprise"
+              href="/private-cloud"
               className="shrink-0 px-5 py-2.5 text-sm font-medium bg-white text-surface-900 rounded-md hover:bg-surface-100 transition-colors"
             >
               Contact Sales

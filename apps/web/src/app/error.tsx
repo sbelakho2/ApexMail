@@ -2,6 +2,37 @@
 
 import { useEffect } from 'react';
 
+function reportClientError(error: Error & { digest?: string }) {
+    const payload = {
+        message: error.message,
+        digest: error.digest,
+        stack: error.stack,
+        timestamp: new Date().toISOString(),
+        path: typeof window !== 'undefined' ? window.location.pathname : undefined,
+    };
+
+    if (process.env.NODE_ENV !== 'production') {
+        console.error('[ApexMail Error]', payload);
+        return;
+    }
+
+    try {
+        const serialized = JSON.stringify(payload);
+        if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/client-errors', serialized);
+            return;
+        }
+        void fetch('/api/client-errors', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: serialized,
+            keepalive: true,
+        });
+    } catch {
+        // swallow reporting failures
+    }
+}
+
 export default function GlobalError({
     error,
     reset,
@@ -10,7 +41,7 @@ export default function GlobalError({
     reset: () => void;
 }) {
     useEffect(() => {
-        console.error('[ApexMail Error]', error);
+        reportClientError(error);
     }, [error]);
 
     return (

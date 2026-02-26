@@ -1,0 +1,45 @@
+[package]
+name = "waf-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust Web Application Firewall: AST-based SQLi/XSS prevention, OWASP CRS-compatible rule engine, zero-copy payload inspection"
+license = "PROPRIETARY"
+
+[features]
+default = ["core"]
+full = ["core", "learning"]
+core = []
+learning = ["dep:rand"]  # Adaptive false-positive learning
+
+[dependencies]
+# Async
+tokio = { version = "1.44", features = ["full"] }
+tracing = "0.1"
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "6.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Pattern matching (Aho-Corasick, zero-backtrack)
+aho-corasick = { version = "1.1", features = ["perf-literal"] }
+regex = { version = "1.10", features = ["perf"] }
+
+# Crypto (HMAC for signed cookies)
+sha2 = "0.10"
+
+# Metrics
+prometheus = "0.13"
+
+# Utilities
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Optional
+rand = { version = "0.8", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

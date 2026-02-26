@@ -110,7 +110,7 @@ export function sleep(ms: number): Promise<void> {
  * Generate random string using cryptographically secure random bytes.
  * Uses Web Crypto API (available in all modern browsers and Node.js ≥ 15).
  */
-export function generateId(length: number = 8): string {
+export function generateRandomId(length: number = 8): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   const bytes = new Uint8Array(length);
   globalThis.crypto.getRandomValues(bytes);
@@ -118,6 +118,8 @@ export function generateId(length: number = 8): string {
   // 256 % 62 = 8, so bytes 248-255 are ~3% more likely; for non-security UI IDs this is fine).
   return Array.from(bytes, (b) => chars[b % chars.length]).join('');
 }
+
+export const generateId = generateRandomId;
 
 /**
  * Truncate text with ellipsis

@@ -14,13 +14,18 @@ package apexmail
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,10 +33,15 @@ const (
 	defaultBaseURL = "https://api.apexmail.ee"
 	defaultTimeout = 30 * time.Second
 	sdkVersion     = "1.0.0"
-	maxResponseBytes = 5 * 1024 * 1024
+	defaultMaxResponseBytes = 20 * 1024 * 1024
 	defaultMaxRetries = 3
 	defaultInitialBackoff = 500 * time.Millisecond
 	defaultMaxBackoff = 5 * time.Second
+	defaultIdleConnTimeout = 90 * time.Second
+	defaultTLSHandshakeTimeout = 10 * time.Second
+	defaultMaxIdleConns = 100
+	defaultMaxIdleConnsPerHost = 10
+	defaultExpectContinueTimeout = 1 * time.Second
 )
 
 var apiKeyPattern = regexp.MustCompile(`^am_(live|test)_[A-Za-z0-9]{16,}$`)
@@ -43,6 +53,7 @@ type Client struct {
 	apiKeyErr    error
 	baseURL      string
 	httpClient   *http.Client
+	maxResponseBytes int64
 	Emails       *EmailsAPI
 	Domains      *DomainsAPI
 	Webhooks     *WebhooksAPI
@@ -56,6 +67,7 @@ type Config struct {
 	BaseURL    string
 	HTTPClient *http.Client
 	Timeout    time.Duration
+	MaxResponseBytes int64
 }
 
 // New creates a new ApexMail client with the provided API key.
@@ -72,15 +84,22 @@ func New(apiKey string, cfg ...Config) *Client {
 	if c.Timeout > 0 {
 		timeout = c.Timeout
 	}
+	maxResponseBytes := int64(defaultMaxResponseBytes)
+	if c.MaxResponseBytes > 0 {
+		maxResponseBytes = c.MaxResponseBytes
+	}
 	httpClient := c.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: timeout}
+		httpClient = newDefaultHTTPClient(timeout)
+	} else if httpClient.Timeout == 0 {
+		httpClient.Timeout = timeout
 	}
 	cl := &Client{
 		apiKey:     apiKey,
 		baseURL:    baseURL,
 		httpClient: httpClient,
 		apiKeyErr:  validateAPIKey(apiKey),
+		maxResponseBytes: maxResponseBytes,
 	}
 	cl.Emails = &EmailsAPI{client: cl}
 	cl.Domains = &DomainsAPI{client: cl}
@@ -89,6 +108,26 @@ func New(apiKey string, cfg ...Config) *Client {
 	cl.Suppressions = &SuppressionsAPI{client: cl}
 	cl.Events = &EventsAPI{client: cl}
 	return cl
+}
+
+func newDefaultHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          defaultMaxIdleConns,
+		MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:       defaultIdleConnTimeout,
+		TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+		ExpectContinueTimeout: defaultExpectContinueTimeout,
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
 }
 
 func validateAPIKey(apiKey string) error {
@@ -132,6 +171,77 @@ func validateSendEmailRequest(req *SendEmailRequest) error {
 	return nil
 }
 
+// WebhookSignatureOptions configures webhook signature verification.
+type WebhookSignatureOptions struct {
+	Payload   []byte
+	Signature string
+	Secret    string
+	Timestamp string
+	Tolerance time.Duration
+}
+
+// VerifyWebhookSignature validates a webhook payload signature using HMAC-SHA256.
+func VerifyWebhookSignature(opts WebhookSignatureOptions) bool {
+	if len(opts.Payload) == 0 || opts.Signature == "" || opts.Secret == "" {
+		return false
+	}
+
+	timestamp, signature := parseWebhookSignature(opts.Signature)
+	if opts.Timestamp != "" {
+		timestamp = opts.Timestamp
+	}
+	if timestamp == "" || signature == "" {
+		return false
+	}
+
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return false
+	}
+	if opts.Tolerance <= 0 {
+		opts.Tolerance = 5 * time.Minute
+	}
+	if absInt64(time.Now().Unix()-ts) > int64(opts.Tolerance.Seconds()) {
+		return false
+	}
+
+	signedPayload := fmt.Sprintf("%d.%s", ts, opts.Payload)
+	mac := hmac.New(sha256.New, []byte(opts.Secret))
+	_, _ = mac.Write([]byte(signedPayload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+func parseWebhookSignature(signatureHeader string) (string, string) {
+	trimmed := strings.TrimSpace(signatureHeader)
+	if strings.Contains(trimmed, "t=") && strings.Contains(trimmed, "v1=") {
+		var timestamp string
+		var signature string
+		parts := strings.Split(trimmed, ",")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if strings.HasPrefix(part, "t=") {
+				timestamp = strings.TrimPrefix(part, "t=")
+			}
+			if strings.HasPrefix(part, "v1=") {
+				signature = strings.TrimPrefix(part, "v1=")
+			}
+		}
+		return timestamp, signature
+	}
+	if strings.HasPrefix(trimmed, "sha256=") {
+		return "", strings.TrimPrefix(trimmed, "sha256=")
+	}
+	return "", trimmed
+}
+
+func absInt64(value int64) int64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body, out interface{}, idempotencyKey ...string) error {
 	if c.apiKeyErr != nil {
 		return c.apiKeyErr
@@ -173,7 +283,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			return &NetworkError{Message: err.Error(), Cause: err}
 		}
 
-		respBody, readErr := readLimitedBody(resp)
+		respBody, readErr := readLimitedBody(resp, c.maxResponseBytes)
 		resp.Body.Close()
 		if readErr != nil {
 			return readErr
@@ -194,13 +304,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			apiErr.StatusCode = resp.StatusCode
 			switch resp.StatusCode {
 			case 401:
-				return &AuthenticationError{APIError: apiErr}
+				return &AuthenticationError{APIError: &apiErr}
 			case 404:
-				return &NotFoundError{APIError: apiErr}
+				return &NotFoundError{APIError: &apiErr}
 			case 422:
-				return &ValidationError{APIError: apiErr}
+				return &ValidationError{APIError: &apiErr}
 			case 429:
-				return &RateLimitError{APIError: apiErr}
+				return &RateLimitError{APIError: &apiErr}
 			default:
 				return &apiErr
 			}
@@ -216,13 +326,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 	return &NetworkError{Message: "request failed after retries", Cause: nil}
 }
 
-func readLimitedBody(resp *http.Response) ([]byte, error) {
-	limited := io.LimitReader(resp.Body, maxResponseBytes+1)
+
+func readLimitedBody(resp *http.Response, maxBytes int64) ([]byte, error) {
+	limited := io.LimitReader(resp.Body, maxBytes+1)
 	respBody, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, &NetworkError{Message: "read response body: " + err.Error(), Cause: err}
 	}
-	if int64(len(respBody)) > maxResponseBytes {
+	if int64(len(respBody)) > maxBytes {
 		return nil, &NetworkError{Message: "response body too large", Cause: nil}
 	}
 	return respBody, nil
@@ -288,16 +399,16 @@ func (e *APIError) Error() string {
 // Typed error subtypes for specific HTTP status codes.
 
 // AuthenticationError is returned when the API key is missing, invalid, or revoked (HTTP 401).
-type AuthenticationError struct{ APIError }
+type AuthenticationError struct{ *APIError }
 
 // NotFoundError is returned when the requested resource does not exist (HTTP 404).
-type NotFoundError struct{ APIError }
+type NotFoundError struct{ *APIError }
 
 // ValidationError is returned when request validation fails (HTTP 422).
-type ValidationError struct{ APIError }
+type ValidationError struct{ *APIError }
 
 // RateLimitError is returned when the rate limit is exceeded (HTTP 429).
-type RateLimitError struct{ APIError }
+type RateLimitError struct{ *APIError }
 
 // NetworkError is returned when a transport-level (non-HTTP) error occurs.
 type NetworkError struct {
@@ -352,28 +463,39 @@ type SendEmailRequest struct {
 	Priority       string       `json:"priority,omitempty"`
 	ScheduledAt    string       `json:"scheduledAt,omitempty"`
 	Metadata       interface{}  `json:"metadata,omitempty"`
-	IdempotencyKey string       `json:"-"`
+}
+
+// SendOptions configures optional behavior for Emails.Send.
+type SendOptions struct {
+	IdempotencyKey string
+}
+
+// SendEmailMessage contains details for a queued send.
+type SendEmailMessage struct {
+	ID          string `json:"id"`
+	MessageID   string `json:"messageId"`
+	Status      string `json:"status"`
+	Recipients  int    `json:"recipients"`
+	ScheduledAt string `json:"scheduledAt,omitempty"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 // SendEmailResponse is returned by Emails.Send.
 type SendEmailResponse struct {
-	Message struct {
-		ID          string `json:"id"`
-		MessageID   string `json:"messageId"`
-		Status      string `json:"status"`
-		Recipients  int    `json:"recipients"`
-		ScheduledAt string `json:"scheduledAt,omitempty"`
-		CreatedAt   string `json:"createdAt"`
-	} `json:"message"`
+	Message SendEmailMessage `json:"message"`
 }
 
 // Send sends a single transactional email.
-func (a *EmailsAPI) Send(ctx context.Context, req *SendEmailRequest) (*SendEmailResponse, error) {
+func (a *EmailsAPI) Send(ctx context.Context, req *SendEmailRequest, opts ...SendOptions) (*SendEmailResponse, error) {
 	if err := validateSendEmailRequest(req); err != nil {
 		return nil, err
 	}
+	var idempotencyKey string
+	if len(opts) > 0 {
+		idempotencyKey = opts[0].IdempotencyKey
+	}
 	var resp SendEmailResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/messages", req, &resp, req.IdempotencyKey)
+	err := a.client.do(ctx, http.MethodPost, "/v1/messages", req, &resp, idempotencyKey)
 	return &resp, err
 }
 
@@ -405,6 +527,20 @@ type BatchSendResponse struct {
 
 // Batch sends up to 1,000 emails in a single request.
 func (a *EmailsAPI) Batch(ctx context.Context, req *BatchSendRequest) (*BatchSendResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("apexmail: batch request is required")
+	}
+	if len(req.Messages) == 0 {
+		return nil, fmt.Errorf("apexmail: at least one message is required")
+	}
+	if len(req.Messages) > 1000 {
+		return nil, fmt.Errorf("apexmail: batch limit exceeded (max 1000)")
+	}
+	for idx, message := range req.Messages {
+		if err := validateSendEmailRequest(message); err != nil {
+			return nil, fmt.Errorf("apexmail: batch message %d: %w", idx, err)
+		}
+	}
 	var resp BatchSendResponse
 	err := a.client.do(ctx, http.MethodPost, "/v1/messages/batch", req, &resp)
 	return &resp, err
@@ -504,6 +640,11 @@ type CreateDomainResponse struct {
 	DNSRecords []DNSRecord `json:"dnsRecords"`
 }
 
+// GetDomainResponse wraps a single domain.
+type GetDomainResponse struct {
+	Domain Domain `json:"domain"`
+}
+
 // Create adds a new domain and returns the DNS records to configure.
 func (a *DomainsAPI) Create(ctx context.Context, req *CreateDomainRequest) (*CreateDomainResponse, error) {
 	var resp CreateDomainResponse
@@ -512,12 +653,8 @@ func (a *DomainsAPI) Create(ctx context.Context, req *CreateDomainRequest) (*Cre
 }
 
 // Get retrieves a domain by its ID.
-func (a *DomainsAPI) Get(ctx context.Context, id string) (*struct {
-	Domain Domain `json:"domain"`
-}, error) {
-	var resp struct {
-		Domain Domain `json:"domain"`
-	}
+func (a *DomainsAPI) Get(ctx context.Context, id string) (*GetDomainResponse, error) {
+	var resp GetDomainResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
@@ -588,35 +725,38 @@ type CreateWebhookRequest struct {
 	Secret string   `json:"secret,omitempty"`
 }
 
-// Create registers a new webhook endpoint.
-func (a *WebhooksAPI) Create(ctx context.Context, req *CreateWebhookRequest) (*struct {
+// CreateWebhookResponse wraps a created webhook.
+type CreateWebhookResponse struct {
 	Webhook Webhook `json:"webhook"`
-}, error) {
-	var resp struct {
-		Webhook Webhook `json:"webhook"`
-	}
+}
+
+// ListWebhooksResponse wraps a list of webhooks.
+type ListWebhooksResponse struct {
+	Webhooks []Webhook `json:"webhooks"`
+}
+
+// GetWebhookResponse wraps a single webhook.
+type GetWebhookResponse struct {
+	Webhook Webhook `json:"webhook"`
+}
+
+// Create registers a new webhook endpoint.
+func (a *WebhooksAPI) Create(ctx context.Context, req *CreateWebhookRequest) (*CreateWebhookResponse, error) {
+	var resp CreateWebhookResponse
 	err := a.client.do(ctx, http.MethodPost, "/v1/webhooks", req, &resp)
 	return &resp, err
 }
 
 // List retrieves all webhooks for the tenant.
-func (a *WebhooksAPI) List(ctx context.Context) (*struct {
-	Webhooks []Webhook `json:"webhooks"`
-}, error) {
-	var resp struct {
-		Webhooks []Webhook `json:"webhooks"`
-	}
+func (a *WebhooksAPI) List(ctx context.Context) (*ListWebhooksResponse, error) {
+	var resp ListWebhooksResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/webhooks", nil, &resp)
 	return &resp, err
 }
 
 // Get retrieves a webhook by its ID.
-func (a *WebhooksAPI) Get(ctx context.Context, id string) (*struct {
-	Webhook Webhook `json:"webhook"`
-}, error) {
-	var resp struct {
-		Webhook Webhook `json:"webhook"`
-	}
+func (a *WebhooksAPI) Get(ctx context.Context, id string) (*GetWebhookResponse, error) {
+	var resp GetWebhookResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/webhooks/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
@@ -629,13 +769,14 @@ type UpdateWebhookRequest struct {
 	Active *bool    `json:"active,omitempty"`
 }
 
-// Update modifies a webhook's URL, event subscriptions, or active status.
-func (a *WebhooksAPI) Update(ctx context.Context, id string, req *UpdateWebhookRequest) (*struct {
+// UpdateWebhookResponse wraps an updated webhook.
+type UpdateWebhookResponse struct {
 	Webhook Webhook `json:"webhook"`
-}, error) {
-	var resp struct {
-		Webhook Webhook `json:"webhook"`
-	}
+}
+
+// Update modifies a webhook's URL, event subscriptions, or active status.
+func (a *WebhooksAPI) Update(ctx context.Context, id string, req *UpdateWebhookRequest) (*UpdateWebhookResponse, error) {
+	var resp UpdateWebhookResponse
 	err := a.client.do(ctx, http.MethodPatch, "/v1/webhooks/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }
@@ -672,35 +813,38 @@ type CreateTemplateRequest struct {
 	DefaultData map[string]interface{} `json:"defaultData,omitempty"`
 }
 
-// Create registers a new email template.
-func (a *TemplatesAPI) Create(ctx context.Context, req *CreateTemplateRequest) (*struct {
+// CreateTemplateResponse wraps a created template.
+type CreateTemplateResponse struct {
 	Template Template `json:"template"`
-}, error) {
-	var resp struct {
-		Template Template `json:"template"`
-	}
+}
+
+// Create registers a new email template.
+func (a *TemplatesAPI) Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error) {
+	var resp CreateTemplateResponse
 	err := a.client.do(ctx, http.MethodPost, "/v1/templates", req, &resp)
 	return &resp, err
 }
 
-// Get retrieves a template by its ID.
-func (a *TemplatesAPI) Get(ctx context.Context, id string) (*struct {
+// GetTemplateResponse wraps a template.
+type GetTemplateResponse struct {
 	Template Template `json:"template"`
-}, error) {
-	var resp struct {
-		Template Template `json:"template"`
-	}
+}
+
+// Get retrieves a template by its ID.
+func (a *TemplatesAPI) Get(ctx context.Context, id string) (*GetTemplateResponse, error) {
+	var resp GetTemplateResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/templates/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
-// GetBySlug retrieves a template by its unique slug.
-func (a *TemplatesAPI) GetBySlug(ctx context.Context, slug string) (*struct {
+// GetTemplateBySlugResponse wraps a template fetched by slug.
+type GetTemplateBySlugResponse struct {
 	Template Template `json:"template"`
-}, error) {
-	var resp struct {
-		Template Template `json:"template"`
-	}
+}
+
+// GetBySlug retrieves a template by its unique slug.
+func (a *TemplatesAPI) GetBySlug(ctx context.Context, slug string) (*GetTemplateBySlugResponse, error) {
+	var resp GetTemplateBySlugResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/templates/slug/"+url.PathEscape(slug), nil, &resp)
 	return &resp, err
 }
@@ -742,13 +886,14 @@ type UpdateTemplateRequest struct {
 	DefaultData map[string]interface{} `json:"defaultData,omitempty"`
 }
 
-// Update modifies a template. A new version is created automatically.
-func (a *TemplatesAPI) Update(ctx context.Context, id string, req *UpdateTemplateRequest) (*struct {
+// UpdateTemplateResponse wraps an updated template.
+type UpdateTemplateResponse struct {
 	Template Template `json:"template"`
-}, error) {
-	var resp struct {
-		Template Template `json:"template"`
-	}
+}
+
+// Update modifies a template. A new version is created automatically.
+func (a *TemplatesAPI) Update(ctx context.Context, id string, req *UpdateTemplateRequest) (*UpdateTemplateResponse, error) {
+	var resp UpdateTemplateResponse
 	err := a.client.do(ctx, http.MethodPatch, "/v1/templates/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }

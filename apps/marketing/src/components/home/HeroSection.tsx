@@ -1,6 +1,3 @@
-'use client';
-
-import { motion } from 'framer-motion';
 import Link from 'next/link';
 import { ArrowRight, Play, Check } from '@/components/ui/icons';
 import { CodeBlock } from '@/components/ui/CodeBlock';
@@ -34,16 +31,12 @@ const benefits = [
 
 export function HeroSection() {
  return (
- <section className="relative min-h-[90vh] flex items-center pt-24 pb-16 lg:pt-0 overflow-hidden bg-white">
+ <section className="relative min-h-[90vh] flex items-center pt-24 pb-16 lg:pt-0 overflow-hidden bg-surface-50">
  
  <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
  {/* Left Column - Copy */}
- <motion.div
- initial={{ opacity: 0, y: 12 }}
- animate={{ opacity: 1, y: 0 }}
- transition={{ duration: 0.5 }}
- >
+ <div>
  {/* Badge */}
  <div
    className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-50 border border-brand-100 text-sm font-semibold text-brand-700 mb-8 shadow-sm"
@@ -90,7 +83,7 @@ export function HeroSection() {
             <ArrowRight className="w-4 h-4 ml-2" aria-hidden="true" />
           </Link>
           <Link 
-            href="#demo" 
+            href="#api-console" 
             className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
             aria-label="Watch product demo video"
           >
@@ -99,19 +92,13 @@ export function HeroSection() {
           </Link>
         </div>
 
-        {/* Trust Signals */}
-        <div className="mt-12 pt-8 border-t border-surface-200">
-          <p className="text-[14px] font-semibold text-surface-400 mb-6 uppercase tracking-wider">Trusted by developers at</p>
-          <div className="flex flex-wrap items-center gap-x-10 gap-y-6 opacity-40 grayscale contrast-125 hover:grayscale-0 hover:opacity-100 transition-all duration-500">
-            {['TechCorp', 'StartupX', 'ScaleUp', 'DevHub', 'GlobalNet'].map((company) => (
-              <span key={company} className="text-surface-900 font-bold text-lg tracking-tight">{company}</span>
-            ))}
-          </div>
-        </div>
- </motion.div>
+        <p className="mt-12 pt-8 border-t border-surface-200 text-sm font-medium text-surface-500">
+          Trusted by engineering teams shipping regulated transactional email at scale.
+        </p>
+ </div>
 
  {/* Right Column - Code Block */}
- <div className="relative hidden lg:block">
+ <div className="relative">
  {/* Code block */}
  <div className="relative bg-surface-900 rounded-xl overflow-hidden border border-surface-800 shadow-2xl">
  {/* Window header */}

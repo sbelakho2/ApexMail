@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use aho_corasick::AhoCorasick;
 use regex::Regex;
+use tracing::warn;
 
 use super::types::{
     ActionType, ClassificationResult, ExtractedData, ReplyClassification, Sentiment,
@@ -25,110 +26,110 @@ struct PatternSet {
 }
 
 static PATTERNS: LazyLock<PatternSet> = LazyLock::new(|| PatternSet {
-    out_of_office: vec![
-        Regex::new(r"(?i)out of (?:the )?office").unwrap(),
-        Regex::new(r"(?i)away from (?:my )?(?:desk|office|email)").unwrap(),
-        Regex::new(r"(?i)on (?:annual |paid )?(?:leave|vacation|holiday|pto)").unwrap(),
-        Regex::new(r"(?i)currently (?:out|away|traveling|unavailable)").unwrap(),
-        Regex::new(r"(?i)limited access to email").unwrap(),
-        Regex::new(r"(?i)auto[- ]?reply").unwrap(),
-        Regex::new(r"(?i)automatic reply").unwrap(),
-        Regex::new(r"(?i)i(?:'m| am) (?:currently )?(?:out|away|on leave)").unwrap(),
-        Regex::new(r"(?i)will (?:be )?(?:back|return(?:ing)?|in the office)").unwrap(),
-        Regex::new(r"(?i)maternity|paternity leave").unwrap(),
-        Regex::new(r"(?i)(?:sick|medical) leave").unwrap(),
-    ],
-    not_interested: vec![
-        Regex::new(r"(?i)not interested").unwrap(),
-        Regex::new(r"(?i)no(?:t)? thank(?:s| you)").unwrap(),
-        Regex::new(r"(?i)please remove (?:me|us)").unwrap(),
-        Regex::new(r"(?i)don't contact (?:me|us)").unwrap(),
-        Regex::new(r"(?i)stop (?:emailing|contacting|sending)").unwrap(),
-        Regex::new(r"(?i)we(?:'re| are) not (?:looking|interested)").unwrap(),
-        Regex::new(r"(?i)not a good fit").unwrap(),
-        Regex::new(r"(?i)not (?:right|the right) time").unwrap(),
-        Regex::new(r"(?i)pass(?:ing)? on this").unwrap(),
-        Regex::new(r"(?i)we(?:'ll| will) pass").unwrap(),
-        Regex::new(r"(?i)decline").unwrap(),
-        Regex::new(r"(?i)not for us").unwrap(),
-    ],
-    interested: vec![
-        Regex::new(r"(?i)(?:i(?:'m| am)|we(?:'re| are)) interested").unwrap(),
-        Regex::new(r"(?i)tell (?:me|us) more").unwrap(),
-        Regex::new(r"(?i)(?:can|could) you (?:send|share|provide)").unwrap(),
-        Regex::new(r"(?i)(?:i|we) (?:would |'d )?like (?:to )?(?:learn|know|hear|see) more").unwrap(),
-        Regex::new(r"(?i)sounds (?:interesting|great|good)").unwrap(),
-        Regex::new(r"(?i)let(?:'s| us) (?:chat|talk|connect|discuss)").unwrap(),
-        Regex::new(r"(?i)when (?:can|could) we (?:meet|talk|chat)").unwrap(),
-        Regex::new(r"(?i)schedule (?:a )?(?:call|meeting|demo)").unwrap(),
-        Regex::new(r"(?i)book (?:a )?(?:time|meeting|call)").unwrap(),
-        Regex::new(r"(?i)(?:free|available) (?:for a )?(?:call|chat|meeting)").unwrap(),
-    ],
-    wrong_person: vec![
-        Regex::new(r"(?i)(?:i(?:'m| am)|i) not the (?:right|correct) person").unwrap(),
-        Regex::new(r"(?i)wrong (?:person|contact|department)").unwrap(),
-        Regex::new(r"(?i)you (?:should|need to) (?:contact|reach out to|speak with)").unwrap(),
-        Regex::new(r"(?i)try (?:contacting|reaching)").unwrap(),
-        Regex::new(r"(?i)(?:forward|forwarding) (?:this )?to").unwrap(),
-        Regex::new(r"(?i)no longer (?:work|at|with)").unwrap(),
-        Regex::new(r"(?i)left the company").unwrap(),
-        Regex::new(r"(?i)moved to (?:a )?(?:different|another)").unwrap(),
-    ],
-    unsubscribe: vec![
-        Regex::new(r"(?i)unsubscribe").unwrap(),
-        Regex::new(r"(?i)remove (?:me|my email|us)").unwrap(),
-        Regex::new(r"(?i)opt[- ]?out").unwrap(),
-        Regex::new(r"(?i)stop (?:sending|emailing)").unwrap(),
-        Regex::new(r"(?i)take (?:me|us) off (?:your |the )?list").unwrap(),
-        Regex::new(r"(?i)gdpr|ccpa|data (?:deletion|removal)").unwrap(),
-        Regex::new(r"(?i)do not (?:email|contact)").unwrap(),
-    ],
-    meeting_request: vec![
-        Regex::new(r"(?i)(?:schedule|book|set up) (?:a )?(?:call|meeting|demo|time)").unwrap(),
-        Regex::new(r"(?i)(?:when|what time)(?:'s| is| are) (?:good|available)").unwrap(),
-        Regex::new(r"(?i)(?:free|available) (?:on|this|next)").unwrap(),
-        Regex::new(r"(?i)(?:let(?:'s| us)|can we) (?:meet|connect|chat|talk)").unwrap(),
-        Regex::new(r"(?i)calendly|hubspot|zoom|teams").unwrap(),
-    ],
-    complaint: vec![
-        Regex::new(r"(?i)complaint").unwrap(),
-        Regex::new(r"(?i)disappointed").unwrap(),
-        Regex::new(r"(?i)frustrated").unwrap(),
-        Regex::new(r"(?i)unacceptable").unwrap(),
-        Regex::new(r"(?i)terrible").unwrap(),
-        Regex::new(r"(?i)awful").unwrap(),
-        Regex::new(r"(?i)worst").unwrap(),
-    ],
-    spam: vec![
-        Regex::new(r"(?i)spam").unwrap(),
-        Regex::new(r"(?i)junk").unwrap(),
-        Regex::new(r"(?i)unsolicited").unwrap(),
-        Regex::new(r"(?i)report(?:ing)? (?:this )?as spam").unwrap(),
-    ],
-    positive: vec![
-        Regex::new(r"(?i)thank(?:s| you)").unwrap(),
-        Regex::new(r"(?i)great").unwrap(),
-        Regex::new(r"(?i)excellent").unwrap(),
-        Regex::new(r"(?i)awesome").unwrap(),
-        Regex::new(r"(?i)perfect").unwrap(),
-        Regex::new(r"(?i)love it").unwrap(),
-        Regex::new(r"(?i)sounds good").unwrap(),
-    ],
-    negative: vec![
-        Regex::new(r"(?i)no\b").unwrap(),
-        Regex::new(r"(?i)not\b").unwrap(),
-        Regex::new(r"(?i)don't").unwrap(),
-        Regex::new(r"(?i)won't").unwrap(),
-        Regex::new(r"(?i)can't").unwrap(),
-        Regex::new(r"(?i)never").unwrap(),
-        Regex::new(r"(?i)stop").unwrap(),
-        Regex::new(r"(?i)remove").unwrap(),
-    ],
+    out_of_office: compile_regexes(&[
+        r"(?i)out of (?:the )?office",
+        r"(?i)away from (?:my )?(?:desk|office|email)",
+        r"(?i)on (?:annual |paid )?(?:leave|vacation|holiday|pto)",
+        r"(?i)currently (?:out|away|traveling|unavailable)",
+        r"(?i)limited access to email",
+        r"(?i)auto[- ]?reply",
+        r"(?i)automatic reply",
+        r"(?i)i(?:'m| am) (?:currently )?(?:out|away|on leave)",
+        r"(?i)will (?:be )?(?:back|return(?:ing)?|in the office)",
+        r"(?i)maternity|paternity leave",
+        r"(?i)(?:sick|medical) leave",
+    ]),
+    not_interested: compile_regexes(&[
+        r"(?i)not interested",
+        r"(?i)no(?:t)? thank(?:s| you)",
+        r"(?i)please remove (?:me|us)",
+        r"(?i)don't contact (?:me|us)",
+        r"(?i)stop (?:emailing|contacting|sending)",
+        r"(?i)we(?:'re| are) not (?:looking|interested)",
+        r"(?i)not a good fit",
+        r"(?i)not (?:right|the right) time",
+        r"(?i)pass(?:ing)? on this",
+        r"(?i)we(?:'ll| will) pass",
+        r"(?i)decline",
+        r"(?i)not for us",
+    ]),
+    interested: compile_regexes(&[
+        r"(?i)(?:i(?:'m| am)|we(?:'re| are)) interested",
+        r"(?i)tell (?:me|us) more",
+        r"(?i)(?:can|could) you (?:send|share|provide)",
+        r"(?i)(?:i|we) (?:would |'d )?like (?:to )?(?:learn|know|hear|see) more",
+        r"(?i)sounds (?:interesting|great|good)",
+        r"(?i)let(?:'s| us) (?:chat|talk|connect|discuss)",
+        r"(?i)when (?:can|could) we (?:meet|talk|chat)",
+        r"(?i)schedule (?:a )?(?:call|meeting|demo)",
+        r"(?i)book (?:a )?(?:time|meeting|call)",
+        r"(?i)(?:free|available) (?:for a )?(?:call|chat|meeting)",
+    ]),
+    wrong_person: compile_regexes(&[
+        r"(?i)(?:i(?:'m| am)|i) not the (?:right|correct) person",
+        r"(?i)wrong (?:person|contact|department)",
+        r"(?i)you (?:should|need to) (?:contact|reach out to|speak with)",
+        r"(?i)try (?:contacting|reaching)",
+        r"(?i)(?:forward|forwarding) (?:this )?to",
+        r"(?i)no longer (?:work|at|with)",
+        r"(?i)left the company",
+        r"(?i)moved to (?:a )?(?:different|another)",
+    ]),
+    unsubscribe: compile_regexes(&[
+        r"(?i)unsubscribe",
+        r"(?i)remove (?:me|my email|us)",
+        r"(?i)opt[- ]?out",
+        r"(?i)stop (?:sending|emailing)",
+        r"(?i)take (?:me|us) off (?:your |the )?list",
+        r"(?i)gdpr|ccpa|data (?:deletion|removal)",
+        r"(?i)do not (?:email|contact)",
+    ]),
+    meeting_request: compile_regexes(&[
+        r"(?i)(?:schedule|book|set up) (?:a )?(?:call|meeting|demo|time)",
+        r"(?i)(?:when|what time)(?:'s| is| are) (?:good|available)",
+        r"(?i)(?:free|available) (?:on|this|next)",
+        r"(?i)(?:let(?:'s| us)|can we) (?:meet|connect|chat|talk)",
+        r"(?i)calendly|hubspot|zoom|teams",
+    ]),
+    complaint: compile_regexes(&[
+        r"(?i)complaint",
+        r"(?i)disappointed",
+        r"(?i)frustrated",
+        r"(?i)unacceptable",
+        r"(?i)terrible",
+        r"(?i)awful",
+        r"(?i)worst",
+    ]),
+    spam: compile_regexes(&[
+        r"(?i)spam",
+        r"(?i)junk",
+        r"(?i)unsolicited",
+        r"(?i)report(?:ing)? (?:this )?as spam",
+    ]),
+    positive: compile_regexes(&[
+        r"(?i)thank(?:s| you)",
+        r"(?i)great",
+        r"(?i)excellent",
+        r"(?i)awesome",
+        r"(?i)perfect",
+        r"(?i)love it",
+        r"(?i)sounds good",
+    ]),
+    negative: compile_regexes(&[
+        r"(?i)no\b",
+        r"(?i)not\b",
+        r"(?i)don't",
+        r"(?i)won't",
+        r"(?i)can't",
+        r"(?i)never",
+        r"(?i)stop",
+        r"(?i)remove",
+    ]),
 });
 
 /// Quick pattern phrases for Aho-Corasick fast initial scan.
-static QUICK_PATTERNS: LazyLock<AhoCorasick> = LazyLock::new(|| {
-    AhoCorasick::new([
+static QUICK_PATTERNS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
+    let patterns = [
         "out of office",
         "not interested",
         "interested",
@@ -144,9 +145,28 @@ static QUICK_PATTERNS: LazyLock<AhoCorasick> = LazyLock::new(|| {
         "remove me",
         "stop emailing",
         "opt out",
-    ])
-    .expect("Invalid Aho-Corasick patterns")
+    ];
+    match AhoCorasick::new(patterns) {
+        Ok(ac) => Some(ac),
+        Err(e) => {
+            warn!(error = %e, "Invalid Aho-Corasick patterns; disabling quick scan");
+            None
+        }
+    }
 });
+
+fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(e) => {
+                warn!(pattern = %pattern, error = %e, "Invalid regex pattern");
+                None
+            }
+        })
+        .collect()
+}
 
 /// Classify a reply based on pattern matching.
 pub fn classify(subject: &str, body: &str) -> ClassificationResult {
@@ -154,17 +174,19 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
     let text = combined.to_lowercase();
 
     // Fix #88/#91: Use Aho-Corasick quick scan results for early return on no-match
-    let quick_match_count = QUICK_PATTERNS.find_iter(&text).count();
-    if quick_match_count == 0 {
-        // No obvious patterns matched - return Unknown early to save regex work
-        return ClassificationResult {
-            classification: ReplyClassification::Unknown,
-            confidence: 0.3,
-            sub_type: None,
-            extracted_data: ExtractedData::default(),
-            reasoning: "No quick patterns matched".to_string(),
-            suggested_action: build_suggested_action(ReplyClassification::Unknown, Sentiment::Neutral),
-        };
+    if let Some(quick_patterns) = QUICK_PATTERNS.as_ref() {
+        let quick_match_count = quick_patterns.find_iter(&text).count();
+        if quick_match_count == 0 {
+            // No obvious patterns matched - return Unknown early to save regex work
+            return ClassificationResult {
+                classification: ReplyClassification::Unknown,
+                confidence: 0.3,
+                sub_type: None,
+                extracted_data: ExtractedData::default(),
+                reasoning: "No quick patterns matched".to_string(),
+                suggested_action: build_suggested_action(ReplyClassification::Unknown, Sentiment::Neutral),
+            };
+        }
     }
 
     // Score each classification

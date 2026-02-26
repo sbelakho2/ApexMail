@@ -25,5 +25,8 @@ SET uidnext = COALESCE((
     SELECT MAX(uid) + 1 FROM mail_messages mm WHERE mm.mailbox_id = mb.id
 ), 1);
 
+ALTER TABLE mail_messages
+    ALTER COLUMN uid SET NOT NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_mailbox_uid
     ON mail_messages(mailbox_id, uid);

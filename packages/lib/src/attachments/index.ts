@@ -11,6 +11,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { createLogger } from '../logger/index.js';
 
 const logger = createLogger({ name: 'attachments' });
@@ -264,20 +265,27 @@ export class LocalAttachmentStorage implements AttachmentStorage {
         try {
             const files = await fs.readdir(this.metadataPath);
             const now = new Date();
+            const batchSize = 20;
             
-            for (const file of files) {
-                if (!file.endsWith('.json')) continue;
-                
-                const metadataPath = path.join(this.metadataPath, file);
-                const content = await fs.readFile(metadataPath, 'utf-8');
-                let metadata: AttachmentMetadata;
-                try { metadata = JSON.parse(content); }
-                catch { continue; }
-                
-                if (metadata.expiresAt && new Date(metadata.expiresAt) < now) {
-                    await this.delete(metadata.id);
-                    deleted++;
-                }
+            for (let i = 0; i < files.length; i += batchSize) {
+                const batch = files.slice(i, i + batchSize);
+                const results = await Promise.all(batch.map(async (file) => {
+                    if (!file.endsWith('.json')) return 0;
+                    
+                    const metadataPath = path.join(this.metadataPath, file);
+                    const content = await fs.readFile(metadataPath, 'utf-8');
+                    let metadata: AttachmentMetadata;
+                    try { metadata = JSON.parse(content); }
+                    catch { return 0; }
+                    
+                    if (metadata.expiresAt && new Date(metadata.expiresAt) < now) {
+                        await this.delete(metadata.id);
+                        return 1;
+                    }
+                    return 0;
+                }));
+
+                deleted += results.reduce((sum, value) => sum + value, 0);
             }
         } catch (err) {
             logger.error('Error during cleanup', { error: err });
@@ -312,6 +320,7 @@ export class S3AttachmentStorage implements AttachmentStorage {
     private maxSize: number;
     private allowedTypes: string[] | null;
     private expirationDays: number | null;
+    private client: S3Client;
     
     constructor(config: AttachmentStorageConfig) {
         if (!config.s3) {
@@ -322,6 +331,16 @@ export class S3AttachmentStorage implements AttachmentStorage {
         this.maxSize = config.maxSize || 25 * 1024 * 1024;
         this.allowedTypes = config.allowedTypes || null;
         this.expirationDays = config.expirationDays || null;
+        this.client = new S3Client({
+            region: this.config.region,
+            endpoint: this.config.endpoint,
+            forcePathStyle: this.config.forcePathStyle,
+            credentials: {
+                accessKeyId: this.config.accessKeyId,
+                secretAccessKey: this.config.secretAccessKey,
+                sessionToken: this.config.sessionToken,
+            },
+        });
     }
     
     async upload(
@@ -345,51 +364,21 @@ export class S3AttachmentStorage implements AttachmentStorage {
         const hash = crypto.createHash('sha256').update(buffer).digest('hex');
         const id = `${tenantId}/${hash}`;
         
-        // Use AWS SDK v3 style signing
-        const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-        const dateStamp = date.slice(0, 8);
-        
-        const canonicalUri = `/${id}`;
-        const host = this.config.endpoint 
-            ? new URL(this.config.endpoint).host 
-            : `${this.config.bucket}.s3.${this.config.region}.amazonaws.com`;
-        
-        // Create the request
-        const endpoint = this.config.endpoint || `https://${host}`;
-        const url = `${endpoint}${this.config.forcePathStyle ? `/${this.config.bucket}` : ''}${canonicalUri}`;
-        
-        // Sign and upload using fetch
-        const headers: Record<string, string> = {
-            'Content-Type': contentType,
-            'Content-Length': buffer.length.toString(),
-            'x-amz-date': date,
-            'x-amz-content-sha256': hash,
-            'Host': host,
-        };
-        
+        const metadata: Record<string, string> = {};
         if (this.expirationDays) {
             const expires = new Date(Date.now() + this.expirationDays * 24 * 60 * 60 * 1000);
-            headers['x-amz-meta-expires'] = expires.toISOString();
+            metadata['expires'] = expires.toISOString();
         }
 
-        if (this.config.sessionToken) {
-            headers['x-amz-security-token'] = this.config.sessionToken;
-        }
-        
-        // Generate signature (simplified - in production use AWS SDK)
-        const signature = this.signRequest('PUT', canonicalUri, headers, hash, dateStamp);
-        headers['Authorization'] = signature;
-        
-        const response = await fetch(url, {
-            method: 'PUT',
-            headers,
-            body: buffer,
+        const command = new PutObjectCommand({
+            Bucket: this.config.bucket,
+            Key: id,
+            Body: buffer,
+            ContentType: contentType,
+            ContentLength: buffer.length,
+            Metadata: metadata,
         });
-        
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`S3 upload failed: ${response.status} ${text}`);
-        }
+        await this.client.send(command);
         
         logger.info('Attachment uploaded to S3', { id, filename, size: buffer.length, tenantId, messageId });
         
@@ -403,18 +392,18 @@ export class S3AttachmentStorage implements AttachmentStorage {
     
     async download(id: string): Promise<{ content: Buffer; metadata: AttachmentMetadata }> {
         this.validateObjectKey(id);
-        const url = this.getInternalUrl(id);
-        const headers = this.getAuthHeaders('GET', `/${id}`);
-        
-        const response = await fetch(url, { headers });
-        
-        if (!response.ok) {
+        const response = await this.client.send(new GetObjectCommand({
+            Bucket: this.config.bucket,
+            Key: id,
+        }));
+
+        if (!response.Body) {
             throw new Error(`Attachment not found: ${id}`);
         }
-        
-        const content = Buffer.from(await response.arrayBuffer());
-        const contentType = response.headers.get('content-type') || 'application/octet-stream';
-        const expiresHeader = response.headers.get('x-amz-meta-expires');
+
+        const content = await this.readStreamToBuffer(response.Body as NodeJS.ReadableStream);
+        const contentType = response.ContentType || 'application/octet-stream';
+        const expiresHeader = response.Metadata?.['expires'];
         
         const metadata: AttachmentMetadata = {
             id,
@@ -432,38 +421,29 @@ export class S3AttachmentStorage implements AttachmentStorage {
     
     async delete(id: string): Promise<void> {
         this.validateObjectKey(id);
-        const url = this.getInternalUrl(id);
-        const headers = this.getAuthHeaders('DELETE', `/${id}`);
-        
-        const response = await fetch(url, {
-            method: 'DELETE',
-            headers,
-        });
-        
-        if (!response.ok && response.status !== 404) {
-            throw new Error(`Failed to delete attachment: ${id}`);
-        }
+        await this.client.send(new DeleteObjectCommand({
+            Bucket: this.config.bucket,
+            Key: id,
+        }));
         
         logger.info('Attachment deleted from S3', { id });
     }
     
     async getMetadata(id: string): Promise<AttachmentMetadata | null> {
         this.validateObjectKey(id);
-        const url = this.getInternalUrl(id);
-        const headers = this.getAuthHeaders('HEAD', `/${id}`);
-        
-        const response = await fetch(url, {
-            method: 'HEAD',
-            headers,
-        });
-        
-        if (!response.ok) {
+        let response;
+        try {
+            response = await this.client.send(new HeadObjectCommand({
+                Bucket: this.config.bucket,
+                Key: id,
+            }));
+        } catch {
             return null;
         }
-        
-        const contentType = response.headers.get('content-type') || 'application/octet-stream';
-        const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-        const expiresHeader = response.headers.get('x-amz-meta-expires');
+
+        const contentType = response.ContentType || 'application/octet-stream';
+        const contentLength = response.ContentLength ?? 0;
+        const expiresHeader = response.Metadata?.['expires'];
         
         return {
             id,
@@ -504,85 +484,13 @@ export class S3AttachmentStorage implements AttachmentStorage {
             throw new Error('Invalid attachment key');
         }
     }
-    
-    private getAuthHeaders(method: string, path: string): Record<string, string> {
-        const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-        const dateStamp = date.slice(0, 8);
-        const host = this.config.endpoint 
-            ? new URL(this.config.endpoint).host 
-            : `${this.config.bucket}.s3.${this.config.region}.amazonaws.com`;
-        
-        const headers: Record<string, string> = {
-            'x-amz-date': date,
-            'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-            'Host': host,
-        };
 
-        if (this.config.sessionToken) {
-            headers['x-amz-security-token'] = this.config.sessionToken;
+    private async readStreamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         }
-        
-        const signature = this.signRequest(method, path, headers, 'UNSIGNED-PAYLOAD', dateStamp);
-        headers['Authorization'] = signature;
-        
-        return headers;
-    }
-    
-    // FIX-500-376: Partial SigV4 implementation. Supports STS session tokens and
-    // basic PUT/GET/DELETE/HEAD signing, but still does not support chunked
-    // uploads, presigned URL query signing, or advanced canonicalization edge-cases.
-    private signRequest(
-        method: string,
-        path: string,
-        headers: Record<string, string>,
-        payloadHash: string,
-        dateStamp: string
-    ): string {
-        const date = headers['x-amz-date'] || '';
-        const region = this.config.region;
-        const service = 's3';
-        
-        // Create canonical request
-        const sortedHeaders = Object.keys(headers)
-            .filter(k => k.toLowerCase() !== 'authorization')
-            .sort()
-            .map(k => `${k.toLowerCase()}:${headers[k]?.trim()}`)
-            .join('\n');
-        
-        const signedHeaders = Object.keys(headers)
-            .filter(k => k.toLowerCase() !== 'authorization')
-            .sort()
-            .map(k => k.toLowerCase())
-            .join(';');
-        
-        const canonicalRequest = [
-            method,
-            path,
-            '', // query string
-            sortedHeaders,
-            '',
-            signedHeaders,
-            payloadHash,
-        ].join('\n');
-        
-        // Create string to sign
-        const algorithm = 'AWS4-HMAC-SHA256';
-        const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-        const stringToSign = [
-            algorithm,
-            date,
-            credentialScope,
-            crypto.createHash('sha256').update(canonicalRequest).digest('hex'),
-        ].join('\n');
-        
-        // Calculate signature
-        const kDate = crypto.createHmac('sha256', `AWS4${this.config.secretAccessKey}`).update(dateStamp).digest();
-        const kRegion = crypto.createHmac('sha256', kDate).update(region).digest();
-        const kService = crypto.createHmac('sha256', kRegion).update(service).digest();
-        const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
-        const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-        
-        return `${algorithm} Credential=${this.config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+        return Buffer.concat(chunks);
     }
 }
 

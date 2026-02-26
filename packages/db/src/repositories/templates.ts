@@ -79,6 +79,12 @@ export interface UpdateTemplateInput {
 export class TemplatesRepository {
   constructor(private readonly db: DatabasePool) {}
 
+  private static extractRootVariable(variable: string): string | null {
+    const trimmed = variable.trim();
+    const match = /^[a-zA-Z_][a-zA-Z0-9_]*/.exec(trimmed);
+    return match ? match[0] : null;
+  }
+
   private generateSlug(name: string): string {
     return name
       .toLowerCase()
@@ -168,51 +174,55 @@ export class TemplatesRepository {
     switch (engine) {
       case 'handlebars': {
         // Match {{variable}} and {{#each variable}} etc.
-        const handlebarsRegex = /\{\{(?:#[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/g;
+        const handlebarsRegex = /\{\{(?:[#/]?[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\])*)/g;
         while ((match = handlebarsRegex.exec(content)) !== null) {
-          const varPart = match[1]?.split('.')[0];
-          if (varPart) variables.add(varPart);
+          const varPart = match[1];
+          const root = varPart ? TemplatesRepository.extractRootVariable(varPart) : null;
+          if (root) variables.add(root);
         }
         break;
       }
       case 'mjml': {
         // MJML uses Handlebars by default
-        const mjmlRegex = /\{\{(?:#[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/g;
+        const mjmlRegex = /\{\{(?:[#/]?[a-z]+\s+)?([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\])*)/g;
         while ((match = mjmlRegex.exec(content)) !== null) {
-          const varPart = match[1]?.split('.')[0];
-          if (varPart) variables.add(varPart);
+          const varPart = match[1];
+          const root = varPart ? TemplatesRepository.extractRootVariable(varPart) : null;
+          if (root) variables.add(root);
         }
         break;
       }
       case 'liquid': {
         // Match {{ variable }} and {% for item in variable %}
-        const liquidRegex = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)|{%\s*(?:for|if|unless)\s+\w+\s+in\s+([a-zA-Z_][a-zA-Z0-9_.]*)/g;
+        const liquidRegex = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\])*)|{%\s*(?:for|if|unless)\s+\w+\s+in\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\])*)/g;
         while ((match = liquidRegex.exec(content)) !== null) {
           const varName = match[1] || match[2];
           if (varName) {
-            const varPart = varName.split('.')[0];
-            if (varPart) variables.add(varPart);
+            const root = TemplatesRepository.extractRootVariable(varName);
+            if (root) variables.add(root);
           }
         }
         break;
       }
       case 'ejs': {
         // Match <%= variable %> and <% variable %>
-        const ejsRegex = /<%[=-]?\s*([a-zA-Z_][a-zA-Z0-9_.]*)/g;
+        const ejsRegex = /<%[=-]?\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\])*)/g;
         while ((match = ejsRegex.exec(content)) !== null) {
-          const varPart = match[1]?.split('.')[0];
-          if (varPart) variables.add(varPart);
+          const varPart = match[1];
+          const root = varPart ? TemplatesRepository.extractRootVariable(varPart) : null;
+          if (root) variables.add(root);
         }
         break;
       }
       case 'react': {
         // Match {variable} and {props.variable} in JSX
-        const reactRegex = /\{([a-zA-Z_][a-zA-Z0-9_.]*)(?:[.\[]|\})/g;
+        const reactRegex = /\{([a-zA-Z_][a-zA-Z0-9_]*(?:\?\.[a-zA-Z_][a-zA-Z0-9_]*|\.[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\])*)/g;
         while ((match = reactRegex.exec(content)) !== null) {
-          const varPart = match[1]?.split('.')[0];
+          const varPart = match[1];
+          const root = varPart ? TemplatesRepository.extractRootVariable(varPart) : null;
           // Filter out common React keywords
-          if (varPart && !['true', 'false', 'null', 'undefined', 'return', 'const', 'let', 'var', 'function'].includes(varPart)) {
-            variables.add(varPart);
+          if (root && !['true', 'false', 'null', 'undefined', 'return', 'const', 'let', 'var', 'function'].includes(root)) {
+            variables.add(root);
           }
         }
         break;

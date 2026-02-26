@@ -15,6 +15,14 @@ Operational procedures for handling ApexMail incidents.
 - `api-server` — REST API
 - `mta` — Mail transfer agent
 - `worker-processors` — Background job processing
+- `ddos-protection` — 5-layer DDoS defense (ML anomaly detection, SMTP state machine, PoW challenges)
+- `waf-engine` — Web Application Firewall (AST-based SQLi/XSS detection)
+- `ids-engine` — Intrusion Detection/Prevention (signature matching, port scan detection)
+- `spam-filter` — Bayesian spam & phishing filter
+- `sandbox` — Attachment analysis (file magic, macro detection)
+- `ato-protection` — Account takeover prevention (impossible travel, device fingerprinting)
+- `dlp-engine` — Data loss prevention (PII detection, entropy-based secret scanning)
+- `threat-intel` — Threat intelligence (IP/domain blocklists, reputation scoring)
 
 ---
 
@@ -211,6 +219,12 @@ docker compose -f docker-compose.prod.yml restart redis
 - Unauthorized access detected
 - Anomalous activity in logs
 - Data exfiltration alerts
+- DDoS protection alerts (check `ddos_blocked_ips` Prometheus metric)
+- WAF blocks spiking (SQLi/XSS attempts)
+- IDS alerts (port scans, signature matches)
+- Account takeover alerts (impossible travel, failed lockouts)
+- DLP quarantines (PII or secrets detected in outbound email)
+- Threat intelligence hits (known malicious IP/domain connections)
 
 #### Immediate Actions
 
@@ -220,19 +234,26 @@ docker compose -f docker-compose.prod.yml stop tracking
 
 # 2. Block suspicious IPs (on host)
 sudo iptables -A INPUT -s SUSPICIOUS_IP -j DROP
+# Note: ddos-protection crate has its own IP blocklist;
+# threat-intel crate maintains CIDR-based blocklists with TTL expiry
 
 # 3. Capture forensic data
 docker compose -f docker-compose.prod.yml logs > incident_$(date +%Y%m%d_%H%M%S).log
 docker compose -f docker-compose.prod.yml exec postgres \
   pg_dump -U apexmail apexmail > db_backup_$(date +%Y%m%d_%H%M%S).sql
 
-# 4. Rotate secrets
+# 4. Check security metrics (DDoS, WAF, IDS, ATO)
+curl -s http://localhost:9092/metrics | grep -E 'ddos_|waf_|ids_|ato_|dlp_|threat'
+
+# 5. Rotate secrets
 # Update TRACKING_SECRET_KEY in .env and redeploy
 
-# 5. Review audit logs
+# 6. Review audit logs
 docker compose -f docker-compose.prod.yml exec postgres \
   psql -U apexmail -c "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100;"
 ```
+
+> **Reference:** See [Security Systems Reference](../../security/Security_Systems.md) for detailed architecture of all 8 security crates and their Prometheus metrics.
 
 ---
 

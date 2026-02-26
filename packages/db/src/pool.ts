@@ -217,10 +217,16 @@ class DatabasePool {
       if (!this.pool || this.isShuttingDown) return;
 
       try {
+        const { waitingCount, idleCount } = this.getStats();
+        if (waitingCount > 0 && idleCount === 0) {
+          this.logger.debug('Skipping pool health check due to load', {
+            waitingCount,
+            idleCount,
+          });
+          return;
+        }
         const start = Date.now();
-        const client = await this.pool.connect();
-        await client.query('SELECT 1');
-        client.release();
+        await this.pool.query('SELECT 1');
         const duration = Date.now() - start;
 
         this.logger.debug('Pool health check passed', {
@@ -378,8 +384,32 @@ const POOL_CONFIGS: Record<string, Partial<DatabaseConfig>> = {
   default: { maxConnections: 20 },
 };
 
-// Map of service name to pool instance for proper isolation
-const dbPools: Map<string, DatabasePool> = new Map();
+export class DatabasePoolRegistry {
+  private readonly dbPools: Map<string, DatabasePool> = new Map();
+
+  getDatabase(service: string = 'default'): DatabasePool {
+    const serviceName = service in POOL_CONFIGS ? service : 'default';
+
+    let pool = this.dbPools.get(serviceName);
+    if (!pool) {
+      const poolConfig = POOL_CONFIGS[serviceName] ?? {};
+      pool = new DatabasePool(poolConfig);
+      this.dbPools.set(serviceName, pool);
+    }
+    return pool;
+  }
+
+  async disconnectAllPools(): Promise<void> {
+    const disconnectPromises: Promise<void>[] = [];
+    for (const pool of this.dbPools.values()) {
+      disconnectPromises.push(pool.disconnect());
+    }
+    await Promise.all(disconnectPromises);
+    this.dbPools.clear();
+  }
+}
+
+const defaultRegistry = new DatabasePoolRegistry();
 
 /**
  * Get a database pool for a specific service.
@@ -388,15 +418,7 @@ const dbPools: Map<string, DatabasePool> = new Map();
  * @returns DatabasePool instance for the service
  */
 export function getDatabase(service: string = 'default'): DatabasePool {
-  const serviceName = service in POOL_CONFIGS ? service : 'default';
-  
-  let pool = dbPools.get(serviceName);
-  if (!pool) {
-    const poolConfig = POOL_CONFIGS[serviceName] ?? {};
-    pool = new DatabasePool(poolConfig);
-    dbPools.set(serviceName, pool);
-  }
-  return pool;
+  return defaultRegistry.getDatabase(service);
 }
 
 /**
@@ -411,12 +433,11 @@ export function createDatabase(config?: Partial<DatabaseConfig>): DatabasePool {
  * Disconnect all database pools. Call during graceful shutdown.
  */
 export async function disconnectAllPools(): Promise<void> {
-  const disconnectPromises: Promise<void>[] = [];
-  for (const pool of dbPools.values()) {
-    disconnectPromises.push(pool.disconnect());
-  }
-  await Promise.all(disconnectPromises);
-  dbPools.clear();
+  await defaultRegistry.disconnectAllPools();
 }
 
 export { DatabasePool };
+
+export function createDatabaseRegistry(): DatabasePoolRegistry {
+  return new DatabasePoolRegistry();
+}

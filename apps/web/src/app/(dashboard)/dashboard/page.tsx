@@ -12,7 +12,6 @@ import {
     MousePointer,
     Calendar,
     Zap,
-    Loader2,
     AlertCircle,
     Shield,
     FileText,
@@ -42,6 +41,7 @@ import { ApexAreaChart, ApexBarChart } from '@/components/charts';
 import { cn, formatNumber, formatPercent, formatRelativeTime } from '@/lib/utils';
 import { EmptyState } from '@/components/ui/empty-state';
 import { StatusIndicator } from '@/components/ui/status-indicator';
+import { useAPI, APIError } from '@/hooks/use-api';
 
 // ---------- Types matching GET /v1/analytics/dashboard response ----------
 
@@ -58,12 +58,15 @@ interface DashboardData {
     health: { score: number; grade: string };
 }
 
-interface VolumePoint { date: string; sent: number; delivered: number; bounced: number; [key: string]: string | number }
-interface EngagementPoint { date: string; opens: number; clicks: number; [key: string]: string | number }
-interface RecentMessage {
-    id: string; name: string; status: string;
-    sentAt?: string; scheduledAt?: string;
-    sent: number; openRate: number; clickRate: number;
+interface VolumePoint { date: string; sent: number; delivered: number; bounced: number }
+interface EngagementPoint { date: string; opens: number; clicks: number }
+interface RecentMessageApiRow {
+    id?: string;
+    subject?: string;
+    status?: string;
+    sentAt?: string;
+    scheduledAt?: string;
+    recipientCount?: number;
 }
 
 interface DashboardSourcesStatus {
@@ -76,104 +79,91 @@ interface DashboardSourcesStatus {
 // ---------- Data fetching hook ----------
 
 function useDashboard(windowDays: number, refreshKey: number) {
-    const [data, setData] = React.useState<DashboardData | null>(null);
-    const [volume, setVolume] = React.useState<VolumePoint[]>([]);
-    const [engagement, setEngagement] = React.useState<EngagementPoint[]>([]);
-    const [campaigns, setCampaigns] = React.useState<RecentMessage[]>([]);
-    const [loading, setLoading] = React.useState(true);
-    const [error, setError] = React.useState<string | null>(null);
     const [lastUpdated, setLastUpdated] = React.useState<string | null>(null);
-    const pollDelayRef = React.useRef(60_000);
-    const [sourcesStatus, setSourcesStatus] = React.useState<DashboardSourcesStatus>({
-        overview: 'ok',
-        volume: 'ok',
-        engagement: 'ok',
-        campaigns: 'ok',
-    });
+    const [loadingTimedOut, setLoadingTimedOut] = React.useState(false);
+    const since = React.useMemo(() => new Date(Date.now() - windowDays * 86_400_000).toISOString(), [windowDays]);
+    const until = React.useMemo(() => new Date().toISOString(), [windowDays, refreshKey]);
+
+    const requestConfig = React.useMemo(
+        () => ({
+            refreshInterval: 60_000,
+            keepPreviousData: true,
+        }),
+        []
+    );
+
+    const dashboardQuery = useAPI<{ dashboard?: DashboardData }>(
+        `/v1/analytics/dashboard?since=${since}&until=${until}`,
+        requestConfig
+    );
+    const volumeQuery = useAPI<{ volume?: VolumePoint[] }>(
+        `/v1/analytics/volume?since=${since}&until=${until}&granularity=day`,
+        requestConfig
+    );
+    const engagementQuery = useAPI<{ engagement?: EngagementPoint[] }>(
+        `/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`,
+        requestConfig
+    );
+    const messagesQuery = useAPI<{ messages?: RecentMessageApiRow[]; data?: RecentMessageApiRow[] }>(
+        '/v1/messages?limit=5&sort=createdAt:desc',
+        requestConfig
+    );
+
+    const loading = dashboardQuery.isLoading || volumeQuery.isLoading || engagementQuery.isLoading || messagesQuery.isLoading;
+
+    const sourcesStatus: DashboardSourcesStatus = {
+        overview: dashboardQuery.error ? 'error' : 'ok',
+        volume: volumeQuery.error ? 'error' : 'ok',
+        engagement: engagementQuery.error ? 'error' : 'ok',
+        campaigns: messagesQuery.error ? 'error' : 'ok',
+    };
+
+    const data = dashboardQuery.data?.dashboard ?? null;
+    const volume = volumeQuery.data?.volume ?? [];
+    const engagement = engagementQuery.data?.engagement ?? [];
+    const campaigns = React.useMemo(() => {
+        const rows = (messagesQuery.data?.messages ?? messagesQuery.data?.data ?? []) as RecentMessageApiRow[];
+        return rows.slice(0, 5).map((message) => ({
+            id: message.id ?? crypto.randomUUID(),
+            name: message.subject || 'Untitled',
+            status: message.status ?? 'unknown',
+            sentAt: message.sentAt,
+            scheduledAt: message.scheduledAt,
+            sent: message.recipientCount ?? 0,
+            openRate: 0,
+            clickRate: 0,
+        }));
+    }, [messagesQuery.data]);
+
+    const firstError = [dashboardQuery.error, volumeQuery.error, engagementQuery.error, messagesQuery.error].find(Boolean) as APIError | undefined;
+    const allSourcesFailed = Object.values(sourcesStatus).every((status) => status === 'error');
+    const error = React.useMemo(() => {
+        if (allSourcesFailed) return 'All analytics sources are currently unavailable.';
+        if (!firstError) return null;
+        const baseMessage = 'Temporary analytics fetch failure. Please retry.';
+        return firstError.message ? `${baseMessage} (${firstError.message})` : baseMessage;
+    }, [allSourcesFailed, firstError]);
 
     React.useEffect(() => {
-        let cancelled = false;
-        let timerId: number | null = null;
+        if (!loading) {
+            setLoadingTimedOut(false);
+            return;
+        }
 
-        const load = async () => {
-            if (cancelled) return;
-            try {
-                setLoading(true);
-                setError(null);
-                const since = new Date(Date.now() - windowDays * 86_400_000).toISOString();
-                const until = new Date().toISOString();
-                const [dashRes, volRes, engRes, campRes] = await Promise.allSettled([
-                    fetch(`/v1/analytics/dashboard?since=${since}&until=${until}`),
-                    fetch(`/v1/analytics/volume?since=${since}&until=${until}&granularity=day`),
-                    fetch(`/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`),
-                    fetch('/v1/messages?limit=5&sort=createdAt:desc'),
-                ]);
-                if (cancelled) return;
-                const nextStatus: DashboardSourcesStatus = {
-                    overview: dashRes.status === 'fulfilled' && dashRes.value.ok ? 'ok' : 'error',
-                    volume: volRes.status === 'fulfilled' && volRes.value.ok ? 'ok' : 'error',
-                    engagement: engRes.status === 'fulfilled' && engRes.value.ok ? 'ok' : 'error',
-                    campaigns: campRes.status === 'fulfilled' && campRes.value.ok ? 'ok' : 'error',
-                };
+        const timer = window.setTimeout(() => {
+            setLoadingTimedOut(true);
+        }, 15_000);
 
-                if (dashRes.status === 'fulfilled' && dashRes.value.ok) {
-                    setData((await dashRes.value.json()).dashboard);
-                } else {
-                    setData(null);
-                }
-                if (volRes.status === 'fulfilled' && volRes.value.ok) {
-                    setVolume((await volRes.value.json()).volume ?? []);
-                } else {
-                    setVolume([]);
-                }
-                if (engRes.status === 'fulfilled' && engRes.value.ok) {
-                    setEngagement((await engRes.value.json()).engagement ?? []);
-                } else {
-                    setEngagement([]);
-                }
-                if (campRes.status === 'fulfilled' && campRes.value.ok) {
-                    const json = await campRes.value.json();
-                    const msgs = json.messages ?? json.data ?? [];
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    setCampaigns(msgs.slice(0, 5).map((m: any) => ({
-                        id: m.id, name: m.subject || 'Untitled', status: m.status,
-                        sentAt: m.sentAt, scheduledAt: m.scheduledAt,
-                        sent: m.recipientCount ?? 0, openRate: 0, clickRate: 0,
-                    })));
-                } else {
-                    setCampaigns([]);
-                }
+        return () => window.clearTimeout(timer);
+    }, [loading]);
 
-                setSourcesStatus(nextStatus);
-                const hasAnyError = Object.values(nextStatus).some((status) => status === 'error');
-                if (Object.values(nextStatus).every((status) => status === 'error')) {
-                    setError('All analytics sources are currently unavailable.');
-                }
+    React.useEffect(() => {
+        if (!loading) {
+            setLastUpdated(new Date().toISOString());
+        }
+    }, [loading, data, volume.length, engagement.length, campaigns.length]);
 
-                pollDelayRef.current = hasAnyError ? Math.min(pollDelayRef.current * 2, 300_000) : 60_000;
-            } catch (err) {
-                if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
-                pollDelayRef.current = Math.min(pollDelayRef.current * 2, 300_000);
-            } finally {
-                if (!cancelled) {
-                    setLastUpdated(new Date().toISOString());
-                    setLoading(false);
-                }
-            }
-            if (!cancelled) {
-                timerId = window.setTimeout(load, pollDelayRef.current);
-            }
-        };
-
-        pollDelayRef.current = 60_000;
-        load();
-        return () => {
-            cancelled = true;
-            if (timerId !== null) window.clearTimeout(timerId);
-        };
-    }, [windowDays, refreshKey]);
-
-    return { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus };
+    return { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus, loadingTimedOut };
 }
 
 // ---------- Stat builder ----------
@@ -210,13 +200,13 @@ function DashboardSkeleton() {
 export default function DashboardPage() {
     const [windowDays, setWindowDays] = React.useState<7 | 30 | 90>(30);
     const [refreshKey, setRefreshKey] = React.useState(0);
-    const { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus } = useDashboard(windowDays, refreshKey);
+    const { data, volume, engagement, campaigns, loading, error, lastUpdated, sourcesStatus, loadingTimedOut } = useDashboard(windowDays, refreshKey);
     const stats = buildStats(data);
     const lastUpdatedLabel = lastUpdated ? formatRelativeTime(new Date(lastUpdated)) : 'just now';
     const isStale = Boolean(lastUpdated) && Date.now() - new Date(lastUpdated as string).getTime() > 60_000;
     const countFormatter = React.useCallback((value: number) => formatNumber(value), []);
 
-    if (loading) {
+    if (loading && !loadingTimedOut) {
         return <DashboardSkeleton />;
     }
 
@@ -242,7 +232,7 @@ export default function DashboardPage() {
                     <Button variant="outline" className="border-surface-200 shadow-sm" onClick={() => setRefreshKey((prev) => prev + 1)}>
                         <RefreshCw className="mr-2 h-4 w-4" />Refresh
                     </Button>
-                    <Button className="bg-primary shadow-lg shadow-primary/20"><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
+                    <Button className="bg-primary shadow-lg shadow-primary/20" onClick={() => { window.location.href = '/campaigns/new'; }}><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
                 </>}
             />
 
@@ -263,9 +253,19 @@ export default function DashboardPage() {
 
             {error && (
                 <Card className="border-destructive/50 bg-destructive/10">
-                    <CardContent className="flex items-center gap-3 p-4">
+                    <CardContent className="flex items-center justify-between gap-3 p-4">
+                        <div className="flex items-center gap-3 min-w-0">
                         <AlertCircle className="h-5 w-5 text-destructive" />
                         <p className="text-sm text-destructive">Could not load live data. {error}</p>
+                        </div>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setRefreshKey((prev) => prev + 1)}
+                            className="border-destructive/40 text-destructive hover:bg-destructive/10"
+                        >
+                            Retry
+                        </Button>
                     </CardContent>
                 </Card>
             )}
@@ -294,7 +294,7 @@ export default function DashboardPage() {
                             <div className="mt-4 space-y-1 min-w-0">
                                 <p className="text-xs font-bold uppercase tracking-widest text-surface-500 truncate">{stat.title}</p>
                                 <p className="text-3xl font-bold apex-metric-number tracking-tight">
-                                    {'isPercent' in stat && stat.isPercent ? formatPercent(stat.value / 100) : formatNumber(stat.value)}
+                                    {'isPercent' in stat && stat.isPercent ? formatPercent(stat.value) : formatNumber(stat.value)}
                                 </p>
                             </div>
                         </CardContent>
@@ -304,7 +304,7 @@ export default function DashboardPage() {
 
             {/* Charts */}
             <div className="grid gap-8 lg:grid-cols-2" data-testid="charts-section">
-                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-engagement">
+                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-engagement" aria-label="Engagement trends chart">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <div className="flex items-center justify-between">
                             <div>
@@ -331,7 +331,7 @@ export default function DashboardPage() {
                         )}
                     </CardContent>
                 </Card>
-                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-volume">
+                <Card className="border-none shadow-premium bg-white overflow-hidden" data-testid="chart-volume" aria-label="Sending volume chart">
                     <CardHeader className="border-b border-surface-50 pb-6">
                         <div className="flex items-center justify-between">
                             <div>

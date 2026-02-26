@@ -37,18 +37,13 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
 
-    const result = await ctx.contracts.getContract(contractId);
+    const result = await ctx.contracts.getContract(contractId, tenantId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
 
     if (!result.value) {
-      return c.json({ error: 'Contract not found' }, 404);
-    }
-
-    // SECURITY: Verify contract belongs to requesting tenant
-    if (result.value.tenantId !== tenantId) {
       return c.json({ error: 'Contract not found' }, 404);
     }
 
@@ -61,18 +56,13 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
 
-    const result = await ctx.contracts.getContract(contractId);
+    const result = await ctx.contracts.getContract(contractId, tenantId);
 
     if (!result.ok) {
       return c.json({ error: result.error.message }, 500);
     }
 
     if (!result.value) {
-      return c.json({ error: 'Contract not found' }, 404);
-    }
-
-    // SECURITY: Verify contract belongs to requesting tenant
-    if (result.value.tenantId !== tenantId) {
       return c.json({ error: 'Contract not found' }, 404);
     }
 
@@ -85,6 +75,14 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
   router.get('/contracts/:contractId/usage', async (c) => {
     const tenantId = c.get('tenantId');
     const contractId = c.req.param('contractId');
+
+    const contractResult = await ctx.contracts.getContract(contractId, tenantId);
+    if (!contractResult.ok) {
+      return c.json({ error: contractResult.error.message }, 500);
+    }
+    if (!contractResult.value) {
+      return c.json({ error: 'Contract not found' }, 404);
+    }
 
     const result = await ctx.contracts.getContractUsage(tenantId, contractId);
 
@@ -129,6 +127,18 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
 
     const parsed = schema.parse(body);
+    const overageRateCentsPerEmail = parsed.overageRates.emailsPerThousand / 10;
+    const additionalFees = parsed.dedicatedSupport
+      ? [{ name: 'Dedicated Support', amount: 0, frequency: 'monthly' as const }]
+      : [];
+    const customTerms = JSON.stringify({
+      customFeatures: parsed.customFeatures ?? [],
+      allowPurchaseOrders: parsed.allowPurchaseOrders ?? false,
+      customSla: parsed.customSla ?? null,
+      apiOveragePerThousand: parsed.overageRates.apiCallsPerThousand,
+      storageOveragePerGb: parsed.overageRates.storagePerGb,
+    });
+
     const result = await ctx.contracts.createContract({
       tenantId,
       name: `Enterprise Contract - ${tenantId}`,
@@ -136,8 +146,10 @@ export function enterpriseRoutes(ctx: BillingContext): Hono<BillingEnv> {
       endDate: new Date(parsed.endDate),
       basePrice: parsed.baseFee,
       committedVolume: parsed.committedVolume.emails,
-      overageRate: Math.round(parsed.overageRates.emailsPerThousand / 1000 * 100), // Convert to per-email cents
+      overageRate: overageRateCentsPerEmail,
       paymentTermsDays: parsed.paymentTerms === 'net30' ? 30 : 60,
+      additionalFees,
+      customTerms,
     });
 
     if (!result.ok) {

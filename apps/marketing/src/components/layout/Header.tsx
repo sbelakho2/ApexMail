@@ -11,7 +11,7 @@ const navigation = [
     name: 'Product',
     items: [
       { name: 'Features', href: '/features', icon: Zap, description: 'Explore our complete feature set' },
-      { name: 'Security', href: '/security', icon: Shield, description: 'Enterprise-grade protection' },
+      { name: 'Security', href: '/compliance', icon: Shield, description: 'Enterprise-grade protection' },
       { name: 'Private Cloud', href: '/private-cloud', icon: Cloud, description: 'Single-tenant deployments' },
     ],
   },
@@ -24,7 +24,7 @@ const navigation = [
   },
   { name: 'Pricing', href: '/pricing' },
   { name: 'Compliance', href: '/compliance' },
-  { name: 'Enterprise', href: '/enterprise' },
+  { name: 'Enterprise', href: '/private-cloud' },
 ];
 
 export function Header() {
@@ -33,10 +33,20 @@ export function Header() {
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
 
   useEffect(() => {
+    let ticking = false;
+
     const handleScroll = () => {
-      setIsScrolled(window.scrollY > 20);
+      if (ticking) return;
+
+      ticking = true;
+      window.requestAnimationFrame(() => {
+        setIsScrolled(window.scrollY > 20);
+        ticking = false;
+      });
     };
-    window.addEventListener('scroll', handleScroll);
+
+    handleScroll();
+    window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
@@ -68,8 +78,24 @@ export function Header() {
                   className="relative"
                   onMouseEnter={() => setActiveDropdown(item.name)}
                   onMouseLeave={() => setActiveDropdown(null)}
+                  onFocus={() => setActiveDropdown(item.name)}
+                  onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                      setActiveDropdown(null);
+                    }
+                  }}
                 >
-                  <button className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50">
+                  <button
+                    className="flex items-center gap-1.5 px-3 py-2.5 text-sm font-medium text-surface-600 hover:text-surface-900 transition-colors rounded-lg hover:bg-surface-50"
+                    aria-haspopup="menu"
+                    aria-expanded={activeDropdown === item.name}
+                    onClick={() => setActiveDropdown(activeDropdown === item.name ? null : item.name)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        setActiveDropdown(null);
+                      }
+                    }}
+                  >
                     {item.name}
                     <ChevronDown className={cn('w-4 h-4 transition-transform duration-150', activeDropdown === item.name && 'rotate-180')} />
                   </button>

@@ -6,58 +6,10 @@ interface CodeBlockProps {
 }
 
 export function CodeBlock({ code, language }: CodeBlockProps) {
- // Simple syntax highlighting
- const highlightCode = (code: string, lang: string): string => {
- let highlighted = code
- // Escape HTML
- .replace(/&/g, '&amp;')
- .replace(/</g, '&lt;')
- .replace(/>/g, '&gt;');
-
- if (lang === 'typescript' || lang === 'javascript') {
- highlighted = highlighted
- // Comments
- .replace(/(\/\/.*)/g, '<span class="code-comment">$1</span>')
- // Strings
- .replace(/(['"`])((?:(?!\1)[^\\]|\\.)*)(\1)/g, '<span class="code-string">$1$2$3</span>')
- // Keywords
- .replace(/\b(const|let|var|function|async|await|return|if|else|for|while|import|from|export|default|class|new|this|try|catch|throw)\b/g, '<span class="code-keyword">$1</span>')
- // Properties/methods after dot
- .replace(/\.(\w+)/g, '.<span class="code-highlight">$1</span>')
-              // Numbers
-              .replace(/\b(\d+)\b/g, '<span class="text-primary-400">$1</span>');
-          } else if (lang === 'bash' || lang === 'shell') {
-            highlighted = highlighted
-              // Comments
-              .replace(/(#.*)/g, '<span class="code-comment">$1</span>')
-              // Strings
-              .replace(/(['"])((?:(?!\1)[^\\]|\\.)*)(\1)/g, '<span class="code-string">$1$2$3</span>')
-              // Commands
-              .replace(/^(\w+)/gm, '<span class="code-keyword">$1</span>')
-              // Flags
-              .replace(/(\s-\w+)/g, '<span class="text-primary-400">$1</span>');
-          } else if (lang === 'json') {
-            highlighted = highlighted
-              // Keys
-              .replace(/"([^"]+)":/g, '<span class="code-highlight">"$1"</span>:')
-              // String values
-              .replace(/: "([^"]*)"/g, ': <span class="code-string">"$1"</span>')
-              // Numbers and booleans
-              .replace(/: (\d+|true|false|null)/g, ': <span class="text-primary-400">$1</span>');
-          }
-
- return highlighted;
- };
-
  return (
  <div className="code-block overflow-hidden">
  <pre className="p-4 text-[13px] leading-relaxed overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
- <code
- className="font-mono block whitespace-pre break-normal"
- dangerouslySetInnerHTML={{
- __html: highlightCode(code, language),
- }}
- />
+ <code data-language={language} className="font-mono block whitespace-pre break-normal">{code}</code>
  </pre>
  </div>
  );

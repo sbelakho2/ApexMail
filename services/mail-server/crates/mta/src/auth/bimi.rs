@@ -4,11 +4,15 @@
 
 use std::sync::LazyLock;
 use std::time::Duration;
+use std::io::Cursor;
 
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
+use x509_parser::prelude::*;
 
 // #131: Shared DNS resolver – avoids creating a new resolver per verify_bimi call
 static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
@@ -18,13 +22,15 @@ static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
 // Shared HTTP client for BIMI logo fetching.
 static BIMI_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
+    .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
-        .unwrap_or_else(|_| Client::new())
+    .expect("BIMI HTTP client")
 });
 
 // #128: Maximum logo download size (256 KB) to prevent OOM from malicious URLs
 const MAX_LOGO_SIZE: usize = 256 * 1024;
+const MAX_CERT_SIZE: usize = 512 * 1024;
 
 /// Parsed BIMI DNS record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,60 +226,65 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
 /// #129: Comprehensive validation replacing fragile string matching.
 /// #130: Robust external reference detection.
 pub fn validate_svg_content(svg: &str) -> bool {
-    let lower = svg.to_lowercase();
+    let mut reader = Reader::from_str(svg);
+    reader.config_mut().trim_text(true);
 
-    // #129: Comprehensive script/event-handler detection
-    let dangerous_patterns = [
-        "<script", "javascript:", "vbscript:", "data:",
-        "onerror", "onclick", "onload", "onmouseover", "onfocus",
-        "onblur", "onsubmit", "onreset", "onchange", "oninput",
-        "onkeydown", "onkeyup", "onkeypress", "onmouseout",
-        "onmousedown", "onmouseup", "ondblclick",
-        "eval(", "expression(",
-    ];
-    for pattern in &dangerous_patterns {
-        if lower.contains(pattern) {
-            return false;
-        }
-    }
+    let mut saw_svg_root = false;
 
-    // Must not contain animations
-    let animation_patterns = ["<animate", "<set ", "<animatetransform", "<animatemotion"];
-    for pattern in &animation_patterns {
-        if lower.contains(pattern) {
-            return false;
-        }
-    }
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(tag)) | Ok(Event::Empty(tag)) => {
+                let name = String::from_utf8_lossy(tag.name().as_ref()).to_lowercase();
+                if name == "svg" {
+                    saw_svg_root = true;
+                }
 
-    // #129: Reject entity-encoded characters that could bypass checks
-    if lower.contains("&#") {
-        return false;
-    }
+                if matches!(
+                    name.as_str(),
+                    "script" | "foreignobject" | "animate" | "set" | "animatetransform" | "animatemotion"
+                ) {
+                    return false;
+                }
 
-    // #129: Reject CDATA sections (can hide malicious content)
-    if lower.contains("<![cdata[") {
-        return false;
-    }
+                for attr in tag.attributes().with_checks(true) {
+                    let attr = match attr {
+                        Ok(a) => a,
+                        Err(_) => return false,
+                    };
 
-    // #130: Reject foreignObject (can embed arbitrary HTML)
-    if lower.contains("<foreignobject") {
-        return false;
-    }
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).to_lowercase();
+                    let value = String::from_utf8_lossy(attr.value.as_ref()).to_lowercase();
 
-    // #130: Stricter external reference detection – reject any href pointing
-    // to an external URL, checking per-line instead of heuristic counting
-    for line in lower.lines() {
-        let has_href = line.contains("xlink:href") || line.contains("href=");
-        let is_xmlns = line.contains("xmlns");
-        if has_href && !is_xmlns {
-            if line.contains("http://") || line.contains("https://") || line.contains("//") {
+                    if key.starts_with("on") {
+                        return false;
+                    }
+
+                    if value.contains("javascript:")
+                        || value.contains("vbscript:")
+                        || value.contains("data:")
+                        || value.contains("expression(")
+                        || value.contains("eval(")
+                    {
+                        return false;
+                    }
+
+                    if key == "href" || key == "xlink:href" {
+                        if value.contains("http://") || value.contains("https://") || value.starts_with("//") {
+                            return false;
+                        }
+                    }
+                }
+            }
+            Ok(Event::DocType(_)) | Ok(Event::CData(_)) => {
                 return false;
             }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return false,
         }
     }
 
-    // Must be a valid SVG (basic check)
-    lower.contains("<svg")
+    saw_svg_root
 }
 
 /// Get BIMI indicator for display in email clients.
@@ -366,10 +377,85 @@ async fn validate_vmc_certificate(url: &str) -> bool {
         Err(_) => return false,
     };
 
-    match client.get(url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
+    let response = match client.get(url).send().await {
+        Ok(resp) => resp,
+        Err(_) => return false,
+    };
+
+    if !response.status().is_success() {
+        return false;
     }
+
+    if let Some(len) = response.content_length() {
+        if len > MAX_CERT_SIZE as u64 {
+            return false;
+        }
+    }
+
+    let bytes = match response.bytes().await {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    if bytes.len() > MAX_CERT_SIZE {
+        return false;
+    }
+
+    let cert_chain = match parse_vmc_cert_chain(&bytes) {
+        Some(chain) => chain,
+        None => return false,
+    };
+
+    verify_x509_chain(&cert_chain)
+}
+
+fn parse_vmc_cert_chain(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut cursor = Cursor::new(raw);
+    let mut certs = rustls_pemfile::certs(&mut cursor)
+        .filter_map(Result::ok)
+        .map(|cert| cert.to_vec())
+        .collect::<Vec<_>>();
+
+    if certs.is_empty() {
+        certs.push(raw.to_vec());
+    }
+
+    Some(certs)
+}
+
+fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
+    if chain_der.is_empty() {
+        return false;
+    }
+
+    let mut chain = Vec::with_capacity(chain_der.len());
+    for der in chain_der {
+        let parsed = match X509Certificate::from_der(der) {
+            Ok((_, cert)) => cert,
+            Err(_) => return false,
+        };
+
+        let now = ASN1Time::now();
+        if parsed.validity().is_valid_at(now).is_err() {
+            return false;
+        }
+
+        chain.push(parsed);
+    }
+
+    for idx in 0..(chain.len().saturating_sub(1)) {
+        let cert = &chain[idx];
+        let issuer = &chain[idx + 1];
+        if cert.verify_signature(Some(issuer.public_key())).is_err() {
+            return false;
+        }
+    }
+
+    let root = match chain.last() {
+        Some(c) => c,
+        None => return false,
+    };
+    root.verify_signature(Some(root.public_key())).is_ok()
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────

@@ -150,7 +150,9 @@ export function PlanSelector({ currentPlan, onPlanChange, trigger }: PlanSelecto
       await onPlanChange(planId);
       setIsOpen(false);
     } catch (error) {
-      console.error('Failed to change plan:', error);
+      if (process.env.NODE_ENV !== 'production') {
+        console.error('Failed to change plan:', error);
+      }
     } finally {
       setIsLoading(null);
     }

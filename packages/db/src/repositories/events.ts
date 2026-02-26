@@ -97,6 +97,16 @@ export class EventsRepository {
     return createHash('sha256').update(normalizedEmail).digest('hex');
   }
 
+  private redactEmail(email: string): string {
+    const normalizedEmail = email.toLowerCase().trim();
+    const atIndex = normalizedEmail.lastIndexOf('@');
+    if (atIndex <= 0 || atIndex === normalizedEmail.length - 1) {
+      return '';
+    }
+    const domain = normalizedEmail.slice(atIndex + 1);
+    return `***@${domain}`;
+  }
+
   private generateDeduplicationKey(input: CreateEventInput): string {
     // Dedup key: message + recipient + event type + timestamp (minute precision for opens/clicks)
     const timestampStr = input.eventType === 'opened' || input.eventType === 'clicked'
@@ -117,6 +127,7 @@ export class EventsRepository {
   async create(input: CreateEventInput): Promise<Result<Event | null, Error>> {
     const id = generateUuid();
     const emailHash = this.hashEmail(input.recipientEmail);
+    const redactedEmail = this.redactEmail(input.recipientEmail);
     const deduplicationKey = this.generateDeduplicationKey(input);
     const now = new Date();
     const timestamp = input.timestamp ?? now;
@@ -161,7 +172,7 @@ export class EventsRepository {
         id,
         input.tenantId,
         input.messageId,
-        input.recipientEmail.toLowerCase().trim(),
+        redactedEmail,
         emailHash,
         input.eventType,
         timestamp,
@@ -203,6 +214,7 @@ export class EventsRepository {
     for (const input of inputs) {
       const id = generateUuid();
       const emailHash = this.hashEmail(input.recipientEmail);
+      const redactedEmail = this.redactEmail(input.recipientEmail);
       const deduplicationKey = this.generateDeduplicationKey(input);
       const timestamp = input.timestamp ?? now;
 
@@ -213,7 +225,7 @@ export class EventsRepository {
         id,
         input.tenantId,
         input.messageId,
-        input.recipientEmail.toLowerCase().trim(),
+        redactedEmail,
         emailHash,
         input.eventType,
         timestamp,

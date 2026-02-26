@@ -17,7 +17,14 @@ export function safeJsonParse<T = unknown>(
     const parsed = JSON.parse(json) as T;
     return { ok: true, value: parsed };
   } catch (error) {
-    if (defaultValue !== undefined) {
+    const hasDefault = arguments.length >= 2;
+    if (hasDefault) {
+      if (defaultValue === null) {
+        return {
+          ok: false,
+          error: new Error('JSON parse error: defaultValue was null'),
+        };
+      }
       return { ok: true, value: defaultValue };
     }
     return {
@@ -57,7 +64,7 @@ export function safeJsonStringify(
       }
       if (val && typeof val === 'object') {
         if (seen.has(val as object)) {
-          return '[Circular]';
+          throw new Error('Circular reference detected');
         }
         seen.add(val as object);
       }

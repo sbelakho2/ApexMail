@@ -4,6 +4,7 @@
  */
 
 import type { Redis } from 'ioredis';
+import { createHash } from 'node:crypto';
 import { Result } from '@apexmail/lib';
 import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
@@ -39,6 +40,7 @@ export interface ViralStats {
  */
 export class ViralLoopService {
   private readonly baseUrl: string;
+  private readonly telemetryHashSalt: string;
 
   constructor(
     private readonly db: DatabasePool,
@@ -46,6 +48,30 @@ export class ViralLoopService {
     baseUrl?: string
   ) {
     this.baseUrl = baseUrl ?? 'https://apexmail.ee';
+    this.telemetryHashSalt = process.env['VIRAL_TELEMETRY_HASH_SALT'] ?? 'apexmail-telemetry';
+  }
+
+  private anonymizeIpAddress(ipAddress: string): string {
+    if (ipAddress.includes('.')) {
+      const octets = ipAddress.split('.');
+      if (octets.length === 4) {
+        return `${octets[0]}.${octets[1]}.${octets[2]}.0`;
+      }
+      return ipAddress;
+    }
+
+    if (ipAddress.includes(':')) {
+      const hextets = ipAddress.split(':').slice(0, 4).join(':');
+      return `${hextets}::`;
+    }
+
+    return ipAddress;
+  }
+
+  private hashUserAgent(userAgent: string): string {
+    return createHash('sha256')
+      .update(`${this.telemetryHashSalt}:${userAgent}`)
+      .digest('hex');
   }
 
   /**
@@ -97,6 +123,9 @@ export class ViralLoopService {
     ipAddress: string,
     userAgent: string
   ): Promise<Result<{ attributionId: string; cookieValue: string }, Error>> {
+    const pseudonymizedIp = this.anonymizeIpAddress(ipAddress);
+    const pseudonymizedUserAgent = this.hashUserAgent(userAgent);
+
     const result = await this.db.query<{ id: string }>(
       `INSERT INTO viral_attributions (
         id, source_tenant_id, message_ref, clicked_at,
@@ -109,7 +138,7 @@ export class ViralLoopService {
         $3, $4, NOW()
       )
       RETURNING id`,
-      [sourceTenantId, messageRef, ipAddress, userAgent]
+      [sourceTenantId, messageRef, pseudonymizedIp, pseudonymizedUserAgent]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -273,11 +302,7 @@ export class ViralLoopService {
     // Safe JSON parsing for features
     let features: Record<string, unknown> = {};
     try {
-      try {
-        features = JSON.parse(row.features || '{}');
-      } catch {
-        features = {};
-      }
+      features = JSON.parse(row.features || '{}') as Record<string, unknown>;
     } catch {
       console.warn(`[ViralLoop] Failed to parse plan features for tenant ${tenantId}`);
       return Result.ok(true); // Default to showing footer on parse error

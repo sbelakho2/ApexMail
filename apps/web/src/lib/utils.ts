@@ -130,13 +130,18 @@ export function getLocalTimeZone(): string {
  * Format bytes to human readable format
  */
 export function formatBytes(bytes: number, decimals = 2): string {
-    if (bytes === 0) return '0 Bytes';
+    if (!Number.isFinite(bytes)) return '0 Bytes';
+
+    const sign = bytes < 0 ? '-' : '';
+    const absoluteBytes = Math.abs(bytes);
+    if (absoluteBytes === 0) return '0 Bytes';
 
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const i = Math.min(Math.floor(Math.log(absoluteBytes) / Math.log(k)), sizes.length - 1);
+    const value = absoluteBytes / Math.pow(k, i);
 
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
+    return `${sign}${parseFloat(value.toFixed(decimals))} ${sizes[i]}`;
 }
 
 /**
@@ -283,16 +288,27 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 /**
  * Download data as file
  */
+let downloadAnchor: HTMLAnchorElement | null = null;
+
 export function downloadFile(data: string | Blob, filename: string, type = 'text/plain'): void {
     const blob = data instanceof Blob ? data : new Blob([data], { type });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+
+    if (!downloadAnchor) {
+        downloadAnchor = document.createElement('a');
+        downloadAnchor.style.display = 'none';
+        document.body.appendChild(downloadAnchor);
+    }
+
+    const link = downloadAnchor;
     link.href = url;
     link.download = filename;
-    document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+
+    // Ensure object URL stays alive for click handling before cleanup.
+    setTimeout(() => {
+        URL.revokeObjectURL(url);
+    }, 0);
 }
 
 /**
@@ -339,9 +355,14 @@ export function isBrowser(): boolean {
  */
 export function isMobile(): boolean {
     if (!isBrowser()) return false;
-    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-        navigator.userAgent
-    );
+
+    const hasTouchPoints = (navigator.maxTouchPoints ?? 0) > 0;
+    const coarsePointer = typeof window.matchMedia === 'function'
+        ? window.matchMedia('(pointer: coarse)').matches
+        : false;
+    const narrowViewport = window.innerWidth <= 768;
+
+    return narrowViewport && (hasTouchPoints || coarsePointer);
 }
 
 /**

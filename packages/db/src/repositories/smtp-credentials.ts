@@ -32,6 +32,15 @@ export interface SmtpCredentialWithSecret extends SmtpCredential {
 export class SmtpCredentialsRepository {
     constructor(private readonly db: DatabasePool) {}
 
+    private dummyHashPromise: Promise<string> | null = null;
+
+    private getDummyHash(): Promise<string> {
+        if (!this.dummyHashPromise) {
+            this.dummyHashPromise = this.hashPassword('invalid-credential-placeholder');
+        }
+        return this.dummyHashPromise;
+    }
+
     /**
      * Create new SMTP credentials for a tenant
      * Returns the plain password only once - it cannot be retrieved again
@@ -99,7 +108,8 @@ export class SmtpCredentialsRepository {
 
             if (result.value.rows.length === 0) {
                 // Perform dummy verification to keep timing similar
-                await verifySecret(password, await this.hashPassword(password));
+                const dummyHash = await this.getDummyHash();
+                await verifySecret(password, dummyHash);
                 return err(new Error('Invalid credentials'));
             }
 
@@ -107,16 +117,16 @@ export class SmtpCredentialsRepository {
             if (!row) {
                 return err(new Error('Invalid credentials'));
             }
-            const isActive = row.is_active as boolean;
-
-            if (!isActive) {
-                return err(new Error('Credentials are disabled'));
-            }
 
             const storedHash = row.password_hash as string;
             const hashMatch = await verifySecret(password, storedHash);
             if (!hashMatch) {
                 return err(new Error('Invalid credentials'));
+            }
+
+            const isActive = row.is_active as boolean;
+            if (!isActive) {
+                return err(new Error('Credentials are disabled'));
             }
 
             return ok({

@@ -13,6 +13,14 @@ export const metadata: Metadata = {
   openGraph: {
     title: 'Compliance-as-Code - ApexMail',
     description: 'The first email API that keeps you out of court.',
+    type: 'website',
+    images: ['/og-image.png'],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Compliance-as-Code - ApexMail',
+    description: 'The first email API that keeps you out of court.',
+    images: ['/og-image.png'],
   },
 };
 

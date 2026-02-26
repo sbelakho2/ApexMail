@@ -4,6 +4,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
+use tracing::warn;
 
 use super::types::EmailJob;
 use crate::common::TrackingConfig;
@@ -30,9 +31,19 @@ pub struct TrackingPayload {
 }
 
 /// Regex for matching href attributes in HTML.
-static HREF_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"href\s*=\s*["']([^"']+)["']"#).expect("Invalid href regex")
+static HREF_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    compile_regex(r#"href\s*=\s*["']([^"']+)["']"#)
 });
+
+fn compile_regex(pattern: &str) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(e) => {
+            warn!(pattern = %pattern, error = %e, "Invalid regex pattern; disabling matcher");
+            None
+        }
+    }
+}
 
 /// Hash a tenant ID for privacy-preserving tracking.
 /// The server maintains a mapping of hashes to tenant IDs.
@@ -114,7 +125,11 @@ pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -
 
 /// Rewrite links in HTML content for click tracking.
 pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> String {
-    HREF_REGEX
+    let Some(href_regex) = HREF_REGEX.as_ref() else {
+        return html.to_string();
+    };
+
+    href_regex
         .replace_all(html, |caps: &regex::Captures| {
             let original_url = caps.get(1).map(|m| m.as_str()).unwrap_or("");
 

@@ -5,7 +5,45 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
 import { z } from 'zod';
+import type { PlanFeatures } from '../services/plans.js';
 import type { BillingEnv, BillingContext } from '../app.js';
+
+const PLAN_FEATURE_KEYS = [
+  'dedicatedIp',
+  'dedicatedIpCount',
+  'maxSendingDomains',
+  'ssoEnabled',
+  'auditLogs',
+  'apiAccess',
+  'webhooksEnabled',
+  'inboundEmail',
+  'advancedAnalytics',
+  'sendTimeOptimization',
+  'abTesting',
+  'timeTravelDebugging',
+  'dataExport',
+  'customTrackingDomain',
+  'customTemplates',
+  'templateApprovalWorkflow',
+  'whiteLabel',
+  'poweredByFooter',
+  'customRetention',
+  'maxRetentionDays',
+  'maxTeamMembers',
+  'subaccounts',
+  'maxSubaccounts',
+  'supportLevel',
+  'dedicatedCsm',
+  'priorityOnboarding',
+  'byoip',
+  'slaGuarantee',
+  'slaCreditPercentage',
+  'hipaaCompliance',
+  'soc2Compliance',
+  'privateCloud',
+] as const satisfies readonly (keyof PlanFeatures)[];
+
+const featureParamSchema = z.enum(PLAN_FEATURE_KEYS);
 
 export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
@@ -62,7 +100,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Check feature access
   router.get('/features/:feature', async (c) => {
     const tenantId = c.get('tenantId');
-    const feature = c.req.param('feature') as keyof import('../services/plans.js').PlanFeatures;
+    const feature = featureParamSchema.parse(c.req.param('feature'));
 
     const result = await ctx.plans.hasFeature(tenantId, feature);
 
@@ -177,7 +215,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
       priceMonthly: parsed.priceMonthly,
       priceYearly: parsed.priceYearly,
       emailLimit: parsed.limits.emailsPerMonth,
-      apiCallLimit: parsed.limits.apiCallsPerMinute * 60, // Convert per minute to per hour
+      apiCallLimit: parsed.limits.apiCallsPerMinute,
       features: parsed.features as unknown as import('../services/plans.js').PlanFeatures,
       stripePriceIdMonthly: parsed.stripePriceIdMonthly,
       stripePriceIdYearly: parsed.stripePriceIdYearly,
@@ -234,7 +272,7 @@ export function plansRoutes(ctx: BillingContext): Hono<BillingEnv> {
       priceMonthly: parsed.priceMonthly ?? existing.priceMonthly,
       priceYearly: parsed.priceYearly ?? existing.priceYearly,
       emailLimit: parsed.limits?.emailsPerMonth ?? existing.emailLimit,
-      apiCallLimit: parsed.limits?.apiCallsPerMinute ? parsed.limits.apiCallsPerMinute * 60 : existing.apiCallLimit,
+      apiCallLimit: parsed.limits?.apiCallsPerMinute ?? existing.apiCallLimit,
       features: (parsed.features ?? existing.features) as import('../services/plans.js').PlanFeatures,
       stripePriceIdMonthly: parsed.stripePriceIdMonthly ?? existing.stripePriceIdMonthly ?? undefined,
       stripePriceIdYearly: parsed.stripePriceIdYearly ?? existing.stripePriceIdYearly ?? undefined,

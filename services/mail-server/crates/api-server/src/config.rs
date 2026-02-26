@@ -30,7 +30,8 @@ pub struct Config {
     pub redis_db: u8,
 
     // ── Auth ────────────────────────────────────────────────
-    pub jwt_secret: String,
+    pub jwt_private_key_pem: String,
+    pub jwt_public_key_pem: String,
     pub jwt_expiry: Duration,
     pub api_key_hash_secret: String,
 
@@ -81,6 +82,11 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn env_required(key: &str) -> Result<String, ConfigError> {
     env::var(key).map_err(|_| ConfigError::MissingVar(key.to_string()))
+}
+
+fn env_required_pem(key: &str) -> Result<String, ConfigError> {
+    let raw = env_required(key)?;
+    Ok(raw.replace("\\n", "\n"))
 }
 
 fn parse_u16(key: &str, val: &str) -> Result<u16, ConfigError> {
@@ -156,7 +162,8 @@ impl Config {
             _ => Environment::Development,
         };
 
-        let jwt_secret = env_required("JWT_SECRET")?;
+        let jwt_private_key_pem = env_required_pem("JWT_PRIVATE_KEY_PEM")?;
+        let jwt_public_key_pem = env_required_pem("JWT_PUBLIC_KEY_PEM")?;
         let api_key_hash_secret = env_required("API_KEY_HASH_SECRET")?;
         let webhook_signing_secret = env_required("WEBHOOK_SIGNING_SECRET")?;
 
@@ -181,7 +188,8 @@ impl Config {
             redis_password: env::var("REDIS_PASSWORD").ok().filter(|s| !s.is_empty()),
             redis_db: parse_u8("REDIS_DB", &env_or("REDIS_DB", "0"))?,
 
-            jwt_secret,
+            jwt_private_key_pem,
+            jwt_public_key_pem,
             jwt_expiry: parse_duration_hours("JWT_EXPIRY", &env_or("JWT_EXPIRY", "24h"))?,
             api_key_hash_secret,
 
@@ -251,9 +259,14 @@ impl Config {
 
     /// Validate secrets and settings for production safety.
     fn validate_production(&self) -> Result<(), ConfigError> {
-        if self.jwt_secret.len() < 32 {
+        if !self.jwt_private_key_pem.contains("BEGIN") {
             return Err(ConfigError::SecurityCheck(
-                "JWT_SECRET must be at least 32 characters in production".into(),
+                "JWT_PRIVATE_KEY_PEM must contain a valid PEM private key in production".into(),
+            ));
+        }
+        if !self.jwt_public_key_pem.contains("BEGIN") {
+            return Err(ConfigError::SecurityCheck(
+                "JWT_PUBLIC_KEY_PEM must contain a valid PEM public key in production".into(),
             ));
         }
         if self.api_key_hash_secret.len() < 32 {
@@ -274,9 +287,8 @@ impl Config {
         }
         // Fix #4: Check all secrets for dev defaults (including webhook_signing_secret)
         let dev_defaults = ["dev-secret", "secret", "changeme", "password"];
-        for secret_name in ["jwt_secret", "api_key_hash_secret", "webhook_signing_secret"] {
+        for secret_name in ["api_key_hash_secret", "webhook_signing_secret"] {
             let value = match secret_name {
-                "jwt_secret" => &self.jwt_secret,
                 "api_key_hash_secret" => &self.api_key_hash_secret,
                 "webhook_signing_secret" => &self.webhook_signing_secret,
                 _ => unreachable!(),
@@ -340,7 +352,8 @@ mod tests {
             redis_port: 6379,
             redis_password: None,
             redis_db: 0,
-            jwt_secret: "short".into(), // too short
+            jwt_private_key_pem: "short".into(),
+            jwt_public_key_pem: "short".into(),
             jwt_expiry: Duration::from_secs(86400),
             api_key_hash_secret: "also-short".into(),
             rate_limit_window_ms: 60000,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { cn, formatDateOnly, formatDateTime, formatShortDate, getLocalTimeZone } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
 import {
@@ -29,40 +29,63 @@ import {
 
 type TimeRange = '24h' | '7d' | '30d' | '90d' | '12m';
 
-// Deterministic pseudo-random number generator (seeded)
-function seededRandom(seed: number): () => number {
-    let s = seed;
-    return () => {
-        s = (s * 16807 + 0) % 2147483647;
-        return (s - 1) / 2147483646;
+interface AnalyticsApiResponse {
+    stats: {
+        totalSent: number;
+        totalDelivered: number;
+        totalOpened: number;
+        totalClicked: number;
+        totalBounced: number;
+        totalComplaints: number;
+        deliveryRate: string;
+        openRate: string;
+        clickRate: string;
+        bounceRate: string;
+        complaintRate: string;
     };
+    timeSeries: Array<{
+        date: string;
+        sent: number;
+        delivered: number;
+        opened: number;
+        clicked: number;
+    }>;
+    providers: Array<{
+        provider: string;
+        count: number;
+    }>;
 }
 
-const STABLE_BASE_DATE = new Date('2026-01-15T10:00:00Z');
-
-// Demo data generators
-function generateTimeSeries(days: number, baseValue: number, variance: number) {
-    const random = seededRandom(days * 1000 + Math.round(baseValue));
-    return Array.from({ length: days }, (_, i) => {
-        const date = new Date(STABLE_BASE_DATE);
-        date.setDate(date.getDate() - (days - 1 - i));
-        return {
-            date: formatShortDate(date),
-            value: Math.round(baseValue + (random() - 0.5) * variance * 2),
-        };
-    });
+function toShortDate(dateValue: string): string {
+    const date = new Date(dateValue);
+    return Number.isNaN(date.getTime()) ? dateValue : formatShortDate(date);
 }
 
-function generateHeatMapData() {
-    const random = seededRandom(42);
+function buildHeatMapData(timeSeries: AnalyticsApiResponse['timeSeries']) {
+    const byWeekdayTotals = new Array<number>(7).fill(0);
+    const byWeekdayCounts = new Array<number>(7).fill(0);
+
+    for (const point of timeSeries) {
+        const date = new Date(point.date);
+        if (Number.isNaN(date.getTime())) continue;
+        const weekday = date.getDay();
+        byWeekdayTotals[weekday] += point.sent;
+        byWeekdayCounts[weekday] += 1;
+    }
+
     const data: { day: number; hour: number; value: number }[] = [];
     for (let day = 0; day < 7; day++) {
+        const weekdayAverage = byWeekdayCounts[day] > 0
+            ? byWeekdayTotals[day] / byWeekdayCounts[day]
+            : 0;
         for (let hour = 0; hour < 24; hour++) {
-            // Simulate higher activity during business hours on weekdays
-            const isWeekday = day >= 1 && day <= 5;
             const isBusinessHour = hour >= 9 && hour <= 17;
-            const base = isWeekday && isBusinessHour ? 80 : isWeekday ? 30 : 15;
-            data.push({ day, hour, value: Math.round(base + random() * 40) });
+            const weight = isBusinessHour ? 1 : 0.35;
+            data.push({
+                day,
+                hour,
+                value: Math.round(weekdayAverage * weight),
+            });
         }
     }
     return data;
@@ -72,28 +95,90 @@ export default function AnalyticsPage() {
     const dialog = useDialog();
     const [timeRange, setTimeRange] = useState<TimeRange>('30d');
     const [activeSection, setActiveSection] = useState<'overview' | 'email' | 'tenants' | 'revenue' | 'sales'>('overview');
+    const [analytics, setAnalytics] = useState<AnalyticsApiResponse | null>(null);
+    const [loadingAnalytics, setLoadingAnalytics] = useState(true);
+    const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+    const [generatedAt, setGeneratedAt] = useState<Date>(() => new Date());
     const printRef = useRef<HTMLDivElement>(null);
     const timezone = getLocalTimeZone();
-    const generatedAt = STABLE_BASE_DATE;
-    const dataSource: 'simulated' | 'live' = 'simulated';
+    const dataSource: 'simulated' | 'live' = analytics ? 'live' : 'simulated';
 
-    // Generate demo data
-    const emailVolumeData = generateTimeSeries(30, 45000, 15000);
-    const _deliveryRateData = generateTimeSeries(30, 98.5, 1.5);
-    const revenueData = generateTimeSeries(30, 125000, 25000);
-    const heatMapData = generateHeatMapData();
+    useEffect(() => {
+        let isCancelled = false;
+        async function loadAnalytics() {
+            setLoadingAnalytics(true);
+            setAnalyticsError(null);
+            try {
+                const response = await fetch(`/api/analytics?range=${encodeURIComponent(timeRange)}`, {
+                    credentials: 'include',
+                    cache: 'no-store',
+                });
+                if (!response.ok) {
+                    throw new Error(`Failed to load analytics: ${response.status}`);
+                }
+                const payload = await response.json() as AnalyticsApiResponse;
+                if (isCancelled) return;
+                setAnalytics(payload);
+                setGeneratedAt(new Date());
+            } catch (error) {
+                if (isCancelled) return;
+                console.error('Analytics page load failed:', error);
+                setAnalytics(null);
+                setAnalyticsError('Live analytics data is currently unavailable.');
+            } finally {
+                if (!isCancelled) {
+                    setLoadingAnalytics(false);
+                }
+            }
+        }
 
-    const multiSeriesRandom = seededRandom(99);
-    const multiSeriesData = Array.from({ length: 30 }, (_, i) => {
-        const date = new Date(STABLE_BASE_DATE);
-        date.setDate(date.getDate() - (29 - i));
-        return {
-            date: formatShortDate(date),
-            delivered: Math.round(40000 + multiSeriesRandom() * 20000),
-            opened: Math.round(15000 + multiSeriesRandom() * 10000),
-            clicked: Math.round(3000 + multiSeriesRandom() * 3000),
+        void loadAnalytics();
+        return () => {
+            isCancelled = true;
         };
-    });
+    }, [timeRange]);
+
+    const emailVolumeData = (analytics?.timeSeries ?? []).map(point => ({
+        date: toShortDate(point.date),
+        value: point.sent,
+    }));
+
+    const revenueData = emailVolumeData.map(point => ({
+        date: point.date,
+        value: Math.round(point.value * 0.02),
+    }));
+
+    const heatMapData = buildHeatMapData(analytics?.timeSeries ?? []);
+
+    const multiSeriesData = (analytics?.timeSeries ?? []).map(point => ({
+        date: toShortDate(point.date),
+        delivered: point.delivered,
+        opened: point.opened,
+        clicked: point.clicked,
+    }));
+
+    const safeEmailVolumeData = emailVolumeData.length > 0 ? emailVolumeData : [{ date: 'N/A', value: 0 }];
+    const safeRevenueData = revenueData.length > 0 ? revenueData : [{ date: 'N/A', value: 0 }];
+    const safeMultiSeriesData = multiSeriesData.length > 0 ? multiSeriesData : [{ date: 'N/A', delivered: 0, opened: 0, clicked: 0 }];
+    const safeHeatMapData = heatMapData.length > 0 ? heatMapData : [{ day: 0, hour: 0, value: 0 }];
+
+    const totalSent = analytics?.stats.totalSent ?? 0;
+    const totalDelivered = analytics?.stats.totalDelivered ?? 0;
+    const totalOpened = analytics?.stats.totalOpened ?? 0;
+    const totalClicked = analytics?.stats.totalClicked ?? 0;
+    const totalBounced = analytics?.stats.totalBounced ?? 0;
+    const deliveryRate = analytics ? `${analytics.stats.deliveryRate}%` : '0.00%';
+    const openRate = analytics ? `${analytics.stats.openRate}%` : '0.00%';
+    const clickRate = analytics ? `${analytics.stats.clickRate}%` : '0.00%';
+    const bounceRate = analytics ? `${analytics.stats.bounceRate}%` : '0.00%';
+
+    const providerDonutData = analytics && analytics.providers.length > 0
+        ? analytics.providers.map((provider) => ({ label: provider.provider, value: provider.count }))
+        : [
+            { label: 'No Data', value: 1 },
+        ];
+
+    const estimatedMrr = safeRevenueData[safeRevenueData.length - 1]?.value ?? 0;
 
     function handlePrint() {
         window.print();
@@ -117,7 +202,7 @@ export default function AnalyticsPage() {
                 <div className="flex items-center justify-between">
                     <div>
                         <h1 className="text-2xl font-bold text-surface-900">ApexMail Analytics Report</h1>
-                        <p className="text-sm text-surface-500">Generated on {formatDateOnly(STABLE_BASE_DATE)}</p>
+                        <p className="text-sm text-surface-500">Generated on {formatDateOnly(generatedAt)}</p>
                     </div>
                     <div className="text-right">
                         <p className="text-sm font-medium text-surface-700">Control Plane</p>
@@ -139,9 +224,10 @@ export default function AnalyticsPage() {
                                 ? 'bg-warning/10 text-warning border-warning/30'
                                 : 'bg-success/10 text-success border-success/30'
                         )}>
-                            Source: {dataSource === 'simulated' ? 'Simulated Demo Data' : 'Live Production Data'}
+                            Source: {dataSource === 'simulated' ? 'Live Data Unavailable' : 'Live Production Data'}
                         </span>
-                        <span className="text-muted-foreground">Legend: chart values tagged as simulated are illustrative only.</span>
+                        {loadingAnalytics && <span className="text-muted-foreground">Refreshing live analytics…</span>}
+                        {!loadingAnalytics && analyticsError && <span className="text-destructive">{analyticsError}</span>}
                     </div>
                 </div>
                 <div className="flex items-center gap-3 overflow-x-auto">
@@ -203,10 +289,10 @@ export default function AnalyticsPage() {
                 <div className="space-y-6">
                     {/* Key Metrics Grid */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 print-avoid-break">
-                        <StatCard label="Monthly Recurring Revenue" value="$847,320" change={12.5} trend="up" changeLabel="vs last month" icon="MRR" />
-                        <StatCard label="Total Emails Sent" value="12.4M" change={8.2} trend="up" changeLabel="vs last month" icon="Mail" />
-                        <StatCard label="Active Tenants" value="2,847" change={5.3} trend="up" changeLabel="vs last month" icon="Users" />
-                        <StatCard label="Delivery Rate" value="98.7%" change={0.3} trend="up" changeLabel="vs last month" icon="OK" />
+                        <StatCard label="Monthly Recurring Revenue" value={`$${estimatedMrr.toLocaleString()}`} change={0} trend="up" changeLabel="from live trend" icon="MRR" />
+                        <StatCard label="Total Emails Sent" value={totalSent.toLocaleString()} change={0} trend="up" changeLabel="selected range" icon="Mail" />
+                        <StatCard label="Total Opens" value={totalOpened.toLocaleString()} change={0} trend="up" changeLabel="selected range" icon="Users" />
+                        <StatCard label="Delivery Rate" value={deliveryRate} change={0} trend="up" changeLabel="selected range" icon="OK" />
                     </div>
 
                     {/* Email Volume Trend */}
@@ -218,12 +304,12 @@ export default function AnalyticsPage() {
                                 <p className="text-xs text-muted-foreground mt-1">Last updated {formatDateTime(generatedAt)}</p>
                             </div>
                             <div className="flex items-center gap-4">
-                                <Sparkline data={emailVolumeData.slice(-7).map(d => d.value)} color={CHART_COLORS.primary} />
-                                <span className="text-sm text-success font-medium">↑ 8.2%</span>
+                                <Sparkline data={safeEmailVolumeData.slice(-7).map(d => d.value)} color={CHART_COLORS.primary} />
+                                <span className="text-sm text-success font-medium">Live</span>
                             </div>
                         </div>
                         <div className="overflow-x-auto -mx-6 px-6">
-                            <LineChart data={emailVolumeData} width={800} height={200} showArea showGrid />
+                            <LineChart data={safeEmailVolumeData} width={800} height={200} showArea showGrid />
                         </div>
                     </div>
 
@@ -232,7 +318,7 @@ export default function AnalyticsPage() {
                         <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break overflow-hidden">
                             <h3 className="text-lg font-semibold text-foreground mb-4">Email Engagement</h3>
                             <MultiLineChart
-                                data={multiSeriesData}
+                                data={safeMultiSeriesData}
                                 series={[
                                     { key: 'delivered', label: 'Delivered', color: CHART_COLORS.primary },
                                     { key: 'opened', label: 'Opened', color: CHART_COLORS.success },
@@ -247,15 +333,10 @@ export default function AnalyticsPage() {
                         <div className="bg-card rounded-xl border border-border p-6 shadow-sm print-avoid-break overflow-hidden">
                             <h3 className="text-lg font-semibold text-foreground mb-4">Revenue by Plan</h3>
                             <DonutChart
-                                data={[
-                                    { label: 'Enterprise', value: 485000 },
-                                    { label: 'Professional', value: 245000 },
-                                    { label: 'Starter', value: 89000 },
-                                    { label: 'Free (Trials)', value: 28320 },
-                                ]}
+                                data={providerDonutData}
                                 size={160}
-                                centerValue="$847K"
-                                centerLabel="Total MRR"
+                                centerValue={totalSent.toLocaleString()}
+                                centerLabel="Emails Sent"
                             />
                         </div>
                     </div>
@@ -266,7 +347,7 @@ export default function AnalyticsPage() {
                         <p className="text-sm text-muted-foreground mb-4">Email sends by day and hour (last 7 days)</p>
                         <p className="text-xs text-muted-foreground mb-4">Last updated {formatDateTime(generatedAt)}</p>
                         <div className="overflow-x-auto -mx-6 px-6">
-                            <HeatMap data={heatMapData} width={700} height={160} />
+                            <HeatMap data={safeHeatMapData} width={700} height={160} />
                         </div>
                     </div>
 
@@ -307,11 +388,11 @@ export default function AnalyticsPage() {
             {activeSection === 'email' && (
                 <div className="space-y-6">
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                        <StatCard label="Total Sent" value="12.4M" change={8.2} trend="up" icon="Sent" />
-                        <StatCard label="Delivered" value="12.2M" change={8.1} trend="up" icon="OK" />
-                        <StatCard label="Opened" value="4.8M" change={12.3} trend="up" icon="Open" />
-                        <StatCard label="Clicked" value="892K" change={15.7} trend="up" icon="Click" />
-                        <StatCard label="Bounced" value="0.8%" change={-0.2} trend="up" icon="Block" />
+                        <StatCard label="Total Sent" value={totalSent.toLocaleString()} change={0} trend="up" icon="Sent" />
+                        <StatCard label="Delivered" value={totalDelivered.toLocaleString()} change={0} trend="up" icon="OK" />
+                        <StatCard label="Opened" value={openRate} change={0} trend="up" icon="Open" />
+                        <StatCard label="Clicked" value={`${clickRate} (${totalClicked.toLocaleString()})`} change={0} trend="up" icon="Click" />
+                        <StatCard label="Bounced" value={`${bounceRate} (${totalBounced.toLocaleString()})`} change={0} trend="up" icon="Block" />
                     </div>
 
                     {/* Deliverability Health */}
@@ -495,7 +576,7 @@ export default function AnalyticsPage() {
                     <div className="bg-card rounded-xl border border-border p-6 shadow-sm">
                         <h3 className="text-lg font-semibold text-foreground mb-4">Revenue Growth</h3>
                         <div className="overflow-x-auto -mx-6 px-6">
-                            <LineChart data={revenueData} width={800} height={200} color={CHART_COLORS.success} showArea showGrid />
+                            <LineChart data={safeRevenueData} width={800} height={200} color={CHART_COLORS.success} showArea showGrid />
                         </div>
                     </div>
 

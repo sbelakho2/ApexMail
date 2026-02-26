@@ -11,17 +11,18 @@
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 // ─── Pattern Database ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 struct PatternEntry {
-    pattern: &'static str,
-    category: &'static str,
-    label: &'static str,
+    pattern: String,
+    category: String,
+    label: String,
 }
 
-const PATTERNS: &[PatternEntry] = &[
+const BUILTIN_PATTERNS: &[(&str, &str, &str)] = &[
     // Search engine bots
     PatternEntry { pattern: "googlebot", category: "search_engine", label: "bot:google" },
     PatternEntry { pattern: "google-inspectiontool", category: "search_engine", label: "bot:google" },
@@ -94,17 +95,58 @@ const PATTERNS: &[PatternEntry] = &[
     PatternEntry { pattern: "crawler", category: "generic", label: "generic:crawler" },
 ];
 
-static AUTOMATON: OnceLock<AhoCorasick> = OnceLock::new();
+struct PatternStore {
+    patterns: Vec<PatternEntry>,
+    automaton: AhoCorasick,
+}
 
-fn get_automaton() -> &'static AhoCorasick {
-    AUTOMATON.get_or_init(|| {
-        let patterns: Vec<&str> = PATTERNS.iter().map(|p| p.pattern).collect();
-        AhoCorasickBuilder::new()
+impl PatternStore {
+    fn new(patterns: Vec<PatternEntry>) -> Result<Self> {
+        let sources: Vec<&str> = patterns.iter().map(|p| p.pattern.as_str()).collect();
+        let automaton = AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostLongest)
-            .build(&patterns)
-            .expect("automaton must build")
+            .build(&sources)
+            .map_err(|err| Error::from_reason(format!("Failed to build automaton: {err}")))?;
+        Ok(Self { patterns, automaton })
+    }
+}
+
+static PATTERN_STORE: OnceLock<RwLock<PatternStore>> = OnceLock::new();
+
+fn load_builtin_patterns() -> Vec<PatternEntry> {
+    BUILTIN_PATTERNS
+        .iter()
+        .map(|(pattern, category, label)| PatternEntry {
+            pattern: (*pattern).to_string(),
+            category: (*category).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+fn get_store() -> &'static RwLock<PatternStore> {
+    PATTERN_STORE.get_or_init(|| {
+        let store = PatternStore::new(load_builtin_patterns())
+            .unwrap_or_else(|_| PatternStore {
+                patterns: Vec::new(),
+                automaton: AhoCorasickBuilder::new()
+                    .ascii_case_insensitive(true)
+                    .match_kind(MatchKind::LeftmostLongest)
+                    .build(&[])
+                    .expect("automaton must build"),
+            });
+        RwLock::new(store)
     })
+}
+
+fn rebuild_store(patterns: Vec<PatternEntry>) -> Result<()> {
+    let store = PatternStore::new(patterns)?;
+    let Ok(mut guard) = get_store().write() else {
+        return Err(Error::from_reason("Pattern store lock poisoned"));
+    };
+    *guard = store;
+    Ok(())
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -127,6 +169,13 @@ pub struct BotMatch {
 }
 
 #[napi(object)]
+pub struct BotPatternInput {
+    pub pattern: String,
+    pub category: String,
+    pub label: String,
+}
+
+#[napi(object)]
 pub struct BatchBotResult {
     pub results: Vec<BotDetectionResult>,
     pub bot_count: u32,
@@ -138,19 +187,31 @@ pub struct BatchBotResult {
 /// Detect whether a user-agent string is from a bot.
 #[napi]
 pub fn detect_bot(user_agent: String) -> BotDetectionResult {
-    let automaton = get_automaton();
+    let store_guard = match get_store().read() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return BotDetectionResult {
+                is_bot: false,
+                user_agent,
+                matches: Vec::new(),
+                confidence: 0.0,
+                category: None,
+            };
+        }
+    };
+
     let ua_lower = user_agent.to_lowercase();
 
     let mut matches = Vec::new();
 
-    for mat in automaton.find_iter(&ua_lower) {
+    for mat in store_guard.automaton.find_iter(&ua_lower) {
         let idx = mat.pattern().as_usize();
-        if idx < PATTERNS.len() {
-            let entry = &PATTERNS[idx];
+        if idx < store_guard.patterns.len() {
+            let entry = &store_guard.patterns[idx];
             matches.push(BotMatch {
-                pattern: entry.pattern.to_string(),
-                label: entry.label.to_string(),
-                category: entry.category.to_string(),
+                pattern: entry.pattern.clone(),
+                label: entry.label.clone(),
+                category: entry.category.clone(),
                 position: mat.start() as u32,
             });
         }
@@ -198,18 +259,24 @@ pub fn detect_bots_batch(user_agents: Vec<String>) -> BatchBotResult {
 #[napi]
 pub fn is_known_bot_pattern(pattern: String) -> bool {
     let p = pattern.to_lowercase();
-    PATTERNS.iter().any(|entry| p.contains(entry.pattern))
+    let Ok(store) = get_store().read() else {
+        return false;
+    };
+    store.patterns.iter().any(|entry| p.contains(&entry.pattern))
 }
 
 /// Get all known bot patterns grouped by category.
 #[napi]
 pub fn get_bot_patterns() -> std::collections::HashMap<String, Vec<String>> {
     let mut categories: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for entry in PATTERNS {
+    let Ok(store) = get_store().read() else {
+        return categories;
+    };
+    for entry in store.patterns.iter() {
         categories
-            .entry(entry.category.to_string())
+            .entry(entry.category.clone())
             .or_default()
-            .push(entry.pattern.to_string());
+            .push(entry.pattern.clone());
     }
     categories
 }
@@ -217,15 +284,57 @@ pub fn get_bot_patterns() -> std::collections::HashMap<String, Vec<String>> {
 /// Get the total number of known patterns.
 #[napi]
 pub fn pattern_count() -> u32 {
-    PATTERNS.len() as u32
+    let Ok(store) = get_store().read() else {
+        return 0;
+    };
+    store.patterns.len() as u32
 }
 
 /// Get categories and their pattern counts.
 #[napi]
 pub fn get_categories() -> String {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for entry in PATTERNS {
-        *counts.entry(entry.category).or_default() += 1;
+    let Ok(store) = get_store().read() else {
+        return "{}".to_string();
+    };
+    for entry in store.patterns.iter() {
+        *counts.entry(entry.category.as_str()).or_default() += 1;
     }
     serde_json::to_string(&counts).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Pre-warm the automaton to avoid first-call latency spikes.
+#[napi]
+pub fn warmup() -> bool {
+    let _ = get_store();
+    true
+}
+
+/// Replace or extend the pattern database at runtime.
+#[napi]
+pub fn set_custom_patterns(patterns: Vec<BotPatternInput>, replace: bool) -> Result<u32> {
+    let mut merged = if replace {
+        Vec::new()
+    } else {
+        load_builtin_patterns()
+    };
+
+    for entry in patterns {
+        if entry.pattern.trim().is_empty() {
+            continue;
+        }
+        merged.push(PatternEntry {
+            pattern: entry.pattern.to_lowercase(),
+            category: entry.category,
+            label: entry.label,
+        });
+    }
+
+    rebuild_store(merged.clone())?;
+    Ok(merged.len() as u32)
+}
+
+#[napi::module_init]
+fn module_init() {
+    let _ = get_store();
 }

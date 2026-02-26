@@ -5,6 +5,13 @@
 
 import { Result } from '@apexmail/lib';
 import type { DatabasePool } from '@apexmail/db';
+import { randomBytes } from 'node:crypto';
+import { COMPANY_INFO } from '../config.js';
+
+// BUG-004 FIX: Helper for generating random hex strings
+function generateRandomHex(bytes: number): string {
+  return randomBytes(bytes).toString('hex');
+}
 
 export interface InvoiceLineItem {
   description: string;
@@ -95,22 +102,17 @@ export class InvoiceService {
   constructor(private readonly db: DatabasePool) {}
 
   /**
-   * Generate invoice number (EE format: YYYY-NNNNNN)
-   * Uses UTC year to ensure consistency across timezones
+   * Generate invoice number with tenant isolation
+   * BUG-004 FIX: Uses tenant ID prefix + random component instead of global sequence
+   * Format: YYYY-XXXX-RRRRRR (year-tenantPrefix-random)
    */
-  async generateInvoiceNumber(): Promise<Result<string, Error>> {
+  async generateInvoiceNumber(tenantId: string): Promise<Result<string, Error>> {
     const year = new Date().getUTCFullYear();
-    
-    const result = await this.db.query<{ next_val: string }>(
-      `SELECT nextval('invoice_number_seq')::text as next_val`
-    );
-
-    if (!result.ok) return Result.err(result.error);
-
-    // Safe null handling for sequence value
-    const rawSequence = result.value.rows[0]?.next_val;
-    const sequence = (rawSequence ?? '').padStart(6, '0') || '000001';
-    return Result.ok(`${year}-${sequence}`);
+    // Use first 4 chars of tenant UUID for prefix (tenant-isolated)
+    const tenantPrefix = tenantId.replace(/-/g, '').slice(0, 4).toUpperCase();
+    // Use 6 random hex chars for uniqueness
+    const randomPart = generateRandomHex(3).toUpperCase();
+    return Result.ok(`${year}-${tenantPrefix}-${randomPart}`);
   }
 
   /**
@@ -220,26 +222,43 @@ export class InvoiceService {
     const numberResult = await this.generateInvoiceNumber();
     if (!numberResult.ok) return Result.err(numberResult.error);
 
-    // Calculate line items with VAT
-    const lineItems: InvoiceLineItem[] = input.lineItems.map(item => {
-      const amount = item.quantity * item.unitPrice;
-      const { vatRate, vatAmount } = this.calculateVat(
-        amount,
-        billingAddress.country,
-        billingAddress.vatNumber
-      );
+    // Calculate VAT on subtotal to avoid per-line rounding drift, then allocate VAT across lines
+    const baseLineItems = input.lineItems.map(item => ({
+      description: item.description,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      amount: item.quantity * item.unitPrice,
+    }));
+
+    const subtotal = baseLineItems.reduce((sum, item) => sum + item.amount, 0);
+    const { vatRate, vatAmount: vatTotal } = this.calculateVat(
+      subtotal,
+      billingAddress.country,
+      billingAddress.vatNumber
+    );
+
+    let allocatedVat = 0;
+    const lineItems: InvoiceLineItem[] = baseLineItems.map((item, index) => {
+      let vatAmount = 0;
+      if (vatTotal > 0 && subtotal > 0) {
+        if (index === baseLineItems.length - 1) {
+          vatAmount = vatTotal - allocatedVat;
+        } else {
+          vatAmount = Math.floor((vatTotal * item.amount) / subtotal);
+          allocatedVat += vatAmount;
+        }
+      }
+
       return {
         description: item.description,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
-        amount,
+        amount: item.amount,
         vatRate,
         vatAmount,
       };
     });
 
-    const subtotal = lineItems.reduce((sum, item) => sum + item.amount, 0);
-    const vatTotal = lineItems.reduce((sum, item) => sum + item.vatAmount, 0);
     const total = subtotal + vatTotal;
 
     const now = new Date();
@@ -315,6 +334,16 @@ export class InvoiceService {
    * Generate PDF content for invoice
    */
   generateInvoiceHtml(invoice: Invoice): string {
+    const esc = (value: unknown): string => {
+      const input = value == null ? '' : String(value);
+      return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    };
+
     const formatCurrency = (cents: number): string => 
       `€${(cents / 100).toFixed(2)}`;
 
@@ -322,6 +351,15 @@ export class InvoiceService {
       const parts = date.toISOString().split('T');
       return parts[0] ?? date.toISOString();
     };
+
+    const paymentTermsDays = Math.max(
+      0,
+      Math.ceil((invoice.dueAt.getTime() - invoice.issuedAt.getTime()) / (1000 * 60 * 60 * 24))
+    );
+    const vatRates = [...new Set(invoice.lineItems.map(item => item.vatRate))].sort((a, b) => a - b);
+    const vatLabel = vatRates.length <= 1
+      ? `VAT (${vatRates[0] ?? 0}%)`
+      : `VAT (Mixed: ${vatRates.map(rate => `${rate}%`).join(', ')})`;
 
     // This generates a simple HTML template that can be converted to PDF
     return `
@@ -358,7 +396,7 @@ export class InvoiceService {
       <div class="invoice-number">Invoice ${invoice.invoiceNumber}</div>
       <div>Issued: ${formatDate(invoice.issuedAt)}</div>
       <div>Due: ${formatDate(invoice.dueAt)}</div>
-      ${invoice.purchaseOrderNumber ? `<div>PO: ${invoice.purchaseOrderNumber}</div>` : ''}
+      ${invoice.purchaseOrderNumber ? `<div>PO: ${esc(invoice.purchaseOrderNumber)}</div>` : ''}
     </div>
   </div>
 
@@ -376,13 +414,13 @@ export class InvoiceService {
     </div>
     <div class="address">
       <h3>Bill To</h3>
-      <strong>${invoice.billingAddress.companyName}</strong><br>
-      ${invoice.billingAddress.addressLine1}<br>
-      ${invoice.billingAddress.addressLine2 ? invoice.billingAddress.addressLine2 + '<br>' : ''}
-      ${invoice.billingAddress.postalCode} ${invoice.billingAddress.city}<br>
-      ${invoice.billingAddress.state ? invoice.billingAddress.state + ', ' : ''}${invoice.billingAddress.country}<br>
-      ${invoice.billingAddress.vatNumber ? `VAT: ${invoice.billingAddress.vatNumber}<br>` : ''}
-      ${invoice.billingAddress.email}
+      <strong>${esc(invoice.billingAddress.companyName)}</strong><br>
+      ${esc(invoice.billingAddress.addressLine1)}<br>
+      ${invoice.billingAddress.addressLine2 ? `${esc(invoice.billingAddress.addressLine2)}<br>` : ''}
+      ${esc(invoice.billingAddress.postalCode)} ${esc(invoice.billingAddress.city)}<br>
+      ${invoice.billingAddress.state ? `${esc(invoice.billingAddress.state)}, ` : ''}${esc(invoice.billingAddress.country)}<br>
+      ${invoice.billingAddress.vatNumber ? `VAT: ${esc(invoice.billingAddress.vatNumber)}<br>` : ''}
+      ${esc(invoice.billingAddress.email)}
     </div>
   </div>
 
@@ -399,7 +437,7 @@ export class InvoiceService {
     <tbody>
       ${invoice.lineItems.map(item => `
         <tr>
-          <td>${item.description}</td>
+          <td>${esc(item.description)}</td>
           <td>${item.quantity}</td>
           <td class="amount">${formatCurrency(item.unitPrice)}</td>
           <td class="amount">${item.vatRate}%</td>
@@ -416,7 +454,7 @@ export class InvoiceService {
         <td class="amount">${formatCurrency(invoice.subtotal)}</td>
       </tr>
       <tr>
-        <td>VAT (${invoice.lineItems[0]?.vatRate ?? 0}%)</td>
+        <td>${vatLabel}</td>
         <td class="amount">${formatCurrency(invoice.vatTotal)}</td>
       </tr>
       <tr class="total-row">
@@ -432,10 +470,10 @@ export class InvoiceService {
     </div>
   ` : ''}
 
-  ${invoice.notes ? `<div style="margin-top: 30px;"><strong>Notes:</strong> ${invoice.notes}</div>` : ''}
+  ${invoice.notes ? `<div style="margin-top: 30px;"><strong>Notes:</strong> ${esc(invoice.notes)}</div>` : ''}
 
   <div class="footer">
-    <p>Payment terms: Net 30 days. Please include invoice number in payment reference.</p>
+    <p>Payment terms: Net ${paymentTermsDays} days. Please include invoice number in payment reference.</p>
     <p>Bel Consulting OÜ (trading as ApexMail) | Reg. 16192499 | VAT: EE102951727 | IBAN: EE38 2200 2210 1234 5678 | BIC: HABAEE2X</p>
     <p>Sakala 7-2, 10141 Tallinn, Estonia</p>
     <p>Period: ${formatDate(invoice.periodStart)} to ${formatDate(invoice.periodEnd)}</p>
@@ -473,11 +511,11 @@ export class InvoiceService {
             <PostalCode>10141</PostalCode>
             <Country>EE</Country>
           </LegalAddress>
-          <PhoneNumber>+37256380927</PhoneNumber>
+            <PhoneNumber>${this.escapeXml(process.env['BILLING_COMPANY_PHONE'] ?? '+37200000000')}</PhoneNumber>
           <E-mailAddress>billing@apexmail.ee</E-mailAddress>
         </ContactData>
         <AccountInfo>
-          <AccountNumber>EE382200221012345678</AccountNumber>
+            <AccountNumber>${this.escapeXml(COMPANY_INFO.bank.iban)}</AccountNumber>
           <BIC>HABAEE2X</BIC>
           <BankName>Swedbank AS</BankName>
         </AccountInfo>
@@ -542,7 +580,7 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
       <PaymentId>${invoice.invoiceNumber}</PaymentId>
       <PaymentTotalSum>${(invoice.total / 100).toFixed(2)}</PaymentTotalSum>
       <PayerName>${this.escapeXml(invoice.billingAddress.companyName)}</PayerName>
-      <PayToAccount>EE382200221012345678</PayToAccount>
+      <PayToAccount>${this.escapeXml(COMPANY_INFO.bank.iban)}</PayToAccount>
       <PayToBIC>HABAEE2X</PayToBIC>
       <PayToName>Bel Consulting OÜ</PayToName>
     </PaymentInfo>
@@ -664,9 +702,16 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
   async listInvoices(
     tenantId: string,
     options?: { limit?: number; offset?: number }
-  ): Promise<Result<Invoice[], Error>> {
+  ): Promise<Result<{ invoices: Invoice[]; totalCount: number }, Error>> {
     const limit = options?.limit ?? 50;
     const offset = options?.offset ?? 0;
+
+    const totalCountResult = await this.db.query<{ total_count: string }>(
+      `SELECT COUNT(*)::text AS total_count FROM invoices WHERE tenant_id = $1`,
+      [tenantId]
+    );
+
+    if (!totalCountResult.ok) return Result.err(totalCountResult.error);
 
     const result = await this.db.query<{
       id: string;
@@ -705,7 +750,7 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
 
     if (!result.ok) return Result.err(result.error);
 
-    return Result.ok(result.value.rows.map(row => {
+    const invoices = result.value.rows.map(row => {
       // Safe JSON parsing to prevent crashes
       let lineItems: InvoiceLineItem[] = [];
       let billingAddress: BillingAddress = { 
@@ -747,7 +792,12 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };
-    }));
+    });
+
+    return Result.ok({
+      invoices,
+      totalCount: parseInt(totalCountResult.value.rows[0]?.total_count ?? '0', 10),
+    });
   }
 
   private escapeXml(str: string): string {

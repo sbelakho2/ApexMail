@@ -1,0 +1,29 @@
+[package]
+name = "ids-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Network-level Intrusion Detection/Prevention System: signature matching, anomaly detection, protocol analysis"
+license = "PROPRIETARY"
+
+[features]
+default = ["core"]
+full = ["core", "deep_inspection"]
+core = []
+deep_inspection = []  # Full payload reassembly and inspection
+
+[dependencies]
+tokio = { version = "1.44", features = ["full"] }
+tracing = "0.1"
+parking_lot = "0.12"
+dashmap = "6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+aho-corasick = { version = "1.1", features = ["perf-literal"] }
+sha2 = "0.10"
+hex = "0.4"
+prometheus = "0.13"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -192,9 +192,6 @@ let globalLogger: Logger | null = null;
 export function getLogger(options?: LoggerOptions): Logger {
   if (!globalLogger) {
     globalLogger = new PinoLoggerWrapper(options);
-  } else if (options) {
-    // FIX-500-379: Warn when singleton is requested with different options
-    globalLogger.warn('getLogger() called with options but singleton already exists; options ignored');
   }
   return globalLogger;
 }

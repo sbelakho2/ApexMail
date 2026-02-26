@@ -2,29 +2,36 @@
  * CSRF protection utilities
  */
 
-import * as crypto from 'crypto';
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import {
+    generateRandomBase64Url,
+    hmacSha256Base64Url,
+    constantTimeEqual,
+} from '@/lib/signatures';
 
 export const CSRF_COOKIE = 'csrf_token';
 export const CSRF_SIG_COOKIE = 'csrf_token_sig';
 
 function getCsrfSecret(): string | null {
-    return process.env.CSRF_SECRET || process.env.SESSION_SECRET || null;
+    if (process.env.CSRF_SECRET) {
+        return process.env.CSRF_SECRET;
+    }
+
+    if (process.env.NODE_ENV !== 'production' && process.env.SESSION_SECRET) {
+        return process.env.SESSION_SECRET;
+    }
+
+    return null;
 }
 
-export function createCsrfToken(secret: string): { token: string; signature: string } {
-    const token = crypto.randomBytes(32).toString('base64url');
-    const signature = crypto.createHmac('sha256', secret).update(token).digest('base64url');
+export async function createCsrfToken(secret: string): Promise<{ token: string; signature: string }> {
+    const token = generateRandomBase64Url(32);
+    const signature = await hmacSha256Base64Url(secret, token);
     return { token, signature };
 }
 
-function safeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-export function validateCsrf(request: NextRequest): { ok: boolean; response?: NextResponse } {
+export async function validateCsrf(request: NextRequest): Promise<{ ok: boolean; response?: NextResponse }> {
     const secret = getCsrfSecret();
     if (!secret) {
         return {
@@ -60,8 +67,8 @@ export function validateCsrf(request: NextRequest): { ok: boolean; response?: Ne
         };
     }
 
-    const expectedSig = crypto.createHmac('sha256', secret).update(cookieToken).digest('base64url');
-    if (!safeEqual(expectedSig, cookieSig)) {
+    const expectedSig = await hmacSha256Base64Url(secret, cookieToken);
+    if (!constantTimeEqual(expectedSig, cookieSig)) {
         return {
             ok: false,
             response: NextResponse.json(
@@ -74,7 +81,7 @@ export function validateCsrf(request: NextRequest): { ok: boolean; response?: Ne
     return { ok: true };
 }
 
-export function buildCsrfResponse(): NextResponse {
+export async function buildCsrfResponse(): Promise<NextResponse> {
     const secret = getCsrfSecret();
     if (!secret) {
         return NextResponse.json(
@@ -83,7 +90,10 @@ export function buildCsrfResponse(): NextResponse {
         );
     }
 
-    const { token, signature } = createCsrfToken(secret);
+    const { token, signature } = await createCsrfToken(secret);
+
+    // SEC-007 FIX: Add explicit domain to prevent subdomain cookie access
+    const cookieDomain = process.env.NODE_ENV === 'production' ? 'apexmail.ee' : undefined;
 
     const response = NextResponse.json({ token });
     response.cookies.set(CSRF_COOKIE, token, {
@@ -92,6 +102,7 @@ export function buildCsrfResponse(): NextResponse {
         sameSite: 'strict',
         path: '/',
         maxAge: 60 * 60 * 2,
+        domain: cookieDomain,
     });
     response.cookies.set(CSRF_SIG_COOKIE, signature, {
         httpOnly: true,
@@ -99,6 +110,7 @@ export function buildCsrfResponse(): NextResponse {
         sameSite: 'strict',
         path: '/',
         maxAge: 60 * 60 * 2,
+        domain: cookieDomain,
     });
 
     return response;

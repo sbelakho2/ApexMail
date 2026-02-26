@@ -9,6 +9,18 @@
  * - API key generation
  */
 
+/**
+ * ID usage policy:
+ * - `generateUuid()` (UUID v7) for primary keys and internal references.
+ * - `generateShortId()` / `generateReadableId()` (nanoid) for user-facing IDs.
+ * - `generateRandomUuid()` (UUID v4) only for legacy integrations.
+ */
+export const ID_USAGE_POLICY = {
+  internal: 'UUIDv7 for primary keys and internal references',
+  public: 'Nanoid-based short IDs for URLs and user-facing tokens',
+  legacy: 'UUIDv4 only when external systems require v4',
+} as const;
+
 import { v4 as uuidv4 } from 'uuid';
 import { randomBytes, createHash } from 'node:crypto';
 import { nanoid, customAlphabet } from 'nanoid';

@@ -1,0 +1,17 @@
+[package]
+name = "ato-protection"
+version = "0.1.0"
+edition.workspace = true
+description = "Account Takeover Protection — behavioral biometrics, impossible travel detection, session fingerprinting, and adaptive MFA"
+license = "MIT"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+sha2 = { workspace = true }
+hex = "0.4"
+chrono = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

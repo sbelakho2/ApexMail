@@ -41,25 +41,6 @@ export class WalletService {
    * Get wallet balance
    */
   async getBalance(tenantId: string): Promise<Result<WalletBalance, Error>> {
-    // Try cache first
-    const cachedBalance = await this.redis.get(`wallet:balance:${tenantId}`);
-    if (cachedBalance) {
-      try {
-        const cached = JSON.parse(cachedBalance);
-        return Result.ok({
-          tenantId,
-          balance: cached.balance,
-          reservedBalance: cached.reserved,
-          availableBalance: cached.balance - cached.reserved,
-          currency: 'EUR',
-          updatedAt: new Date(cached.updatedAt),
-        });
-      } catch {
-        // Invalid cache, delete and fall through to database
-        await this.redis.del(`wallet:balance:${tenantId}`);
-      }
-    }
-
     // Query database
     const result = await this.db.query<{
       tenant_id: string;
@@ -499,21 +480,51 @@ export class WalletService {
    */
   async processExpiredReservations(): Promise<Result<{ releasedCount: number }, Error>> {
     const result = await this.db.query<{
-      id: string;
       tenant_id: string;
-      amount: number;
+      released_count: string;
     }>(
-      `SELECT id, tenant_id, amount FROM wallet_reservations
-       WHERE status = 'pending' AND expires_at < NOW()`
+      `WITH expired_reservations AS (
+         SELECT id, tenant_id, amount
+         FROM wallet_reservations
+         WHERE status = 'pending' AND expires_at < NOW()
+         FOR UPDATE SKIP LOCKED
+       ),
+       released_reservations AS (
+         UPDATE wallet_reservations wr
+         SET status = 'released', released_at = NOW()
+         FROM expired_reservations er
+         WHERE wr.id = er.id
+         RETURNING er.tenant_id, er.amount
+       ),
+       released_totals AS (
+         SELECT tenant_id, COALESCE(SUM(amount), 0) AS total_amount
+         FROM released_reservations
+         GROUP BY tenant_id
+       ),
+       wallet_updates AS (
+         UPDATE wallets w
+         SET reserved = w.reserved - rt.total_amount,
+             updated_at = NOW()
+         FROM released_totals rt
+         WHERE w.tenant_id = rt.tenant_id
+         RETURNING w.tenant_id
+       )
+       SELECT wu.tenant_id, (
+         SELECT COUNT(*)::text FROM released_reservations
+       ) AS released_count
+       FROM wallet_updates wu`
     );
 
     if (!result.ok) return Result.err(result.error);
 
-    for (const row of result.value.rows) {
-      await this.releaseReservation(row.id);
+    const releasedCount = parseInt(result.value.rows[0]?.released_count ?? '0', 10);
+
+    const tenantIds = new Set(result.value.rows.map(row => row.tenant_id));
+    for (const tenantId of tenantIds) {
+      await this.redis.del(`wallet:balance:${tenantId}`);
     }
 
-    return Result.ok({ releasedCount: result.value.rows.length });
+    return Result.ok({ releasedCount });
   }
 
   private async executeTransaction(
@@ -537,7 +548,13 @@ export class WalletService {
       metadata: string;
       created_at: Date;
     }>(
-      `WITH updated_wallet AS (
+      `WITH ensure_wallet AS (
+        INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+        VALUES ($2, 0, 0, 'EUR', NOW(), NOW())
+        ON CONFLICT (tenant_id) DO NOTHING
+        RETURNING tenant_id
+      ),
+      updated_wallet AS (
         UPDATE wallets
         SET balance = balance + $1, updated_at = NOW()
         WHERE tenant_id = $2

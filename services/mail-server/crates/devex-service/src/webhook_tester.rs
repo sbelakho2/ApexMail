@@ -9,6 +9,7 @@ use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::types::{DevExError, WebhookTestResult};
+use tracing::warn;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -21,14 +22,13 @@ pub struct WebhookTester {
 
 impl WebhookTester {
     /// Create a new tester with the given signing secret.
-    pub fn new(signing_secret: String) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .expect("reqwest client"),
-            signing_secret,
-        }
+    pub fn new(signing_secret: String) -> Result<Self, DevExError> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| DevExError::WebhookError(format!("HTTP client: {e}")))?;
+
+        Ok(Self { http, signing_secret })
     }
 
     /// Build a test webhook payload for a given event type.
@@ -55,8 +55,13 @@ impl WebhookTester {
         let timestamp = Utc::now().timestamp();
         let signed_content = format!("{}.{}", timestamp, String::from_utf8_lossy(body));
 
-        let mut mac =
-            HmacSha256::new_from_slice(self.signing_secret.as_bytes()).expect("HMAC key length");
+        let mut mac = match HmacSha256::new_from_slice(self.signing_secret.as_bytes()) {
+            Ok(mac) => mac,
+            Err(e) => {
+                warn!(error = %e, "Failed to initialize webhook HMAC signer");
+                return format!("t={},v1=invalid", timestamp);
+            }
+        };
         mac.update(signed_content.as_bytes());
         let result = mac.finalize();
         let sig = hex::encode(result.into_bytes());
@@ -231,7 +236,7 @@ mod tests {
     #[test]
     fn test_sign_and_verify() {
         let secret = "whsec_test_secret_12345";
-        let tester = WebhookTester::new(secret.to_string());
+        let tester = WebhookTester::new(secret.to_string()).expect("tester init");
         let body = b"{\"type\":\"email.delivered\"}";
         let sig = tester.sign_payload(body);
 
@@ -245,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_verify_wrong_secret_fails() {
-        let tester = WebhookTester::new("correct_secret".to_string());
+        let tester = WebhookTester::new("correct_secret".to_string()).expect("tester init");
         let body = b"{}";
         let sig = tester.sign_payload(body);
 

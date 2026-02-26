@@ -34,12 +34,14 @@ class Client
 {
     public const SDK_VERSION     = '1.0.0';
     public const DEFAULT_URL     = 'https://api.apexmail.ee';
+    public const DEFAULT_MAX_RESPONSE_BYTES = 20971520;
     private const API_KEY_REGEX  = '/^am_(live|test)_[A-Za-z0-9]{16,}$/';
 
     private string $apiKey;
     private string $baseUrl;
     private int    $timeout;
     private int    $maxRetries;
+    private int    $maxResponseBytes;
 
     public Resources\Emails      $emails;
     public Resources\Domains     $domains;
@@ -50,7 +52,7 @@ class Client
 
     /**
      * @param string $apiKey  API key (starts with am_live_ or am_test_)
-     * @param array  $options Optional: ['baseUrl' => '...', 'timeout' => 30]
+    * @param array  $options Optional: ['baseUrl' => '...', 'timeout' => 30, 'maxResponseBytes' => 20971520]
      */
     public function __construct(string $apiKey, array $options = [])
     {
@@ -62,6 +64,7 @@ class Client
         $this->baseUrl = rtrim($options['baseUrl'] ?? self::DEFAULT_URL, '/');
         $this->timeout = (int) ($options['timeout'] ?? 30);
         $this->maxRetries = (int) ($options['maxRetries'] ?? 3);
+        $this->maxResponseBytes = (int) ($options['maxResponseBytes'] ?? self::DEFAULT_MAX_RESPONSE_BYTES);
 
         $this->emails       = new Resources\Emails($this);
         $this->domains      = new Resources\Domains($this);
@@ -104,13 +107,19 @@ class Client
                 $headers[] = 'X-Idempotency-Key: ' . $idempotencyKey;
             }
 
+            $responseBody = '';
+            $responseTooLarge = false;
+            $maxBytes = $this->maxResponseBytes;
+
             $ch = curl_init($url);
             curl_setopt_array($ch, [
                 CURLOPT_CUSTOMREQUEST  => strtoupper($method),
-                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_RETURNTRANSFER => false,
                 CURLOPT_HTTPHEADER     => $headers,
                 CURLOPT_TIMEOUT        => $this->timeout,
                 CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
                 CURLOPT_HEADERFUNCTION => static function ($curl, $header) use (&$retryAfter) {
                     $len = strlen($header);
                     if (stripos($header, 'Retry-After:') === 0) {
@@ -118,16 +127,28 @@ class Client
                     }
                     return $len;
                 },
+                CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$responseBody, &$responseTooLarge, $maxBytes): int {
+                    $responseBody .= $chunk;
+                    if (strlen($responseBody) > $maxBytes) {
+                        $responseTooLarge = true;
+                        return 0;
+                    }
+                    return strlen($chunk);
+                },
             ]);
 
             if ($body !== null) {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_THROW_ON_ERROR));
             }
 
-            $response   = curl_exec($ch);
+            curl_exec($ch);
             $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $curlError  = curl_error($ch);
             curl_close($ch);
+
+            if ($responseTooLarge) {
+                throw new Exceptions\NetworkException('Response body exceeds maxResponseBytes');
+            }
 
             if ($curlError) {
                 if ($attempt < $this->maxRetries) {
@@ -144,7 +165,9 @@ class Client
                 continue;
             }
 
-            $decoded = $response ? (array) json_decode((string) $response, true, 512, JSON_THROW_ON_ERROR) : [];
+            $decoded = $responseBody !== ''
+                ? (array) json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR)
+                : [];
 
             if ($statusCode >= 400) {
                 $this->throwApiError($statusCode, $decoded);
@@ -180,6 +203,79 @@ class Client
         usleep((int) ($delay * 1_000_000));
     }
 
+    public static function verifyWebhookSignature(
+        string $payload,
+        string|array|null $signatureHeader,
+        string $secret,
+        int $toleranceSeconds = 300,
+        ?int $timestamp = null,
+    ): bool {
+        if ($signatureHeader === null || $signatureHeader === '' || $secret === '') {
+            return false;
+        }
+
+        if (is_array($signatureHeader)) {
+            $signatureHeader = $signatureHeader[0] ?? null;
+        }
+        if ($signatureHeader === null || $signatureHeader === '') {
+            return false;
+        }
+
+        $parsed = self::parseSignatureHeader($signatureHeader);
+        $timestampValue = $timestamp ?? ($parsed['timestamp'] ?? null);
+        $signature = $parsed['signature'] ?? null;
+        if ($timestampValue === null || $signature === null || $signature === '') {
+            return false;
+        }
+        if (!is_numeric($timestampValue)) {
+            return false;
+        }
+
+        $timestampInt = (int) $timestampValue;
+        $now = time();
+        if (abs($now - $timestampInt) > $toleranceSeconds) {
+            return false;
+        }
+
+        $signedPayload = $timestampInt . '.' . $payload;
+        $expected = hash_hmac('sha256', $signedPayload, $secret);
+        if (strlen($expected) !== strlen($signature)) {
+            return false;
+        }
+
+        return hash_equals($expected, $signature);
+    }
+
+    private static function parseSignatureHeader(string $signatureHeader): array
+    {
+        $trimmed = trim($signatureHeader);
+        if (str_contains($trimmed, 't=') && str_contains($trimmed, 'v1=')) {
+            $parts = explode(',', $trimmed);
+            $timestamp = null;
+            $signature = null;
+            foreach ($parts as $part) {
+                $part = trim($part);
+                $segments = explode('=', $part, 2);
+                if (count($segments) !== 2) {
+                    continue;
+                }
+                [$key, $value] = $segments;
+                if ($key === 't' && $value !== '') {
+                    $timestamp = $value;
+                } elseif ($key === 'v1' && $value !== '') {
+                    $signature = $value;
+                }
+            }
+            return ['timestamp' => $timestamp, 'signature' => $signature];
+        }
+
+        if (str_starts_with($trimmed, 'sha256=')) {
+            return ['signature' => substr($trimmed, strlen('sha256='))];
+        }
+
+        return ['signature' => $trimmed];
+    }
+
     // ── Private ─────────────────────────────────────────────────────────────
 
     /** @throws ApexMailException */
@@ -190,6 +286,8 @@ class Client
 
         $exception = match (true) {
             $statusCode === 401 => new Exceptions\AuthenticationException($message, $statusCode, $code),
+            $statusCode === 403 => new Exceptions\ForbiddenException($message, $statusCode, $code),
+            $statusCode === 409 => new Exceptions\ConflictException($message, $statusCode, $code),
             $statusCode === 404 => new Exceptions\NotFoundException($message, $statusCode, $code),
             $statusCode === 422 => new Exceptions\ValidationException($message, $statusCode, $code),
             $statusCode === 429 => new Exceptions\RateLimitException($message, $statusCode, $code),

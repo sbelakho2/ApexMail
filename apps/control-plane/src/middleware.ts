@@ -74,7 +74,46 @@ const CSRF_COOKIE = 'csrf_token';
 const CSRF_SIG_COOKIE = 'csrf_token_sig';
 const E2E_BYPASS_HEADER = 'x-e2e-bypass-key';
 
+type ControlPlaneRole = 'viewer' | 'operator' | 'admin' | 'owner' | 'super_admin';
+
+function roleRank(role: ControlPlaneRole): number {
+    switch (role) {
+        case 'viewer':
+            return 1;
+        case 'operator':
+            return 2;
+        case 'admin':
+            return 3;
+        case 'owner':
+        case 'super_admin':
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+const ADMIN_MUTATION_API_PREFIXES = ['/api/tenants', '/api/secrets', '/api/features'];
+const ADMIN_PAGE_PREFIXES = ['/secrets'];
+
+function hasRequiredRole(path: string, method: string, role: ControlPlaneRole): boolean {
+    if (ADMIN_PAGE_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
+        return roleRank(role) >= roleRank('admin');
+    }
+
+    if (ADMIN_MUTATION_API_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
+        if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+            return roleRank(role) >= roleRank('admin');
+        }
+    }
+
+    return true;
+}
+
 function hasValidE2EBypass(request: NextRequest): boolean {
+    if (process.env.NODE_ENV === 'production') {
+        return false;
+    }
+
     const enabled = process.env.E2E_TEST_MODE === 'true';
     const expected = process.env.E2E_BYPASS_KEY;
     const provided = request.headers.get(E2E_BYPASS_HEADER);
@@ -84,6 +123,15 @@ function hasValidE2EBypass(request: NextRequest): boolean {
     }
 
     return _constTimeEq(expected, provided);
+}
+
+function applySecurityHeaders(response: NextResponse): NextResponse {
+    response.headers.set('X-Frame-Options', 'DENY');
+    response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+    response.headers.set('X-Control-Plane', 'authenticated');
+    response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    response.headers.set('Pragma', 'no-cache');
+    return response;
 }
 
 /**
@@ -146,7 +194,7 @@ const SESSION_DURATION_MS = 8 * 60 * 60 * 1000; // 8 hours — must match login 
  * without requiring re-authentication, while still bounding absolute session
  * lifetime via the maxAge check in validateSession.
  */
-async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid: boolean; refreshedToken?: string }> {
+async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid: boolean; role?: ControlPlaneRole; refreshedToken?: string }> {
     try {
         const [payload, signature] = sessionToken.split('.');
         if (!payload || !signature) return { valid: false };
@@ -166,6 +214,8 @@ async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid
         const maxAge = 24 * 60 * 60 * 1000;
         if (decoded.iat && Date.now() - decoded.iat > maxAge) return { valid: false };
 
+        const role = (typeof decoded.role === 'string' ? decoded.role : 'operator') as ControlPlaneRole;
+
         // G-208: Sliding refresh — if more than half the session duration has
         // elapsed since issuance, mint a fresh token.
         const halfLife = SESSION_DURATION_MS / 2;
@@ -183,7 +233,7 @@ async function validateSessionWithRefresh(sessionToken: string): Promise<{ valid
             refreshedToken = `${refreshedB64}.${refreshedSig}`;
         }
 
-        return { valid: true, refreshedToken };
+        return { valid: true, role, refreshedToken };
     } catch (err) {
         console.error('[MIDDLEWARE] validateSessionWithRefresh error:', err);
         return { valid: false };
@@ -243,8 +293,17 @@ function isIpWhitelisted(clientIp: string): boolean {
         return false;
     }
     
+    // SEC-014 FIX: Wildcard IP whitelist requires explicit ALLOW_ALL_IPS=true
+    if (IP_WHITELIST.includes('*')) {
+        if (process.env.ALLOW_ALL_IPS !== 'true') {
+            console.error('[SECURITY] Wildcard IP whitelist requires ALLOW_ALL_IPS=true env var');
+            return false;
+        }
+        return true;
+    }
+    
     // Check if IP is in whitelist (supports CIDR notation in production)
-    return IP_WHITELIST.includes(clientIp) || IP_WHITELIST.includes('*');
+    return IP_WHITELIST.includes(clientIp);
 }
 
 export async function middleware(request: NextRequest) {
@@ -261,13 +320,8 @@ export async function middleware(request: NextRequest) {
     // Test-only bypass for deterministic Chromium E2E coverage.
     // Requires explicit E2E_TEST_MODE and matching bypass secret.
     if (hasValidE2EBypass(request)) {
-        const response = NextResponse.next();
+        const response = applySecurityHeaders(NextResponse.next());
         response.headers.set('X-E2E-Bypass', '1');
-        response.headers.set('X-Frame-Options', 'DENY');
-        response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
-        response.headers.set('X-Control-Plane', 'authenticated');
-        response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-        response.headers.set('Pragma', 'no-cache');
         return response;
     }
     
@@ -291,7 +345,7 @@ export async function middleware(request: NextRequest) {
         const apiKey = request.headers.get(CONTROL_PLANE_API_KEY_HEADER);
         if (apiKey) {
             if (validateApiKey(apiKey)) {
-                return NextResponse.next();
+                return applySecurityHeaders(NextResponse.next());
             }
             console.warn(`[SECURITY] Invalid API key attempt from IP: ${clientIp}`);
             return new NextResponse(
@@ -321,6 +375,14 @@ export async function middleware(request: NextRequest) {
         return response;
     }
 
+    const sessionRole = sessionResult.role ?? 'operator';
+    if (!hasRequiredRole(path, request.method, sessionRole)) {
+        return new NextResponse(
+            JSON.stringify({ error: 'Forbidden: insufficient role for this operation' }),
+            { status: 403, headers: { 'Content-Type': 'application/json' } }
+        );
+    }
+
     // ==== SECURITY LAYER 3.5: CSRF Protection for state-changing API requests ====
     if (path.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
         if (!path.startsWith('/api/auth/login') && !path.startsWith('/api/csrf')) {
@@ -335,7 +397,7 @@ export async function middleware(request: NextRequest) {
                 );
             }
 
-            const secret = process.env.CSRF_SECRET || process.env.CONTROL_PLANE_JWT_SECRET;
+            const secret = process.env.CSRF_SECRET;
             if (!secret) {
                 return new NextResponse(
                     JSON.stringify({ error: 'Server configuration error' }),
@@ -344,7 +406,8 @@ export async function middleware(request: NextRequest) {
             }
 
             // Web Crypto API — Edge Runtime compatible
-            const expectedSig = await _hmacSign(secret, csrfCookie);
+            const sessionBinding = sessionToken || 'anonymous';
+            const expectedSig = await _hmacSign(secret, `${csrfCookie}.${sessionBinding}`);
 
             if (!_constTimeEq(expectedSig, csrfSig)) {
                 return new NextResponse(
@@ -356,18 +419,7 @@ export async function middleware(request: NextRequest) {
     }
     
     // ==== SECURITY LAYER 4: Add security headers ====
-    const response = NextResponse.next();
-    
-    // Prevent embedding in iframes (clickjacking protection)
-    response.headers.set('X-Frame-Options', 'DENY');
-    response.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
-    
-    // Mark as control plane request
-    response.headers.set('X-Control-Plane', 'authenticated');
-    
-    // Prevent caching of authenticated content
-    response.headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    response.headers.set('Pragma', 'no-cache');
+    const response = applySecurityHeaders(NextResponse.next());
 
     // G-208: Set refreshed session cookie if the session was past half-life
     if (sessionResult.refreshedToken) {

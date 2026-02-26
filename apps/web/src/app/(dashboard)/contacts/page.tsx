@@ -1,7 +1,5 @@
 'use client';
 
-import * as React from 'react';
-import { useRouter } from 'next/navigation';
 import {
     Plus,
     Search,
@@ -58,459 +56,75 @@ import { PaginationControls } from '@/components/ui/pagination-controls';
 import { SortableTableHead } from '@/components/ui/sortable-table-head';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { cn, formatNumber, formatRelativeTime, getInitials } from '@/lib/utils';
-import {
-    APIError,
-    useContacts,
-    useLists,
-    useCreateContact,
-    useCreateList,
-    useUpdateContact,
-    useDeleteContact,
-    useAPIMutation,
-    type Contact,
-} from '@/hooks/use-api';
-
-interface ContactDisplay {
-    id: string;
-    email: string;
-    firstName?: string;
-    lastName?: string;
-    company?: string;
-    status: 'subscribed' | 'unsubscribed' | 'bounced' | 'complained';
-    tags: string[];
-    score: number;
-    createdAt: string;
-    lastActivity: string;
-}
-
-type ContactsFilterPreset = 'all_contacts' | 'high_intent' | 'bounced_followup';
-
-function mapContactsApiError(error: unknown, operation: string) {
-    if (error instanceof APIError) {
-        if (error.status === 429) return `${operation} is rate-limited. Please retry in a few moments.`;
-        if (error.status >= 500) return `${operation} failed due to a temporary server issue. Please retry.`;
-        if (error.status === 404) return `${operation} failed because the requested resource no longer exists.`;
-        if (error.status === 400) return `${operation} failed due to invalid request data. Check inputs and retry.`;
-    }
-    return `${operation} failed. Please try again.`;
-}
-
-function toContactDisplay(contact: Contact): ContactDisplay {
-    return {
-        id: contact.id,
-        email: contact.email,
-        firstName: contact.firstName,
-        lastName: contact.lastName,
-        company: contact.company,
-        status: contact.status,
-        tags: contact.tags ?? [],
-        score: contact.score ?? 0,
-        createdAt: contact.createdAt,
-        lastActivity: contact.updatedAt,
-    };
-}
+import { useContactsController } from './use-contacts-controller';
 
 export default function ContactsPage() {
-    const router = useRouter();
-
-    const [page, setPage] = React.useState(1);
-    const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
-    const [selectedList, setSelectedList] = React.useState('all');
-    const [statusFilter, setStatusFilter] = React.useState<string>('all');
-    const [searchInput, setSearchInput] = React.useState('');
-    const [searchQuery, setSearchQuery] = React.useState('');
-    const [sortField, setSortField] = React.useState<'name' | 'score' | 'lastActivity'>('lastActivity');
-    const [sortOrder, setSortOrder] = React.useState<'asc' | 'desc'>('desc');
-    const [activePreset, setActivePreset] = React.useState<ContactsFilterPreset>('all_contacts');
-
-    const [addContactOpen, setAddContactOpen] = React.useState(false);
-    const [editContactOpen, setEditContactOpen] = React.useState(false);
-    const [importOpen, setImportOpen] = React.useState(false);
-    const [createListOpen, setCreateListOpen] = React.useState(false);
-    const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
-
-    const [selectedContact, setSelectedContact] = React.useState<ContactDisplay | null>(null);
-    const [rowDeleteId, setRowDeleteId] = React.useState<string | null>(null);
-    const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
-
-    const [notice, setNotice] = React.useState('');
-    const [errorNotice, setErrorNotice] = React.useState('');
-    const [lastDeletedIds, setLastDeletedIds] = React.useState<string[]>([]);
-    const [isFilterRefreshing, setIsFilterRefreshing] = React.useState(false);
-    const [importProgress, setImportProgress] = React.useState(0);
-    const [importResult, setImportResult] = React.useState<string>('');
-
-    // Item 121: duplicate-contact conflict resolution
-    interface ImportDuplicate {
-        email: string;
-        existingName: string;
-        incomingName: string;
-    }
-    const [importDuplicates, setImportDuplicates] = React.useState<ImportDuplicate[]>([]);
-    const [duplicateStrategy, setDuplicateStrategy] = React.useState<'skip' | 'merge' | 'overwrite'>('skip');
-    const [resolveLoading, setResolveLoading] = React.useState(false);
-    const [newListName, setNewListName] = React.useState('');
-
-    const [contactForm, setContactForm] = React.useState({
-        email: '',
-        firstName: '',
-        lastName: '',
-        company: '',
-        tags: '',
-    });
-
-    const createContact = useCreateContact();
-    const createList = useCreateList();
-    const updateContact = useUpdateContact(editTargetId ?? '');
-    const deleteContact = useDeleteContact(rowDeleteId ?? '');
-
-    const bulkTagMutation = useAPIMutation<{ success: boolean }, { ids: string[]; tag: string }>('/api/contacts/bulk/tag');
-    const bulkDeleteMutation = useAPIMutation<{ success: boolean }, { ids: string[] }>('/api/contacts/bulk/delete');
-    const bulkRestoreMutation = useAPIMutation<{ restored: number }, { ids: string[] }>('/api/contacts/bulk/restore');
-    const resolveDuplicatesMutation = useAPIMutation<{ resolved: number }, { strategy: 'skip' | 'merge' | 'overwrite' }>('/api/contacts/bulk/resolve-duplicates');
-
-    const { data: contactsData, error: contactsError, isLoading, mutate } = useContacts(
+    const {
         page,
-        50,
-        selectedList === 'all' ? undefined : selectedList,
-        {
-            status: statusFilter,
-            search: searchQuery,
-            sortField,
-            sortOrder,
-        }
-    );
-
-    const { data: listsData, error: listsError } = useLists();
-
-    React.useEffect(() => {
-        if (typeof window === 'undefined') return;
-        const preset = window.localStorage.getItem('contacts.filterPreset') as ContactsFilterPreset | null;
-        if (!preset) return;
-        applyPreset(preset);
-    }, []);
-
-    React.useEffect(() => {
-        const timer = window.setTimeout(() => {
-            setSearchQuery(searchInput.trim());
-            setPage(1);
-        }, 350);
-        return () => window.clearTimeout(timer);
-    }, [searchInput]);
-
-    React.useEffect(() => {
-        setIsFilterRefreshing(true);
-    }, [statusFilter, searchQuery, selectedList, sortField, sortOrder, page]);
-
-    React.useEffect(() => {
-        if (!isLoading) {
-            setIsFilterRefreshing(false);
-        }
-    }, [isLoading, contactsData]);
-
-    const filteredContacts = React.useMemo<ContactDisplay[]>(() => {
-        const rows = contactsData?.data ?? [];
-        return rows.map(toContactDisplay);
-    }, [contactsData]);
-
-    const lists = React.useMemo(() => {
-        const apiLists = listsData ?? [];
-        const total = contactsData?.total ?? 0;
-        return [
-            { id: 'all', name: 'All Contacts', count: total },
-            ...apiLists.map((list) => ({
-                id: list.id,
-                name: list.name,
-                count: list.subscriberCount ?? 0,
-                unsubscribedCount: list.unsubscribedCount ?? 0,
-                bouncedCount: list.bouncedCount ?? 0,
-            })),
-        ];
-    }, [listsData, contactsData?.total]);
-
-    const statusCounts = React.useMemo(() => {
-        const counts: Record<string, number> = {
-            all: contactsData?.total ?? 0,
-            subscribed: 0,
-            unsubscribed: 0,
-            bounced: 0,
-            complained: 0,
-        };
-
-        filteredContacts.forEach((contact) => {
-            counts[contact.status] = (counts[contact.status] || 0) + 1;
-        });
-
-        return counts;
-    }, [filteredContacts, contactsData?.total]);
-
-    const totalPages = contactsData?.totalPages ?? 1;
-    const totalContacts = contactsData?.total ?? filteredContacts.length;
-
-    const currentListMeta = React.useMemo(() => {
-        if (selectedList === 'all') return null;
-        return (listsData ?? []).find((list) => list.id === selectedList) ?? null;
-    }, [listsData, selectedList]);
-
-    const handleSort = (field: 'name' | 'score' | 'lastActivity') => {
-        setPage(1);
-        if (sortField === field) {
-            setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
-            return;
-        }
-        setSortField(field);
-        setSortOrder('asc');
-    };
-
-    const applyPreset = (preset: ContactsFilterPreset) => {
-        setActivePreset(preset);
-        setPage(1);
-
-        if (typeof window !== 'undefined') {
-            window.localStorage.setItem('contacts.filterPreset', preset);
-        }
-
-        if (preset === 'high_intent') {
-            setStatusFilter('subscribed');
-            setSearchInput('');
-            setSearchQuery('');
-            setSortField('score');
-            setSortOrder('desc');
-            return;
-        }
-
-        if (preset === 'bounced_followup') {
-            setStatusFilter('bounced');
-            setSearchInput('');
-            setSearchQuery('');
-            setSortField('lastActivity');
-            setSortOrder('asc');
-            return;
-        }
-
-        setStatusFilter('all');
-        setSearchInput('');
-        setSearchQuery('');
-        setSortField('lastActivity');
-        setSortOrder('desc');
-    };
-
-    const toggleSelectAll = () => {
-        if (selectedIds.length === filteredContacts.length) {
-            setSelectedIds([]);
-            return;
-        }
-        setSelectedIds(filteredContacts.map((contact) => contact.id));
-    };
-
-    const toggleSelect = (id: string) => {
-        setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
-    };
-
-    const handleSelectionKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
-            event.preventDefault();
-            setSelectedIds(filteredContacts.map((contact) => contact.id));
-            return;
-        }
-
-        if (event.key === 'Escape') {
-            setSelectedIds([]);
-        }
-    };
-
-    const resetNotices = () => {
-        setNotice('');
-        setErrorNotice('');
-    };
-
-    const handleBulkAddTag = async () => {
-        if (selectedIds.length === 0) return;
-        resetNotices();
-        try {
-            await bulkTagMutation.trigger({ ids: selectedIds, tag: 'needs-followup' });
-            setNotice(`Added tag to ${selectedIds.length} contacts.`);
-            setSelectedIds([]);
-            mutate();
-        } catch (error) {
-            setErrorNotice(mapContactsApiError(error, 'Adding tags'));
-        }
-    };
-
-    const handleBulkDelete = async () => {
-        if (selectedIds.length === 0) return;
-        resetNotices();
-
-        const ids = [...selectedIds];
-        try {
-            await bulkDeleteMutation.trigger({ ids });
-            setLastDeletedIds(ids);
-            setSelectedIds([]);
-            setNotice(`Deleted ${ids.length} contacts. You can undo this action.`);
-            mutate();
-
-            const undoTimer = window.setTimeout(() => {
-                setNotice('');
-            }, 10000);
-
-            return () => window.clearTimeout(undoTimer);
-        } catch (error) {
-            setErrorNotice(mapContactsApiError(error, 'Bulk delete'));
-        }
-    };
-
-    const handleUndoDelete = async () => {
-        resetNotices();
-        if (lastDeletedIds.length === 0) {
-            setErrorNotice('No recent delete action to undo.');
-            return;
-        }
-        try {
-            await bulkRestoreMutation.trigger({ ids: lastDeletedIds });
-            setLastDeletedIds([]);
-            setNotice('Restored recently deleted contacts.');
-            mutate();
-        } catch {
-            setErrorNotice('Undo window expired or restore endpoint unavailable.');
-        }
-    };
-
-    const handleBulkSendEmail = () => {
-        if (selectedIds.length === 0) return;
-        const params = new URLSearchParams();
-        params.set('contacts', selectedIds.join(','));
-        router.push(`/campaigns/new?${params.toString()}`);
-    };
-
-    const handleCreateList = async () => {
-        resetNotices();
-        if (!newListName.trim()) {
-            setErrorNotice('List name is required.');
-            return;
-        }
-
-        try {
-            await createList.trigger({ name: newListName.trim() });
-            setCreateListOpen(false);
-            setNewListName('');
-            setNotice('List created successfully.');
-        } catch (error) {
-            setErrorNotice(mapContactsApiError(error, 'Creating list'));
-        }
-    };
-
-    const handleCreateContact = async () => {
-        resetNotices();
-        if (!contactForm.email.trim()) {
-            setErrorNotice('Email is required.');
-            return;
-        }
-
-        try {
-            await createContact.trigger({
-                email: contactForm.email.trim(),
-                firstName: contactForm.firstName.trim() || undefined,
-                lastName: contactForm.lastName.trim() || undefined,
-                company: contactForm.company.trim() || undefined,
-                tags: contactForm.tags
-                    .split(',')
-                    .map((tag) => tag.trim())
-                    .filter(Boolean),
-            });
-
-            setAddContactOpen(false);
-            setContactForm({ email: '', firstName: '', lastName: '', company: '', tags: '' });
-            setNotice('Contact created successfully.');
-            mutate();
-        } catch (error) {
-            setErrorNotice(mapContactsApiError(error, 'Creating contact'));
-        }
-    };
-
-    const handleOpenEdit = (contact: ContactDisplay) => {
-        setEditTargetId(contact.id);
-        setContactForm({
-            email: contact.email,
-            firstName: contact.firstName ?? '',
-            lastName: contact.lastName ?? '',
-            company: contact.company ?? '',
-            tags: contact.tags.join(', '),
-        });
-        setEditContactOpen(true);
-    };
-
-    const handleUpdateContact = async () => {
-        if (!editTargetId) return;
-        resetNotices();
-        try {
-            await updateContact.trigger({
-                email: contactForm.email.trim(),
-                firstName: contactForm.firstName.trim() || undefined,
-                lastName: contactForm.lastName.trim() || undefined,
-                company: contactForm.company.trim() || undefined,
-                tags: contactForm.tags
-                    .split(',')
-                    .map((tag) => tag.trim())
-                    .filter(Boolean),
-            });
-            setEditContactOpen(false);
-            setNotice('Contact updated successfully.');
-            mutate();
-        } catch (error) {
-            setErrorNotice(mapContactsApiError(error, 'Updating contact'));
-        }
-    };
-
-    const handleRowDelete = async () => {
-        if (!rowDeleteId) return;
-        resetNotices();
-        try {
-            await deleteContact.trigger();
-            setDeleteConfirmOpen(false);
-            setRowDeleteId(null);
-            setNotice('Contact deleted successfully.');
-            mutate();
-        } catch (error) {
-            setErrorNotice(mapContactsApiError(error, 'Deleting contact'));
-        }
-    };
-
-    const handleImportContacts = () => {
-        setImportProgress(5);
-        setImportResult('');
-        setImportDuplicates([]);
-        const timer = window.setInterval(() => {
-            setImportProgress((prev) => {
-                const next = Math.min(prev + 20, 100);
-                if (next >= 100) {
-                    window.clearInterval(timer);
-                    // Simulate API returning 3 duplicates for conflict resolution (item 121)
-                    setImportDuplicates([
-                        { email: 'alice@example.com', existingName: 'Alice Smith', incomingName: 'Alice A. Smith' },
-                        { email: 'bob@example.com', existingName: 'Bob Jones', incomingName: 'Robert Jones' },
-                        { email: 'carol@example.com', existingName: 'Carol White', incomingName: 'Carol White-Brown' },
-                    ]);
-                    mutate();
-                }
-                return next;
-            });
-        }, 300);
-    };
-
-    const handleResolveImport = async () => {
-        setResolveLoading(true);
-        try {
-            const result = await resolveDuplicatesMutation.trigger({ strategy: duplicateStrategy });
-            const resolvedCount = result?.resolved ?? importDuplicates.length;
-            setImportDuplicates([]);
-            setImportResult(`Import complete. ${resolvedCount} duplicate${resolvedCount !== 1 ? 's' : ''} resolved using "${duplicateStrategy}" strategy.`);
-            mutate();
-        } catch {
-            setImportResult('Duplicate resolution failed. Please retry or contact support.');
-        } finally {
-            setResolveLoading(false);
-        }
-    };
+        setPage,
+        selectedIds,
+        selectedList,
+        statusFilter,
+        searchInput,
+        setSearchInput,
+        sortField,
+        sortOrder,
+        activePreset,
+        addContactOpen,
+        setAddContactOpen,
+        editContactOpen,
+        setEditContactOpen,
+        importOpen,
+        createListOpen,
+        setCreateListOpen,
+        deleteConfirmOpen,
+        setDeleteConfirmOpen,
+        selectedContact,
+        setSelectedContact,
+        setRowDeleteId,
+        notice,
+        combinedErrorNotice,
+        isFilterRefreshing,
+        importProgress,
+        importResult,
+        importDuplicates,
+        duplicateStrategy,
+        setDuplicateStrategy,
+        resolveLoading,
+        newListName,
+        setNewListName,
+        contactForm,
+        setContactForm,
+        isLoading,
+        filteredContacts,
+        lists,
+        totalPages,
+        totalContacts,
+        currentListMeta,
+        handleSort,
+        applyPreset,
+        toggleSelectAll,
+        toggleSelect,
+        handleSelectionKeyDown,
+        handleBulkAddTag,
+        handleBulkDelete,
+        handleUndoDelete,
+        handleBulkSendEmail,
+        handleSendEmailToContact,
+        handleCreateList,
+        handleCreateContact,
+        handleOpenEdit,
+        handleUpdateContact,
+        handleRowDelete,
+        handleImportContacts,
+        handleResolveImport,
+        clearSearch,
+        clearFilters,
+        closeImportDialog,
+        setStatusFilterAndResetPage,
+        setSelectedListAndResetPage,
+        setImportOpen,
+    } = useContactsController();
 
     return (
         <div className="space-y-6">
@@ -545,10 +159,10 @@ export default function ContactsPage() {
                 </Card>
             ) : null}
 
-            {errorNotice || contactsError || listsError ? (
+            {combinedErrorNotice ? (
                 <Card className="border-destructive/30 bg-destructive/10">
                     <CardContent className="p-3 text-sm text-destructive">
-                        {errorNotice || mapContactsApiError(contactsError ?? listsError, 'Loading contacts')}
+                        {combinedErrorNotice}
                     </CardContent>
                 </Card>
             ) : null}
@@ -563,10 +177,7 @@ export default function ContactsPage() {
                             {lists.map((list) => (
                                 <button
                                     key={list.id}
-                                    onClick={() => {
-                                        setSelectedList(list.id);
-                                        setPage(1);
-                                    }}
+                                    onClick={() => setSelectedListAndResetPage(list.id)}
                                     className={cn(
                                         'flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm transition-colors',
                                         selectedList === list.id
@@ -624,10 +235,7 @@ export default function ContactsPage() {
                                     {searchInput && (
                                         <button
                                             type="button"
-                                            onClick={() => {
-                                                setSearchInput('');
-                                                setSearchQuery('');
-                                            }}
+                                            onClick={clearSearch}
                                             className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
                                             aria-label="Clear contacts search"
                                         >
@@ -635,10 +243,7 @@ export default function ContactsPage() {
                                         </button>
                                     )}
                                 </div>
-                                <Select value={statusFilter} onValueChange={(value) => {
-                                    setStatusFilter(value);
-                                    setPage(1);
-                                }}>
+                                <Select value={statusFilter} onValueChange={setStatusFilterAndResetPage}>
                                     <SelectTrigger className="w-full sm:w-44">
                                         <SelectValue placeholder="Status" />
                                     </SelectTrigger>
@@ -654,7 +259,7 @@ export default function ContactsPage() {
                                     size="sm"
                                     variant={statusFilter === 'bounced' ? 'default' : 'outline'}
                                     title="Quick filter: bounced contacts needing remediation"
-                                    onClick={() => setStatusFilter('bounced')}
+                                    onClick={() => setStatusFilterAndResetPage('bounced')}
                                 >
                                     Bounced
                                 </Button>
@@ -662,7 +267,7 @@ export default function ContactsPage() {
                                     size="sm"
                                     variant={statusFilter === 'complained' ? 'default' : 'outline'}
                                     title="Quick filter: complaint contacts to avoid sender reputation issues"
-                                    onClick={() => setStatusFilter('complained')}
+                                    onClick={() => setStatusFilterAndResetPage('complained')}
                                 >
                                     Complained
                                 </Button>
@@ -742,12 +347,7 @@ export default function ContactsPage() {
                                                     <p>No contacts found</p>
                                                     <button
                                                         type="button"
-                                                        onClick={() => {
-                                                            setStatusFilter('all');
-                                                            setSearchInput('');
-                                                            setSearchQuery('');
-                                                            setSelectedList('all');
-                                                        }}
+                                                        onClick={clearFilters}
                                                         className="text-xs text-primary hover:underline"
                                                     >
                                                         Clear filters and broaden terms
@@ -812,7 +412,7 @@ export default function ContactsPage() {
                                                                     <Pencil className="mr-2 h-4 w-4" />
                                                                     Edit
                                                                 </DropdownMenuItem>
-                                                                <DropdownMenuItem onClick={() => router.push(`/campaigns/new?contacts=${contact.id}`)}>
+                                                                <DropdownMenuItem onClick={() => handleSendEmailToContact(contact.id)}>
                                                                     <Mail className="mr-2 h-4 w-4" />
                                                                     Send Email
                                                                 </DropdownMenuItem>
@@ -1062,7 +662,7 @@ export default function ContactsPage() {
                         )}
                     </div>
                     <DialogFooter>
-                        <Button variant="outline" onClick={() => { setImportOpen(false); setImportDuplicates([]); setImportProgress(0); setImportResult(''); }}>
+                        <Button variant="outline" onClick={closeImportDialog}>
                             Close
                         </Button>
                         {importDuplicates.length > 0 ? (

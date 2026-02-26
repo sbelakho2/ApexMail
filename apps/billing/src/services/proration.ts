@@ -43,12 +43,9 @@ export class ProrationEngine {
     currentPeriod: SubscriptionPeriod,
     isYearly: boolean
   ): ProrationResult {
-    const currentPrice = isYearly 
-      ? currentPlan.priceYearly / 12 
-      : currentPlan.priceMonthly;
-    const newPrice = isYearly 
-      ? newPlan.priceYearly / 12 
-      : newPlan.priceMonthly;
+    const currentPriceNumerator = isYearly ? currentPlan.priceYearly : currentPlan.priceMonthly;
+    const newPriceNumerator = isYearly ? newPlan.priceYearly : newPlan.priceMonthly;
+    const priceDivisor = isYearly ? 12 : 1;
 
     const { daysInPeriod, daysRemaining } = currentPeriod;
 
@@ -57,15 +54,13 @@ export class ProrationEngine {
       throw new Error('Invalid period: daysInPeriod must be greater than 0');
     }
 
-    // Calculate daily rates (safe: daysInPeriod > 0)
-    const currentDailyRate = currentPrice / daysInPeriod;
-    const newDailyRate = newPrice / daysInPeriod;
+    const periodDivisor = daysInPeriod * priceDivisor;
 
     // Credit for unused days on current plan
-    const creditAmount = Math.round(currentDailyRate * daysRemaining);
+    const creditAmount = Math.round((currentPriceNumerator * daysRemaining) / periodDivisor);
 
     // Charge for remaining days on new plan
-    const chargeAmount = Math.round(newDailyRate * daysRemaining);
+    const chargeAmount = Math.round((newPriceNumerator * daysRemaining) / periodDivisor);
 
     // Net amount (positive = customer pays, negative = customer gets credit)
     const netAmount = chargeAmount - creditAmount;
@@ -73,8 +68,8 @@ export class ProrationEngine {
     const explanation = this.buildExplanation(
       currentPlan,
       newPlan,
-      currentPrice,
-      newPrice,
+      Math.round(currentPriceNumerator / priceDivisor),
+      Math.round(newPriceNumerator / priceDivisor),
       daysRemaining,
       daysInPeriod,
       creditAmount,

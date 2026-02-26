@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 
 const AUTOPILOT_BASE = process.env.AUTOPILOT_API_URL || 'http://localhost:3010';
+const OWNER_TENANT_ID = process.env.CONTROL_PLANE_OWNER_TENANT_ID || 'apexmail-owner';
 
 export async function POST(request: NextRequest) {
     try {
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                tenantId: 'apexmail-owner', // Owner tenant ID
+                tenantId: OWNER_TENANT_ID,
                 sources,
                 categories,
                 maxPagesPerSource: Math.min(maxPagesPerSource || 3, 10),

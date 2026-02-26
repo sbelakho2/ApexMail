@@ -4,10 +4,33 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { withTransaction } from '@apexmail/db';
+import { randomUUID } from 'node:crypto';
 import type { BillingEnv, BillingContext } from '../app.js';
 
 export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
+
+  const parseQueryDate = (value: string | undefined): Date | null => {
+    if (!value) return null;
+    const timestamp = Date.parse(value);
+    if (Number.isNaN(timestamp)) return null;
+    return new Date(timestamp);
+  };
+
+  // SEC-005 FIX: Helper to check if admin has access to specific tenant
+  const canAccessTenant = (adminScope: string[] | undefined, tenantId: string): boolean => {
+    // If no scope defined, deny by default (fail-secure)
+    if (!adminScope || adminScope.length === 0) {
+      return false;
+    }
+    // Wildcard scope allows access to all tenants
+    if (adminScope.includes('tenant:*')) {
+      return true;
+    }
+    // Check for specific tenant scope
+    return adminScope.includes(`tenant:${tenantId}`);
+  };
 
   // Admin middleware
   router.use('*', async (c, next) => {
@@ -17,6 +40,16 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
     return next();
   });
+
+  // SEC-005 FIX: Middleware to check tenant-specific access
+  const requireTenantAccess = async (c: Parameters<typeof router.get>[1] extends (c: infer C, n: unknown) => unknown ? C : never) => {
+    const adminScope = c.get('adminScope') as string[] | undefined;
+    const tenantId = c.req.param('tenantId');
+    if (tenantId && !canAccessTenant(adminScope, tenantId)) {
+      return c.json({ error: 'Tenant access denied' }, 403);
+    }
+    return null; // Access allowed
+  };
 
   // List all tenants with billing status
   router.get('/tenants', async (c) => {
@@ -62,6 +95,10 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Get tenant billing details
   router.get('/tenants/:tenantId', async (c) => {
+    // SEC-005 FIX: Check tenant-specific access
+    const accessDenied = await requireTenantAccess(c);
+    if (accessDenied) return accessDenied;
+    
     const tenantId = c.req.param('tenantId');
 
     const [subscription, planLimits, dunning, wallet, invoices] = await Promise.all([
@@ -84,6 +121,10 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Apply credit to tenant
   router.post('/tenants/:tenantId/credits', async (c) => {
+    // SEC-005 FIX: Check tenant-specific access
+    const accessDenied = await requireTenantAccess(c);
+    if (accessDenied) return accessDenied;
+    
     const tenantId = c.req.param('tenantId');
     const body = await c.req.json();
 
@@ -97,9 +138,9 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const parsed = schema.parse(body);
     const adminId = c.get('adminId');
 
-    // Use client-provided idempotency key, or generate deterministic one from request params
+    // Use client-provided idempotency key, or generate unique fallback to avoid collisions
     const idempotencyKey = parsed.idempotencyKey ?? 
-      `admin_credit_${adminId}_${tenantId}_${parsed.amount}_${parsed.reason}`;
+      `admin_credit_${adminId}_${tenantId}_${Date.now()}_${randomUUID()}`;
 
     const result = await ctx.wallet.credit(
       tenantId,
@@ -117,6 +158,10 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
   // Override plan for tenant
   router.post('/tenants/:tenantId/plan-override', async (c) => {
+    // SEC-005 FIX: Check tenant-specific access
+    const accessDenied = await requireTenantAccess(c);
+    if (accessDenied) return accessDenied;
+    
     const tenantId = c.req.param('tenantId');
     const body = await c.req.json();
 
@@ -148,11 +193,32 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       ]
     );
 
+    await ctx.db.query(
+      `INSERT INTO billing_audit_log (
+        tenant_id, action, actor_id, actor_type, details, created_at
+      ) VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [
+        tenantId,
+        'plan_override',
+        adminId,
+        'admin',
+        JSON.stringify({
+          planId: parsed.planId,
+          reason: parsed.reason,
+          expiresAt: parsed.expiresAt ?? null,
+        }),
+      ]
+    );
+
     return c.json({ success: true, message: 'Plan override applied' });
   });
 
   // Force subscription status
   router.post('/tenants/:tenantId/subscription-status', async (c) => {
+    // SEC-005 FIX: Check tenant-specific access
+    const accessDenied = await requireTenantAccess(c);
+    if (accessDenied) return accessDenied;
+    
     const tenantId = c.req.param('tenantId');
     const body = await c.req.json();
 
@@ -164,32 +230,49 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const parsed = schema.parse(body);
     const adminId = c.get('adminId');
 
-    await ctx.db.query(
-      `UPDATE stripe_subscriptions 
-       SET status = $2, admin_override_at = NOW(), admin_override_by = $3, admin_override_reason = $4
-       WHERE tenant_id = $1`,
-      [tenantId, parsed.status, adminId, parsed.reason]
-    );
+    const txResult = await withTransaction(ctx.db, async (tx) => {
+      const updateResult = await tx.client.query(
+        `UPDATE stripe_subscriptions 
+         SET status = $2, admin_override_at = NOW(), admin_override_by = $3, admin_override_reason = $4
+         WHERE tenant_id = $1`,
+        [tenantId, parsed.status, adminId, parsed.reason]
+      );
 
-    // Log the action
-    await ctx.db.query(
-      `INSERT INTO billing_audit_log (
-        tenant_id, action, actor_id, actor_type, details, created_at
-      ) VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [
-        tenantId,
-        'subscription_status_override',
-        adminId,
-        'admin',
-        JSON.stringify({ newStatus: parsed.status, reason: parsed.reason }),
-      ]
-    );
+      if (updateResult.rowCount !== 1) {
+        throw new Error('Subscription not found for tenant');
+      }
+
+      const auditResult = await tx.client.query(
+        `INSERT INTO billing_audit_log (
+          tenant_id, action, actor_id, actor_type, details, created_at
+        ) VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [
+          tenantId,
+          'subscription_status_override',
+          adminId,
+          'admin',
+          JSON.stringify({ newStatus: parsed.status, reason: parsed.reason }),
+        ]
+      );
+
+      if (auditResult.rowCount !== 1) {
+        throw new Error('Failed to write audit log');
+      }
+    });
+
+    if (!txResult.ok) {
+      console.error("Admin operation failed:", txResult.error); return c.json({ error: "Operation failed" }, 500);
+    }
 
     return c.json({ success: true, message: 'Subscription status updated' });
   });
 
   // Reset dunning state
   router.post('/tenants/:tenantId/dunning/reset', async (c) => {
+    // SEC-005 FIX: Check tenant-specific access
+    const accessDenied = await requireTenantAccess(c);
+    if (accessDenied) return accessDenied;
+    
     const tenantId = c.req.param('tenantId');
     const body = await c.req.json();
 
@@ -197,8 +280,8 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       reason: z.string(),
     });
 
-    // Validate body even though we only need to log the reason
-    schema.parse(body);
+    const parsed = schema.parse(body);
+    const adminId = c.get('adminId');
     
     // Reset dunning by recording a successful payment
     const result = await ctx.dunning.recordSuccessfulPayment(tenantId);
@@ -207,11 +290,28 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       console.error("Admin operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
     }
 
+    await ctx.db.query(
+      `INSERT INTO billing_audit_log (
+        tenant_id, action, actor_id, actor_type, details, created_at
+      ) VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [
+        tenantId,
+        'dunning_reset',
+        adminId,
+        'admin',
+        JSON.stringify({ reason: parsed.reason }),
+      ]
+    );
+
     return c.json({ success: true, message: 'Dunning state reset' });
   });
 
   // Generate invoice for tenant
   router.post('/tenants/:tenantId/invoices', async (c) => {
+    // SEC-005 FIX: Check tenant-specific access
+    const accessDenied = await requireTenantAccess(c);
+    if (accessDenied) return accessDenied;
+    
     const tenantId = c.req.param('tenantId');
     const body = await c.req.json();
 
@@ -300,6 +400,12 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'startDate and endDate required' }, 400);
     }
 
+    const parsedStartDate = parseQueryDate(startDate);
+    const parsedEndDate = parseQueryDate(endDate);
+    if (!parsedStartDate || !parsedEndDate) {
+      return c.json({ error: 'Invalid startDate or endDate' }, 400);
+    }
+
     // FIX-500-361: DATE_TRUNC intervals are all hardcoded string literals (never user-input).
     // If granularity ever becomes user-selectable, validate against:
     // const ALLOWED_DATE_TRUNC_INTERVALS = new Set(['hour', 'day', 'week', 'month', 'quarter', 'year']);
@@ -314,7 +420,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       WHERE status = 'paid' AND paid_at >= $1 AND paid_at < $2
       GROUP BY DATE_TRUNC('day', paid_at), currency
       ORDER BY date`,
-      [new Date(startDate), new Date(endDate)]
+      [parsedStartDate, parsedEndDate]
     );
 
     if (!result.ok) {
@@ -354,26 +460,39 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Get churn report
   router.get('/reports/churn', async (c) => {
     const result = await ctx.db.query(`
-      SELECT 
-        DATE_TRUNC('month', canceled_at) as month,
-        COUNT(*) as churned_count,
-        SUM(
-          CASE 
-            WHEN billing_interval = 'month' THEN amount
-            WHEN billing_interval = 'year' THEN amount / 12
-            ELSE 0
-          END
-        ) as churned_mrr,
-        (
-          SELECT COUNT(DISTINCT tenant_id)
-          FROM stripe_subscriptions
-          WHERE status = 'active' 
-            AND created_at < DATE_TRUNC('month', s.canceled_at)
-        ) as starting_count
-      FROM stripe_subscriptions s
-      WHERE status = 'canceled' AND canceled_at IS NOT NULL
-      GROUP BY DATE_TRUNC('month', canceled_at)
-      ORDER BY month DESC
+      WITH churned AS (
+        SELECT
+          DATE_TRUNC('month', canceled_at) as month,
+          COUNT(*) as churned_count,
+          SUM(
+            CASE
+              WHEN billing_interval = 'month' THEN amount
+              WHEN billing_interval = 'year' THEN amount / 12
+              ELSE 0
+            END
+          ) as churned_mrr
+        FROM stripe_subscriptions
+        WHERE status = 'canceled' AND canceled_at IS NOT NULL
+        GROUP BY DATE_TRUNC('month', canceled_at)
+      ),
+      starting AS (
+        SELECT
+          c.month,
+          COUNT(DISTINCT s.tenant_id) as starting_count
+        FROM churned c
+        LEFT JOIN stripe_subscriptions s
+          ON s.status = 'active'
+         AND s.created_at < c.month
+        GROUP BY c.month
+      )
+      SELECT
+        c.month,
+        c.churned_count,
+        c.churned_mrr,
+        COALESCE(s.starting_count, 0) as starting_count
+      FROM churned c
+      LEFT JOIN starting s ON s.month = c.month
+      ORDER BY c.month DESC
       LIMIT 12
     `);
 
@@ -412,6 +531,12 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'startDate and endDate required' }, 400);
     }
 
+    const parsedStartDate = parseQueryDate(startDate);
+    const parsedEndDate = parseQueryDate(endDate);
+    if (!parsedStartDate || !parsedEndDate) {
+      return c.json({ error: 'Invalid startDate or endDate' }, 400);
+    }
+
     const result = await ctx.db.query(
       `SELECT 
         DATE_TRUNC('day', recorded_at) as date,
@@ -426,7 +551,7 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       WHERE recorded_at >= $1 AND recorded_at < $2
       GROUP BY DATE_TRUNC('day', recorded_at)
       ORDER BY date`,
-      [new Date(startDate), new Date(endDate)]
+      [parsedStartDate, parsedEndDate]
     );
 
     if (!result.ok) {
@@ -447,8 +572,14 @@ export function adminRoutes(ctx: BillingContext): Hono<BillingEnv> {
       return c.json({ error: 'type, startDate, and endDate required' }, 400);
     }
 
+    const parsedStartDate = parseQueryDate(startDate);
+    const parsedEndDate = parseQueryDate(endDate);
+    if (!parsedStartDate || !parsedEndDate) {
+      return c.json({ error: 'Invalid startDate or endDate' }, 400);
+    }
+
     let query: string;
-    const params: Date[] = [new Date(startDate), new Date(endDate)];
+    const params: Date[] = [parsedStartDate, parsedEndDate];
 
     switch (type) {
       case 'invoices':

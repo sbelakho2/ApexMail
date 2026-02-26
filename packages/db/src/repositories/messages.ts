@@ -5,6 +5,7 @@
 import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid, generateMessageId, generateVerpAddress } from '@apexmail/lib/id';
 import type { DatabasePool } from '../pool.js';
+import { withTransaction } from '../transaction.js';
 
 export interface EmailRecipient {
   email: string;
@@ -71,6 +72,51 @@ export interface Message {
   createdAt: Date;
   updatedAt: Date;
 }
+
+type MessageRow = {
+  id: string;
+  tenant_id: string;
+  user_id: string | null;
+  idempotency_key: string | null;
+  message_id: string;
+  status: Message['status'];
+  from_email: string;
+  from_name: string | null;
+  reply_to: string | null;
+  recipients: string;
+  subject: string;
+  html_body: string | null;
+  text_body: string | null;
+  headers: string;
+  attachments: string;
+  template_id: string | null;
+  template_data: string | null;
+  campaign_id: string | null;
+  tags: string[];
+  priority: Message['priority'];
+  scheduled_at: Date | null;
+  sent_at: Date | null;
+  delivered_at: Date | null;
+  bounced_at: Date | null;
+  bounce_type: Message['bounceType'];
+  bounce_reason: string | null;
+  mta_message_id: string | null;
+  ip_address: string | null;
+  sending_domain: string;
+  attempts: number;
+  max_attempts: number;
+  last_attempt_at: Date | null;
+  next_attempt_at: Date | null;
+  metadata: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
+const MESSAGE_COLUMNS =
+  'id, tenant_id, user_id, idempotency_key, message_id, status, from_email, from_name, reply_to, recipients, subject, html_body, text_body, headers, attachments, template_id, template_data, campaign_id, tags, priority, scheduled_at, sent_at, delivered_at, bounced_at, bounce_type, bounce_reason, mta_message_id, ip_address, sending_domain, attempts, max_attempts, last_attempt_at, next_attempt_at, metadata, created_at, updated_at';
+
+const MESSAGE_COLUMNS_NO_BODY =
+  'id, tenant_id, user_id, idempotency_key, message_id, status, from_email, from_name, reply_to, recipients, subject, headers, attachments, template_id, template_data, campaign_id, tags, priority, scheduled_at, sent_at, delivered_at, bounced_at, bounce_type, bounce_reason, mta_message_id, ip_address, sending_domain, attempts, max_attempts, last_attempt_at, next_attempt_at, metadata, created_at, updated_at';
 
 export interface CreateMessageInput {
   tenantId: string;
@@ -150,11 +196,8 @@ export class MessagesRepository {
      * INSERT but before the queue INSERT would leave an orphaned message that
      * never gets delivered.
      */
-    const client = await this.db.getClient();
-    try {
-      await client.query('BEGIN');
-
-      const result = await client.query(
+    const result = await withTransaction(this.db, async ({ client }) => {
+      const insertResult = await client.query(
         `INSERT INTO messages (
           id, tenant_id, user_id, idempotency_key, message_id, status,
           from_email, from_name, reply_to, recipients, subject,
@@ -200,10 +243,9 @@ export class MessagesRepository {
         ]
       );
 
-      const row = result.rows[0];
+      const row = insertResult.rows[0];
       if (!row) {
-        await client.query('ROLLBACK');
-        return Result.err(new Error('Failed to create message'));
+        throw new Error('Failed to create message');
       }
 
       const message = this.mapRow(row);
@@ -236,110 +278,75 @@ export class MessagesRepository {
         const toRecipients = input.recipients.filter(r => r.type === 'to');
 
         if (toRecipients.length > 0) {
-          const queueValues: unknown[] = [];
-          const queuePlaceholders: string[] = [];
-          let paramIdx = 1;
+          const chunkSize = 100;
 
-          for (const recipient of toRecipients) {
-            const queueId = generateUuid();
-            const toFormatted = recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
+          for (let i = 0; i < toRecipients.length; i += chunkSize) {
+            const chunk = toRecipients.slice(i, i + chunkSize);
+            const queueValues: unknown[] = [];
+            const queuePlaceholders: string[] = [];
+            let paramIdx = 1;
 
-            queuePlaceholders.push(
-              `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`
-            );
-            queueValues.push(
-              queueId,
-              message.id,
-              input.tenantId,
-              input.domainId,
-              fromFormatted,
-              toFormatted,
-              input.subject,
-              input.htmlBody ?? null,
-              input.textBody ?? null,
-              headersJson,
-              attachmentsJson,
-              input.campaignId ?? null,
-              tagsJson,
-              metadataJson,
-              input.scheduledAt ?? null,
-              priorityValue,
-              'pending',
-              0,
-              5,
-              now,
-              now,
+            for (const recipient of chunk) {
+              const queueId = generateUuid();
+              const toFormatted = recipient.name ? `${recipient.name} <${recipient.email}>` : recipient.email;
+
+              queuePlaceholders.push(
+                `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`
+              );
+              queueValues.push(
+                queueId,
+                message.id,
+                input.tenantId,
+                input.domainId,
+                fromFormatted,
+                toFormatted,
+                input.subject,
+                input.htmlBody ?? null,
+                input.textBody ?? null,
+                headersJson,
+                attachmentsJson,
+                input.campaignId ?? null,
+                tagsJson,
+                metadataJson,
+                input.scheduledAt ?? null,
+                priorityValue,
+                'pending',
+                0,
+                5,
+                now,
+                now,
+              );
+            }
+
+            await client.query(
+              `INSERT INTO email_queue (
+                id, message_id, tenant_id, domain_id, "from", "to", subject,
+                html, text, headers, attachments, campaign_id, tags, metadata,
+                scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
+              ) VALUES ${queuePlaceholders.join(', ')}`,
+              queueValues
             );
           }
-
-          await client.query(
-            `INSERT INTO email_queue (
-              id, message_id, tenant_id, domain_id, "from", "to", subject,
-              html, text, headers, attachments, campaign_id, tags, metadata,
-              scheduled_at, priority, status, attempt, max_attempts, created_at, updated_at
-            ) VALUES ${queuePlaceholders.join(', ')}`,
-            queueValues
-          );
         }
       }
 
-      await client.query('COMMIT');
-      return Result.ok(message);
-    } catch (error) {
-      await client.query('ROLLBACK');
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+      return message;
+    });
+
+    if (!result.ok) return result;
+    return Result.ok(result.value);
   }
 
   async findById(id: string, tenantId?: string, options?: { includeBody?: boolean }): Promise<Result<Message | null, Error>> {
     // FIX-500-043: Conditionally exclude large body columns when not needed
     const columns = options?.includeBody === false
-      ? 'id, tenant_id, user_id, idempotency_key, message_id, status, from_email, from_name, reply_to, recipients, subject, headers, attachments, template_id, template_data, campaign_id, tags, priority, scheduled_at, sent_at, delivered_at, bounced_at, bounce_type, bounce_reason, mta_message_id, ip_address, sending_domain, attempts, max_attempts, last_attempt_at, next_attempt_at, metadata, created_at, updated_at'
-      : '*';
+      ? MESSAGE_COLUMNS_NO_BODY
+      : MESSAGE_COLUMNS;
     const sql = tenantId
       ? `SELECT ${columns} FROM messages WHERE id = $1 AND tenant_id = $2`
       : `SELECT ${columns} FROM messages WHERE id = $1`;
     const params = tenantId ? [id, tenantId] : [id];
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<MessageRow>(
       sql,
       params
     );
@@ -351,44 +358,7 @@ export class MessagesRepository {
   }
 
   async findByIdempotencyKey(key: string, tenantId: string): Promise<Result<Message | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<MessageRow>(
       'SELECT * FROM messages WHERE tenant_id = $1 AND idempotency_key = $2',
       [tenantId, key]
     );
@@ -406,44 +376,7 @@ export class MessagesRepository {
       ? 'SELECT * FROM messages WHERE mta_message_id = $1 AND tenant_id = $2'
       : 'SELECT * FROM messages WHERE mta_message_id = $1';
     const params = tenantId ? [mtaId, tenantId] : [mtaId];
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(sql, params);
+    const result = await this.db.query<MessageRow>(sql, params);
 
     if (!result.ok) return result;
 
@@ -469,137 +402,107 @@ export class MessagesRepository {
 
   // A-024: Add optional tenantId for database-level tenant isolation
   async update(id: string, input: UpdateMessageInput, tenantId?: string): Promise<Result<Message, Error>> {
-    // C-105: Validate status transition if a new status is being set.
-    // Look up current status and check against the state machine.
-    if (input.status !== undefined) {
-      const currentResult = await this.findById(id, tenantId);
-      if (currentResult.ok && currentResult.value) {
-        const currentStatus = currentResult.value.status;
-        const allowed = MessagesRepository.VALID_TRANSITIONS[currentStatus];
+    const result = await withTransaction(this.db, async ({ client }) => {
+      // C-105: Validate status transition if a new status is being set.
+      if (input.status !== undefined) {
+        const statusQuery = tenantId
+          ? 'SELECT status FROM messages WHERE id = $1 AND tenant_id = $2 FOR UPDATE'
+          : 'SELECT status FROM messages WHERE id = $1 FOR UPDATE';
+        const statusParams = tenantId ? [id, tenantId] : [id];
+        const current = await client.query<{ status: Message['status'] }>(statusQuery, statusParams);
+        const currentRow = current.rows[0];
+        if (!currentRow) {
+          throw new Error('Message not found');
+        }
+        const allowed = MessagesRepository.VALID_TRANSITIONS[currentRow.status];
         if (allowed && !allowed.has(input.status)) {
-          return Result.err(
-            new Error(`C-105: Invalid status transition '${currentStatus}' → '${input.status}'`)
-          );
+          throw new Error(`C-105: Invalid status transition '${currentRow.status}' → '${input.status}'`);
         }
       }
-    }
 
-    const updates: string[] = [];
-    const values: unknown[] = [];
-    let paramIndex = 1;
+      const updates: string[] = [];
+      const values: unknown[] = [];
+      let paramIndex = 1;
 
-    if (input.status !== undefined) {
-      updates.push(`status = $${paramIndex++}`);
-      values.push(input.status);
-    }
-    if (input.sentAt !== undefined) {
-      updates.push(`sent_at = $${paramIndex++}`);
-      values.push(input.sentAt);
-    }
-    if (input.deliveredAt !== undefined) {
-      updates.push(`delivered_at = $${paramIndex++}`);
-      values.push(input.deliveredAt);
-    }
-    if (input.bouncedAt !== undefined) {
-      updates.push(`bounced_at = $${paramIndex++}`);
-      values.push(input.bouncedAt);
-    }
-    if (input.bounceType !== undefined) {
-      updates.push(`bounce_type = $${paramIndex++}`);
-      values.push(input.bounceType);
-    }
-    if (input.bounceReason !== undefined) {
-      updates.push(`bounce_reason = $${paramIndex++}`);
-      values.push(input.bounceReason);
-    }
-    if (input.mtaMessageId !== undefined) {
-      updates.push(`mta_message_id = $${paramIndex++}`);
-      values.push(input.mtaMessageId);
-    }
-    if (input.ipAddress !== undefined) {
-      updates.push(`ip_address = $${paramIndex++}`);
-      values.push(input.ipAddress);
-    }
-    if (input.attempts !== undefined) {
-      updates.push(`attempts = $${paramIndex++}`);
-      values.push(input.attempts);
-    }
-    if (input.lastAttemptAt !== undefined) {
-      updates.push(`last_attempt_at = $${paramIndex++}`);
-      values.push(input.lastAttemptAt);
-    }
-    if (input.nextAttemptAt !== undefined) {
-      updates.push(`next_attempt_at = $${paramIndex++}`);
-      values.push(input.nextAttemptAt);
-    }
-    if (input.metadata !== undefined) {
-      updates.push(`metadata = metadata || $${paramIndex++}::jsonb`);
-      values.push(JSON.stringify(input.metadata));
-    }
+      if (input.status !== undefined) {
+        updates.push(`status = $${paramIndex++}`);
+        values.push(input.status);
+      }
+      if (input.sentAt !== undefined) {
+        updates.push(`sent_at = $${paramIndex++}`);
+        values.push(input.sentAt);
+      }
+      if (input.deliveredAt !== undefined) {
+        updates.push(`delivered_at = $${paramIndex++}`);
+        values.push(input.deliveredAt);
+      }
+      if (input.bouncedAt !== undefined) {
+        updates.push(`bounced_at = $${paramIndex++}`);
+        values.push(input.bouncedAt);
+      }
+      if (input.bounceType !== undefined) {
+        updates.push(`bounce_type = $${paramIndex++}`);
+        values.push(input.bounceType);
+      }
+      if (input.bounceReason !== undefined) {
+        updates.push(`bounce_reason = $${paramIndex++}`);
+        values.push(input.bounceReason);
+      }
+      if (input.mtaMessageId !== undefined) {
+        updates.push(`mta_message_id = $${paramIndex++}`);
+        values.push(input.mtaMessageId);
+      }
+      if (input.ipAddress !== undefined) {
+        updates.push(`ip_address = $${paramIndex++}`);
+        values.push(input.ipAddress);
+      }
+      if (input.attempts !== undefined) {
+        updates.push(`attempts = $${paramIndex++}`);
+        values.push(input.attempts);
+      }
+      if (input.lastAttemptAt !== undefined) {
+        updates.push(`last_attempt_at = $${paramIndex++}`);
+        values.push(input.lastAttemptAt);
+      }
+      if (input.nextAttemptAt !== undefined) {
+        updates.push(`next_attempt_at = $${paramIndex++}`);
+        values.push(input.nextAttemptAt);
+      }
+      if (input.metadata !== undefined) {
+        updates.push(`metadata = metadata || $${paramIndex++}::jsonb`);
+        values.push(JSON.stringify(input.metadata));
+      }
 
-    updates.push(`updated_at = $${paramIndex++}`);
-    values.push(new Date());
+      if (updates.length === 0) {
+        throw new Error('No updates specified');
+      }
 
-    values.push(id);
+      updates.push(`updated_at = $${paramIndex++}`);
+      values.push(new Date());
 
-    // A-024: Build WHERE clause with optional tenantId
-    let whereClause = `WHERE id = $${paramIndex}`;
-    if (tenantId) {
-      paramIndex++;
-      whereClause += ` AND tenant_id = $${paramIndex}`;
-      values.push(tenantId);
-    }
+      values.push(id);
 
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
-      `UPDATE messages SET ${updates.join(', ')} ${whereClause} RETURNING *`,
-      values
-    );
+      let whereClause = `WHERE id = $${paramIndex}`;
+      if (tenantId) {
+        paramIndex++;
+        whereClause += ` AND tenant_id = $${paramIndex}`;
+        values.push(tenantId);
+      }
 
-    if (!result.ok) return result;
+      const updateResult = await client.query<MessageRow>(
+        `UPDATE messages SET ${updates.join(', ')} ${whereClause} RETURNING *`,
+        values
+      );
 
-    const row = result.value.rows[0];
-    if (!row) {
-      return Result.err(new Error('Message not found'));
-    }
+      const row = updateResult.rows[0];
+      if (!row) {
+        throw new Error('Message not found');
+      }
 
-    return Result.ok(this.mapRow(row));
+      return this.mapRow(row);
+    });
+
+    return result.ok ? Result.ok(result.value) : result;
   }
 
   async markSending(id: string, ipAddress: string): Promise<Result<Message, Error>> {
@@ -643,44 +546,7 @@ export class MessagesRepository {
    */
   async markDeferred(id: string, reason: string, nextAttempt: Date): Promise<Result<Message, Error>> {
     const now = new Date();
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<MessageRow>(
       `UPDATE messages 
        SET status = 'deferred', 
            attempts = attempts + 1, 
@@ -729,44 +595,7 @@ export class MessagesRepository {
   async claimForSending(limit: number, ipAddress: string): Promise<Result<Message[], Error>> {
     const now = new Date();
     
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      user_id: string | null;
-      idempotency_key: string | null;
-      message_id: string;
-      status: Message['status'];
-      from_email: string;
-      from_name: string | null;
-      reply_to: string | null;
-      recipients: string;
-      subject: string;
-      html_body: string | null;
-      text_body: string | null;
-      headers: string;
-      attachments: string;
-      template_id: string | null;
-      template_data: string | null;
-      campaign_id: string | null;
-      tags: string[];
-      priority: Message['priority'];
-      scheduled_at: Date | null;
-      sent_at: Date | null;
-      delivered_at: Date | null;
-      bounced_at: Date | null;
-      bounce_type: Message['bounceType'];
-      bounce_reason: string | null;
-      mta_message_id: string | null;
-      ip_address: string | null;
-      sending_domain: string;
-      attempts: number;
-      max_attempts: number;
-      last_attempt_at: Date | null;
-      next_attempt_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<MessageRow>(
       `UPDATE messages
        SET status = 'sending', ip_address = $1, last_attempt_at = $2, attempts = attempts + 1, updated_at = $2
        WHERE id IN (

@@ -1,0 +1,6 @@
+BEGIN;
+
+DROP VIEW IF EXISTS dunning_records;
+DROP TABLE IF EXISTS dunning_events CASCADE;
+
+COMMIT;

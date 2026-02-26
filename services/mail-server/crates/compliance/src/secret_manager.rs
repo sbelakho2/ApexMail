@@ -18,7 +18,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
 use sqlx::PgPool;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::SecretsConfig;
@@ -32,13 +32,13 @@ pub struct SecretManager {
 }
 
 impl SecretManager {
-    pub fn new(db: PgPool, config: SecretsConfig) -> Self {
-        let cipher_key = derive_key(&config.encryption_key);
-        Self {
+    pub fn new(db: PgPool, config: SecretsConfig) -> Result<Self, String> {
+        let cipher_key = derive_key(&config.encryption_key)?;
+        Ok(Self {
             db,
             config,
             cipher_key,
-        }
+        })
     }
 
     // ── CRUD ────────────────────────────────────────────────
@@ -704,28 +704,32 @@ impl SecretManager {
 
 // ─── Key Derivation ────────────────────────────────────────────
 
-fn derive_key(master_key: &str) -> [u8; 32] {
+fn derive_key(master_key: &str) -> Result<[u8; 32], String> {
     type HmacSha256 = Hmac<Sha256>;
 
     let salt = std::env::var("SECRETS_KDF_SALT")
         .unwrap_or_else(|_| "apexmail-compliance-kdf-v1".to_string());
 
     // HKDF-Extract(salt, ikm)
-    let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes())
-        .unwrap_or_else(|_| <HmacSha256 as Mac>::new_from_slice(b"apexmail-compliance-kdf-v1").expect("static salt"));
+    let mut extract = <HmacSha256 as Mac>::new_from_slice(salt.as_bytes()).or_else(|e| {
+        warn!(error = %e, "Invalid KDF salt; falling back to static salt");
+        <HmacSha256 as Mac>::new_from_slice(b"apexmail-compliance-kdf-v1")
+            .map_err(|err| format!("KDF salt init: {err}"))
+    })?;
     extract.update(master_key.as_bytes());
     let prk = extract.finalize().into_bytes();
 
     // HKDF-Expand(prk, info, 32)
     let info = b"apexmail-secret-manager-encryption-key-v1";
-    let mut expand = <HmacSha256 as Mac>::new_from_slice(&prk).expect("PRK size valid for HMAC");
+    let mut expand = <HmacSha256 as Mac>::new_from_slice(&prk)
+        .map_err(|e| format!("KDF PRK init: {e}"))?;
     expand.update(info);
     expand.update(&[1]);
     let okm = expand.finalize().into_bytes();
 
     let mut key = [0u8; 32];
     key.copy_from_slice(&okm[..32]);
-    key
+    Ok(key)
 }
 
 // ─── Secret Generation ─────────────────────────────────────────
@@ -830,20 +834,20 @@ mod tests {
             rotation_days: 90,
             max_versions_to_keep: 10,
         };
-        SecretManager::new(pool, config)
+        SecretManager::new(pool, config).expect("test secret manager")
     }
 
     #[test]
     fn test_derive_key_deterministic() {
-        let k1 = derive_key("same-key");
-        let k2 = derive_key("same-key");
+        let k1 = derive_key("same-key").expect("derive key");
+        let k2 = derive_key("same-key").expect("derive key");
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn test_derive_key_different_keys() {
-        let k1 = derive_key("key-a");
-        let k2 = derive_key("key-b");
+        let k1 = derive_key("key-a").expect("derive key");
+        let k2 = derive_key("key-b").expect("derive key");
         assert_ne!(k1, k2);
     }
 
@@ -894,7 +898,7 @@ mod tests {
             encryption_key: "different-master-key-for-testing!!".into(),
             rotation_days: 90,
             max_versions_to_keep: 10,
-        });
+        }).expect("test secret manager");
 
         let encrypted = mgr1.encrypt("secret-data").unwrap();
         assert!(mgr2.decrypt(&encrypted).is_err());

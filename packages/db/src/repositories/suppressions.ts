@@ -148,59 +148,61 @@ export class SuppressionsRepository {
   ): Promise<Result<CheckSuppressionResult, Error>> {
     const emailHash = this.hashEmail(email);
 
-    // Check in priority order: global, tenant, domain, campaign
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string | null;
-      email: string;
-      email_hash: string;
-      type: SuppressionType;
-      scope: SuppressionScope;
-      scope_id: string | null;
-      reason: string | null;
-      source: string;
-      original_message_id: string | null;
-      bounce_type: 'hard' | 'soft' | null;
-      bounce_code: string | null;
-      feedback_type: string | null;
-      expires_at: Date | null;
-      metadata: string;
-      created_at: Date;
-      updated_at: Date;
-    }>(
-      // FIX-500-042: Select only columns needed for suppression check instead of SELECT *
-      `SELECT id, tenant_id, email_hash, scope, scope_id, reason, source, bounce_type, bounce_code, feedback_type, expires_at, metadata, created_at, updated_at FROM suppressions
-       WHERE email_hash = $1
-         AND (tenant_id IS NULL OR tenant_id = $2)
-         AND (expires_at IS NULL OR expires_at > NOW())
-         AND (scope = 'global' 
-              OR (scope = 'tenant' AND tenant_id = $2)
-              OR (scope = 'domain' AND scope_id = $3)
-              OR (scope = 'campaign' AND scope_id = $4))
-       ORDER BY 
-         CASE scope 
-           WHEN 'global' THEN 0 
-           WHEN 'tenant' THEN 1 
-           WHEN 'domain' THEN 2 
-           ELSE 3 
-         END,
-         created_at DESC
-       LIMIT 1`,
-      [
-        emailHash,
-        tenantId,
-        options.domain ?? null,
-        options.scopeId ?? null,
-      ]
-    );
+    const selectSql =
+      'SELECT id, tenant_id, email_hash, scope, scope_id, reason, source, bounce_type, bounce_code, feedback_type, expires_at, metadata, created_at, updated_at '
+      + 'FROM suppressions '
+      + 'WHERE email_hash = $1 '
+      + 'AND (expires_at IS NULL OR expires_at > NOW()) '
+      + 'AND scope = $2 '
+      + 'AND tenant_id IS NOT DISTINCT FROM $3 '
+      + 'AND ($4::text IS NULL OR scope_id = $4) '
+      + 'ORDER BY created_at DESC '
+      + 'LIMIT 1';
 
-    if (!result.ok) return result;
+    const scopeChecks: Array<[SuppressionScope, string | null, string | null]> = [
+      ['global', null, null],
+      ['tenant', tenantId, null],
+      ['domain', tenantId, options.domain ?? null],
+      ['campaign', tenantId, options.scopeId ?? null],
+    ];
 
-    const row = result.value.rows[0];
-    return Result.ok({
-      suppressed: !!row,
-      suppression: row ? this.mapRow(row) : null,
-    });
+    for (const [scope, scopedTenantId, scopedId] of scopeChecks) {
+      if ((scope === 'domain' && !options.domain) || (scope === 'campaign' && !options.scopeId)) {
+        continue;
+      }
+
+      const result = await this.db.query<{
+        id: string;
+        tenant_id: string | null;
+        email: string;
+        email_hash: string;
+        type: SuppressionType;
+        scope: SuppressionScope;
+        scope_id: string | null;
+        reason: string | null;
+        source: string;
+        original_message_id: string | null;
+        bounce_type: 'hard' | 'soft' | null;
+        bounce_code: string | null;
+        feedback_type: string | null;
+        expires_at: Date | null;
+        metadata: string;
+        created_at: Date;
+        updated_at: Date;
+      }>(selectSql, [emailHash, scope, scopedTenantId, scopedId]);
+
+      if (!result.ok) return result;
+
+      const row = result.value.rows[0];
+      if (row) {
+        return Result.ok({
+          suppressed: true,
+          suppression: this.mapRow(row),
+        });
+      }
+    }
+
+    return Result.ok({ suppressed: false, suppression: null });
   }
 
   async checkBulkSuppression(

@@ -10,6 +10,11 @@ use uuid::Uuid;
 
 use crate::models::*;
 
+const ACCOUNT_COLUMNS: &str = "id, email, domain, password_hash, display_name, quota_bytes, used_bytes, is_active, created_at, updated_at";
+const MAILBOX_COLUMNS: &str = "id, account_id, name, parent_id, mailbox_type, total_messages, unread_messages, uidnext, created_at, updated_at";
+const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, text_body, html_body, raw_size, is_read, is_starred, is_deleted, is_spam, labels, headers, attachments, created_at, updated_at";
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 /// Message storage
 pub struct MessageStorage {
     pool: PgPool,
@@ -23,131 +28,7 @@ impl MessageStorage {
     
     /// Initialize database tables
     pub async fn initialize(&self) -> Result<()> {
-        // Accounts table
-        sqlx::query(r#"
-            CREATE TABLE IF NOT EXISTS mail_accounts (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                email TEXT NOT NULL UNIQUE,
-                domain TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                display_name TEXT,
-                quota_bytes BIGINT NOT NULL DEFAULT 1073741824,
-                used_bytes BIGINT NOT NULL DEFAULT 0,
-                is_active BOOLEAN NOT NULL DEFAULT true,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        "#)
-        .execute(&self.pool)
-        .await?;
-        
-        // Mailboxes table
-        sqlx::query(r#"
-            CREATE TABLE IF NOT EXISTS mail_mailboxes (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                account_id UUID NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                parent_id UUID REFERENCES mail_mailboxes(id) ON DELETE CASCADE,
-                mailbox_type TEXT NOT NULL DEFAULT 'custom',
-                total_messages BIGINT NOT NULL DEFAULT 0,
-                unread_messages BIGINT NOT NULL DEFAULT 0,
-                uidnext BIGINT NOT NULL DEFAULT 1,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE(account_id, name, parent_id)
-            )
-        "#)
-        .execute(&self.pool)
-        .await?;
-        
-        // Messages table
-        sqlx::query(r#"
-            CREATE TABLE IF NOT EXISTS mail_messages (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                account_id UUID NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
-                mailbox_id UUID NOT NULL REFERENCES mail_mailboxes(id) ON DELETE CASCADE,
-                uid BIGINT,
-                message_id TEXT NOT NULL,
-                from_address TEXT NOT NULL,
-                from_name TEXT,
-                to_addresses JSONB NOT NULL DEFAULT '[]'::jsonb,
-                cc_addresses JSONB NOT NULL DEFAULT '[]'::jsonb,
-                bcc_addresses JSONB NOT NULL DEFAULT '[]'::jsonb,
-                subject TEXT NOT NULL,
-                date TIMESTAMPTZ NOT NULL,
-                text_body TEXT,
-                html_body TEXT,
-                raw_size BIGINT NOT NULL DEFAULT 0,
-                is_read BOOLEAN NOT NULL DEFAULT false,
-                is_starred BOOLEAN NOT NULL DEFAULT false,
-                is_deleted BOOLEAN NOT NULL DEFAULT false,
-                is_spam BOOLEAN NOT NULL DEFAULT false,
-                labels TEXT[] DEFAULT '{}',
-                headers JSONB DEFAULT '{}'::jsonb,
-                attachments JSONB DEFAULT '[]'::jsonb,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        "#)
-        .execute(&self.pool)
-        .await?;
-
-        // Ensure new columns exist on older installations
-        sqlx::query("ALTER TABLE mail_mailboxes ADD COLUMN IF NOT EXISTS uidnext BIGINT NOT NULL DEFAULT 1")
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS uid BIGINT")
-            .execute(&self.pool)
-            .await?;
-
-        // Backfill UIDs for existing messages (per mailbox, ordered by date)
-        sqlx::query(r#"
-            WITH ranked AS (
-                SELECT id, mailbox_id,
-                       ROW_NUMBER() OVER (PARTITION BY mailbox_id ORDER BY date, created_at, id) AS uid
-                FROM mail_messages
-                WHERE uid IS NULL
-            )
-            UPDATE mail_messages m
-            SET uid = r.uid
-            FROM ranked r
-            WHERE m.id = r.id
-        "#)
-        .execute(&self.pool)
-        .await?;
-
-        // Set uidnext to max(uid)+1 per mailbox
-        sqlx::query(r#"
-            UPDATE mail_mailboxes mb
-            SET uidnext = COALESCE((
-                SELECT MAX(uid) + 1 FROM mail_messages mm WHERE mm.mailbox_id = mb.id
-            ), 1)
-        "#)
-        .execute(&self.pool)
-        .await?;
-        
-        // Indexes
-        sqlx::query(r#"
-            CREATE INDEX IF NOT EXISTS idx_mail_messages_account_mailbox 
-            ON mail_messages(account_id, mailbox_id, date DESC)
-        "#)
-        .execute(&self.pool)
-        .await?;
-        
-        sqlx::query(r#"
-            CREATE INDEX IF NOT EXISTS idx_mail_messages_search 
-            ON mail_messages USING GIN (to_tsvector('english', subject || ' ' || COALESCE(text_body, '')))
-        "#)
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_mailbox_uid
-            ON mail_messages(mailbox_id, uid)
-        "#)
-        .execute(&self.pool)
-        .await?;
-        
+        MIGRATOR.run(&self.pool).await?;
         info!("Mailstore tables initialized");
         Ok(())
     }
@@ -159,11 +40,14 @@ impl MessageStorage {
         let domain = email.split('@').nth(1)
             .ok_or_else(|| anyhow!("Invalid email address"))?;
         
-        let row = sqlx::query(r#"
+        let row = sqlx::query(&format!(
+            r#"
             INSERT INTO mail_accounts (email, domain, password_hash, display_name)
             VALUES ($1, $2, $3, $4)
-            RETURNING *
-        "#)
+            RETURNING {}
+        "#,
+            ACCOUNT_COLUMNS
+        ))
         .bind(email)
         .bind(domain)
         .bind(password_hash)
@@ -193,9 +77,10 @@ impl MessageStorage {
     
     /// Get account by email
     pub async fn get_account_by_email(&self, email: &str) -> Result<Option<Account>> {
-        let row = sqlx::query(r#"
-            SELECT * FROM mail_accounts WHERE email = $1 AND is_active = true
-        "#)
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_accounts WHERE email = $1 AND is_active = true",
+            ACCOUNT_COLUMNS
+        ))
         .bind(email)
         .fetch_optional(&self.pool)
         .await?;
@@ -216,9 +101,10 @@ impl MessageStorage {
     
     /// Get account by ID
     pub async fn get_account(&self, account_id: &Uuid) -> Result<Option<Account>> {
-        let row = sqlx::query(r#"
-            SELECT * FROM mail_accounts WHERE id = $1
-        "#)
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_accounts WHERE id = $1",
+            ACCOUNT_COLUMNS
+        ))
         .bind(account_id)
         .fetch_optional(&self.pool)
         .await?;
@@ -268,9 +154,10 @@ impl MessageStorage {
     
     /// List mailboxes for an account
     pub async fn list_mailboxes(&self, account_id: &Uuid) -> Result<Vec<Mailbox>> {
-        let rows = sqlx::query(r#"
-            SELECT * FROM mail_mailboxes WHERE account_id = $1 ORDER BY name
-        "#)
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM mail_mailboxes WHERE account_id = $1 ORDER BY name",
+            MAILBOX_COLUMNS
+        ))
         .bind(account_id)
         .fetch_all(&self.pool)
         .await?;
@@ -301,10 +188,10 @@ impl MessageStorage {
 
     /// Get a mailbox by name (case-insensitive)
     pub async fn get_mailbox_by_name(&self, account_id: &Uuid, name: &str) -> Result<Option<Mailbox>> {
-        let row = sqlx::query(r#"
-            SELECT * FROM mail_mailboxes
-            WHERE account_id = $1 AND lower(name) = lower($2)
-        "#)
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND lower(name) = lower($2)",
+            MAILBOX_COLUMNS
+        ))
         .bind(account_id)
         .bind(name)
         .fetch_optional(&self.pool)
@@ -358,11 +245,14 @@ impl MessageStorage {
             _ => "custom",
         };
 
-        let row = sqlx::query(r#"
+        let row = sqlx::query(&format!(
+            r#"
             INSERT INTO mail_mailboxes (account_id, name, mailbox_type)
             VALUES ($1, $2, $3)
-            RETURNING *
-        "#)
+            RETURNING {}
+        "#,
+            MAILBOX_COLUMNS
+        ))
         .bind(account_id)
         .bind(name)
         .bind(mailbox_type)
@@ -423,10 +313,10 @@ impl MessageStorage {
             MailboxType::Custom => return Ok(None),
         };
         
-        let row = sqlx::query(r#"
-            SELECT * FROM mail_mailboxes 
-            WHERE account_id = $1 AND mailbox_type = $2
-        "#)
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_mailboxes WHERE account_id = $1 AND mailbox_type = $2",
+            MAILBOX_COLUMNS
+        ))
         .bind(account_id)
         .bind(type_str)
         .fetch_optional(&self.pool)
@@ -527,9 +417,10 @@ impl MessageStorage {
     
     /// Get a message by ID
     pub async fn get_message(&self, message_id: &Uuid) -> Result<Option<StoredMessage>> {
-        let row = sqlx::query(r#"
-            SELECT * FROM mail_messages WHERE id = $1
-        "#)
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_messages WHERE id = $1",
+            MESSAGE_COLUMNS
+        ))
         .bind(message_id)
         .fetch_optional(&self.pool)
         .await?;
@@ -547,10 +438,10 @@ impl MessageStorage {
         mailbox_id: &Uuid,
         uid: i64,
     ) -> Result<Option<StoredMessage>> {
-        let row = sqlx::query(r#"
-            SELECT * FROM mail_messages
-            WHERE account_id = $1 AND mailbox_id = $2 AND uid = $3
-        "#)
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM mail_messages WHERE account_id = $1 AND mailbox_id = $2 AND uid = $3",
+            MESSAGE_COLUMNS
+        ))
         .bind(account_id)
         .bind(mailbox_id)
         .bind(uid)
@@ -565,9 +456,10 @@ impl MessageStorage {
     
     /// List messages
     pub async fn list_messages(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
-        let mut sql = String::from(r#"
-            SELECT * FROM mail_messages WHERE account_id = $1
-        "#);
+        let mut sql = format!(
+            "SELECT {} FROM mail_messages WHERE account_id = $1",
+            MESSAGE_COLUMNS
+        );
         
         let mut param_idx = 2;
         
@@ -644,14 +536,17 @@ impl MessageStorage {
         .fetch_one(&self.pool)
         .await?;
 
-        let rows = sqlx::query(r#"
-            SELECT * FROM mail_messages
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT {} FROM mail_messages
             WHERE account_id = $1 AND mailbox_id = $2
               AND to_tsvector('english', subject || ' ' || COALESCE(text_body, ''))
                   @@ plainto_tsquery('english', $3)
             ORDER BY uid DESC NULLS LAST, date DESC
             LIMIT $4 OFFSET $5
-        "#)
+        "#,
+            MESSAGE_COLUMNS
+        ))
         .bind(account_id)
         .bind(mailbox_id)
         .bind(q)
@@ -740,10 +635,10 @@ impl MessageStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(r#"
-            SELECT * FROM mail_messages
-            WHERE account_id = $1 AND mailbox_id = $2 AND uid = ANY($3)
-        "#)
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM mail_messages WHERE account_id = $1 AND mailbox_id = $2 AND uid = ANY($3)",
+            MESSAGE_COLUMNS
+        ))
         .bind(account_id)
         .bind(mailbox_id)
         .bind(uids)

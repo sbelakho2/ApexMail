@@ -19,25 +19,17 @@ interface ImpersonationInfo {
 export function ImpersonationBanner() {
     const [impersonationInfo, setImpersonationInfo] = useState<ImpersonationInfo | null>(null);
     const [timeRemaining, setTimeRemaining] = useState<string>('');
-    const storageKey = 'apexmail.impersonation.info';
+    const [isEndingSession, setIsEndingSession] = useState(false);
+    const [endSessionError, setEndSessionError] = useState<string | null>(null);
     
     useEffect(() => {
-        try {
-            const persisted = sessionStorage.getItem(storageKey);
-            if (persisted) {
-                const parsed = JSON.parse(persisted) as ImpersonationInfo;
-                if (parsed?.expiresAt && parsed.expiresAt > Date.now()) {
-                    setImpersonationInfo(parsed);
-                }
-            }
-        } catch {
-            // ignore invalid persisted state
-        }
-
         // Check for impersonation session
         const checkImpersonation = async () => {
             try {
-                const response = await fetch('/api/auth/session');
+                const response = await fetch('/api/auth/session', {
+                    cache: 'no-store',
+                    credentials: 'include',
+                });
                 const data = await response.json();
                 
                 if (data.impersonation) {
@@ -47,9 +39,8 @@ export function ImpersonationBanner() {
                         expiresAt: data.impersonation.exp,
                     };
                     setImpersonationInfo(nextInfo);
-                    sessionStorage.setItem(storageKey, JSON.stringify(nextInfo));
                 } else {
-                    sessionStorage.removeItem(storageKey);
+                    setImpersonationInfo(null);
                 }
             } catch {
                 // Not impersonating or error
@@ -61,45 +52,60 @@ export function ImpersonationBanner() {
     
     useEffect(() => {
         if (!impersonationInfo) return;
-        
+
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
         const updateTimer = () => {
             const remaining = impersonationInfo.expiresAt - Date.now();
             if (remaining <= 0) {
-                setTimeRemaining('Expired');
+                setTimeRemaining((prev) => (prev === 'Expired' ? prev : 'Expired'));
                 return;
             }
-            
+
             const minutes = Math.floor(remaining / 60000);
             const seconds = Math.floor((remaining % 60000) / 1000);
-            setTimeRemaining(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+
+            const nextLabel = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            setTimeRemaining((prev) => (prev === nextLabel ? prev : nextLabel));
+
+            const nextDelayMs = remaining > 5 * 60_000
+                ? 60_000
+                : remaining > 60_000
+                    ? 15_000
+                    : 1_000;
+
+            timeoutId = setTimeout(updateTimer, nextDelayMs);
         };
-        
+
         updateTimer();
-        const interval = setInterval(updateTimer, 1000);
-        
-        return () => clearInterval(interval);
+
+        return () => {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        };
     }, [impersonationInfo]);
     
     const handleEndSession = async () => {
+        setEndSessionError(null);
+        setIsEndingSession(true);
         try {
-            sessionStorage.removeItem(storageKey);
-        } catch {
-            // noop
-        }
-
-        try {
-            await fetch('/api/auth/impersonate/end', { method: 'POST' });
+            const response = await fetch('/api/auth/impersonate/end', { method: 'POST' });
+            if (!response.ok) {
+                throw new Error('Unable to end session');
+            }
             window.location.href = '/login';
         } catch {
-            // Force redirect on error
-            window.location.href = '/login';
+            setEndSessionError('Could not end impersonation session. Please try again.');
+        } finally {
+            setIsEndingSession(false);
         }
     };
     
     if (!impersonationInfo) return null;
     
     return (
-        <div className="fixed top-0 left-0 right-0 z-[100] bg-warning text-white shadow-lg">
+        <div className="fixed top-0 left-0 right-0 z-[100] bg-warning text-white shadow-lg" role="alert" aria-live="polite">
             <div className="max-w-7xl mx-auto px-4 py-2">
                 <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -124,6 +130,9 @@ export function ImpersonationBanner() {
                     </div>
                     
                     <div className="flex items-center gap-4">
+                        {endSessionError ? (
+                            <span className="text-xs font-medium text-white/95">{endSessionError}</span>
+                        ) : null}
                         <div className="flex items-center gap-2 text-sm">
                             <AlertTriangle className="w-4 h-4" />
                             <span className="hidden sm:inline opacity-80">Expires in:</span>
@@ -134,10 +143,11 @@ export function ImpersonationBanner() {
                         
                         <button
                             onClick={handleEndSession}
+                            disabled={isEndingSession}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-white/20 hover:bg-white/30 rounded-lg text-sm font-semibold transition-colors"
                         >
                             <X className="w-4 h-4" />
-                            <span className="hidden sm:inline">End Session</span>
+                            <span className="hidden sm:inline">{isEndingSession ? 'Ending…' : 'End Session'}</span>
                         </button>
                     </div>
                 </div>

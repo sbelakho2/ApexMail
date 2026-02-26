@@ -6,6 +6,7 @@ use regex::Regex;
 use sqlx::PgPool;
 use std::sync::LazyLock;
 use std::time::Duration;
+use tracing::warn;
 
 use crate::types::*;
 
@@ -15,26 +16,26 @@ const REPLY_CACHE_TTL_SECS: u64 = 3600;
 
 /// Auto-reply detection patterns.
 static AUTO_REPLY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        Regex::new(r"(?i)^auto[- ]?reply").unwrap(),
-        Regex::new(r"(?i)^automatic reply").unwrap(),
-        Regex::new(r"(?i)^out of (the )?office").unwrap(),
-        Regex::new(r"(?i)^ooo\b").unwrap(),
-        Regex::new(r"(?i)^away from").unwrap(),
-        Regex::new(r"(?i)^on vacation").unwrap(),
-        Regex::new(r"(?i)^i('m| am) (currently )?(out|away|on)").unwrap(),
-        Regex::new(r"(?i)^this is an automated").unwrap(),
-        Regex::new(r"(?i)^do not reply").unwrap(),
-        Regex::new(r"(?i)^noreply").unwrap(),
-        Regex::new(r"(?i)vacation.*auto.*response").unwrap(),
-        Regex::new(r"(?i)delivery.*status.*notification").unwrap(),
-        Regex::new(r"(?i)mail delivery.*failed").unwrap(),
-        Regex::new(r"(?i)undeliverable").unwrap(),
-        Regex::new(r"(?i)returned mail").unwrap(),
-        Regex::new(r"(?i)message not delivered").unwrap(),
-        Regex::new(r"(?i)^thank you for (your |contacting)").unwrap(),
-        Regex::new(r"(?i)^we (have )?received your").unwrap(),
-    ]
+    compile_regexes(&[
+        r"(?i)^auto[- ]?reply",
+        r"(?i)^automatic reply",
+        r"(?i)^out of (the )?office",
+        r"(?i)^ooo\b",
+        r"(?i)^away from",
+        r"(?i)^on vacation",
+        r"(?i)^i('m| am) (currently )?(out|away|on)",
+        r"(?i)^this is an automated",
+        r"(?i)^do not reply",
+        r"(?i)^noreply",
+        r"(?i)vacation.*auto.*response",
+        r"(?i)delivery.*status.*notification",
+        r"(?i)mail delivery.*failed",
+        r"(?i)undeliverable",
+        r"(?i)returned mail",
+        r"(?i)message not delivered",
+        r"(?i)^thank you for (your |contacting)",
+        r"(?i)^we (have )?received your",
+    ])
 });
 
 /// Auto-reply header indicators.
@@ -50,32 +51,43 @@ static AUTO_REPLY_HEADERS: LazyLock<Vec<(&'static str, &'static str)>> = LazyLoc
 
 /// Sentiment patterns.
 static POSITIVE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![Regex::new(
+    compile_regexes(&[
         r"(?i)\b(thank|thanks|great|awesome|excellent|love|perfect|wonderful|appreciate)\b",
-    )
-    .unwrap()]
+    ])
 });
 static NEGATIVE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![Regex::new(
+    compile_regexes(&[
         r"(?i)\b(unsubscribe|stop|remove|spam|hate|terrible|worst|annoying|complaint)\b",
-    )
-    .unwrap()]
+    ])
 });
 static INQUIRY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![Regex::new(
+    compile_regexes(&[
         r"(?i)\b(question|how|when|where|what|why|can you|could you|please help)\b",
-    )
-    .unwrap()]
+    ])
 });
 static UNSUB_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![Regex::new(
+    compile_regexes(&[
         r"(?i)\b(unsubscribe|opt.out|stop (sending|emailing)|remove me)\b",
-    )
-    .unwrap()]
+    ])
 });
 static OOO_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![Regex::new(r"(?i)\b(out of office|ooo|on vacation|away|on leave|returning)\b").unwrap()]
+    compile_regexes(&[
+        r"(?i)\b(out of office|ooo|on vacation|away|on leave|returning)\b",
+    ])
 });
+
+fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(e) => {
+                warn!(pattern = %pattern, error = %e, "Invalid regex pattern");
+                None
+            }
+        })
+        .collect()
+}
 
 pub struct ReplyTrackingService {
     pool: PgPool,

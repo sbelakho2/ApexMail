@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { formatNumber, cn, timeAgo } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * IP Warmer Management - Dedicated IP warming interface
@@ -402,11 +403,7 @@ export default function IPWarmerPage() {
     });
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading IP warmup data..." />;
     }
 
     return (

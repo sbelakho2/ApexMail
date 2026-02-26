@@ -72,7 +72,6 @@ async function controlPlaneFetch(url: string, options: RequestInit = {}): Promis
                     ...getAuthHeaders(),
                     ...options.headers,
                 },
-                credentials: 'include',
                 signal: controller.signal,
             });
 
@@ -160,6 +159,15 @@ export interface RiskProfile {
     flags: string[];
 }
 
+export interface PipelineStats {
+    leadsDiscovered: number;
+    emailsSent: number;
+    repliesReceived: number;
+    demosScheduled: number;
+    trialsStarted: number;
+    converted: number;
+}
+
 // ============================================
 // Sales Autopilot API (Control Plane CRM)
 // ============================================
@@ -180,11 +188,11 @@ export async function getCampaigns(tenantId: string): Promise<Campaign[]> {
     return data.data;
 }
 
-export async function getPipelineStats(tenantId: string): Promise<unknown> {
+export async function getPipelineStats(tenantId: string): Promise<PipelineStats> {
     const url = `${AUTOPILOT_API_URL}/api/v1/pipeline/${tenantId}`;
     
     const response = await controlPlaneFetch(url);
-    const data = await response.json();
+    const data = await response.json() as { data: PipelineStats };
     return data.data;
 }
 

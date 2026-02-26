@@ -1,8 +1,16 @@
 import useSWR, { SWRConfiguration, mutate as globalMutate } from 'swr';
 import useSWRMutation from 'swr/mutation';
+import type { Campaign, CampaignStats, Contact } from '@/types/entities';
 
-// Base API URL from environment
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Always use same-origin relative paths; Next.js rewrites proxy /v1/* to API_URL server-side.
+const API_BASE_URL = '';
+const CSRF_HEADER = 'X-CSRF-Token';
+const CSRF_COOKIE = 'csrf_token';
+const CSRF_CACHE_TTL_MS = 10 * 60 * 1000;
+
+let cachedCsrfToken: string | null = null;
+let cachedCsrfAt = 0;
+let inflightCsrfRequest: Promise<string | null> | null = null;
 
 // Custom error class for API errors
 export class APIError extends Error {
@@ -15,6 +23,64 @@ export class APIError extends Error {
         this.status = status;
         this.info = info;
     }
+}
+
+function readCookie(name: string): string | null {
+    if (typeof document === 'undefined') {
+        return null;
+    }
+
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = document.cookie.match(new RegExp(`(?:^|; )${escapedName}=([^;]*)`));
+    return match ? decodeURIComponent(match[1]) : null;
+}
+
+async function fetchCsrfToken(): Promise<string | null> {
+    if (typeof window === 'undefined') {
+        return null;
+    }
+
+    const response = await fetch('/api/csrf', {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+    });
+
+    if (!response.ok) {
+        return null;
+    }
+
+    const payload = await response.json().catch(() => null) as { token?: unknown } | null;
+    const token = typeof payload?.token === 'string' ? payload.token : null;
+    if (!token) {
+        return null;
+    }
+
+    cachedCsrfToken = token;
+    cachedCsrfAt = Date.now();
+    return token;
+}
+
+async function getCsrfToken(): Promise<string | null> {
+    const cookieToken = readCookie(CSRF_COOKIE);
+    if (cookieToken) {
+        cachedCsrfToken = cookieToken;
+        cachedCsrfAt = Date.now();
+        return cookieToken;
+    }
+
+    const isFresh = cachedCsrfToken && (Date.now() - cachedCsrfAt) < CSRF_CACHE_TTL_MS;
+    if (isFresh && cachedCsrfToken) {
+        return cachedCsrfToken;
+    }
+
+    if (!inflightCsrfRequest) {
+        inflightCsrfRequest = fetchCsrfToken().finally(() => {
+            inflightCsrfRequest = null;
+        });
+    }
+
+    return inflightCsrfRequest;
 }
 
 // Type-safe fetcher function
@@ -43,11 +109,17 @@ async function postFetcher<T, D = unknown>(
     url: string,
     { arg }: { arg: D }
 ): Promise<T> {
+    const csrfToken = await getCsrfToken();
+    if (!csrfToken) {
+        throw new APIError('Unable to initialize CSRF token', 403);
+    }
+
     const response = await fetch(`${API_BASE_URL}${url}`, {
         method: 'POST',
         credentials: 'include',
         headers: {
             'Content-Type': 'application/json',
+            [CSRF_HEADER]: csrfToken,
         },
         body: JSON.stringify(arg),
     });
@@ -68,11 +140,17 @@ async function putFetcher<T, D = unknown>(
     url: string,
     { arg }: { arg: D }
 ): Promise<T> {
+    const csrfToken = await getCsrfToken();
+    if (!csrfToken) {
+        throw new APIError('Unable to initialize CSRF token', 403);
+    }
+
     const response = await fetch(`${API_BASE_URL}${url}`, {
         method: 'PUT',
         credentials: 'include',
         headers: {
             'Content-Type': 'application/json',
+            [CSRF_HEADER]: csrfToken,
         },
         body: JSON.stringify(arg),
     });
@@ -90,11 +168,17 @@ async function putFetcher<T, D = unknown>(
 }
 
 async function deleteFetcher<T>(url: string): Promise<T> {
+    const csrfToken = await getCsrfToken();
+    if (!csrfToken) {
+        throw new APIError('Unable to initialize CSRF token', 403);
+    }
+
     const response = await fetch(`${API_BASE_URL}${url}`, {
         method: 'DELETE',
         credentials: 'include',
         headers: {
             'Content-Type': 'application/json',
+            [CSRF_HEADER]: csrfToken,
         },
     });
 
@@ -108,6 +192,28 @@ async function deleteFetcher<T>(url: string): Promise<T> {
     }
 
     return response.json();
+}
+
+async function putByIdFetcher<T, D>(
+    baseUrl: string,
+    { arg }: { arg: { id: string; data: D } }
+): Promise<T> {
+    if (!arg?.id) {
+        throw new APIError('Resource ID is required', 400);
+    }
+
+    return putFetcher<T, D>(`${baseUrl}/${arg.id}`, { arg: arg.data });
+}
+
+async function deleteByIdFetcher<T>(
+    baseUrl: string,
+    { arg }: { arg: string }
+): Promise<T> {
+    if (!arg) {
+        throw new APIError('Resource ID is required', 400);
+    }
+
+    return deleteFetcher<T>(`${baseUrl}/${arg}`);
 }
 
 // Default SWR configuration
@@ -168,7 +274,7 @@ export function useAPIDelete<T>(
 ) {
     return useSWRMutation<T, APIError, string, void>(
         endpoint,
-        () => deleteFetcher<T>(endpoint),
+        deleteFetcher,
         {
             onSuccess: config?.onSuccess,
             onError: config?.onError,
@@ -185,52 +291,7 @@ export interface PaginatedResponse<T> {
     totalPages: number;
 }
 
-export interface Campaign {
-    id: string;
-    name: string;
-    subject: string;
-    fromName: string;
-    fromEmail: string;
-    status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'paused';
-    listId: string;
-    templateId?: string;
-    content?: string;
-    scheduledAt?: string;
-    sentAt?: string;
-    stats?: CampaignStats;
-    createdAt: string;
-    updatedAt: string;
-}
-
-export interface CampaignStats {
-    sent: number;
-    delivered: number;
-    opens: number;
-    uniqueOpens: number;
-    clicks: number;
-    uniqueClicks: number;
-    bounces: number;
-    complaints: number;
-    unsubscribes: number;
-    openRate: number;
-    clickRate: number;
-    bounceRate: number;
-}
-
-export interface Contact {
-    id: string;
-    email: string;
-    firstName?: string;
-    lastName?: string;
-    phone?: string;
-    company?: string;
-    status: 'subscribed' | 'unsubscribed' | 'bounced' | 'complained';
-    tags: string[];
-    customFields: Record<string, unknown>;
-    score?: number;
-    createdAt: string;
-    updatedAt: string;
-}
+export type { Campaign, CampaignStats, Contact };
 
 export interface List {
     id: string;
@@ -292,12 +353,16 @@ export function useUpdateCampaign(id: string) {
     });
 }
 
-export function useDeleteCampaign(id: string) {
-    return useAPIDelete<void>(`/v1/campaigns/${id}`, {
-        onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
-        },
-    });
+export function useDeleteCampaign() {
+    return useSWRMutation<void, APIError, string, string>(
+        '/v1/campaigns',
+        deleteByIdFetcher,
+        {
+            onSuccess: () => {
+                globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
+            },
+        }
+    );
 }
 
 // Specific API hooks for contacts
@@ -336,18 +401,34 @@ export function useCreateContact() {
     });
 }
 
-export function useUpdateContact(id: string) {
-    return useAPIPut<Contact, Partial<Contact>>(`/v1/contacts/${id}`, {
-        onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
-        },
-    });
+export function useUpdateContact() {
+    return useSWRMutation<Contact, APIError, string, { id: string; data: Partial<Contact> }>(
+        '/v1/contacts',
+        putByIdFetcher,
+        {
+            onSuccess: () => {
+                globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
+            },
+        }
+    );
 }
 
-export function useDeleteContact(id: string) {
-    return useAPIDelete<void>(`/v1/contacts/${id}`, {
+export function useDeleteContact() {
+    return useSWRMutation<void, APIError, string, string>(
+        '/v1/contacts',
+        deleteByIdFetcher,
+        {
+            onSuccess: () => {
+                globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
+            },
+        }
+    );
+}
+
+export function useUpdateCampaign(id: string) {
+    return useAPIPut<Campaign, Partial<Campaign>>(`/v1/campaigns/${id}`, {
         onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/contacts'));
+            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
         },
     });
 }

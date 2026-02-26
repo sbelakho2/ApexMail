@@ -2,6 +2,7 @@
 
 use regex::Regex;
 use std::sync::LazyLock;
+use tracing::warn;
 
 use crate::types::*;
 
@@ -63,9 +64,19 @@ static SPAM_TOKENS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
 static SPAM_BIGRAMS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec!["buy now", "act now", "click here", "free offer", "risk free", "no cost"]
 });
-static EMOJI_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\p{Emoji_Presentation}\p{Emoji}\u{200d}\u{fe0f}]").unwrap()
+static EMOJI_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    compile_regex(r"[\p{Emoji_Presentation}\p{Emoji}\u{200d}\u{fe0f}]")
 });
+
+fn compile_regex(pattern: &str) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(e) => {
+            warn!(pattern = %pattern, error = %e, "Invalid regex pattern; disabling matcher");
+            None
+        }
+    }
+}
 
 pub struct SubjectLineAnalyzer;
 
@@ -146,7 +157,9 @@ pub fn classify_tokens(tokens: &[String]) -> Vec<TokenAnalysis> {
 
             let _is_question = token.contains('?');
             let _is_number = token.chars().all(|c| c.is_ascii_digit());
-            let _has_emoji = EMOJI_RE.is_match(token);
+            let _has_emoji = EMOJI_RE
+                .as_ref()
+                .map_or(false, |regex| regex.is_match(token));
 
             TokenAnalysis {
                 token: token.clone(),
@@ -266,7 +279,9 @@ fn compute_token_lift(token: &str) -> f64 {
 
 /// Count emoji characters.
 fn count_emojis(s: &str) -> usize {
-    EMOJI_RE.find_iter(s).count()
+    EMOJI_RE
+        .as_ref()
+        .map_or(0, |regex| regex.find_iter(s).count())
 }
 
 #[cfg(test)]

@@ -4,21 +4,34 @@
 
 BEGIN;
 
--- Rename existing columns to match service expectations
--- base_fee → base_price (service uses basePrice / base_price)
-ALTER TABLE enterprise_contracts RENAME COLUMN base_fee TO base_price;
+-- Rename existing columns to match service expectations (guarded)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'base_fee')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'base_price') THEN
+    EXECUTE 'ALTER TABLE enterprise_contracts RENAME COLUMN base_fee TO base_price';
+  END IF;
 
--- committed_volume JSONB → committed_volume_tiers (free up name for integer column)
-ALTER TABLE enterprise_contracts RENAME COLUMN committed_volume TO committed_volume_tiers;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'committed_volume')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'committed_volume_tiers') THEN
+    EXECUTE 'ALTER TABLE enterprise_contracts RENAME COLUMN committed_volume TO committed_volume_tiers';
+  END IF;
 
--- overage_rates JSONB → overage_rate_tiers (free up for scalar overage_rate)
-ALTER TABLE enterprise_contracts RENAME COLUMN overage_rates TO overage_rate_tiers;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'overage_rates')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'overage_rate_tiers') THEN
+    EXECUTE 'ALTER TABLE enterprise_contracts RENAME COLUMN overage_rates TO overage_rate_tiers';
+  END IF;
 
--- signer_name → signed_by (service uses signedBy / signed_by)
-ALTER TABLE enterprise_contracts RENAME COLUMN signer_name TO signed_by;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'signer_name')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'signed_by') THEN
+    EXECUTE 'ALTER TABLE enterprise_contracts RENAME COLUMN signer_name TO signed_by';
+  END IF;
 
--- payment_terms → payment_terms_legacy (service uses payment_terms_days integer)
-ALTER TABLE enterprise_contracts RENAME COLUMN payment_terms TO payment_terms_legacy;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'payment_terms')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'enterprise_contracts' AND column_name = 'payment_terms_legacy') THEN
+    EXECUTE 'ALTER TABLE enterprise_contracts RENAME COLUMN payment_terms TO payment_terms_legacy';
+  END IF;
+END $$;
 
 -- Add columns the service expects that were missing
 ALTER TABLE enterprise_contracts

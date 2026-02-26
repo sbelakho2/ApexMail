@@ -1,6 +1,6 @@
 'use client';
 
-import * as React from 'react';
+import { useEffect } from 'react';
 import {
     User,
     Bell,
@@ -30,7 +30,8 @@ import {
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { cn, formatDate } from '@/lib/utils';
-import { PlanSelector, PaygUsageDashboard, PLANS } from '@/components/billing';
+import { PlanSelector, PaygUsageDashboard } from '@/components/billing';
+import { useSettingsController } from './use-settings-controller';
 
 const settingsSections = [
     { id: 'profile', label: 'Profile', icon: User },
@@ -42,142 +43,55 @@ const settingsSections = [
     { id: 'billing', label: 'Billing', icon: CreditCard },
 ];
 
-interface UserProfile {
-    firstName: string;
-    lastName: string;
-    email: string;
-    bio: string;
-    orgName: string;
-    fromName: string;
-    fromEmail: string;
-    replyTo: string;
-    address: string;
-    timezone: string;
-    language: string;
-}
-
-const DEFAULT_PROFILE: UserProfile = {
-    firstName: '', lastName: '', email: '', bio: '',
-    orgName: '', fromName: '', fromEmail: '', replyTo: '', address: '',
-    timezone: 'utc', language: 'en',
-};
-
-interface WebhookEntry {
-    id: string;
-    url: string;
-    events: string[];
-    status: string;
-    createdAt: string;
-}
-
-type SectionSaveState = 'idle' | 'saving' | 'saved' | 'error';
-
 export default function SettingsPage() {
-    const [activeSection, setActiveSection] = React.useState('profile');
-    const [currentPlan, setCurrentPlan] = React.useState('pro');
-    const [saveStatus, setSaveStatus] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-    const [profile, setProfile] = React.useState<UserProfile>(DEFAULT_PROFILE);
-    const [webhooks, setWebhooks] = React.useState<WebhookEntry[]>([]);
-    const [profileLoaded, setProfileLoaded] = React.useState(false);
-    const [isDirty, setIsDirty] = React.useState(false);
-    const [lastSavedAt, setLastSavedAt] = React.useState<string | null>(null);
-    const [sectionSaveStatus, setSectionSaveStatus] = React.useState<Record<string, SectionSaveState>>({
-        profile: 'idle', account: 'idle', notifications: 'idle', email: 'idle', security: 'idle', api: 'idle', billing: 'idle',
-    });
-    const [readOnlyMode, setReadOnlyMode] = React.useState(false);
-    const [localConflict, setLocalConflict] = React.useState(false);
-    const [pendingLocalProfile, setPendingLocalProfile] = React.useState<UserProfile | null>(null);
-    const [pendingVerification, setPendingVerification] = React.useState(false);
-    const [avatarUploadProgress, setAvatarUploadProgress] = React.useState(0);
-    const [newWebhookUrl, setNewWebhookUrl] = React.useState('');
-    const [newWebhookEvents, setNewWebhookEvents] = React.useState('delivered, opened');
-    const [settingsImportJson, setSettingsImportJson] = React.useState('');
-    const [revealedApiKey, setRevealedApiKey] = React.useState(false);
-    const [toasts, setToasts] = React.useState<Array<{ id: string; message: string; tone: 'success' | 'error' | 'info' }>>([]);
-    const avatarInputRef = React.useRef<HTMLInputElement | null>(null);
-    const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    const resetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    const {
+        state: {
+            activeSection,
+            currentPlan,
+            saveStatus,
+            profile,
+            webhooks,
+            lastSavedAt,
+            sectionSaveStatus,
+            readOnlyMode,
+            profileLoadError,
+            localConflict,
+            pendingLocalProfile,
+            pendingVerification,
+            avatarUploadProgress,
+            newWebhookUrl,
+            newWebhookEvents,
+            settingsImportJson,
+            revealedApiKey,
+            toasts,
+            activePlanData,
+            isDirty,
+        },
+        refs: {
+            avatarInputRef,
+        },
+        actions: {
+            setNewWebhookUrl,
+            setNewWebhookEvents,
+            setSettingsImportJson,
+            updateProfile,
+            handleSave,
+            resetSectionDefaults,
+            addWebhook,
+            exportSettingsJson,
+            importSettingsJson,
+            handleAvatarUpload,
+            handleSectionChange,
+            handleKeepServerProfile,
+            handleUseLocalProfile,
+            handleVerificationSend,
+            handleApiKeyAction,
+            handlePlanChange,
+        },
+    } = useSettingsController();
 
-    const pushToast = React.useCallback((message: string, tone: 'success' | 'error' | 'info' = 'info') => {
-        setToasts((prev) => {
-            if (prev.some((toast) => toast.message === message)) return prev;
-            const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            return [...prev, { id, message, tone }].slice(-4);
-        });
-    }, []);
-
-    React.useEffect(() => {
-        if (toasts.length === 0) return;
-        const timer = window.setTimeout(() => {
-            setToasts((prev) => prev.slice(1));
-        }, 3000);
-        return () => window.clearTimeout(timer);
-    }, [toasts]);
-
-    // Load profile from API on mount
-    React.useEffect(() => {
-        Promise.allSettled([
-            fetch('/v1/auth/me'),
-            fetch('/v1/webhooks'),
-        ]).then(async ([profileRes, whRes]) => {
-            if (profileRes.status === 'fulfilled' && profileRes.value.ok) {
-                const json = await profileRes.value.json();
-                const user = json.user ?? json;
-                const serverProfile = {
-                    ...DEFAULT_PROFILE,
-                    firstName: user.firstName ?? user.name?.split(' ')[0] ?? '',
-                    lastName: user.lastName ?? user.name?.split(' ').slice(1).join(' ') ?? '',
-                    email: user.email ?? '',
-                    orgName: user.organization ?? user.orgName ?? '',
-                };
-
-                setProfile(prev => ({
-                    ...prev,
-                    ...serverProfile,
-                }));
-
-                try {
-                    const stored = localStorage.getItem('apexmail-user-settings');
-                    if (stored) {
-                        const parsed = JSON.parse(stored) as UserProfile;
-                        const hasConflict = JSON.stringify({ ...serverProfile, bio: parsed.bio || serverProfile.bio }) !== JSON.stringify(parsed);
-                        if (hasConflict) {
-                            setPendingLocalProfile(parsed);
-                            setLocalConflict(true);
-                        }
-                    }
-                } catch {
-                    // ignore
-                }
-            } else {
-                setReadOnlyMode(true);
-                try {
-                    const stored = localStorage.getItem('apexmail-user-settings');
-                    if (stored) setProfile(prev => ({ ...prev, ...JSON.parse(stored) }));
-                } catch { /* ignore */ }
-            }
-            if (whRes.status === 'fulfilled' && whRes.value.ok) {
-                const json = await whRes.value.json();
-                setWebhooks(json.webhooks ?? json.data ?? []);
-            }
-        }).finally(() => {
-            setProfileLoaded(true);
-            setIsDirty(false);
-        });
-
-        return () => {
-            if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-            if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
-        };
-    }, []);
-
-    function updateProfile(field: keyof UserProfile, value: string) {
-        setProfile(prev => ({ ...prev, [field]: value }));
-        setIsDirty(true);
-    }
-
-    React.useEffect(() => {
-        if (!profileLoaded || !isDirty) return;
+    useEffect(() => {
+        if (!isDirty) return;
 
         const handleBeforeUnload = (event: BeforeUnloadEvent) => {
             event.preventDefault();
@@ -186,160 +100,7 @@ export default function SettingsPage() {
 
         window.addEventListener('beforeunload', handleBeforeUnload);
         return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, [profileLoaded, isDirty]);
-
-    async function handleSave() {
-        if (readOnlyMode) {
-            pushToast('Settings are read-only while backend profile APIs are unavailable.', 'error');
-            return;
-        }
-
-        setSaveStatus('saving');
-        setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'saving' }));
-        try {
-            const profileChanged = Boolean(profile.email || profile.orgName);
-
-            localStorage.setItem('apexmail-user-settings', JSON.stringify(profile));
-
-            const res = await fetch('/v1/auth/profile', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    firstName: profile.firstName,
-                    lastName: profile.lastName,
-                    email: profile.email,
-                    bio: profile.bio,
-                    orgName: profile.orgName,
-                    fromName: profile.fromName,
-                    fromEmail: profile.fromEmail,
-                    replyTo: profile.replyTo,
-                    address: profile.address,
-                    timezone: profile.timezone,
-                    language: profile.language,
-                }),
-            });
-
-            if (!res.ok && res.status !== 404) throw new Error('Save failed');
-
-            saveTimerRef.current = setTimeout(() => {
-                setSaveStatus('saved');
-                setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'saved' }));
-                setIsDirty(false);
-                setLastSavedAt(new Date().toISOString());
-                if (profileChanged && (activeSection === 'profile' || activeSection === 'account')) {
-                    setPendingVerification(true);
-                }
-                pushToast('Settings saved.', 'success');
-                resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 2000);
-            }, 300);
-        } catch {
-            setSaveStatus('error');
-            setSectionSaveStatus((prev) => ({ ...prev, [activeSection]: 'error' }));
-            pushToast('Failed to save settings.', 'error');
-            resetTimerRef.current = setTimeout(() => setSaveStatus('idle'), 3000);
-        }
-    }
-
-    function resetSectionDefaults(section: string) {
-        if (!window.confirm(`Reset ${section} settings to defaults?`)) return;
-
-        if (section === 'profile' || section === 'account' || section === 'email') {
-            setProfile((prev) => ({ ...prev, ...DEFAULT_PROFILE, email: prev.email || DEFAULT_PROFILE.email }));
-            setIsDirty(true);
-            pushToast(`${section} settings reset to defaults.`, 'info');
-        }
-    }
-
-    function validateWebhookUrl(value: string) {
-        try {
-            const parsed = new URL(value);
-            return parsed.protocol === 'https:';
-        } catch {
-            return false;
-        }
-    }
-
-    function addWebhook() {
-        if (!validateWebhookUrl(newWebhookUrl)) {
-            pushToast('Webhook URL must be a valid HTTPS endpoint.', 'error');
-            return;
-        }
-        const entry: WebhookEntry = {
-            id: `wh_${Date.now()}`,
-            url: newWebhookUrl,
-            events: newWebhookEvents.split(',').map((event) => event.trim()).filter(Boolean),
-            status: 'active',
-            createdAt: new Date().toISOString(),
-        };
-        setWebhooks((prev) => [entry, ...prev]);
-        setNewWebhookUrl('');
-        setNewWebhookEvents('delivered, opened');
-        setIsDirty(true);
-        pushToast('Webhook added.', 'success');
-    }
-
-    function exportSettingsJson() {
-        const payload = JSON.stringify(profile, null, 2);
-        setSettingsImportJson(payload);
-        navigator.clipboard.writeText(payload).then(() => {
-            pushToast('Settings JSON copied to clipboard.', 'success');
-        }).catch(() => {
-            pushToast('Exported settings JSON to editor panel.', 'info');
-        });
-    }
-
-    function importSettingsJson() {
-        try {
-            const parsed = JSON.parse(settingsImportJson) as Partial<UserProfile>;
-            const keys: Array<keyof UserProfile> = [
-                'firstName', 'lastName', 'email', 'bio', 'orgName', 'fromName', 'fromEmail', 'replyTo', 'address', 'timezone', 'language',
-            ];
-            const invalid = Object.keys(parsed).some((key) => !keys.includes(key as keyof UserProfile));
-            if (invalid) {
-                pushToast('Settings JSON contains unsupported keys.', 'error');
-                return;
-            }
-            setProfile((prev) => ({ ...prev, ...parsed }));
-            setIsDirty(true);
-            pushToast('Settings JSON imported.', 'success');
-        } catch {
-            pushToast('Invalid settings JSON.', 'error');
-        }
-    }
-
-    function handleAvatarUpload(fileList: FileList | null) {
-        if (!fileList || fileList.length === 0) return;
-        const file = fileList[0];
-        const allowed = ['image/jpeg', 'image/png', 'image/gif'];
-        if (!allowed.includes(file.type)) {
-            pushToast('Avatar must be JPG, PNG, or GIF.', 'error');
-            return;
-        }
-        if (file.size > 2 * 1024 * 1024) {
-            pushToast('Avatar size must be under 2MB.', 'error');
-            return;
-        }
-
-        setAvatarUploadProgress(10);
-        const timer = window.setInterval(() => {
-            setAvatarUploadProgress((prev) => {
-                const next = Math.min(prev + 30, 100);
-                if (next >= 100) {
-                    window.clearInterval(timer);
-                    pushToast('Avatar uploaded successfully.', 'success');
-                }
-                return next;
-            });
-        }, 200);
-    }
-
-    const activePlanData = PLANS.find(p => p.name === currentPlan);
-
-    function handleSectionChange(nextSection: string) {
-        if (nextSection === activeSection) return;
-        if (isDirty && !window.confirm('You have unsaved changes. Leave this section anyway?')) return;
-        setActiveSection(nextSection);
-    }
+    }, [isDirty]);
 
     return (
         <div className="space-y-6">
@@ -375,6 +136,14 @@ export default function SettingsPage() {
                 </Card>
             ) : null}
 
+            {profileLoadError ? (
+                <Card className="border-destructive/40 bg-destructive/10">
+                    <CardContent className="p-3 text-sm text-foreground">
+                        {profileLoadError}
+                    </CardContent>
+                </Card>
+            ) : null}
+
             {localConflict && pendingLocalProfile ? (
                 <Card className="border-warning/40 bg-warning/10">
                     <CardContent className="p-3 text-sm text-foreground flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -383,22 +152,13 @@ export default function SettingsPage() {
                             <Button
                                 size="sm"
                                 variant="outline"
-                                onClick={() => {
-                                    setLocalConflict(false);
-                                    setPendingLocalProfile(null);
-                                    pushToast('Using server profile values.', 'info');
-                                }}
+                                onClick={handleKeepServerProfile}
                             >
                                 Keep Server
                             </Button>
                             <Button
                                 size="sm"
-                                onClick={() => {
-                                    setProfile((prev) => ({ ...prev, ...pendingLocalProfile }));
-                                    setLocalConflict(false);
-                                    setIsDirty(true);
-                                    pushToast('Applied local unsynced settings.', 'info');
-                                }}
+                                onClick={handleUseLocalProfile}
                             >
                                 Use Local
                             </Button>
@@ -411,7 +171,7 @@ export default function SettingsPage() {
                 <Card className="border-primary/30 bg-primary/5">
                     <CardContent className="p-3 text-sm text-foreground flex items-center justify-between gap-3">
                         <span>Profile identity changes pending verification. Confirm via email to finalize billing/contact updates.</span>
-                        <Button size="sm" variant="outline" onClick={() => pushToast('Verification code sent to your account email.', 'success')}>
+                        <Button size="sm" variant="outline" onClick={handleVerificationSend}>
                             Send Verification Code
                         </Button>
                     </CardContent>
@@ -847,15 +607,7 @@ export default function SettingsPage() {
                                                 </p>
                                             </div>
                                             <div className="flex items-center gap-2">
-                                                <Button variant="outline" size="sm" onClick={() => {
-                                                    if (!revealedApiKey) {
-                                                        setRevealedApiKey(true);
-                                                        pushToast('Key revealed once for secure copy.', 'info');
-                                                        return;
-                                                    }
-                                                    navigator.clipboard.writeText('am_prod_abcd1234efgh5678ijkl9012mnop3456');
-                                                    pushToast('API key copied.', 'success');
-                                                }}>
+                                                <Button variant="outline" size="sm" onClick={handleApiKeyAction}>
                                                     {revealedApiKey ? 'Copy' : 'Reveal'}
                                                 </Button>
                                                 <Button
@@ -978,10 +730,7 @@ export default function SettingsPage() {
                                         </div>
                                         <PlanSelector 
                                             currentPlan={currentPlan}
-                                            onPlanChange={async (planId) => {
-                                                setCurrentPlan(planId);
-                                                setIsDirty(true);
-                                            }}
+                                            onPlanChange={handlePlanChange}
                                         />
                                     </div>
                                     

@@ -143,7 +143,7 @@ export function TimeTravelDemo() {
             </div>
 
             {/* Changes Panel */}
-            <div className="p-8 border-l border-surface-200 bg-white">
+            <div className="p-8 lg:border-l border-surface-200 bg-white">
               <div className="text-xs font-medium text-surface-500 mb-6">Render Changes</div>
               <div className="space-y-4">
                 {currentSnapshot.changes.map((change, i) => (
@@ -178,18 +178,21 @@ export function TimeTravelDemo() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
+                  aria-label="Previous snapshot"
                   className="p-2 text-surface-400 hover:text-primary-600 transition-colors bg-surface-50 rounded-lg hover:bg-surface-100 border border-transparent hover:border-surface-200"
                 >
                   <SkipBack className="w-5 h-5" />
                 </button>
                 <button
                   onClick={() => setIsPlaying(!isPlaying)}
+                  aria-label={isPlaying ? 'Pause playback' : 'Start playback'}
                   className="p-3 bg-primary-600 text-white rounded-md border border-primary-600 hover:bg-primary-700 transition-colors"
                 >
                   {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
                 </button>
                 <button
                   onClick={() => setCurrentIndex((prev) => Math.min(renderSnapshots.length - 1, prev + 1))}
+                  aria-label="Next snapshot"
                   className="p-2 text-surface-400 hover:text-primary-600 transition-colors bg-surface-50 rounded-lg hover:bg-surface-100 border border-transparent hover:border-surface-200"
                 >
                   <SkipForward className="w-5 h-5" />
@@ -209,6 +212,7 @@ export function TimeTravelDemo() {
                     <button
                       key={snapshot.id}
                       onClick={() => setCurrentIndex(index)}
+                      aria-label={`Jump to snapshot for ${snapshot.client}`}
                       className={cn(
                         'text-xs font-medium transition-colors p-1 rounded-md hover:bg-surface-50',
                         index === currentIndex ? 'text-primary-700 font-semibold' : 'text-surface-400 hover:text-surface-900'

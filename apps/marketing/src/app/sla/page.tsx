@@ -3,15 +3,27 @@ import type { Metadata } from 'next';
 export const metadata: Metadata = {
     title: 'Service Level Agreement',
     description: 'ApexMail SLA — our uptime and performance commitments.',
+    openGraph: {
+        title: 'Service Level Agreement | ApexMail',
+        description: 'ApexMail SLA — our uptime and performance commitments.',
+        type: 'website',
+        images: ['/og-image.png'],
+    },
+    twitter: {
+        card: 'summary_large_image',
+        title: 'Service Level Agreement | ApexMail',
+        description: 'ApexMail SLA — our uptime and performance commitments.',
+        images: ['/og-image.png'],
+    },
 };
 
 export default function SlaPage() {
     return (
         <div className="max-w-3xl mx-auto px-6 py-24">
             <h1 className="text-4xl font-bold mb-4">Service Level Agreement</h1>
-            <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
+            <p className="text-surface-500 mb-8">Last updated: February 2026</p>
 
-            <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
+            <div className="prose prose-neutral max-w-none space-y-6 text-[15px] leading-relaxed">
                 <h2 className="text-xl font-semibold mt-8">1. Uptime Commitment</h2>
                 <table className="w-full border-collapse">
                     <thead>
@@ -40,7 +52,7 @@ export default function SlaPage() {
                         <tr className="border-b"><td className="py-2">Enterprise</td><td className="py-2">Up to 25% of monthly fee</td></tr>
                     </tbody>
                 </table>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-sm text-surface-500">
                     Service credits apply when monthly uptime falls below 99.9% for the plan.
                 </p>
 

@@ -3,15 +3,27 @@ import type { Metadata } from 'next';
 export const metadata: Metadata = {
     title: 'Privacy Policy',
     description: 'ApexMail Privacy Policy — how we collect, use, and protect your data.',
+    openGraph: {
+        title: 'Privacy Policy | ApexMail',
+        description: 'ApexMail Privacy Policy — how we collect, use, and protect your data.',
+        type: 'website',
+        images: ['/og-image.png'],
+    },
+    twitter: {
+        card: 'summary_large_image',
+        title: 'Privacy Policy | ApexMail',
+        description: 'ApexMail Privacy Policy — how we collect, use, and protect your data.',
+        images: ['/og-image.png'],
+    },
 };
 
 export default function PrivacyPage() {
     return (
         <div className="max-w-3xl mx-auto px-6 py-24">
             <h1 className="text-4xl font-bold mb-4">Privacy Policy</h1>
-            <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
+            <p className="text-surface-500 mb-8">Last updated: February 2026</p>
 
-            <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
+            <div className="prose prose-neutral max-w-none space-y-6 text-[15px] leading-relaxed">
                 <h2 className="text-xl font-semibold mt-8">1. Data Controller</h2>
                 <p>
                     Bel Consulting OÜ (trading as ApexMail), registry code 16192499,

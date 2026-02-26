@@ -59,7 +59,8 @@ async fn main() -> anyhow::Result<()> {
     let risk_engine = RiskScoringEngine::new(db.clone(), config.clone());
     let content_scanner = ContentScanner::new(db.clone(), config.content.clone());
     let audit_logger = AuditLogger::new(db.clone(), config.audit.clone());
-    let secret_manager = SecretManager::new(db.clone(), config.secrets.clone());
+    let secret_manager = SecretManager::new(db.clone(), config.secrets.clone())
+        .map_err(|e| anyhow::anyhow!(e))?;
     let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone());
 
     let state = Arc::new(AppState {

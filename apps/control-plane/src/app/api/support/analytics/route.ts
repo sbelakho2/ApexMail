@@ -8,11 +8,20 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
+const SUPPORT_ANALYTICS_CACHE_TTL_MS = 60_000;
+const supportAnalyticsCache = new Map<number, { expiresAt: number; value: unknown }>();
 
 export async function GET(request: NextRequest) {
     try {
         const rawDays = parseInt(request.nextUrl.searchParams.get('days') ?? '30', 10);
         const days = Number.isFinite(rawDays) ? Math.min(Math.max(rawDays, 1), 365) : 30;
+        const now = Date.now();
+
+        const cached = supportAnalyticsCache.get(days);
+        if (cached && cached.expiresAt > now) {
+            return NextResponse.json(cached.value);
+        }
+
         const since = new Date();
         since.setDate(since.getDate() - days);
 
@@ -83,7 +92,7 @@ export async function GET(request: NextRequest) {
         const statusMap = toMap(statusCounts, 'status');
         const totalTickets = Object.values(statusMap).reduce((a, b) => a + b, 0);
 
-        return NextResponse.json({
+        const payload = {
             totalTickets,
             openTickets: statusMap['open'] ?? 0,
             inProgressTickets: statusMap['in_progress'] ?? 0,
@@ -106,7 +115,14 @@ export async function GET(request: NextRequest) {
                 createdAt: r.created_at,
             })),
             responseTimeBuckets: toMap(responseTimeBuckets, 'bucket'),
+        };
+
+        supportAnalyticsCache.set(days, {
+            expiresAt: now + SUPPORT_ANALYTICS_CACHE_TTL_MS,
+            value: payload,
         });
+
+        return NextResponse.json(payload);
     } catch (error) {
         console.error('Support analytics error:', error);
         return NextResponse.json({ error: 'Failed to fetch analytics' }, { status: 500 });

@@ -4,17 +4,23 @@
 //! Includes DKIM signing, proper MX lookup, and retry logic.
 
 use anyhow::{anyhow, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::LazyLock;
+use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use moka::sync::Cache;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use moka::future::Cache;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::error::ResolveErrorKind;
+use trust_dns_resolver::proto::op::ResponseCode;
 
 use crate::dkim::DkimSigner;
 
@@ -35,27 +41,43 @@ pub struct SmtpSenderConfig {
     pub timeout_seconds: u64,
     pub max_retries: u32,
     pub retry_delay_seconds: u64,
+    pub require_starttls: bool,
+    pub connection_pool_size: usize,
+    pub mx_cache_ttl_secs: u64,
 }
 
 impl Default for SmtpSenderConfig {
     fn default() -> Self {
         Self {
-            hostname: "mail.apexmail.ee".to_string(),
+            hostname: default_sender_hostname(),
             timeout_seconds: 60,
             max_retries: 3,
             retry_delay_seconds: 30,
+            require_starttls: false,
+            connection_pool_size: 2,
+            mx_cache_ttl_secs: default_mx_cache_ttl_secs(),
         }
     }
 }
 
 /// Maximum entries in the MX cache
 const MX_CACHE_MAX: u64 = 10_000;
-/// MX cache TTL (5 minutes, matching typical DNS TTL)
-const MX_CACHE_TTL: Duration = Duration::from_secs(300);
+const MAX_SMTP_RESPONSE_LINE: usize = 1000;
+const MAX_EHLO_LINES: usize = 64;
 
-static SMTP_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
-    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-});
+fn default_sender_hostname() -> String {
+    env::var("SMTP_SENDER_HOSTNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "localhost".to_string())
+}
+
+fn default_mx_cache_ttl_secs() -> u64 {
+    env::var("SMTP_MX_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|val| val.parse::<u64>().ok())
+        .filter(|val| *val > 0)
+        .unwrap_or(300)
+}
 
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
 pub struct SmtpSender {
@@ -66,54 +88,97 @@ pub struct SmtpSender {
     dkim_signer: Option<DkimSigner>,
     /// MX cache with TTL and bounded size (#106/#107)
     mx_cache: Cache<String, Vec<String>>,
+    /// Per-MX SMTP connection pool to reduce TCP/TLS handshakes
+    connection_pool: Mutex<HashMap<String, Vec<PooledStream>>>,
+}
+
+struct OutboundMetrics {
+    deliveries_ok: AtomicU64,
+    deliveries_failed: AtomicU64,
+    recipients_accepted: AtomicU64,
+    recipients_rejected: AtomicU64,
+}
+
+impl OutboundMetrics {
+    fn new() -> Self {
+        Self {
+            deliveries_ok: AtomicU64::new(0),
+            deliveries_failed: AtomicU64::new(0),
+            recipients_accepted: AtomicU64::new(0),
+            recipients_rejected: AtomicU64::new(0),
+        }
+    }
+
+    fn record_send_result(&self, success: bool, accepted: usize, rejected: usize) {
+        if success {
+            self.deliveries_ok.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.deliveries_failed.fetch_add(1, Ordering::Relaxed);
+        }
+        self.recipients_accepted
+            .fetch_add(accepted as u64, Ordering::Relaxed);
+        self.recipients_rejected
+            .fetch_add(rejected as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> OutboundMetricsSnapshot {
+        OutboundMetricsSnapshot {
+            deliveries_ok: self.deliveries_ok.load(Ordering::Relaxed),
+            deliveries_failed: self.deliveries_failed.load(Ordering::Relaxed),
+            recipients_accepted: self.recipients_accepted.load(Ordering::Relaxed),
+            recipients_rejected: self.recipients_rejected.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboundMetricsSnapshot {
+    pub deliveries_ok: u64,
+    pub deliveries_failed: u64,
+    pub recipients_accepted: u64,
+    pub recipients_rejected: u64,
+}
+
+static OUTBOUND_METRICS: LazyLock<OutboundMetrics> = LazyLock::new(OutboundMetrics::new);
+
+enum PooledStream {
+    Plain(TcpStream),
+    Tls(tokio_rustls::client::TlsStream<TcpStream>),
 }
 
 impl SmtpSender {
     /// Create a new SMTP sender with just the from domain
     pub fn new(from_domain: String) -> Self {
-        let resolver = SMTP_RESOLVER.clone();
-        
-        Self {
-            config: SmtpSenderConfig::default(),
-            from_domain,
-            resolver,
-            dkim_signer: None,
-            mx_cache: Cache::builder()
-                .max_capacity(MX_CACHE_MAX)
-                .time_to_live(MX_CACHE_TTL)
-                .build(),
-        }
+        Self::build_sender(from_domain, SmtpSenderConfig::default(), None)
     }
     
     /// Create with custom config
     pub fn with_config(from_domain: String, config: SmtpSenderConfig) -> Self {
-        let resolver = SMTP_RESOLVER.clone();
-        
-        Self {
-            config,
-            from_domain,
-            resolver,
-            dkim_signer: None,
-            mx_cache: Cache::builder()
-                .max_capacity(MX_CACHE_MAX)
-                .time_to_live(MX_CACHE_TTL)
-                .build(),
-        }
+        Self::build_sender(from_domain, config, None)
     }
     
     /// Create with DKIM signer
     pub fn with_dkim(from_domain: String, config: SmtpSenderConfig, dkim_signer: DkimSigner) -> Self {
-        let resolver = SMTP_RESOLVER.clone();
-        
+        Self::build_sender(from_domain, config, Some(dkim_signer))
+    }
+
+    fn build_sender(
+        from_domain: String,
+        config: SmtpSenderConfig,
+        dkim_signer: Option<DkimSigner>,
+    ) -> Self {
+        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+
         Self {
             config,
             from_domain,
             resolver,
-            dkim_signer: Some(dkim_signer),
+            dkim_signer,
             mx_cache: Cache::builder()
                 .max_capacity(MX_CACHE_MAX)
-                .time_to_live(MX_CACHE_TTL)
+                .time_to_live(Duration::from_secs(config.mx_cache_ttl_secs))
                 .build(),
+            connection_pool: Mutex::new(HashMap::new()),
         }
     }
     
@@ -149,44 +214,73 @@ impl SmtpSender {
         // Generate a single Message-ID for the email (#103: avoid dual generation)
         let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), self.config.hostname);
         
-        // Send to each domain
+        let mut domain_payloads = Vec::with_capacity(by_domain.len());
         for (domain, recipients) in by_domain {
-            // Build message with the canonical message_id
-            let message = self.build_message(from, &recipients, subject, text_body, html_body, &headers, &message_id)?;
-            
-            // Get MX servers for domain
-            let mx_servers = self.lookup_mx(&domain).await?;
-            
-            if mx_servers.is_empty() {
-                warn!(domain = %domain, "No MX records found");
-                all_rejected.extend(recipients);
-                continue;
-            }
-            
-            // Try each MX server
-            let mut sent = false;
-            for mx_host in &mx_servers {
-                match self.send_to_mx(mx_host, from, &recipients, &message).await {
-                    Ok(result) => {
-                        all_accepted.extend(result.accepted);
-                        all_rejected.extend(result.rejected);
-                        last_response = result.response;
-                        sent = true;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(mx = %mx_host, error = %e, "MX delivery failed, trying next");
+            let message = self.build_message(
+                from,
+                &recipients,
+                subject,
+                text_body,
+                html_body,
+                &headers,
+                &message_id,
+            )?;
+            domain_payloads.push((domain, recipients, message));
+        }
+
+        let mut deliveries = FuturesUnordered::new();
+        for (domain, recipients, message) in domain_payloads {
+            let message_id = message_id.clone();
+            deliveries.push(async move {
+                let mx_servers = self.lookup_mx(&domain).await?;
+                if mx_servers.is_empty() {
+                    warn!(domain = %domain, "No MX records found");
+                    return Ok((Vec::new(), recipients, String::new()));
+                }
+
+                let mut sent = false;
+                let mut accepted = Vec::new();
+                let mut rejected = Vec::new();
+                let mut response = String::new();
+                for mx_host in &mx_servers {
+                    match self
+                        .send_to_mx(mx_host, from, &recipients, &message, &message_id)
+                        .await
+                    {
+                        Ok(result) => {
+                            accepted.extend(result.accepted);
+                            rejected.extend(result.rejected);
+                            response = result.response;
+                            sent = true;
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(mx = %mx_host, error = %e, "MX delivery failed, trying next");
+                        }
                     }
                 }
-            }
-            
-            if !sent {
-                all_rejected.extend(recipients);
+
+                if !sent {
+                    rejected.extend(recipients);
+                }
+
+                Ok((accepted, rejected, response))
+            });
+        }
+
+        while let Some(result) = deliveries.next().await {
+            let (accepted, rejected, response) = result?;
+            all_accepted.extend(accepted);
+            all_rejected.extend(rejected);
+            if !response.is_empty() {
+                last_response = response;
             }
         }
         
         let success = !all_accepted.is_empty();
         
+        OUTBOUND_METRICS.record_send_result(success, all_accepted.len(), all_rejected.len());
+
         Ok(SmtpSendResult {
             success,
             message_id,
@@ -195,11 +289,15 @@ impl SmtpSender {
             rejected: all_rejected,
         })
     }
+
+    pub fn metrics_snapshot(&self) -> OutboundMetricsSnapshot {
+        OUTBOUND_METRICS.snapshot()
+    }
     
     /// Look up MX records for a domain
     async fn lookup_mx(&self, domain: &str) -> Result<Vec<String>> {
         // Check cache first (moka handles TTL and eviction)
-        if let Some(cached) = self.mx_cache.get(domain) {
+        if let Some(cached) = self.mx_cache.get(domain).await {
             return Ok(cached);
         }
         
@@ -215,14 +313,20 @@ impl SmtpSender {
                 servers.sort_by_key(|(pref, _)| *pref);
                 servers.into_iter().map(|(_, host)| host).collect()
             }
-            Err(_) => {
-                // Fall back to A record (implicit MX)
-                vec![domain.to_string()]
-            }
+            Err(err) => match err.kind() {
+                ResolveErrorKind::NoRecordsFound { response_code, .. }
+                    if *response_code == ResponseCode::NoError
+                        || *response_code == ResponseCode::NXDomain =>
+                {
+                    // Fall back to A record (implicit MX)
+                    vec![domain.to_string()]
+                }
+                _ => return Err(err.into()),
+            },
         };
         
         // Cache the result (moka enforces TTL + max capacity)
-        self.mx_cache.insert(domain.to_string(), mx_servers.clone());
+        self.mx_cache.insert(domain.to_string(), mx_servers.clone()).await;
         
         Ok(mx_servers)
     }
@@ -234,98 +338,40 @@ impl SmtpSender {
         from: &str,
         recipients: &[String],
         message: &[u8],
+        message_id: &str,
     ) -> Result<SmtpSendResult> {
+        if let Some(stream) = self.take_pooled_connection(mx_host).await {
+            let (result, pooled) = self
+                .smtp_session_from_pool(stream, mx_host, from, recipients, message, message_id)
+                .await?;
+            if let Some(returned) = pooled {
+                self.return_pooled_connection(mx_host, returned).await;
+            }
+            return Ok(result);
+        }
+
         let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
-        
+
         // Resolve MX host to IP
         let addrs = self.resolver.lookup_ip(mx_host).await?;
-        let addr = addrs.iter().next()
+        let addr = addrs
+            .iter()
+            .next()
             .ok_or_else(|| anyhow!("No IP addresses for MX host: {}", mx_host))?;
-        
+
         let socket_addr = SocketAddr::new(addr, 25);
-        
+
         debug!(mx = %mx_host, addr = %socket_addr, "Connecting to MX server");
-        
+
         // Connect with timeout
         let stream = timeout(timeout_duration, TcpStream::connect(socket_addr)).await??;
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut response = String::new();
-        
-        // Read greeting
-        response.clear();
-        reader.read_line(&mut response).await?;
-        if !response.starts_with("220") {
-            return Err(anyhow!("Bad greeting: {}", response.trim()));
+        let (result, pooled) = self
+            .smtp_session_plain(stream, mx_host, from, recipients, message, message_id, true)
+            .await?;
+        if let Some(returned) = pooled {
+            self.return_pooled_connection(mx_host, returned).await;
         }
-        
-        // EHLO
-        let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
-        writer.write_all(ehlo_cmd.as_bytes()).await?;
-        
-        // Read EHLO response (may be multi-line), collect capabilities
-        let mut ehlo_lines = Vec::new();
-        loop {
-            response.clear();
-            reader.read_line(&mut response).await?;
-            if response.len() < 4 {
-                return Err(anyhow!("Invalid EHLO response"));
-            }
-            ehlo_lines.push(response.clone());
-            if response.chars().nth(3) == Some(' ') {
-                break;
-            }
-        }
-        if !response.starts_with("250") {
-            return Err(anyhow!("EHLO failed: {}", response.trim()));
-        }
-        
-        // Check if remote server advertises STARTTLS
-        let supports_starttls = ehlo_lines.iter().any(|l| {
-            l.len() >= 4 && l[4..].trim().eq_ignore_ascii_case("STARTTLS")
-        });
-        
-        // Attempt STARTTLS upgrade if supported
-        if supports_starttls {
-            debug!(mx = %mx_host, "Server supports STARTTLS, upgrading connection");
-            
-            writer.write_all(b"STARTTLS\r\n").await?;
-            response.clear();
-            reader.read_line(&mut response).await?;
-            if !response.starts_with("220") {
-                // #108: Do NOT silently fall back to plaintext — that's a security downgrade
-                error!(mx = %mx_host, response = %response.trim(), "STARTTLS rejected by server that advertised it; aborting to prevent security downgrade");
-                return Err(anyhow!("STARTTLS rejected by {}: {}; refusing plaintext downgrade", mx_host, response.trim()));
-            } else {
-                // Reunite reader/writer back into the TcpStream
-                let tcp_stream = reader.into_inner().reunite(writer)?;
-                
-                // Build TLS config with system root certificates
-                let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-                
-                let tls_config = tokio_rustls::rustls::ClientConfig::builder()
-                    .with_root_certificates(root_store)
-                    .with_no_client_auth();
-                let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
-                
-                let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(mx_host.to_string())
-                    .map_err(|e| anyhow!("Invalid server name for TLS: {}", e))?;
-                
-                let tls_stream = connector.connect(server_name, tcp_stream).await
-                    .map_err(|e| anyhow!("TLS handshake failed with {}: {}", mx_host, e))?;
-                
-                info!(mx = %mx_host, "STARTTLS upgrade successful");
-                
-                // Continue the SMTP conversation over TLS
-                return self.smtp_conversation_over_tls(tls_stream, mx_host, from, recipients, message).await;
-            }
-        } else {
-            debug!(mx = %mx_host, "Server does not support STARTTLS, sending in plaintext");
-        }
-        
-        // Continue plaintext SMTP conversation (no STARTTLS or STARTTLS rejected)
-        self.smtp_mail_transaction(&mut reader, &mut writer, from, recipients, message, mx_host).await
+        Ok(result)
     }
     
     /// Continue SMTP conversation over a TLS stream
@@ -336,53 +382,45 @@ impl SmtpSender {
         from: &str,
         recipients: &[String],
         message: &[u8],
-    ) -> Result<SmtpSendResult> {
-        let (tls_reader, tls_writer) = tokio::io::split(tls_stream);
-        let mut reader = BufReader::new(tls_reader);
-        let mut writer = tls_writer;
-        let mut response = String::new();
+        message_id: &str,
+    ) -> Result<(SmtpSendResult, Option<PooledStream>)> {
+        let mut stream = BufStream::new(tls_stream);
+        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
         
         // Re-EHLO after TLS upgrade (RFC 3207 §4.2)
         let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
-        writer.write_all(ehlo_cmd.as_bytes()).await?;
+        stream.write_all(ehlo_cmd.as_bytes()).await?;
         
-        loop {
-            response.clear();
-            reader.read_line(&mut response).await?;
-            if response.len() < 4 {
-                return Err(anyhow!("Invalid EHLO response after STARTTLS"));
-            }
-            if response.chars().nth(3) == Some(' ') {
-                break;
-            }
-        }
-        if !response.starts_with("250") {
-            return Err(anyhow!("EHLO after STARTTLS failed: {}", response.trim()));
-        }
+        read_ehlo_response(&mut stream, timeout_duration).await?;
         
         // Proceed with MAIL FROM / RCPT TO / DATA over TLS
-        self.smtp_mail_transaction(&mut reader, &mut writer, from, recipients, message, mx_host).await
+        let result = self
+            .smtp_mail_transaction(&mut stream, from, recipients, message, mx_host, message_id)
+            .await?;
+
+        let pooled = self.maybe_pool_connection_tls(stream).await?;
+        Ok((result, pooled))
     }
     
     /// Execute the MAIL FROM → RCPT TO → DATA → message sequence
-    async fn smtp_mail_transaction<R, W>(
+    async fn smtp_mail_transaction<S>(
         &self,
-        reader: &mut BufReader<R>,
-        writer: &mut W,
+        stream: &mut S,
         from: &str,
         recipients: &[String],
         message: &[u8],
         mx_host: &str,
+        message_id: &str,
     ) -> Result<SmtpSendResult>
     where
-        R: tokio::io::AsyncRead + Unpin,
-        W: tokio::io::AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let mut response = String::new();
+        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
         let mail_from = format!("MAIL FROM:<{}>\r\n", from);
-        writer.write_all(mail_from.as_bytes()).await?;
+        stream.write_all(mail_from.as_bytes()).await?;
         response.clear();
-        reader.read_line(&mut response).await?;
+        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
         if !response.starts_with("250") {
             return Err(anyhow!("MAIL FROM failed: {}", response.trim()));
         }
@@ -393,9 +431,9 @@ impl SmtpSender {
         
         for recipient in recipients {
             let rcpt_to = format!("RCPT TO:<{}>\r\n", recipient);
-            writer.write_all(rcpt_to.as_bytes()).await?;
+            stream.write_all(rcpt_to.as_bytes()).await?;
             response.clear();
-            reader.read_line(&mut response).await?;
+            read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
             if response.starts_with("250") {
                 accepted.push(recipient.clone());
             } else {
@@ -406,12 +444,12 @@ impl SmtpSender {
         
         if accepted.is_empty() {
             // RSET and read response (#104: avoid stream desync)
-            writer.write_all(b"RSET\r\n").await?;
+            stream.write_all(b"RSET\r\n").await?;
             response.clear();
-            let _ = reader.read_line(&mut response).await;
+            let _ = read_smtp_line_timeout(stream, &mut response, timeout_duration).await;
             return Ok(SmtpSendResult {
                 success: false,
-                message_id: String::new(),
+                message_id: message_id.to_string(),
                 response: response.trim().to_string(),
                 accepted,
                 rejected,
@@ -419,48 +457,35 @@ impl SmtpSender {
         }
         
         // DATA
-        writer.write_all(b"DATA\r\n").await?;
+        stream.write_all(b"DATA\r\n").await?;
         response.clear();
-        reader.read_line(&mut response).await?;
+        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
         if !response.starts_with("354") {
             return Err(anyhow!("DATA failed: {}", response.trim()));
         }
         
         // Send message with dot-stuffing (RFC 5321 §4.5.2) (#100)
         // Any line starting with '.' must have it doubled to prevent SMTP smuggling
-        let msg_str = String::from_utf8_lossy(message);
-        let mut first_line = true;
-        for line in msg_str.split("\r\n") {
-            if !first_line {
-                writer.write_all(b"\r\n").await?;
-            }
-            if line.starts_with('.') {
-                writer.write_all(b".").await?;
-            }
-            writer.write_all(line.as_bytes()).await?;
-            first_line = false;
-        }
+        let stuffed = dot_stuff_message(message);
+        stream.write_all(&stuffed).await?;
         
         // End of message
-        writer.write_all(b"\r\n.\r\n").await?;
+        stream.write_all(b"\r\n.\r\n").await?;
         response.clear();
-        reader.read_line(&mut response).await?;
+        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
         if !response.starts_with("250") {
             return Err(anyhow!("Message rejected: {}", response.trim()));
         }
         
         let final_response = response.trim().to_string();
-        
-        // QUIT and read response (#105: avoid leaving server reply in buffer)
-        writer.write_all(b"QUIT\r\n").await?;
-        response.clear();
-        let _ = reader.read_line(&mut response).await;
+        let extracted_id = extract_queue_id(&final_response)
+            .unwrap_or_else(|| message_id.to_string());
         
         info!(mx = %mx_host, accepted = ?accepted, "Message delivered successfully");
         
         Ok(SmtpSendResult {
             success: true,
-            message_id: String::new(), // Would parse from response
+            message_id: extracted_id,
             response: final_response,
             accepted,
             rejected,
@@ -486,7 +511,7 @@ impl SmtpSender {
     ) -> Result<Vec<u8>> {
         use chrono::Utc;
         
-        let date = Utc::now().format("%a, %d %b %Y %H:%M:%S %z").to_string();
+        let date = Utc::now().to_rfc2822();
         
         let mut msg = Vec::new();
         
@@ -566,6 +591,339 @@ impl SmtpSender {
         
         Ok(msg)
     }
+}
+
+impl SmtpSender {
+    async fn take_pooled_connection(&self, mx_host: &str) -> Option<PooledStream> {
+        let mut pool = self.connection_pool.lock().await;
+        pool.get_mut(mx_host).and_then(|connections| connections.pop())
+    }
+
+    async fn return_pooled_connection(&self, mx_host: &str, stream: PooledStream) {
+        let mut pool = self.connection_pool.lock().await;
+        let entry = pool.entry(mx_host.to_string()).or_default();
+        if entry.len() < self.config.connection_pool_size {
+            entry.push(stream);
+        } else {
+            drop(pool);
+            self.close_pooled_connection(stream).await;
+        }
+    }
+
+    async fn close_pooled_connection(&self, stream: PooledStream) {
+        match stream {
+            PooledStream::Plain(tcp_stream) => {
+                let mut stream = BufStream::new(tcp_stream);
+                let _ = self.send_quit(&mut stream).await;
+            }
+            PooledStream::Tls(tls_stream) => {
+                let mut stream = BufStream::new(tls_stream);
+                let _ = self.send_quit(&mut stream).await;
+            }
+        }
+    }
+
+    async fn smtp_session_from_pool(
+        &self,
+        stream: PooledStream,
+        mx_host: &str,
+        from: &str,
+        recipients: &[String],
+        message: &[u8],
+        message_id: &str,
+    ) -> Result<(SmtpSendResult, Option<PooledStream>)> {
+        match stream {
+            PooledStream::Plain(tcp_stream) => {
+                self.smtp_session_plain(
+                    tcp_stream,
+                    mx_host,
+                    from,
+                    recipients,
+                    message,
+                    message_id,
+                    false,
+                )
+                    .await
+            }
+            PooledStream::Tls(tls_stream) => {
+                self.smtp_conversation_over_tls(
+                    tls_stream,
+                    mx_host,
+                    from,
+                    recipients,
+                    message,
+                    message_id,
+                )
+                    .await
+            }
+        }
+    }
+
+    async fn smtp_session_plain(
+        &self,
+        stream: TcpStream,
+        mx_host: &str,
+        from: &str,
+        recipients: &[String],
+        message: &[u8],
+        message_id: &str,
+        expect_greeting: bool,
+    ) -> Result<(SmtpSendResult, Option<PooledStream>)> {
+        let mut stream = BufStream::new(stream);
+        let mut response = String::new();
+        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
+
+        if expect_greeting {
+            response.clear();
+            read_smtp_line_timeout(&mut stream, &mut response, timeout_duration).await?;
+            if !response.starts_with("220") {
+                return Err(anyhow!("Bad greeting: {}", response.trim()));
+            }
+        }
+
+        // EHLO
+        let ehlo_cmd = format!("EHLO {}\r\n", self.config.hostname);
+        stream.write_all(ehlo_cmd.as_bytes()).await?;
+
+        // Read EHLO response (may be multi-line), collect capabilities
+        let ehlo_lines = read_ehlo_response(&mut stream, timeout_duration).await?;
+
+        // Check if remote server advertises STARTTLS
+        let supports_starttls = ehlo_lines.iter().any(|l| {
+            l.len() >= 4 && l[4..].trim().eq_ignore_ascii_case("STARTTLS")
+        });
+
+        // Attempt STARTTLS upgrade if supported
+        if supports_starttls {
+            debug!(mx = %mx_host, "Server supports STARTTLS, upgrading connection");
+
+            stream.write_all(b"STARTTLS\r\n").await?;
+            response.clear();
+            read_smtp_line_timeout(&mut stream, &mut response, timeout_duration).await?;
+            if !response.starts_with("220") {
+                error!(mx = %mx_host, response = %response.trim(), "STARTTLS rejected by server that advertised it; aborting to prevent security downgrade");
+                return Err(anyhow!("STARTTLS rejected by {}: {}; refusing plaintext downgrade", mx_host, response.trim()));
+            }
+
+            stream.flush().await?;
+            let tcp_stream = stream.into_inner();
+
+            let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+            let tls_config = tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
+
+            let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(mx_host.to_string())
+                .map_err(|e| anyhow!("Invalid server name for TLS: {}", e))?;
+
+            let tls_stream = connector.connect(server_name, tcp_stream).await
+                .map_err(|e| anyhow!("TLS handshake failed with {}: {}", mx_host, e))?;
+
+            info!(mx = %mx_host, "STARTTLS upgrade successful");
+
+            return self
+                .smtp_conversation_over_tls(
+                    tls_stream,
+                    mx_host,
+                    from,
+                    recipients,
+                    message,
+                    message_id,
+                )
+                .await;
+        }
+
+        if self.config.require_starttls {
+            return Err(anyhow!("STARTTLS required but not advertised by {}", mx_host));
+        }
+
+        debug!(mx = %mx_host, "Server does not support STARTTLS, sending in plaintext");
+        let result = self
+            .smtp_mail_transaction(&mut stream, from, recipients, message, mx_host, message_id)
+            .await?;
+
+        let pooled = self.maybe_pool_connection_plain(stream).await?;
+        Ok((result, pooled))
+    }
+
+    async fn maybe_pool_connection_plain(
+        &self,
+        mut stream: BufStream<TcpStream>,
+    ) -> Result<Option<PooledStream>> {
+        if self.config.connection_pool_size == 0 {
+            self.send_quit(&mut stream).await?;
+            return Ok(None);
+        }
+
+        if !self.reset_session(&mut stream).await? {
+            self.send_quit(&mut stream).await?;
+            return Ok(None);
+        }
+
+        let tcp = stream.into_inner();
+        Ok(Some(PooledStream::Plain(tcp)))
+    }
+
+    async fn maybe_pool_connection_tls(
+        &self,
+        mut stream: BufStream<tokio_rustls::client::TlsStream<TcpStream>>,
+    ) -> Result<Option<PooledStream>> {
+        if self.config.connection_pool_size == 0 {
+            self.send_quit(&mut stream).await?;
+            return Ok(None);
+        }
+
+        if !self.reset_session(&mut stream).await? {
+            self.send_quit(&mut stream).await?;
+            return Ok(None);
+        }
+
+        let tls_stream = stream.into_inner();
+        Ok(Some(PooledStream::Tls(tls_stream)))
+    }
+
+    async fn reset_session<S>(&self, stream: &mut S) -> Result<bool>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
+        stream.write_all(b"RSET\r\n").await?;
+        let mut response = String::new();
+        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
+        Ok(response.starts_with("250"))
+    }
+
+    async fn send_quit<S>(&self, stream: &mut S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
+        stream.write_all(b"QUIT\r\n").await?;
+        let mut response = String::new();
+        let _ = read_smtp_line_timeout(stream, &mut response, timeout_duration).await;
+        let _ = stream.shutdown().await;
+        Ok(())
+    }
+}
+
+async fn read_smtp_line_limited<R>(reader: &mut R, response: &mut String) -> Result<usize>
+where
+    R: AsyncRead + Unpin,
+{
+    response.clear();
+    let mut bytes = Vec::with_capacity(128);
+
+    loop {
+        let byte = match reader.read_u8().await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if bytes.is_empty() {
+                    return Ok(0);
+                }
+                break;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        bytes.push(byte);
+        if bytes.len() > MAX_SMTP_RESPONSE_LINE {
+            while let Ok(next) = reader.read_u8().await {
+                if next == b'\n' {
+                    break;
+                }
+            }
+            return Err(anyhow!("SMTP response line too long"));
+        }
+
+        if byte == b'\n' {
+            break;
+        }
+    }
+
+    *response = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(bytes.len())
+}
+
+async fn read_smtp_line_timeout<R>(
+    reader: &mut R,
+    response: &mut String,
+    timeout_duration: Duration,
+) -> Result<usize>
+where
+    R: AsyncRead + Unpin,
+{
+    match timeout(timeout_duration, read_smtp_line_limited(reader, response)).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("SMTP response timeout")),
+    }
+}
+
+async fn read_ehlo_response<S>(
+    stream: &mut S,
+    timeout_duration: Duration,
+) -> Result<Vec<String>>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut lines = Vec::new();
+    let mut response = String::new();
+
+    for _ in 0..MAX_EHLO_LINES {
+        response.clear();
+        read_smtp_line_timeout(stream, &mut response, timeout_duration).await?;
+        if response.len() < 4 {
+            return Err(anyhow!("Invalid EHLO response"));
+        }
+
+        if !response.starts_with("250") {
+            return Err(anyhow!("EHLO failed: {}", response.trim()));
+        }
+
+        let separator = response.chars().nth(3).unwrap_or(' ');
+        if separator != '-' && separator != ' ' {
+            return Err(anyhow!("Malformed EHLO response: {}", response.trim()));
+        }
+
+        lines.push(response.clone());
+        if separator == ' ' {
+            return Ok(lines);
+        }
+    }
+
+    Err(anyhow!("EHLO response too long"))
+}
+
+fn dot_stuff_message(message: &[u8]) -> Vec<u8> {
+    let mut stuffed = Vec::with_capacity(message.len() + 16);
+    let mut start_of_line = true;
+
+    for &byte in message {
+        if start_of_line && byte == b'.' {
+            stuffed.push(b'.');
+        }
+        stuffed.push(byte);
+        start_of_line = byte == b'\n';
+    }
+
+    stuffed
+}
+
+fn extract_queue_id(response: &str) -> Option<String> {
+    let normalized = response.to_ascii_lowercase();
+    for marker in ["queued as", "queue id", "queued id"] {
+        if let Some(pos) = normalized.find(marker) {
+            let tail = response[pos + marker.len()..].trim();
+            let token = tail.split_whitespace().next().unwrap_or("");
+            let cleaned = token.trim_matches(&['<', '>', ':', ';', '.', ','][..]);
+            if !cleaned.is_empty() {
+                return Some(cleaned.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Send a simple email (convenience function)

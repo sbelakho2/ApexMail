@@ -1,5 +1,6 @@
 'use client';
 
+import type { ComponentProps } from 'react';
 import { PageHeader } from '@/components/layout/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -17,7 +18,9 @@ const variants = [
     'destructive',
 ] as const;
 
-const sizes = ['default', 'sm', 'lg', 'xl', 'icon', 'icon-sm', 'icon-lg'] as const;
+type ButtonSize = NonNullable<ComponentProps<typeof Button>['size']>;
+
+const sizes: ButtonSize[] = ['default', 'sm', 'lg', 'xl', 'icon', 'icon-sm', 'icon-lg'];
 
 export default function StorybookButtonsPage() {
     return (
@@ -37,7 +40,7 @@ export default function StorybookButtonsPage() {
                     </div>
                     <div className="flex flex-wrap items-center gap-3">
                         {sizes.map((size) => (
-                            <Button key={size} size={size as any}>Size {size}</Button>
+                            <Button key={size} size={size}>Size {size}</Button>
                         ))}
                         <Button disabled>Disabled</Button>
                         <Button loading>Loading</Button>

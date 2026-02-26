@@ -52,7 +52,9 @@ docs/
 │   │   └── incident-response.md    ✅
 │   └── slo-management.md           ✅
 ├── security/               # Security Documentation
+│   ├── Security_Systems.md         ✅ (NEW — 8 security crates)
 │   ├── compliance.md               ✅
+│   ├── data-protection.md          ✅
 │   ├── email-authentication.md     ✅ (NEW)
 │   └── advanced-analytics.md       ✅ (NEW)
 └── user-guide/            # User Documentation
@@ -104,6 +106,18 @@ docs/
   - Gmail Annotations
 - [Inbox Placement Testing](user-guide/inbox-placement-testing.md) (NEW)
 - [Domain API Reference](api/endpoints/domains.md) (NEW)
+
+### Security Systems
+
+- [Security Systems Reference](security/Security_Systems.md) (NEW — comprehensive coverage of all 8 Rust security crates)
+  - DDoS Protection (ddos-protection) — 5-layer defense, ML anomaly detection, SMTP state machine
+  - Web Application Firewall (waf-engine) — AST-based SQLi/XSS, OWASP CRS-compatible
+  - Intrusion Detection/Prevention (ids-engine) — Signature + protocol + connection tracking
+  - Spam & Phishing Filter (spam-filter) — Bayesian + header + content + URL analysis
+  - Attachment Sandbox (sandbox) — File magic, SHA-256, OLE2/macro detection
+  - Account Takeover Protection (ato-protection) — Haversine impossible travel, device fingerprinting
+  - Data Loss Prevention (dlp-engine) — PII/Luhn, Shannon entropy, content policy
+  - Threat Intelligence (threat-intel) — IP/domain blocklists, CIDR, reputation scoring
 
 ### Operations
 

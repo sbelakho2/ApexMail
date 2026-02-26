@@ -18,12 +18,16 @@ async function tableExists(tableName: string): Promise<boolean> {
     return rows[0]?.exists ?? false;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
     try {
         const hasSalesLeads = await tableExists('sales_leads');
         if (!hasSalesLeads) {
             return NextResponse.json({ leads: [], stats: null });
         }
+
+        const url = new URL(request.url);
+        const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 1), 500);
+        const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
 
         const leadRows = await query<{
             id: string;
@@ -54,8 +58,8 @@ export async function GET() {
                 created_at
             FROM sales_leads
             ORDER BY created_at DESC
-            LIMIT 500
-        `);
+            LIMIT $1 OFFSET $2
+        `, [limit, offset]);
 
         // Aggregate stats
         const statsRows = await query<{

@@ -7,6 +7,7 @@ import { Check, ArrowRight } from '@/components/ui/icons';
 import Link from 'next/link';
 import { formatNumber, formatCurrency } from '@/lib/utils';
 import { cn } from '@/lib/utils';
+import { APEXMAIL_PLAN_TIERS } from '@/lib/pricing';
 
 interface PricingOption {
   dedicatedIP: boolean;
@@ -16,14 +17,7 @@ interface PricingOption {
 }
 
 const pricingTiers = {
-  apexmail: [
-    { max: 3000, price: 0 },       // Free: 3K emails
-    { max: 50000, price: 25 },     // Starter: $25/mo, 50K emails
-    { max: 150000, price: 65 },    // Pro: $65/mo, 150K emails
-    { max: 500000, price: 150 },   // Growth: $150/mo, 500K emails
-    { max: 2000000, price: 350 },  // Scale: $350/mo, 2M emails
-    { max: Infinity, price: 800 }, // Enterprise: $800/mo, 5M emails
-  ],
+  apexmail: APEXMAIL_PLAN_TIERS.map((tier) => ({ max: tier.maxMonthlyEmails, price: tier.monthlyPrice })),
   sendgrid: [
     { max: 6000, price: 0 },
     { max: 50000, price: 19.95 },
@@ -69,7 +63,7 @@ function calculateApexMailCost(volume: number, options: PricingOption) {
 
   // Subscription plan cost
   let planCost = Infinity;
-  const plan = pricingTiers.apexmail.find(t => volume <= t.max && t.price !== undefined);
+  const plan = pricingTiers.apexmail.find((t) => volume <= t.max && t.price !== undefined);
   
   if (plan && plan.price !== undefined) {
     planCost = plan.price;
@@ -188,13 +182,14 @@ export function PricingCalculator() {
               {/* Volume Slider */}
               <div className="mb-10">
                 <div className="flex items-center justify-between mb-6">
-                  <label className="text-lg font-bold text-surface-900">Monthly Email Volume</label>
+                  <label htmlFor="monthly-volume" className="text-lg font-bold text-surface-900">Monthly Email Volume</label>
                   <div className="text-right">
                     <span className="text-3xl font-bold text-brand-500 tabular-nums tracking-tight">{formatNumber(volume)}</span>
                     <span className="text-sm text-surface-500 font-medium ml-1">emails</span>
                   </div>
                 </div>
                 <input
+                  id="monthly-volume"
                   type="range"
                   min="1000"
                   max="1000000"
@@ -209,10 +204,11 @@ export function PricingCalculator() {
                     <button
                       key={mark.value}
                       className={cn(
-                        'text-xs font-bold tracking-tight transition-colors focus:outline-none uppercase tracking-widest',
+                        'text-xs font-bold transition-colors focus:outline-none uppercase tracking-widest',
                         Math.abs(volume - mark.value) < 50000 ? 'text-brand-500' : 'text-surface-400 hover:text-surface-600'
                       )}
                       onClick={() => setVolume(mark.value)}
+                      aria-label={`Set monthly email volume to ${formatNumber(mark.value)} emails`}
                     >
                       {mark.label}
                     </button>
@@ -251,7 +247,8 @@ export function PricingCalculator() {
                         type="checkbox"
                         checked={options[option.key as keyof PricingOption]}
                         onChange={(e) => setOptions({ ...options, [option.key]: e.target.checked })}
-                        className="hidden"
+                        className="sr-only"
+                        aria-label={option.label}
                       />
                     </div>
                     <span className="text-xs text-surface-500 font-medium">{option.tip}</span>

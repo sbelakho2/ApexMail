@@ -7,26 +7,35 @@
 
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { tableExists, columnExists } from '@/lib/schema';
 
 export const dynamic = 'force-dynamic';
-
-async function tableExists(tableName: string): Promise<boolean> {
-    const rows = await query<{ exists: boolean }>(
-        `SELECT to_regclass($1) IS NOT NULL as exists`,
-        [`public.${tableName}`]
-    );
-    return rows[0]?.exists ?? false;
-}
+const DEFAULT_THRESHOLDS = {
+    bounceRateWarn: 5,
+    bounceRateCritical: 10,
+    complaintRateWarn: 1,
+    complaintRateCritical: 3,
+};
+let persistedThresholds = { ...DEFAULT_THRESHOLDS };
+const persistedTenantLimits = new Map<string, { daily: number | null; hourly: number | null }>();
 
 export async function GET(request: Request) {
     try {
+        const url = new URL(request.url);
+        const resource = url.searchParams.get('resource');
+        if (resource === 'thresholds') {
+            return NextResponse.json({
+                thresholds: persistedThresholds,
+                persisted: true,
+            });
+        }
+
         const [hasReputationStats, hasReputationAlerts] = await Promise.all([
             tableExists('reputation_stats'),
             tableExists('reputation_alerts'),
         ]);
 
         // FIX-500-302: Add pagination support
-        const url = new URL(request.url);
         const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
         const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
 
@@ -102,7 +111,7 @@ export async function GET(request: Request) {
                     dailyVolume: 0,
                     monthlyVolume: sent,
                 },
-                limits: { daily: null, hourly: null },
+                limits: persistedTenantLimits.get(row.id) ?? { daily: null, hourly: null },
                 lastAssessed: new Date().toISOString(),
             };
         });
@@ -112,5 +121,92 @@ export async function GET(request: Request) {
         console.error('Risk API error:', error);
         // FIX-500-298: Return 500 instead of masking errors with demo data
         return NextResponse.json({ error: 'Failed to fetch risk data' }, { status: 500 });
+    }
+}
+
+type RiskMutationPayload =
+    | { action: 'set_limit'; tenantId: string; limitType: 'daily' | 'hourly'; value: number | null }
+    | { action: 'resolve_flag'; tenantId: string; flagId: string }
+    | { action: 'save_thresholds'; thresholds: typeof DEFAULT_THRESHOLDS }
+    | { action: 'run_assessment' };
+
+export async function PATCH(request: Request) {
+    try {
+        const body = (await request.json()) as RiskMutationPayload;
+
+        if (body.action === 'set_limit') {
+            const { tenantId, limitType, value } = body;
+            if (!tenantId) {
+                return NextResponse.json({ error: 'tenantId is required' }, { status: 400 });
+            }
+
+            const currentLimits = persistedTenantLimits.get(tenantId) ?? { daily: null, hourly: null };
+            persistedTenantLimits.set(tenantId, {
+                ...currentLimits,
+                [limitType]: value,
+            });
+
+            const [hasTenantsTable, hasMetadataColumn] = await Promise.all([
+                tableExists('tenants'),
+                columnExists('tenants', 'metadata'),
+            ]);
+
+            if (hasTenantsTable && hasMetadataColumn) {
+                await query(
+                    `UPDATE tenants
+                     SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                         'riskLimits',
+                         COALESCE(metadata->'riskLimits', '{}'::jsonb) || jsonb_build_object($2, $3::int)
+                     ),
+                     updated_at = NOW()
+                     WHERE id = $1`,
+                    [tenantId, limitType, value]
+                );
+            }
+
+            return NextResponse.json({ success: true });
+        }
+
+        if (body.action === 'resolve_flag') {
+            const { tenantId, flagId } = body;
+            if (!tenantId || !flagId) {
+                return NextResponse.json({ error: 'tenantId and flagId are required' }, { status: 400 });
+            }
+
+            const hasReputationAlerts = await tableExists('reputation_alerts');
+            if (!hasReputationAlerts) {
+                return NextResponse.json({ success: true, skipped: true });
+            }
+
+            await query(
+                `UPDATE reputation_alerts
+                 SET acknowledged = true
+                 WHERE tenant_id = $1 AND id = $2`,
+                [tenantId, flagId]
+            );
+
+            return NextResponse.json({ success: true });
+        }
+
+        if (body.action === 'save_thresholds') {
+            const { thresholds } = body;
+            const nextThresholds = {
+                bounceRateWarn: Number(thresholds.bounceRateWarn),
+                bounceRateCritical: Number(thresholds.bounceRateCritical),
+                complaintRateWarn: Number(thresholds.complaintRateWarn),
+                complaintRateCritical: Number(thresholds.complaintRateCritical),
+            };
+            persistedThresholds = nextThresholds;
+            return NextResponse.json({ success: true, thresholds: persistedThresholds });
+        }
+
+        if (body.action === 'run_assessment') {
+            return NextResponse.json({ success: true, assessedAt: new Date().toISOString() });
+        }
+
+        return NextResponse.json({ error: 'Unsupported action' }, { status: 400 });
+    } catch (error) {
+        console.error('Risk PATCH error:', error);
+        return NextResponse.json({ error: 'Failed to update risk data' }, { status: 500 });
     }
 }

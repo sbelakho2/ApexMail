@@ -575,7 +575,29 @@ export class StripeService {
 
   private async handleInvoicePaid(invoice: Stripe.Invoice): Promise<void> {
     try {
-      const tenantId = invoice.subscription_details?.metadata?.tenant_id;
+      let tenantId = invoice.subscription_details?.metadata?.tenant_id;
+
+      if (!tenantId) {
+        const subscriptionId = typeof invoice.subscription === 'string'
+          ? invoice.subscription
+          : invoice.subscription?.id;
+
+        if (subscriptionId) {
+          const tenantLookup = await this.db.query<{ tenant_id: string }>(
+            `SELECT tenant_id
+             FROM stripe_subscriptions
+             WHERE stripe_subscription_id = $1
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [subscriptionId]
+          );
+
+          if (tenantLookup.ok) {
+            tenantId = tenantLookup.value.rows[0]?.tenant_id;
+          }
+        }
+      }
+
       if (!tenantId) return;
 
       // Sync invoice to our database
@@ -671,6 +693,8 @@ export class StripeService {
     reason?: string
   ): Promise<Result<Stripe.Refund, Error>> {
     try {
+      const idempotencyKey = `refund_${paymentIntentId}_${amount ?? 'full'}_${reason ?? 'none'}`;
+
       const refund = await this.stripe.refunds.create(
         {
           payment_intent: paymentIntentId,
@@ -678,7 +702,7 @@ export class StripeService {
           reason: reason as Stripe.RefundCreateParams.Reason,
         },
         {
-          idempotencyKey: `refund_${paymentIntentId}`,
+          idempotencyKey,
         }
       );
 
@@ -934,5 +958,103 @@ export class StripeService {
       logger.error('Failed to switch subscription', { error, tenantId, planName, sagaId });
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
+  }
+
+  async cleanupStuckSubscriptionSagas(): Promise<Result<{ cleaned: number }, Error>> {
+    const result = await this.db.query<{ cleaned: string }>(
+      `WITH updated AS (
+         UPDATE subscription_change_saga
+         SET status = 'failed',
+             error = COALESCE(error, 'Timed out waiting for completion'),
+             updated_at = NOW()
+         WHERE status IN ('pending', 'stripe_completed')
+           AND updated_at < NOW() - INTERVAL '1 hour'
+         RETURNING id
+       )
+       SELECT COUNT(*)::text AS cleaned FROM updated`
+    );
+
+    if (!result.ok) return Result.err(result.error);
+    return Result.ok({ cleaned: parseInt(result.value.rows[0]?.cleaned ?? '0', 10) });
+  }
+
+  async processScheduledRetries(): Promise<Result<{ attempted: number; succeeded: number }, Error>> {
+    const dueResult = await this.db.query<{
+      tenant_id: string;
+      stripe_subscription_id: string;
+      stripe_customer_id: string;
+    }>(
+      `SELECT d.tenant_id, s.stripe_subscription_id, s.stripe_customer_id
+       FROM dunning_records d
+       JOIN stripe_subscriptions s ON s.tenant_id = d.tenant_id
+       WHERE d.next_retry_at IS NOT NULL
+         AND d.next_retry_at <= NOW()
+         AND d.status IN ('warning', 'soft_suspended')
+         AND s.status IN ('past_due', 'unpaid')
+       ORDER BY d.next_retry_at ASC
+       LIMIT 50`
+    );
+
+    if (!dueResult.ok) return Result.err(dueResult.error);
+
+    let attempted = 0;
+    let succeeded = 0;
+
+    for (const row of dueResult.value.rows) {
+      attempted += 1;
+
+      try {
+        const invoices = await this.stripe.invoices.list({
+          customer: row.stripe_customer_id,
+          subscription: row.stripe_subscription_id,
+          status: 'open',
+          limit: 1,
+        });
+
+        const invoice = invoices.data[0];
+        if (!invoice?.id) {
+          await this.db.query(
+            `UPDATE dunning_records
+             SET next_retry_at = NULL, updated_at = NOW()
+             WHERE tenant_id = $1`,
+            [row.tenant_id]
+          );
+          continue;
+        }
+
+        await this.stripe.invoices.pay(invoice.id);
+        succeeded += 1;
+
+        if (this.dunning) {
+          await this.dunning.recordSuccessfulPayment(row.tenant_id);
+        } else {
+          await this.db.query(
+            `UPDATE dunning_records
+             SET status = 'healthy',
+                 failed_payment_count = 0,
+                 first_failed_at = NULL,
+                 last_failed_at = NULL,
+                 next_retry_at = NULL,
+                 updated_at = NOW()
+             WHERE tenant_id = $1`,
+            [row.tenant_id]
+          );
+        }
+      } catch (error) {
+        logger.warn('Scheduled Stripe retry failed', {
+          tenantId: row.tenant_id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+
+        await this.db.query(
+          `UPDATE dunning_records
+           SET next_retry_at = NOW() + INTERVAL '1 day', updated_at = NOW()
+           WHERE tenant_id = $1`,
+          [row.tenant_id]
+        ).catch(() => undefined);
+      }
+    }
+
+    return Result.ok({ attempted, succeeded });
   }
 }

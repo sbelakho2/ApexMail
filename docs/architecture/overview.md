@@ -85,7 +85,15 @@ apexmail/
 │           ├── analytics/          # Analytics engine
 │           ├── mta/                # SMTP handling
 │           ├── worker-processors/  # Background jobs
-│           └── ...                 # 30+ crates
+│           ├── ddos-protection/    # 5-layer DDoS defense (ML, PoW, SMTP)
+│           ├── waf-engine/         # AST-based SQLi/XSS WAF
+│           ├── ids-engine/         # Intrusion detection/prevention
+│           ├── spam-filter/        # Bayesian spam & phishing filter
+│           ├── sandbox/            # Attachment static analysis
+│           ├── ato-protection/     # Account takeover prevention
+│           ├── dlp-engine/         # Data loss prevention
+│           ├── threat-intel/       # IP/domain threat intelligence
+│           └── ...                 # 45+ crates total
 │
 ├── packages/
 │   ├── db/                  # Database schema (Drizzle)
@@ -176,6 +184,23 @@ services/mail-server/crates/
 - Row-level security in PostgreSQL
 - Audit logging
 - Secret rotation with encryption at rest
+
+### Security Crate Stack (8 systems, 230 tests)
+
+The mail server embeds 8 dedicated Rust security crates providing defense-in-depth:
+
+| Layer | Crate | Threat Coverage |
+|-------|-------|-----------------|
+| Network Edge | `ddos-protection` | Volumetric floods, protocol attacks, SMTP abuse |
+| Network Edge | `threat-intel` | Known malicious IPs/domains (Spamhaus feeds) |
+| Network Edge | `ids-engine` | Intrusion signatures, port scans, SYN floods |
+| Application | `waf-engine` | SQLi, XSS, path traversal, command injection |
+| Application | `ato-protection` | Impossible travel, credential stuffing, session hijacking |
+| Application | `spam-filter` | Spam, phishing, URL fraud |
+| Content | `sandbox` | Malware attachments, macro exploits |
+| Content | `dlp-engine` | PII leakage, secrets, confidential data |
+
+See [Security Systems Reference](../security/Security_Systems.md) for complete implementation details.
 
 ### Email Authentication Stack
 

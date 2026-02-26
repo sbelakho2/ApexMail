@@ -21,12 +21,12 @@ const IV_LENGTH: usize = 12;
 
 // ── Key Derivation ─────────────────────────────────────────
 
-fn derive_key(master_key: &str, salt: &[u8], info: &str) -> [u8; KEY_LENGTH] {
+fn derive_key(master_key: &str, salt: &[u8], info: &str) -> anyhow::Result<[u8; KEY_LENGTH]> {
     let hk = Hkdf::<Sha256>::new(Some(salt), master_key.as_bytes());
     let mut okm = [0u8; KEY_LENGTH];
     hk.expand(info.as_bytes(), &mut okm)
-        .expect("HKDF expand failed");
-    okm
+        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
+    Ok(okm)
 }
 
 fn hash_code(s: &str) -> i64 {
@@ -72,7 +72,7 @@ impl EncryptionService {
 
     fn encrypt_data_key(&self, raw_key: &[u8]) -> anyhow::Result<String> {
         let salt = b"apexmail-isolation-master";
-        let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption");
+        let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption")?;
 
         let cipher = Aes256Gcm::new_from_slice(&derived)?;
         let mut iv = [0u8; IV_LENGTH];
@@ -101,7 +101,7 @@ impl EncryptionService {
         let mut buffer = B64.decode(parts[2])?;
 
         let salt = b"apexmail-isolation-master";
-        let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption");
+        let derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption")?;
 
         let cipher = Aes256Gcm::new_from_slice(&derived)?;
         let nonce = Nonce::from_slice(&iv);
@@ -178,11 +178,9 @@ impl EncryptionService {
         resource: &str,
         data: &serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let policy = self.get_policy_for_resource(resource);
-        if policy.is_none() {
+        let Some(policy) = self.get_policy_for_resource(resource) else {
             return Ok(data.clone());
-        }
-        let policy = policy.unwrap();
+        };
         let mut result = data.clone();
 
         if let Some(obj) = result.as_object_mut() {
@@ -202,11 +200,9 @@ impl EncryptionService {
         resource: &str,
         data: &serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
-        let policy = self.get_policy_for_resource(resource);
-        if policy.is_none() {
+        let Some(policy) = self.get_policy_for_resource(resource) else {
             return Ok(data.clone());
-        }
-        let policy = policy.unwrap();
+        };
         let mut result = data.clone();
 
         if let Some(obj) = result.as_object_mut() {
@@ -685,11 +681,14 @@ impl EncryptionService {
     }
 }
 
-static SQL_IDENT_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
+static SQL_IDENT_RE: std::sync::LazyLock<Result<regex::Regex, regex::Error>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$"));
 
 fn is_safe_ident(value: &str) -> bool {
-    SQL_IDENT_RE.is_match(value)
+    match SQL_IDENT_RE.as_ref() {
+        Ok(re) => re.is_match(value),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -698,21 +697,21 @@ mod tests {
 
     #[test]
     fn test_derive_key_deterministic() {
-        let k1 = derive_key("master", b"salt", "info");
-        let k2 = derive_key("master", b"salt", "info");
+        let k1 = derive_key("master", b"salt", "info").unwrap();
+        let k2 = derive_key("master", b"salt", "info").unwrap();
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn test_derive_key_different_inputs() {
-        let k1 = derive_key("master", b"salt1", "info");
-        let k2 = derive_key("master", b"salt2", "info");
+        let k1 = derive_key("master", b"salt1", "info").unwrap();
+        let k2 = derive_key("master", b"salt2", "info").unwrap();
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn test_derive_key_length() {
-        let k = derive_key("key", b"salt", "info");
+        let k = derive_key("key", b"salt", "info").unwrap();
         assert_eq!(k.len(), KEY_LENGTH);
     }
 

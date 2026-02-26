@@ -3,6 +3,13 @@
 
 BEGIN;
 
+-- Base tenants table for FK references in billing schema
+CREATE TABLE IF NOT EXISTS tenants (
+    id VARCHAR(26) PRIMARY KEY,
+    name VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Plans table
 CREATE TABLE IF NOT EXISTS plans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -57,7 +64,7 @@ CREATE TABLE IF NOT EXISTS stripe_subscriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     stripe_subscription_id VARCHAR(255) UNIQUE NOT NULL,
-    stripe_customer_id VARCHAR(255) NOT NULL,
+    stripe_customer_id VARCHAR(255) NOT NULL REFERENCES stripe_customers(stripe_customer_id) ON DELETE CASCADE,
     plan_id UUID REFERENCES plans(id),
     status VARCHAR(50) NOT NULL DEFAULT 'incomplete',
     amount INTEGER NOT NULL DEFAULT 0,
@@ -136,7 +143,10 @@ CREATE TABLE IF NOT EXISTS metering_events (
     idempotency_key VARCHAR(255) UNIQUE,
     metadata JSONB DEFAULT '{}',
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+) PARTITION BY RANGE (recorded_at);
+
+CREATE TABLE IF NOT EXISTS metering_events_default
+    PARTITION OF metering_events DEFAULT;
 
 CREATE INDEX idx_metering_events_tenant_period ON metering_events(tenant_id, period_key);
 CREATE INDEX idx_metering_events_type ON metering_events(event_type);
@@ -303,7 +313,7 @@ CREATE TABLE IF NOT EXISTS enterprise_contracts (
     status VARCHAR(30) NOT NULL DEFAULT 'draft',
     start_date DATE NOT NULL,
     end_date DATE NOT NULL,
-    base_fee INTEGER NOT NULL DEFAULT 0,
+    base_fee INTEGER NOT NULL DEFAULT 0 CHECK (base_fee >= 0),
     currency VARCHAR(3) NOT NULL DEFAULT 'USD',
     committed_volume JSONB NOT NULL DEFAULT '{}',
     overage_rates JSONB NOT NULL DEFAULT '{}',

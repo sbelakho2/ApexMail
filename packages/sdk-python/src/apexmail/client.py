@@ -8,10 +8,13 @@ SECURITY: Implements HTTPS enforcement, retry logic, and masked API key repr.
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 import time
-from typing import TYPE_CHECKING, Optional
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from typing import TYPE_CHECKING, Callable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -28,13 +31,16 @@ from .exceptions import (
 )
 from .resources.domains import AsyncDomainsResource, DomainsResource
 from .resources.emails import AsyncEmailsResource, EmailsResource
+from .resources.events import AsyncEventsResource, EventsResource
+from .resources.suppressions import AsyncSuppressionsResource, SuppressionsResource
+from .resources.templates import AsyncTemplatesResource, TemplatesResource
 from .resources.webhooks import AsyncWebhooksResource, WebhooksResource
 
 if TYPE_CHECKING:
     from types import TracebackType
 
 
-DEFAULT_BASE_URL = "https://api.apexmail.ee/v1"
+DEFAULT_BASE_URL = "https://api.apexmail.ee"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
 # Retry on these status codes
@@ -51,6 +57,7 @@ class BaseClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         if not api_key:
             raise ValueError("API key is required")
@@ -62,8 +69,12 @@ class BaseClient:
                 "where <key> is at least 32 alphanumeric characters"
             )
 
+        normalized_base_url = base_url.rstrip("/")
+        if normalized_base_url.endswith("/v1"):
+            normalized_base_url = normalized_base_url[:-3]
+
         # SECURITY FIX: Enforce HTTPS in production
-        parsed_url = urlparse(base_url)
+        parsed_url = urlparse(normalized_base_url)
         if parsed_url.scheme != "https":
             hostname = parsed_url.hostname or ""
             if hostname not in {"localhost", "127.0.0.1"}:
@@ -73,9 +84,10 @@ class BaseClient:
                 )
 
         self._api_key = api_key  # Private to avoid accidental exposure
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalized_base_url
         self.timeout = timeout
         self.max_retries = max_retries
+        self._sleep = sleep_fn or time.sleep
         self._base_headers = {
             "X-API-Key": self._api_key,
             "Content-Type": "application/json",
@@ -96,6 +108,20 @@ class BaseClient:
         if idempotency_key:
             return {"X-Idempotency-Key": idempotency_key}
         return None
+
+    def _parse_retry_after(self, retry_after: Optional[str]) -> Optional[float]:
+        if not retry_after:
+            return None
+        try:
+            return float(retry_after)
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(retry_after)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return max(0.0, parsed.timestamp() - time.time())
+            except Exception:
+                return None
 
     def _calculate_backoff(self, attempt: int) -> float:
         """Calculate exponential backoff with jitter."""
@@ -132,11 +158,11 @@ class BaseClient:
         elif response.status_code == 409:
             raise ConflictError(message=message, code=code)
         elif response.status_code == 429:
-            retry_after = response.headers.get("Retry-After")
+            retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
             raise RateLimitError(
                 message=message,
                 code=code,
-                retry_after=int(retry_after) if retry_after else None,
+                retry_after=int(retry_after) if retry_after is not None else None,
             )
         elif response.status_code >= 500:
             raise ServerError(message=message, code=code)
@@ -171,8 +197,15 @@ class ApexMail(BaseClient):
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            sleep_fn=sleep_fn,
+        )
 
         self._client = httpx.Client(
             base_url=self.base_url,
@@ -183,6 +216,9 @@ class ApexMail(BaseClient):
         # Initialize resources
         self.emails = EmailsResource(self)
         self.domains = DomainsResource(self)
+        self.templates = TemplatesResource(self)
+        self.suppressions = SuppressionsResource(self)
+        self.events = EventsResource(self)
         self.webhooks = WebhooksResource(self)
 
     def _request(
@@ -212,11 +248,11 @@ class ApexMail(BaseClient):
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
                     if response.status_code == 429:
                         # Use Retry-After header if present
-                        retry_after = response.headers.get("Retry-After")
-                        delay = float(retry_after) if retry_after else self._calculate_backoff(attempt)
+                        retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
+                        delay = retry_after if retry_after is not None else self._calculate_backoff(attempt)
                     else:
                         delay = self._calculate_backoff(attempt)
-                    time.sleep(delay)
+                    self._sleep(delay)
                     continue
                     
                 return self._handle_response(response)
@@ -224,7 +260,7 @@ class ApexMail(BaseClient):
             except httpx.TimeoutException as e:
                 last_exception = e
                 if attempt < self.max_retries:
-                    time.sleep(self._calculate_backoff(attempt))
+                    self._sleep(self._calculate_backoff(attempt))
                     continue
                 raise ApexMailError(
                     message="Request timed out",
@@ -234,7 +270,7 @@ class ApexMail(BaseClient):
             except httpx.NetworkError as e:
                 last_exception = e
                 if attempt < self.max_retries:
-                    time.sleep(self._calculate_backoff(attempt))
+                    self._sleep(self._calculate_backoff(attempt))
                     continue
                 raise ApexMailError(
                     message=f"Network error: {e}",
@@ -284,8 +320,15 @@ class AsyncApexMail(BaseClient):
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
-        super().__init__(api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
+        super().__init__(
+            api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            sleep_fn=sleep_fn,
+        )
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -296,6 +339,9 @@ class AsyncApexMail(BaseClient):
         # Initialize resources
         self.emails = AsyncEmailsResource(self)
         self.domains = AsyncDomainsResource(self)
+        self.templates = AsyncTemplatesResource(self)
+        self.suppressions = AsyncSuppressionsResource(self)
+        self.events = AsyncEventsResource(self)
         self.webhooks = AsyncWebhooksResource(self)
 
     async def _request(
@@ -308,8 +354,6 @@ class AsyncApexMail(BaseClient):
         idempotency_key: Optional[str] = None,
     ) -> dict:
         """Make an asynchronous HTTP request with retry logic."""
-        import asyncio
-        
         headers = self._get_headers(idempotency_key)
         last_exception: Optional[Exception] = None
         
@@ -327,8 +371,8 @@ class AsyncApexMail(BaseClient):
                 if response.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries:
                     if response.status_code == 429:
                         # Use Retry-After header if present
-                        retry_after = response.headers.get("Retry-After")
-                        delay = float(retry_after) if retry_after else self._calculate_backoff(attempt)
+                        retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
+                        delay = retry_after if retry_after is not None else self._calculate_backoff(attempt)
                     else:
                         delay = self._calculate_backoff(attempt)
                     await asyncio.sleep(delay)

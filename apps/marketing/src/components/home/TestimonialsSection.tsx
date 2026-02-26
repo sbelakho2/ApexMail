@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
+import Image from 'next/image';
 import { ChevronLeft, ChevronRight, Quote } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
 
@@ -72,7 +73,21 @@ export function TestimonialsSection() {
  const activeTestimonial = testimonials[activeIndex];
 
  return (
- <section ref={ref} className="py-20 lg:py-32 relative overflow-hidden bg-surface-50">
+ <section
+ ref={ref}
+ className="py-20 lg:py-32 relative overflow-hidden bg-surface-50"
+ role="region"
+ aria-roledescription="carousel"
+ aria-label="Customer testimonials"
+ onKeyDown={(e) => {
+ if (e.key === 'ArrowRight') {
+ nextTestimonial();
+ } else if (e.key === 'ArrowLeft') {
+ prevTestimonial();
+ }
+ }}
+ tabIndex={0}
+ >
       <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  {/* Header */}
  <motion.div
@@ -112,9 +127,13 @@ export function TestimonialsSection() {
  &ldquo;{activeTestimonial.quote}&rdquo;
  </blockquote>
  <div className="flex items-center gap-4">
- <div className="w-12 h-12 rounded-full bg-surface-50 flex items-center justify-center text-surface-900 font-semibold text-sm border border-surface-200" aria-hidden="true">
- {activeTestimonial.author?.split(' ').map(n => n?.[0] ?? '').join('') ?? 'U'}
- </div>
+ <Image
+ src={activeTestimonial.image}
+ alt={`${activeTestimonial.author} profile photo`}
+ width={48}
+ height={48}
+ className="w-12 h-12 rounded-full object-cover border border-surface-200"
+ />
  <div>
  <div className="font-semibold text-surface-900">{activeTestimonial.author}</div>
  <div className="text-sm text-surface-500">
@@ -190,24 +209,11 @@ export function TestimonialsSection() {
  </div>
  </div>
 
- {/* Logos Strip */}
- <motion.div
- initial={{ opacity: 0 }}
- animate={inView ? { opacity: 1 } : {}}
- transition={{ delay: 0.4 }}
- className="mt-16 pt-12 border-t border-surface-200"
- >
- <p className="text-center text-xs font-bold text-surface-600 mb-8">
- Powering email for innovative companies worldwide
+ <div className="mt-16 pt-12 border-t border-surface-200 text-center">
+ <p className="text-sm font-medium text-surface-600">
+ Customer stories shown above are from production teams across fintech, healthcare, SaaS, developer tools, and e-commerce.
  </p>
- <div className="flex items-center justify-center gap-12 flex-wrap opacity-40 grayscale">
- {['TechCorp', 'ScaleUp', 'DevTools', 'CloudBase', 'DataFlow', 'AppStack'].map((company) => (
- <span key={company} className="text-surface-900 font-bold text-lg">
- {company}
- </span>
- ))}
  </div>
- </motion.div>
  </div>
  </section>
  );

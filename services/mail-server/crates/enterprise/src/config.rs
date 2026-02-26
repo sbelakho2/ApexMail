@@ -275,32 +275,29 @@ pub struct Config {
 
 impl Config {
     /// Load configuration from environment variables.
-    /// 
-    /// # Panics
-    /// Panics in production mode if `JWT_SECRET` is not set or is the default dev secret.
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let node_env = env::var("NODE_ENV").unwrap_or_default();
         let is_production = node_env == "production" || node_env == "prod";
         
         // JWT secret with production enforcement
         let jwt_secret = env::var("JWT_SECRET").unwrap_or_else(|_| {
-            if is_production {
-                panic!("JWT_SECRET environment variable must be set in production");
-            }
             "dev-secret-change-in-production-please-32ch".into()
         });
         
         // Validate JWT secret in production
         if is_production {
+            if env::var("JWT_SECRET").is_err() {
+                return Err("JWT_SECRET environment variable must be set in production".into());
+            }
             if jwt_secret == "dev-secret-change-in-production-please-32ch" {
-                panic!("JWT_SECRET must not be the default dev secret in production");
+                return Err("JWT_SECRET must not be the default dev secret in production".into());
             }
             if jwt_secret.len() < 32 {
-                panic!("JWT_SECRET must be at least 32 characters in production");
+                return Err("JWT_SECRET must be at least 32 characters in production".into());
             }
         }
         
-        Self {
+        Ok(Self {
             port: env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(3000),
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             cors_origins: env::var("CORS_ORIGINS")
@@ -369,7 +366,7 @@ impl Config {
                 require_review_for_new: env::var("TEMPLATE_REQUIRE_REVIEW_NEW").map(|v| v != "false").unwrap_or(true),
                 auto_approve_threshold: env::var("TEMPLATE_AUTO_APPROVE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(10),
             },
-        }
+        })
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -407,7 +404,7 @@ mod tests {
         for key in &["PORT", "HOST", "DB_HOST", "DB_PORT", "JWT_SECRET"] {
             env::remove_var(key);
         }
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.port, 3000);
         assert_eq!(cfg.host, "0.0.0.0");
         assert_eq!(cfg.db.host, "localhost");
@@ -489,7 +486,7 @@ mod tests {
     fn test_compliance_defaults() {
         env::remove_var("HIPAA_ENABLED");
         env::remove_var("AUDIT_RETENTION_DAYS");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert!(!cfg.compliance.hipaa_enabled);
         assert_eq!(cfg.compliance.audit_retention_days, 2555);
         assert_eq!(cfg.compliance.data_residency_regions, vec!["us", "eu"]);
@@ -498,7 +495,7 @@ mod tests {
     #[test]
     fn test_template_defaults() {
         env::remove_var("TEMPLATE_MAX_SPAM_SCORE");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.template.max_spam_score, 50);
         assert!(cfg.template.require_review_for_new);
         assert_eq!(cfg.template.auto_approve_threshold, 10);
@@ -507,7 +504,7 @@ mod tests {
     #[test]
     fn test_sub_account_defaults() {
         env::remove_var("MAX_SUB_ACCOUNTS");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.sub_account.max_sub_accounts, 100);
         assert!(cfg.sub_account.inherit_parent_settings);
         assert_eq!(cfg.sub_account.volume_allocation_mode, VolumeAllocationMode::Shared);
@@ -516,7 +513,7 @@ mod tests {
     #[test]
     fn test_log_stream_defaults() {
         env::remove_var("LOG_STREAM_BUFFER_SIZE");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.log_stream.buffer_size, 1000);
         assert_eq!(cfg.log_stream.flush_interval_ms, 60000);
         assert!(cfg.log_stream.compression);

@@ -5,9 +5,6 @@ import { EndpointExplorer } from '@/components/api-console/EndpointExplorer';
 import { APIConsoleCTA } from '@/components/api-console/APIConsoleCTA';
 import { DemoErrorBoundary } from '@/components/ui/DemoErrorBoundary';
 
-// Force dynamic rendering to avoid ESM/CommonJS issues with html-encoding-sniffer
-export const dynamic = 'force-dynamic';
-
 export const metadata: Metadata = {
   title: 'API Sandbox Console | Explore Without Signing Up',
   description:

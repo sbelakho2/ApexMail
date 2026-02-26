@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button';
 import { SimpleTooltip } from '@/components/ui/tooltip';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useUIStore } from '@/stores';
 
 interface NavItem {
  title: string;
@@ -103,8 +104,22 @@ interface SidebarProps extends VariantProps<typeof sidebarVariants> {
 }
 
 export function Sidebar({ className, onClose }: SidebarProps) {
-  const [collapsed, setCollapsed] = React.useState(false);
   const pathname = usePathname();
+  const collapsed = useUIStore((state) => state.sidebarCollapsed);
+  const setSidebarCollapsed = useUIStore((state) => state.setSidebarCollapsed);
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // fallback redirect below
+    }
+
+    window.location.href = '/login';
+  };
 
   return (
     <aside className={cn(sidebarVariants({ collapsed }), className)}>
@@ -140,7 +155,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
 
       {/* Navigation */}
       <ScrollArea className="flex-1 px-3">
-        <nav className="flex flex-col gap-6 py-6">
+        <nav className="flex flex-col gap-6 py-6" aria-label="Primary sidebar navigation">
           {mainNav.map((section, sectionIndex) => (
             <div key={sectionIndex} className="flex flex-col gap-1">
               {section.title && !collapsed && (
@@ -212,7 +227,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
  )}
  <div className="flex items-center justify-between">
  {!collapsed && (
- <Button variant="ghost" size="sm" className="text-surface-500 hover:text-surface-900">
+ <Button variant="ghost" size="sm" className="text-surface-500 hover:text-surface-900" onClick={handleLogout}>
  <LogOut className="h-4 w-4 mr-2" />
  Sign Out
  </Button>
@@ -220,7 +235,7 @@ export function Sidebar({ className, onClose }: SidebarProps) {
  <Button
  variant="ghost"
  size="icon"
- onClick={() => setCollapsed(!collapsed)}
+ onClick={() => setSidebarCollapsed(!collapsed)}
  className={cn(collapsed && 'mx-auto')}
  aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
  aria-expanded={!collapsed}

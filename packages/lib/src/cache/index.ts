@@ -33,7 +33,17 @@ export interface CacheProvider {
   decr(key: string, by?: number): Promise<number>;
   expire(key: string, ttlSeconds: number): Promise<void>;
   ttl(key: string): Promise<number>;
-  keys(pattern: string): Promise<string[]>;
+  keys(pattern: string, limit?: number): Promise<string[]>;
+  /**
+   * C-148: Stampede protection with a short-lived lock.
+   * Returns cached value or computes and stores it with TTL.
+   */
+  getOrSet<T>(
+    key: string,
+    ttlSeconds: number,
+    loader: () => Promise<T>,
+    options?: { lockTtlSeconds?: number; maxWaitMs?: number; initialWaitMs?: number }
+  ): Promise<T>;
   mget<T>(keys: string[]): Promise<(T | null)[]>;
   mset<T>(entries: Array<{ key: string; value: T; ttlSeconds?: number }>): Promise<void>;
   
@@ -126,8 +136,15 @@ export class RedisCacheProvider implements CacheProvider {
 
     try {
       return JSON.parse(value) as T;
-    } catch {
-      // Return null instead of unsafe string cast — caller expects T, not string
+    } catch (e) {
+      // BUG-010 FIX: Log parse error and delete corrupt cache entry
+      // This prevents stale data issues where parse always fails
+      this.logger.error('Cache JSON parse error - deleting corrupt entry', {
+        key,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      // Delete the corrupt entry to allow fresh write
+      void this.client.del(this.key(key)).catch(() => { /* ignore delete errors */ });
       return null;
     }
   }
@@ -220,14 +237,13 @@ export class RedisCacheProvider implements CacheProvider {
     return this.client.ttl(this.key(key));
   }
 
-  async keys(pattern: string): Promise<string[]> {
+  async keys(pattern: string, limit = 5000): Promise<string[]> {
     // FIX-012: Use SCAN instead of KEYS to avoid blocking the Redis
     // event loop. KEYS is O(N) on the entire keyspace and causes latency
     // spikes in production; SCAN iterates incrementally.
     const fullPattern = this.key(pattern);
     const result: string[] = [];
     let cursor = '0';
-
     do {
       const [nextCursor, keys] = await this.client.scan(
         cursor,
@@ -239,10 +255,58 @@ export class RedisCacheProvider implements CacheProvider {
       cursor = nextCursor;
       for (const k of keys) {
         result.push(k.slice(this.prefix.length));
+        if (result.length >= limit) {
+          return result;
+        }
       }
     } while (cursor !== '0');
 
     return result;
+  }
+
+  async getOrSet<T>(
+    key: string,
+    ttlSeconds: number,
+    loader: () => Promise<T>,
+    options: { lockTtlSeconds?: number; maxWaitMs?: number; initialWaitMs?: number } = {}
+  ): Promise<T> {
+    const cached = await this.get<T>(key);
+    if (cached !== null) {
+      return cached;
+    }
+
+    const lockKey = `${key}:lock`;
+    const lockTtl = options.lockTtlSeconds ?? 5;
+    const maxWaitMs = options.maxWaitMs ?? 2000;
+    let waitMs = options.initialWaitMs ?? 50;
+    const start = Date.now();
+
+    if (await this.setNX(lockKey, '1', { ttlSeconds: lockTtl })) {
+      try {
+        const value = await loader();
+        await this.set(key, value, { ttlSeconds });
+        return value;
+      } finally {
+        await this.delete(lockKey);
+      }
+    }
+
+    while (Date.now() - start < maxWaitMs) {
+      await this.sleep(waitMs);
+      const cachedRetry = await this.get<T>(key);
+      if (cachedRetry !== null) {
+        return cachedRetry;
+      }
+      waitMs = Math.min(waitMs * 2, 200);
+    }
+
+    const fallbackValue = await loader();
+    await this.set(key, fallbackValue, { ttlSeconds });
+    return fallbackValue;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async mget<T>(keys: string[]): Promise<(T | null)[]> {

@@ -2,7 +2,7 @@
 //!
 //! Supports two authentication methods:
 //! 1. **API Key** — `X-API-Key` header, SHA-256 hashed, DB lookup (Redis-cached 60 s).
-//! 2. **JWT Bearer** — `Authorization: Bearer <token>`, HS256, extracts claims.
+//! 2. **JWT Bearer** — `Authorization: Bearer <token>`, RS256, extracts claims.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -39,9 +39,13 @@ pub struct JwtClaims {
 
 // ─── Constants ─────────────────────────────────────────────────
 
-const API_KEY_CACHE_TTL: u64 = 60; // seconds
+// SEC-008 FIX: Reduced from 60s to 10s for better security/performance tradeoff
+// Revoked API keys will be invalid within 10 seconds instead of 60
+const API_KEY_CACHE_TTL: u64 = 10; // seconds
 const TOKEN_BLACKLIST_PREFIX: &str = "apexmail:token_blacklist:";
 const API_KEY_CACHE_PREFIX: &str = "apexmail:api_key_cache:";
+// SEC-008: Prefix for marking revoked API keys (short TTL marker)
+const API_KEY_REVOKED_PREFIX: &str = "apexmail:api_key_revoked:";
 
 // ─── Extractor ─────────────────────────────────────────────────
 
@@ -194,10 +198,11 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
         return Err(ApiError::Unauthorized("token has been revoked".into()));
     }
 
-    let mut validation = Validation::new(Algorithm::HS256);
+    let mut validation = Validation::new(Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
-    let key = DecodingKey::from_secret(state.config.jwt_secret.as_bytes());
+    let key = DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
+        .map_err(|e| ApiError::Internal(format!("invalid JWT public key configuration: {e}")))?;
     let token_data = decode::<JwtClaims>(token, &key, &validation)?;
 
     let claims = token_data.claims;

@@ -6,8 +6,6 @@ import { CheckCircle2, AlertTriangle, XCircle, Activity } from '@/components/ui/
 
 type SystemStatus = 'operational' | 'degraded' | 'outage' | 'maintenance';
 
-const overallStatus: SystemStatus = 'operational';
-
 const statusConfig = {
   operational: {
     icon: CheckCircle2,
@@ -44,18 +42,72 @@ const statusConfig = {
 };
 
 export function StatusHero() {
-  const config = statusConfig[overallStatus];
-  const Icon = config.icon;
+  const [overallStatus, setOverallStatus] = useState<SystemStatus>('operational');
+  const [statusDescription, setStatusDescription] = useState('Loading live status data...');
   const [lastUpdated, setLastUpdated] = useState<string>('');
 
   useEffect(() => {
-    setLastUpdated(new Date().toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    }));
+    let cancelled = false;
+
+    const mapIndicatorToSystemStatus = (indicator: string): SystemStatus => {
+      if (indicator === 'major_outage') return 'outage';
+      if (indicator === 'critical' || indicator === 'minor' || indicator === 'degraded_performance') return 'degraded';
+      if (indicator === 'under_maintenance') return 'maintenance';
+      return 'operational';
+    };
+
+    const refreshStatus = async () => {
+      try {
+        const response = await fetch('https://status.apexmail.ee/api/v2/status.json', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Failed to fetch live status');
+
+        const data = (await response.json()) as {
+          page?: { updated_at?: string };
+          status?: { indicator?: string; description?: string };
+        };
+
+        if (cancelled) return;
+
+        const indicator = data.status?.indicator ?? 'none';
+        setOverallStatus(mapIndicatorToSystemStatus(indicator));
+        setStatusDescription(data.status?.description ?? 'Live status currently unavailable.');
+
+        const sourceTime = data.page?.updated_at ? new Date(data.page.updated_at) : new Date();
+        setLastUpdated(
+          sourceTime.toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })
+        );
+      } catch {
+        if (cancelled) return;
+        setOverallStatus('degraded');
+        setStatusDescription('Unable to load live status feed right now.');
+        setLastUpdated(
+          new Date().toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })
+        );
+      }
+    };
+
+    refreshStatus();
+    const interval = setInterval(refreshStatus, 60000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
+
+  const config = statusConfig[overallStatus];
+  const Icon = config.icon;
+
 
   return (
     <section className="py-16 md:py-24 bg-white border-b border-surface-100">
@@ -71,7 +123,7 @@ export function StatusHero() {
             className={`inline-flex items-center gap-2.5 px-4 py-2 rounded-full ${config.bg} mb-8`}
             initial={{ scale: 0.95 }}
             animate={{ scale: 1 }}
-            transition={{ delay: 0.2, type: 'spring', text: 0.5 }}
+            transition={{ delay: 0.2, type: 'spring', duration: 0.5 }}
           >
             <Icon className={`w-5 h-5 ${config.color}`} strokeWidth={2.5} />
             <span className={`text-sm font-semibold ${config.color}`}>
@@ -84,7 +136,7 @@ export function StatusHero() {
           </h1>
 
           <p className="text-lg text-surface-500 mb-8 leading-relaxed">
-            {config.description}
+            {statusDescription || config.description}
           </p>
 
           <div className="flex items-center justify-center gap-6 text-sm">

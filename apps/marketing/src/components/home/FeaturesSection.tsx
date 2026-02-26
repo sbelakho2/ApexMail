@@ -1,6 +1,5 @@
 'use client';
 
-import { motion } from 'framer-motion';
 import { useInView } from 'react-intersection-observer';
 import {
  Shield,
@@ -105,12 +104,7 @@ export function FeaturesSection() {
  <section ref={ref} className="py-20 lg:py-32 relative bg-white" id="features">
       <div className="relative max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8">
  {/* Section Header */}
- <motion.div
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ duration: 0.5 }}
- className="text-center mb-16"
- >
+ <div className="text-center mb-16">
  <h2 className="section-title mb-4">
             <span className="text-surface-900">Features That</span>{' '}
             <span className="text-brand-500">Actually Matter</span>
@@ -119,35 +113,27 @@ export function FeaturesSection() {
  Not another SendGrid clone. Every feature is built to solve real problems 
  that make developers and compliance officers lose sleep.
  </p>
- </motion.div>
+ </div>
 
  {/* Feature Categories */}
  <div className="space-y-20">
  {features.map((category, categoryIndex) => (
  <div key={category.category}>
- <motion.h3
- initial={{ opacity: 0, y: 16 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: categoryIndex * 0.1 }}
- className="text-sm font-bold uppercase tracking-widest text-surface-600 mb-8 flex items-center gap-3"
- >
+ <h3 className="text-sm font-bold uppercase tracking-widest text-surface-600 mb-8 flex items-center gap-3">
  <span className="w-8 h-px bg-surface-200" />
  {category.category}
- </motion.h3>
+ </h3>
 
  <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
  {category.items.map((feature, index) => (
- <motion.div
+ <div
  key={feature.title}
- initial={{ opacity: 0, y: 20 }}
- animate={inView ? { opacity: 1, y: 0 } : {}}
- transition={{ delay: categoryIndex * 0.1 + index * 0.1 }}
  className="p-8 bg-white rounded-xl border border-surface-200 hover:border-brand-200 hover:shadow-xl hover:shadow-brand-500/5 transition-all duration-300 group"
 >
  {/* Icon & Badge */}
               <div className="flex items-start justify-between mb-5">
                 <div className="w-12 h-12 rounded-xl bg-brand-50 flex items-center justify-center border border-brand-100 text-brand-600 shadow-sm">
-                  <feature.icon className="w-6 h-6" strokeWidth={1.5} />
+                  <feature.icon className="w-6 h-6" strokeWidth={1.5} aria-label={`${feature.title} icon`} />
                 </div>
                 <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-surface-100 text-surface-600 border border-surface-200 text-[11px] font-bold uppercase tracking-widest">
                   {feature.badge}
@@ -161,7 +147,7 @@ export function FeaturesSection() {
               <p className="text-surface-600 text-[15px] leading-relaxed">
                 {feature.description}
               </p>
-            </motion.div>
+            </div>
           ))}
         </div>
       </div>
@@ -169,12 +155,7 @@ export function FeaturesSection() {
   </div>
 
   {/* Bottom Stats */}
-  <motion.div
-    initial={{ opacity: 0, y: 20 }}
-    animate={inView ? { opacity: 1, y: 0 } : {}}
-    transition={{ delay: 0.6 }}
-    className="mt-20 grid grid-cols-2 md:grid-cols-4 gap-px bg-surface-200 border border-surface-200 rounded-lg overflow-hidden"
-  >
+  <div className="mt-20 grid grid-cols-2 md:grid-cols-4 gap-px bg-surface-200 border border-surface-200 rounded-lg overflow-hidden">
     {[
       { value: '99.9%', label: 'Delivery Rate' },
       { value: '<1.5s', label: 'Avg Delivery Time' },
@@ -186,7 +167,7 @@ export function FeaturesSection() {
         <div className="text-[14px] font-medium text-surface-500">{stat.label}</div>
       </div>
     ))}
-  </motion.div>
+  </div>
  </div>
  </section>
  );

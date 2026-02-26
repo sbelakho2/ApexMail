@@ -45,6 +45,13 @@ export interface CostCircuitConfig {
   checkIntervalMinutes: number;
 }
 
+interface CostRates {
+  storagePerGbMonth: number;
+  bandwidthPerGb: number;
+  computePerHour: number;
+  dedicatedIpPerMonth: number;
+}
+
 const DEFAULT_CONFIG: CostCircuitConfig = {
   marginWarningThreshold: 20,  // 20% margin
   marginCriticalThreshold: 10, // 10% margin
@@ -52,12 +59,18 @@ const DEFAULT_CONFIG: CostCircuitConfig = {
   checkIntervalMinutes: 60,
 };
 
-// Cost rates (in cents per unit)
-const COST_RATES = {
+// Default cost rates (in cents per unit)
+const DEFAULT_COST_RATES: CostRates = {
   storagePerGbMonth: 2.3,      // $0.023/GB/month
   bandwidthPerGb: 9,           // $0.09/GB
   computePerHour: 0.5,         // $0.005/hour per email processed
   dedicatedIpPerMonth: 2495,   // $24.95/IP/month (AWS SES dedicated IP)
+};
+
+const parseRate = (value: string | undefined, fallback: number): number => {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 };
 
 /**
@@ -65,6 +78,7 @@ const COST_RATES = {
  */
 export class CostCircuitService {
   private readonly config: CostCircuitConfig;
+  private readonly costRates: CostRates;
 
   constructor(
     private readonly db: DatabasePool,
@@ -72,6 +86,12 @@ export class CostCircuitService {
     config?: Partial<CostCircuitConfig>
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.costRates = {
+      storagePerGbMonth: parseRate(process.env['BILLING_COST_RATE_STORAGE_PER_GB_MONTH_CENTS'], DEFAULT_COST_RATES.storagePerGbMonth),
+      bandwidthPerGb: parseRate(process.env['BILLING_COST_RATE_BANDWIDTH_PER_GB_CENTS'], DEFAULT_COST_RATES.bandwidthPerGb),
+      computePerHour: parseRate(process.env['BILLING_COST_RATE_COMPUTE_PER_EMAIL_CENTS'], DEFAULT_COST_RATES.computePerHour),
+      dedicatedIpPerMonth: parseRate(process.env['BILLING_COST_RATE_DEDICATED_IP_PER_MONTH_CENTS'], DEFAULT_COST_RATES.dedicatedIpPerMonth),
+    };
   }
 
   /**
@@ -82,80 +102,79 @@ export class CostCircuitService {
     periodStart: Date,
     periodEnd: Date
   ): Promise<Result<TenantCosts, Error>> {
-    // Calculate storage cost
-    const storageResult = await this.db.query<{ total_bytes: string }>(
-      `SELECT COALESCE(SUM(size_bytes), 0)::text as total_bytes
-       FROM message_attachments ma
-       JOIN messages m ON ma.message_id = m.id
-       WHERE m.tenant_id = $1
-         AND m.created_at >= $2
-         AND m.created_at < $3`,
-      [tenantId, periodStart, periodEnd]
-    );
+    const [
+      storageResult,
+      bandwidthResult,
+      emailsResult,
+      ipResult,
+      revenueResult,
+    ] = await Promise.all([
+      this.db.query<{ total_bytes: string }>(
+        `SELECT COALESCE(SUM(size_bytes), 0)::text as total_bytes
+         FROM message_attachments ma
+         JOIN messages m ON ma.message_id = m.id
+         WHERE m.tenant_id = $1
+           AND m.created_at >= $2
+           AND m.created_at < $3`,
+        [tenantId, periodStart, periodEnd]
+      ),
+      this.db.query<{ total_bytes: string }>(
+        `SELECT COALESCE(SUM(size_bytes), 0)::text as total_bytes
+         FROM messages
+         WHERE tenant_id = $1
+           AND created_at >= $2
+           AND created_at < $3
+           AND status IN ('delivered', 'sent')`,
+        [tenantId, periodStart, periodEnd]
+      ),
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::text as count
+         FROM messages
+         WHERE tenant_id = $1
+           AND created_at >= $2
+           AND created_at < $3`,
+        [tenantId, periodStart, periodEnd]
+      ),
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::text as count
+         FROM dedicated_ips
+         WHERE tenant_id = $1
+           AND status IN ('active', 'warming')
+           AND created_at <= $2`,
+        [tenantId, periodEnd]
+      ),
+      this.db.query<{ total: string }>(
+        `SELECT COALESCE(SUM(total), 0)::text as total
+         FROM invoices
+         WHERE tenant_id = $1
+           AND period_start >= $2
+           AND period_end <= $3
+           AND status = 'paid'`,
+        [tenantId, periodStart, periodEnd]
+      ),
+    ]);
 
     const storageGb = storageResult.ok
       ? parseInt(storageResult.value.rows[0]?.total_bytes ?? '0', 10) / (1024 * 1024 * 1024)
       : 0;
-    const storageCost = Math.round(storageGb * COST_RATES.storagePerGbMonth);
-
-    // Calculate bandwidth cost
-    const bandwidthResult = await this.db.query<{ total_bytes: string }>(
-      `SELECT COALESCE(SUM(size_bytes), 0)::text as total_bytes
-       FROM messages
-       WHERE tenant_id = $1
-         AND created_at >= $2
-         AND created_at < $3
-         AND status IN ('delivered', 'sent')`,
-      [tenantId, periodStart, periodEnd]
-    );
+    const storageCost = Math.round(storageGb * this.costRates.storagePerGbMonth);
 
     const bandwidthGb = bandwidthResult.ok
       ? parseInt(bandwidthResult.value.rows[0]?.total_bytes ?? '0', 10) / (1024 * 1024 * 1024)
       : 0;
-    const bandwidthCost = Math.round(bandwidthGb * COST_RATES.bandwidthPerGb);
-
-    // Calculate compute cost (based on emails processed)
-    const emailsResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::text as count
-       FROM messages
-       WHERE tenant_id = $1
-         AND created_at >= $2
-         AND created_at < $3`,
-      [tenantId, periodStart, periodEnd]
-    );
+    const bandwidthCost = Math.round(bandwidthGb * this.costRates.bandwidthPerGb);
 
     const emailCount = emailsResult.ok
       ? parseInt(emailsResult.value.rows[0]?.count ?? '0', 10)
       : 0;
-    const computeCost = Math.round(emailCount * COST_RATES.computePerHour / 100);
-
-    // Calculate dedicated IP cost
-    const ipResult = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*)::text as count
-       FROM dedicated_ips
-       WHERE tenant_id = $1
-         AND status IN ('active', 'warming')
-         AND created_at <= $2`,
-      [tenantId, periodEnd]
-    );
+    const computeCost = Math.round(emailCount * this.costRates.computePerHour / 100);
 
     const ipCount = ipResult.ok
       ? parseInt(ipResult.value.rows[0]?.count ?? '0', 10)
       : 0;
-    const dedicatedIpCost = ipCount * COST_RATES.dedicatedIpPerMonth;
+    const dedicatedIpCost = ipCount * this.costRates.dedicatedIpPerMonth;
 
     const totalCost = storageCost + bandwidthCost + computeCost + dedicatedIpCost;
-
-    // Get revenue
-    const revenueResult = await this.db.query<{ total: string }>(
-      `SELECT COALESCE(SUM(total), 0)::text as total
-       FROM invoices
-       WHERE tenant_id = $1
-         AND period_start >= $2
-         AND period_end <= $3
-         AND status = 'paid'`,
-      [tenantId, periodStart, periodEnd]
-    );
 
     const revenue = revenueResult.ok
       ? parseInt(revenueResult.value.rows[0]?.total ?? '0', 10)
@@ -417,13 +436,13 @@ export class CostCircuitService {
       const rows = tenantsResult.value.rows;
       if (rows.length === 0) break;
 
-      for (const row of rows) {
-        const result = await this.checkMargin(row.id);
+      const results = await Promise.all(rows.map((row) => this.checkMargin(row.id)));
+      for (const result of results) {
         if (result.ok) {
-          if (result.value.status === 'warning') warnings++;
-          if (result.value.status === 'critical') critical++;
+          if (result.value.status === 'warning') warnings += 1;
+          if (result.value.status === 'critical') critical += 1;
         }
-        totalChecked++;
+        totalChecked += 1;
       }
 
       if (rows.length < BATCH_SIZE) break;

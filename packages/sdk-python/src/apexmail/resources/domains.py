@@ -55,7 +55,7 @@ class DomainsResource:
             "verificationMethod": verification_method,
         }
 
-        data = self._client._request("POST", "/domains", json=payload)
+        data = self._client._request("POST", "/v1/domains", json=payload)
         return Domain(**data["domain"])
 
     def get(self, domain_id: str) -> Domain:
@@ -69,7 +69,7 @@ class DomainsResource:
             Domain details
         """
         _validate_id(domain_id, 'domain')
-        data = self._client._request("GET", f"/domains/{domain_id}")
+        data = self._client._request("GET", f"/v1/domains/{domain_id}")
         return Domain(**data["domain"])
 
     def list(
@@ -78,6 +78,7 @@ class DomainsResource:
         status: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        cursor: Optional[int] = None,
     ) -> DomainListResponse:
         """
         List all domains.
@@ -86,6 +87,7 @@ class DomainsResource:
             status: Filter by status (pending, verified, failed, expired)
             limit: Maximum number of results
             offset: Number of results to skip
+            cursor: Cursor for pagination
 
         Returns:
             DomainListResponse with domains list
@@ -97,8 +99,10 @@ class DomainsResource:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
+        if cursor is not None:
+            params["cursor"] = cursor
 
-        data = self._client._request("GET", "/domains", params=params or None)
+        data = self._client._request("GET", "/v1/domains", params=params or None)
         return DomainListResponse(**data)
 
     def verify(self, domain_id: str) -> Domain:
@@ -112,7 +116,7 @@ class DomainsResource:
             Updated domain details
         """
         _validate_id(domain_id, 'domain')
-        data = self._client._request("POST", f"/domains/{domain_id}/verify")
+        data = self._client._request("POST", f"/v1/domains/{domain_id}/verify")
         return Domain(**data["domain"])
 
     def delete(self, domain_id: str) -> None:
@@ -123,7 +127,7 @@ class DomainsResource:
             domain_id: The domain ID to delete
         """
         _validate_id(domain_id, 'domain')
-        self._client._request("DELETE", f"/domains/{domain_id}")
+        self._client._request("DELETE", f"/v1/domains/{domain_id}")
 
 
 class AsyncDomainsResource:
@@ -144,13 +148,13 @@ class AsyncDomainsResource:
             "verificationMethod": verification_method,
         }
 
-        data = await self._client._request("POST", "/domains", json=payload)
+        data = await self._client._request("POST", "/v1/domains", json=payload)
         return Domain(**data["domain"])
 
     async def get(self, domain_id: str) -> Domain:
         """Get domain details by ID asynchronously."""
         _validate_id(domain_id, 'domain')
-        data = await self._client._request("GET", f"/domains/{domain_id}")
+        data = await self._client._request("GET", f"/v1/domains/{domain_id}")
         return Domain(**data["domain"])
 
     async def list(
@@ -159,6 +163,7 @@ class AsyncDomainsResource:
         status: Optional[str] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        cursor: Optional[int] = None,
     ) -> DomainListResponse:
         """List all domains asynchronously."""
         params = {}
@@ -168,17 +173,19 @@ class AsyncDomainsResource:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
+        if cursor is not None:
+            params["cursor"] = cursor
 
-        data = await self._client._request("GET", "/domains", params=params or None)
+        data = await self._client._request("GET", "/v1/domains", params=params or None)
         return DomainListResponse(**data)
 
     async def verify(self, domain_id: str) -> Domain:
         """Trigger domain verification asynchronously."""
         _validate_id(domain_id, 'domain')
-        data = await self._client._request("POST", f"/domains/{domain_id}/verify")
+        data = await self._client._request("POST", f"/v1/domains/{domain_id}/verify")
         return Domain(**data["domain"])
 
     async def delete(self, domain_id: str) -> None:
         """Delete a domain asynchronously."""
         _validate_id(domain_id, 'domain')
-        await self._client._request("DELETE", f"/domains/{domain_id}")
+        await self._client._request("DELETE", f"/v1/domains/{domain_id}")

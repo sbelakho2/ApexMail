@@ -129,9 +129,10 @@ interface DonutChartProps {
     showLegend?: boolean;
     centerLabel?: string;
     centerValue?: string;
+    ariaLabel?: string;
 }
 
-export function DonutChart({ data, size = 200, thickness = 40, showLegend = true, centerLabel, centerValue }: DonutChartProps) {
+export function DonutChart({ data, size = 200, thickness = 40, showLegend = true, centerLabel, centerValue, ariaLabel = 'Donut chart' }: DonutChartProps) {
     const total = data.reduce((sum, d) => sum + d.value, 0);
     const radius = (size - thickness) / 2;
     const _circumference = 2 * Math.PI * radius;
@@ -168,7 +169,7 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
     return (
         <div className="flex items-center gap-6">
             <div className="relative inline-block">
-                <svg width={size} height={size} className="transform -rotate-0">
+                <svg width={size} height={size} className="transform -rotate-0" role="img" aria-label={ariaLabel}>
                     {segments.map((seg, i) => (
                         <path
                             key={i}
@@ -214,9 +215,10 @@ interface BarChartProps {
     height?: number;
     showValues?: boolean;
     horizontal?: boolean;
+    ariaLabel?: string;
 }
 
-export function BarChart({ data, height = 200, showValues = true, horizontal = false }: BarChartProps) {
+export function BarChart({ data, height = 200, showValues = true, horizontal = false, ariaLabel = 'Bar chart' }: BarChartProps) {
     const maxValue = Math.max(...data.map(d => d.value));
 
     if (horizontal) {
@@ -247,7 +249,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
 
     return (
         <div className="w-full">
-            <svg width="100%" height={height} className="overflow-visible">
+            <svg width="100%" height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
                 {data.map((d, i) => {
                     const barHeight = (d.value / maxValue) * (height - 40);
                     const x = (i * (100 / data.length)) + (50 / data.length);
@@ -301,9 +303,10 @@ interface LineChartProps {
     showArea?: boolean;
     showDots?: boolean;
     showGrid?: boolean;
+    ariaLabel?: string;
 }
 
-export function LineChart({ data, width = 400, height = 150, color = CHART_COLORS.primary, showArea = true, showDots = false, showGrid = true }: LineChartProps) {
+export function LineChart({ data, width = 400, height = 150, color = CHART_COLORS.primary, showArea = true, showDots = false, showGrid = true, ariaLabel = 'Line chart' }: LineChartProps) {
     if (data.length === 0) return null;
 
     const values = data.map(d => d.value);
@@ -331,7 +334,7 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
     }));
 
     return (
-        <svg width={width} height={height} className="overflow-visible">
+        <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
             {/* Grid lines */}
             {showGrid && yTicks.map((tick, i) => (
                 <g key={i}>
@@ -383,9 +386,10 @@ interface MultiLineChartProps {
     width?: number;
     height?: number;
     showLegend?: boolean;
+    ariaLabel?: string;
 }
 
-export function MultiLineChart({ data, series, width = 500, height = 200, showLegend = true }: MultiLineChartProps) {
+export function MultiLineChart({ data, series, width = 500, height = 200, showLegend = true, ariaLabel = 'Multi-line chart' }: MultiLineChartProps) {
     if (data.length === 0) return null;
 
     const allValues = series.flatMap(s => data.map(d => d[s.key] as number));
@@ -399,7 +403,7 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
 
     return (
         <div>
-            <svg width={width} height={height} className="overflow-visible">
+            <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
                 {/* Grid */}
                 {[0, 0.5, 1].map((t, i) => (
                     <line
@@ -462,9 +466,10 @@ interface SparklineProps {
     width?: number;
     height?: number;
     color?: string;
+    ariaLabel?: string;
 }
 
-export function Sparkline({ data, width = 100, height = 30, color = CHART_COLORS.primary }: SparklineProps) {
+export function Sparkline({ data, width = 100, height = 30, color = CHART_COLORS.primary, ariaLabel = 'Sparkline chart' }: SparklineProps) {
     if (data.length === 0) return null;
 
     const max = Math.max(...data);
@@ -479,7 +484,7 @@ export function Sparkline({ data, width = 100, height = 30, color = CHART_COLORS
     const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
 
     return (
-        <svg width={width} height={height} className="overflow-visible">
+        <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
             <path d={path} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
         </svg>
     );
@@ -493,9 +498,10 @@ interface HeatMapProps {
     data: { day: number; hour: number; value: number }[];
     width?: number;
     height?: number;
+    ariaLabel?: string;
 }
 
-export function HeatMap({ data, width = 500, height = 150 }: HeatMapProps) {
+export function HeatMap({ data, width = 500, height = 150, ariaLabel = 'Heat map chart' }: HeatMapProps) {
     const maxValue = Math.max(...data.map(d => d.value));
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const _hours = Array.from({ length: 24 }, (_, i) => i);
@@ -504,7 +510,7 @@ export function HeatMap({ data, width = 500, height = 150 }: HeatMapProps) {
     const cellHeight = (height - 20) / 7;
 
     return (
-        <svg width={width} height={height}>
+        <svg width={width} height={height} role="img" aria-label={ariaLabel}>
             {/* Day labels */}
             {days.map((day, i) => (
                 <text key={day} x={0} y={25 + i * cellHeight + cellHeight / 2} className="text-xs fill-surface-400" alignmentBaseline="middle">
@@ -542,9 +548,10 @@ export function HeatMap({ data, width = 500, height = 150 }: HeatMapProps) {
 interface FunnelChartProps {
     data: DataPoint[];
     height?: number;
+    ariaLabel?: string;
 }
 
-export function FunnelChart({ data, height = 200 }: FunnelChartProps) {
+export function FunnelChart({ data, height = 200, ariaLabel = 'Funnel chart' }: FunnelChartProps) {
     const maxValue = data[0]?.value || 1;
     const rowHeight = Math.max(40, Math.floor(height / Math.max(data.length, 1)));
 
@@ -560,7 +567,7 @@ export function FunnelChart({ data, height = 200 }: FunnelChartProps) {
                 return (
                     <div key={i} className="relative">
                         <div className="rounded-lg overflow-hidden relative">
-                            <svg width="100%" height={rowHeight} viewBox={`0 0 100 ${rowHeight}`} preserveAspectRatio="none" aria-hidden="true">
+                            <svg width="100%" height={rowHeight} viewBox={`0 0 100 ${rowHeight}`} preserveAspectRatio="none" role="img" aria-label={`${ariaLabel} stage ${d.label}`}>
                                 <rect x={leftOffset} y="0" width={width} height={rowHeight} rx="8" ry="8" fill={color} />
                             </svg>
                             <div className="absolute inset-0 flex items-center justify-between px-4 pointer-events-none">

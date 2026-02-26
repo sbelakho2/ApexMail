@@ -226,11 +226,11 @@ pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
         }
     }
 
-    // NOTE: Full cryptographic verification of AMS/AS signatures requires
-    // fetching RSA public keys via DNS (selector._domainkey.domain) for each set.
-    // Structural + base64 validation only.
-
-    ArcChainStatus::Pass
+    // #E-005: Do not return pass without cryptographic verification.
+    // Full ARC validation requires AMS/AS signature verification against
+    // selector keys. Until implemented, fail closed instead of reporting pass.
+    warn!("ARC structural checks passed but cryptographic verification is not implemented; failing closed");
+    ArcChainStatus::Fail
 }
 
 /// Parse ARC headers from raw header block.
@@ -413,7 +413,7 @@ mod tests {
             message_signature: "ARC-Message-Signature: i=1; a=rsa-sha256; b=abc".into(),
             seal: "ARC-Seal: i=1; cv=none; b=xyz".into(),
         };
-        assert_eq!(validate_arc_chain(&[set]), ArcChainStatus::Pass);
+        assert_eq!(validate_arc_chain(&[set]), ArcChainStatus::Fail);
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod tests {
                 seal: "ARC-Seal: i=2; cv=pass; b=b".into(),
             },
         ];
-        assert_eq!(validate_arc_chain(&sets), ArcChainStatus::Pass);
+        assert_eq!(validate_arc_chain(&sets), ArcChainStatus::Fail);
     }
 
     #[test]

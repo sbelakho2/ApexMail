@@ -7,29 +7,43 @@
 
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { columnExists } from '@/lib/schema';
 
 export const dynamic = 'force-dynamic';
 
-async function tableExists(tableName: string): Promise<boolean> {
-    const rows = await query<{ exists: boolean }>(
-        `SELECT to_regclass($1) IS NOT NULL as exists`,
-        [`public.${tableName}`]
-    );
-    return rows[0]?.exists ?? false;
+type TenantAction = 'suspend' | 'unsuspend';
+
+interface TenantPatchBody {
+    id?: string;
+    action?: TenantAction;
+    name?: string;
+    plan?: string;
+    status?: string;
 }
 
-async function columnExists(tableName: string, columnName: string): Promise<boolean> {
-    const rows = await query<{ exists: boolean }>(
-        `SELECT EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = $1
-              AND column_name = $2
-        ) as exists`,
-        [tableName, columnName]
-    );
-    return rows[0]?.exists ?? false;
+async function logTenantAudit(action: string, tenantId: string, metadata?: Record<string, unknown>) {
+    try {
+        await query(
+            `INSERT INTO audit_logs (
+                timestamp,
+                action,
+                resource_type,
+                resource_id,
+                tenant_id,
+                metadata
+            ) VALUES (
+                NOW(),
+                $1,
+                'tenant',
+                $2,
+                $2,
+                $3::jsonb
+            )`,
+            [action, tenantId, JSON.stringify(metadata ?? {})]
+        );
+    } catch (error) {
+        console.error('Tenant audit log error:', error);
+    }
 }
 
 export async function GET(request: Request) {
@@ -39,12 +53,6 @@ export async function GET(request: Request) {
         const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50', 10) || 50, 1), 200);
         const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10) || 0, 0);
 
-        const [hasDomains, hasApiKeys, hasStripeSubscriptions] = await Promise.all([
-            tableExists('domains'),
-            tableExists('api_keys'),
-            tableExists('stripe_subscriptions'),
-        ]);
-
         const rows = await query<{
             id: string;
             name: string;
@@ -53,6 +61,7 @@ export async function GET(request: Request) {
             status: string;
             created_at: Date;
             updated_at: Date;
+            owner_email: string | null;
             emails_sent_month: string;
             emails_sent_total: string;
             domains_verified: string;
@@ -61,30 +70,112 @@ export async function GET(request: Request) {
             mrr: string;
             next_billing_date: Date | null;
         }>(`
-            SELECT 
-                t.id, t.name, t.slug, t.plan, t.status,
-                t.created_at,
-                t.updated_at,
-                (SELECT COUNT(*)::text FROM messages m WHERE m.tenant_id = t.id AND m.created_at >= NOW() - INTERVAL '30 days') as emails_sent_month,
-                (SELECT COUNT(*)::text FROM messages m WHERE m.tenant_id = t.id) as emails_sent_total,
-                ${hasDomains
-                    ? `(SELECT COUNT(*)::text FROM domains d WHERE d.tenant_id = t.id AND d.is_verified = true) as domains_verified,`
-                    : `'0'::text as domains_verified,`}
-                ${hasApiKeys
-                    ? `(SELECT COUNT(*)::text FROM api_keys ak WHERE ak.tenant_id = t.id AND ak.is_active = true) as api_keys,`
-                    : `'0'::text as api_keys,`}
-                (SELECT COUNT(*)::text FROM users u WHERE u.tenant_id = t.id AND u.status = 'active') as team_members,
-                ${hasStripeSubscriptions
-                    ? `(SELECT COALESCE(SUM(CASE WHEN s.billing_interval = 'year' THEN s.amount / 12.0 ELSE s.amount END) / 100.0, 0)::text
-                        FROM stripe_subscriptions s
-                        WHERE s.tenant_id = t.id AND s.status IN ('active', 'trialing', 'past_due') AND s.canceled_at IS NULL) as mrr,
-                       (SELECT MIN(s.current_period_end)
-                        FROM stripe_subscriptions s
-                        WHERE s.tenant_id = t.id AND s.status IN ('active', 'trialing', 'past_due') AND s.canceled_at IS NULL) as next_billing_date`
-                    : `'0'::text as mrr, NULL::timestamptz as next_billing_date`}
-            FROM tenants t
-            ORDER BY t.created_at DESC
-            LIMIT $1 OFFSET $2
+            WITH tenant_page AS (
+                SELECT
+                    t.id,
+                    t.name,
+                    t.slug,
+                    t.plan,
+                    t.status,
+                    t.created_at,
+                    t.updated_at
+                FROM tenants t
+                ORDER BY t.created_at DESC
+                LIMIT $1 OFFSET $2
+            ),
+            message_counts AS (
+                SELECT
+                    m.tenant_id,
+                    COUNT(*) FILTER (WHERE m.created_at >= NOW() - INTERVAL '30 days')::text AS emails_sent_month,
+                    COUNT(*)::text AS emails_sent_total
+                FROM messages m
+                INNER JOIN tenant_page tp ON tp.id = m.tenant_id
+                GROUP BY m.tenant_id
+            ),
+            user_counts AS (
+                SELECT
+                    u.tenant_id,
+                    COUNT(*)::text AS team_members
+                FROM users u
+                INNER JOIN tenant_page tp ON tp.id = u.tenant_id
+                WHERE u.status = 'active'
+                GROUP BY u.tenant_id
+            ),
+            owner_contacts AS (
+                SELECT tenant_id, email
+                FROM (
+                    SELECT
+                        u.tenant_id,
+                        u.email,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY u.tenant_id
+                            ORDER BY
+                                CASE
+                                    WHEN u.role = 'owner' THEN 1
+                                    WHEN u.role = 'admin' THEN 2
+                                    ELSE 3
+                                END,
+                                u.created_at ASC
+                        ) AS rank
+                    FROM users u
+                    INNER JOIN tenant_page tp ON tp.id = u.tenant_id
+                    WHERE u.status = 'active' AND u.email IS NOT NULL
+                ) ranked_users
+                WHERE rank = 1
+            ),
+            domain_counts AS (
+                SELECT
+                    d.tenant_id,
+                    COUNT(*)::text AS domains_verified
+                FROM domains d
+                INNER JOIN tenant_page tp ON tp.id = d.tenant_id
+                WHERE d.is_verified = true
+                GROUP BY d.tenant_id
+            ),
+            api_key_counts AS (
+                SELECT
+                    ak.tenant_id,
+                    COUNT(*)::text AS api_keys
+                FROM api_keys ak
+                INNER JOIN tenant_page tp ON tp.id = ak.tenant_id
+                WHERE ak.is_active = true
+                GROUP BY ak.tenant_id
+            ),
+            subscription_metrics AS (
+                SELECT
+                    s.tenant_id,
+                    COALESCE(SUM(CASE WHEN s.billing_interval = 'year' THEN s.amount / 12.0 ELSE s.amount END) / 100.0, 0)::text AS mrr,
+                    MIN(s.current_period_end) AS next_billing_date
+                FROM stripe_subscriptions s
+                INNER JOIN tenant_page tp ON tp.id = s.tenant_id
+                WHERE s.status IN ('active', 'trialing', 'past_due')
+                  AND s.canceled_at IS NULL
+                GROUP BY s.tenant_id
+            )
+            SELECT
+                tp.id,
+                tp.name,
+                tp.slug,
+                tp.plan,
+                tp.status,
+                tp.created_at,
+                tp.updated_at,
+                oc.email AS owner_email,
+                COALESCE(mc.emails_sent_month, '0') AS emails_sent_month,
+                COALESCE(mc.emails_sent_total, '0') AS emails_sent_total,
+                COALESCE(dc.domains_verified, '0') AS domains_verified,
+                COALESCE(akc.api_keys, '0') AS api_keys,
+                COALESCE(uc.team_members, '0') AS team_members,
+                COALESCE(sm.mrr, '0') AS mrr,
+                sm.next_billing_date
+            FROM tenant_page tp
+            LEFT JOIN message_counts mc ON mc.tenant_id = tp.id
+            LEFT JOIN user_counts uc ON uc.tenant_id = tp.id
+            LEFT JOIN owner_contacts oc ON oc.tenant_id = tp.id
+            LEFT JOIN domain_counts dc ON dc.tenant_id = tp.id
+            LEFT JOIN api_key_counts akc ON akc.tenant_id = tp.id
+            LEFT JOIN subscription_metrics sm ON sm.tenant_id = tp.id
+            ORDER BY tp.created_at DESC
         `, [limit, offset]);
 
         const tenants = rows.map(row => {
@@ -110,7 +201,7 @@ export async function GET(request: Request) {
                 id: row.id,
                 name: row.name,
                 domain: row.slug,
-                email: null,
+                email: row.owner_email,
                 plan: row.plan || 'free',
                 status: row.status || 'active',
                 riskLevel,
@@ -149,8 +240,8 @@ export async function GET(request: Request) {
  */
 export async function PATCH(request: Request) {
     try {
-        const body = await request.json();
-        const { id, action, ...updates } = body as { id: string; action?: string; [key: string]: unknown };
+        const body = await request.json() as TenantPatchBody;
+        const { id, action } = body;
 
         if (!id) {
             return NextResponse.json({ error: 'Tenant ID is required' }, { status: 400 });
@@ -158,24 +249,30 @@ export async function PATCH(request: Request) {
 
         if (action === 'suspend') {
             await query('UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2', ['suspended', id]);
+            await logTenantAudit('control_plane.tenant.suspended', id, { status: 'suspended' });
             return NextResponse.json({ success: true, message: `Tenant ${id} suspended` });
         }
 
         if (action === 'unsuspend') {
             await query('UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2', ['active', id]);
+            await logTenantAudit('control_plane.tenant.unsuspended', id, { status: 'active' });
             return NextResponse.json({ success: true, message: `Tenant ${id} unsuspended` });
         }
 
         // General field updates (plan, name, etc.)
-        const allowedFields = ['name', 'plan', 'status', 'slug'];
+        const allowedFieldValues = {
+            name: body.name,
+            plan: body.plan,
+            status: body.status,
+        };
         const setClauses: string[] = [];
-        const values: unknown[] = [];
+        const values: string[] = [];
         let paramIdx = 1;
 
-        for (const field of allowedFields) {
-            if (updates[field] !== undefined) {
+        for (const [field, value] of Object.entries(allowedFieldValues) as Array<[keyof typeof allowedFieldValues, string | undefined]>) {
+            if (value !== undefined) {
                 setClauses.push(`${field} = $${paramIdx}`);
-                values.push(updates[field]);
+                values.push(value);
                 paramIdx++;
             }
         }
@@ -188,6 +285,11 @@ export async function PATCH(request: Request) {
         setClauses.push('updated_at = NOW()');
         values.push(id);
         await query(`UPDATE tenants SET ${setClauses.join(', ')} WHERE id = $${paramIdx}`, values);
+        await logTenantAudit('control_plane.tenant.updated', id, {
+            fields: Object.entries(allowedFieldValues)
+                .filter(([, value]) => value !== undefined)
+                .map(([field]) => field),
+        });
 
         return NextResponse.json({ success: true, message: `Tenant ${id} updated` });
     } catch (error) {
@@ -242,6 +344,8 @@ export async function DELETE(request: Request) {
         if (!result || result.length === 0) {
             return NextResponse.json({ error: 'Tenant not found or already deleted' }, { status: 404 });
         }
+
+        await logTenantAudit('control_plane.tenant.deleted', id, { softDeleted: true });
 
         return NextResponse.json({ success: true, message: `Tenant ${id} soft-deleted` });
     } catch (error) {

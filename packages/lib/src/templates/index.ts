@@ -10,8 +10,8 @@
  * SECURITY: All user-provided attributes are sanitized to prevent XSS
  */
 
-import { createHash } from 'node:crypto';
 import Handlebars from 'handlebars';
+import mjml2html from 'mjml';
 
 // ============================================================================
 // XSS Prevention Utilities
@@ -36,179 +36,82 @@ function escapeHtml(str: string): string {
  */
 function sanitizeUrl(url: string): string {
     if (!url || typeof url !== 'string') return '#';
-    
-    const trimmed = url.trim().toLowerCase();
-    
-    // Block dangerous protocols
-    const dangerousProtocols = [
-        'javascript:',
-        'data:',
-        'vbscript:',
-        'file:',
-        'about:',
-        'blob:',
-    ];
-    
-    for (const protocol of dangerousProtocols) {
-        if (trimmed.startsWith(protocol)) {
+    const trimmed = url.trim();
+    const lower = trimmed.toLowerCase();
+
+    if (lower.startsWith('javascript:') || lower.startsWith('data:') || lower.startsWith('vbscript:')) {
+        return '#';
+    }
+
+    try {
+        const parsed = new URL(trimmed, 'https://example.com');
+        const protocol = parsed.protocol.replace(':', '');
+        if (!['http', 'https', 'mailto', 'tel'].includes(protocol)) {
             return '#';
         }
+        return trimmed;
+    } catch {
+        return '#';
     }
-    
-    // Allow safe protocols
-    const safeProtocols = ['http:', 'https:', 'mailto:', 'tel:'];
-    
-    // Check if it's a relative URL or has a safe protocol
-    if (!trimmed.includes(':') || safeProtocols.some(p => trimmed.startsWith(p))) {
-        // Escape HTML entities in the URL (but preserve URL encoding)
-        return url
-            .replace(/"/g, '%22')
-            .replace(/'/g, '%27')
-            .replace(/</g, '%3C')
-            .replace(/>/g, '%3E');
-    }
-    
-    // Unknown protocol, block it
-    return '#';
 }
 
-/**
- * SECURITY: Sanitize attribute value for safe HTML insertion
- */
 function sanitizeAttr(value: string): string {
     if (!value || typeof value !== 'string') return '';
-    return escapeHtml(value);
+    return value.replace(/[\u0000-\u001F\u007F"'><]/g, '').trim();
 }
 
-function hashString(value: string): string {
-    return createHash('sha256').update(value).digest('hex');
-}
-
-// ============================================================================
-// Types
-// ============================================================================
-
-export interface TemplateContext {
-    [key: string]: unknown;
-}
-
-export interface TemplateRenderOptions {
-    /** Template format: 'mjml' | 'handlebars' | 'html' */
-    format?: 'mjml' | 'handlebars' | 'html';
-    // FIX-500-380: Note: Use 'format', not 'type'. If callers pass a 'type' property
-    // it will be silently ignored. TypeScript catches this at compile time, but
-    // dynamic callers (e.g., API payloads spread into options) should validate.
-    /** Enable strict mode - throw on missing variables */
-    strict?: boolean;
-    /** Custom helpers for Handlebars */
-    helpers?: Record<string, Handlebars.HelperDelegate>;
-    /** Partials for Handlebars */
-    partials?: Record<string, string>;
-}
-
-export interface TemplateRenderResult {
-    html: string;
-    text?: string;
-    errors?: string[];
-}
-
-export interface ExtractedVariable {
-    name: string;
-    path: string;
-    defaultValue?: string;
-}
-
-// ============================================================================
-// MJML Components (Simplified - core structure)
-// ============================================================================
-
-/**
- * Simple MJML to HTML converter
- * Handles the most common MJML tags without external dependencies
- */
 function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     const errors: string[] = [];
-    
-    // Extract body content
-    const bodyMatch = mjml.match(/<mj-body[^>]*>([\s\S]*?)<\/mj-body>/i);
-    if (!bodyMatch) {
-        errors.push('Missing <mj-body> tag');
-        return { html: mjml, errors };
-    }
-    
-    let content = bodyMatch[1] || '';
-    
-    // Convert MJML sections to table rows
-    // SECURITY: Use (?:[^">]|"[^"]*")* instead of [^>]* to handle > inside quoted attributes
-    content = content.replace(
-        /<mj-section((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-section>/gi,
-        (_match, attrs, inner) => {
-            const bgColor = extractAttr(attrs, 'background-color') || '#ffffff';
-            const padding = extractAttr(attrs, 'padding') || '20px';
-            return `<tr><td style="background-color:${bgColor};padding:${padding}"><table width="100%" cellpadding="0" cellspacing="0">${inner}</table></td></tr>`;
-        }
-    );
-    
-    // Convert MJML columns to table cells
-    content = content.replace(
-        /<mj-column((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-column>/gi,
-        (_match, attrs, inner) => {
-            const width = extractAttr(attrs, 'width') || '100%';
-            const padding = extractAttr(attrs, 'padding') || '0';
-            return `<td style="width:${width};padding:${padding};vertical-align:top">${inner}</td>`;
-        }
-    );
-    
-    // Convert MJML text to paragraphs
-    content = content.replace(
-        /<mj-text((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-text>/gi,
-        (_match, attrs, inner) => {
-            const color = extractAttr(attrs, 'color') || '#000000';
-            const fontSize = extractAttr(attrs, 'font-size') || '14px';
-            const lineHeight = extractAttr(attrs, 'line-height') || '1.5';
-            const fontFamily = extractAttr(attrs, 'font-family') || 'Arial, sans-serif';
-            const align = extractAttr(attrs, 'align') || 'left';
-            return `<div style="color:${color};font-size:${fontSize};line-height:${lineHeight};font-family:${fontFamily};text-align:${align}">${inner}</div>`;
-        }
-    );
-    
-    // Convert MJML buttons
-    // SECURITY: Sanitize href to prevent javascript: XSS
-    content = content.replace(
-        /<mj-button((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-button>/gi,
-        (_match, attrs, inner) => {
-            const href = sanitizeUrl(extractAttr(attrs, 'href') || '#');
-            const bgColor = sanitizeAttr(extractAttr(attrs, 'background-color') || '#007bff');
-            const color = sanitizeAttr(extractAttr(attrs, 'color') || '#ffffff');
-            const borderRadius = sanitizeAttr(extractAttr(attrs, 'border-radius') || '4px');
-            const padding = sanitizeAttr(extractAttr(attrs, 'inner-padding') || '12px 24px');
-            const fontSize = sanitizeAttr(extractAttr(attrs, 'font-size') || '14px');
-            // Inner content is typically user-provided button text - escape it
-            const safeInner = escapeHtml(inner);
-            return `<table cellpadding="0" cellspacing="0" style="margin:10px 0"><tr><td style="background-color:${bgColor};border-radius:${borderRadius};padding:${padding}"><a href="${href}" style="color:${color};text-decoration:none;font-size:${fontSize};font-weight:bold;display:inline-block">${safeInner}</a></td></tr></table>`;
-        }
-    );
-    
-    // Convert MJML images
-    // SECURITY: Sanitize src and href to prevent XSS, escape alt text
-    content = content.replace(
-        /<mj-image((?:[^">]|"[^"]*")*)\/?>/gi,
-        (_match, attrs) => {
-            const src = sanitizeUrl(extractAttr(attrs, 'src') || '');
-            const alt = sanitizeAttr(extractAttr(attrs, 'alt') || '');
-            const width = sanitizeAttr(extractAttr(attrs, 'width') || 'auto');
-            const align = sanitizeAttr(extractAttr(attrs, 'align') || 'center');
-            const href = extractAttr(attrs, 'href');
-            const img = `<img src="${src}" alt="${alt}" style="max-width:${width};width:100%;display:block;margin:0 auto" />`;
-            if (href) {
-                const safeHref = sanitizeUrl(href);
-                return `<div style="text-align:${align}"><a href="${safeHref}">${img}</a></div>`;
+    const preprocessed = mjml
+        .replace(/(<mj-image\b[^>]*\balt=")([^"]*)(")/gi, (_match, start, value, end) => {
+            return `${start}${escapeHtml(value)}${end}`;
+        })
+        .replace(/\b(href|src)="([^"]*)"/gi, (match, attr, value) => {
+            if (value.includes('{{')) {
+                return match;
             }
-            return `<div style="text-align:${align}">${img}</div>`;
+            const safeUrl = sanitizeUrl(value);
+            return `${attr}="${safeUrl}"`;
+        })
+        .replace(
+            /<mj-button((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-button>/gi,
+            (_match, attrs, inner) => {
+                const safeInner = String(inner).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `<mj-button${attrs}>${safeInner}</mj-button>`;
+            }
+        )
+        .replace(
+            /<mj-divider((?:[^">]|"[^"]*")*)\/?>(?:<\/mj-divider>)?/gi,
+            (_match, attrs) => {
+                const borderColor = sanitizeAttr(extractAttr(attrs, 'border-color') || '#e0e0e0');
+                const borderWidth = sanitizeAttr(extractAttr(attrs, 'border-width') || '1px');
+                const padding = sanitizeAttr(extractAttr(attrs, 'padding') || '10px 0');
+                return `<mj-raw><div style="padding:${padding}"><hr style="border:0;border-top:${borderWidth} solid ${borderColor};margin:0" /></div></mj-raw>`;
+            }
+        )
+        .replace(
+            /<mj-spacer((?:[^">]|"[^"]*")*)\/?>(?:<\/mj-spacer>)?/gi,
+            (_match, attrs) => {
+                const height = sanitizeAttr(extractAttr(attrs, 'height') || '20px');
+                return `<mj-raw><div style="height:${height}"></div></mj-raw>`;
+            }
+        );
+
+    try {
+        const result = mjml2html(preprocessed, { validationLevel: 'soft' });
+        const mjmlErrors = (result.errors ?? []).map((err) => err.message || String(err));
+        if (mjmlErrors.length > 0) {
+            errors.push(...mjmlErrors);
         }
-    );
-    
-    // Convert MJML dividers
+        const normalizedHtml = result.html.replace(/<!doctype html>/i, '<!DOCTYPE html>');
+        return { html: normalizedHtml, errors };
+    } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+    }
+
+    let content = preprocessed;
+
+    // Convert MJML divider
     content = content.replace(
         /<mj-divider((?:[^">]|"[^"]*")*)\/?>/gi,
         (_match, attrs) => {
@@ -218,7 +121,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
             return `<div style="padding:${padding}"><hr style="border:0;border-top:${borderWidth} solid ${borderColor};margin:0" /></div>`;
         }
     );
-    
+
     // Convert MJML spacers
     content = content.replace(
         /<mj-spacer((?:[^">]|"[^"]*")*)\/?>/gi,
@@ -227,7 +130,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
             return `<div style="height:${height}"></div>`;
         }
     );
-    
+
     // Convert MJML social elements
     content = content.replace(
         /<mj-social((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-social>/gi,
@@ -235,7 +138,7 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
             return `<div style="text-align:center;padding:10px 0">${inner}</div>`;
         }
     );
-    
+
     // SECURITY: Sanitize social element URLs and text
     content = content.replace(
         /<mj-social-element((?:[^">]|"[^"]*")*)>([\s\S]*?)<\/mj-social-element>/gi,
@@ -244,15 +147,13 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
             const src = extractAttr(attrs, 'src') || '';
             const name = sanitizeAttr(extractAttr(attrs, 'name') || '');
             const iconSize = sanitizeAttr(extractAttr(attrs, 'icon-size') || '24px');
-            
-            // Use inline SVG icons for common social networks
-            // SECURITY: getSocialIcon returns safe, predefined URLs
+
             const icon = src ? sanitizeUrl(src) : getSocialIcon(name);
             const safeAlt = sanitizeAttr(inner || name);
             return `<a href="${href}" style="display:inline-block;margin:0 8px;text-decoration:none"><img src="${icon}" alt="${safeAlt}" style="width:${iconSize};height:${iconSize}" /></a>`;
         }
     );
-    
+
     // Build responsive HTML template
     const html = `<!DOCTYPE html>
 <html>
@@ -283,17 +184,17 @@ function mjmlToHtml(mjml: string): { html: string; errors: string[] } {
     </table>
 </body>
 </html>`;
-    
-    // FIX-500-378: Warn about unrecognized MJML tags that were not converted
+
     const unrecongnizedMjTags = content.match(/<mj-(?!body|section|column|text|button|image|divider|spacer|social|social-element)[a-z-]+/gi);
     if (unrecongnizedMjTags) {
-        const uniqueTags = [...new Set(unrecongnizedMjTags.map(t => t.toLowerCase()))];
+        const uniqueTags = [...new Set(unrecongnizedMjTags.map((t) => t.toLowerCase()))];
         for (const tag of uniqueTags) {
             errors.push(`Warning: unrecognized MJML tag '${tag}>' was not converted and may not render correctly`);
         }
     }
 
-    return { html, errors };
+    const normalizedHtml = html.replace(/<!doctype html>/i, '<!DOCTYPE html>');
+    return { html: normalizedHtml, errors };
 }
 
 function extractAttr(attrs: string, name: string): string | undefined {

@@ -6,9 +6,9 @@
  * Used in invoices, contracts, legal documents, email footers, and API responses.
  */
 
-const COMPANY_IBAN = process.env['APEXMAIL_COMPANY_IBAN'] ?? 'EE382200221012345678';
-
-export const COMPANY_INFO = {
+export function getCompanyInfo() {
+  const companyIban = process.env['APEXMAIL_COMPANY_IBAN'] ?? 'EE382200221012345678';
+  return {
   /** Legal entity name */
   name: 'Bel Consulting OÜ',
   
@@ -47,7 +47,7 @@ export const COMPANY_INFO = {
   /** Bank account details for invoicing */
   bank: {
     name: 'Swedbank AS',
-    iban: COMPANY_IBAN,
+    iban: companyIban,
     bic: 'HABAEE2X',
   },
   
@@ -67,15 +67,19 @@ export const COMPANY_INFO = {
     linkedin: 'https://linkedin.com/company/apexmail',
   },
 } as const;
+}
 
-/** Type for company information */
-export type CompanyInfo = typeof COMPANY_INFO;
+export type CompanyInfo = ReturnType<typeof getCompanyInfo>;
+
+export const COMPANY_INFO: CompanyInfo = new Proxy({} as CompanyInfo, {
+  get: (_target, prop) => (getCompanyInfo() as Record<string, unknown>)[String(prop)],
+}) as CompanyInfo;
 
 /**
  * Format company info for invoice header
  */
 export function formatCompanyForInvoice(): string {
-  const { name, tradingAs, address, registryCode, vatNumber, email } = COMPANY_INFO;
+  const { name, tradingAs, address, registryCode, vatNumber, email } = getCompanyInfo();
   return `${name} (trading as ${tradingAs})
 ${address.street}
 ${address.postalCode} ${address.city}
@@ -89,7 +93,7 @@ ${email.billing}`;
  * Format company info for legal footer
  */
 export function formatCompanyForFooter(): string {
-  const { name, tradingAs, address, registryCode, vatNumber } = COMPANY_INFO;
+  const { name, tradingAs, address, registryCode, vatNumber } = getCompanyInfo();
   return `${name} (${tradingAs}) · ${address.formatted} · Reg. ${registryCode} · VAT: ${vatNumber}`;
 }
 
@@ -98,5 +102,6 @@ export function formatCompanyForFooter(): string {
  */
 export function getCopyrightNotice(year?: number): string {
   const currentYear = year ?? new Date().getFullYear();
-  return `© ${currentYear} ${COMPANY_INFO.name}. All rights reserved. ${COMPANY_INFO.brandStatement}.`;
+  const info = getCompanyInfo();
+  return `© ${currentYear} ${info.name}. All rights reserved. ${info.brandStatement}.`;
 }

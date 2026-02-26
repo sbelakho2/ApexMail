@@ -39,6 +39,54 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
         )
 
 
+def _validate_recipients(value: Any, field: str, *, required: bool = False) -> None:
+    if value is None:
+        if required:
+            raise ValidationError(f'"{field}" is required')
+        return
+    recipients = value if isinstance(value, list) else [value]
+    if not recipients:
+        raise ValidationError(f'"{field}" must contain at least one recipient')
+    for recipient in recipients:
+        if not isinstance(recipient, str):
+            raise ValidationError(f'"{field}" must be a string or list of strings')
+        _validate_email(recipient, field)
+
+
+def _validate_batch_email(email: dict[str, Any], index: int) -> None:
+    from_value = email.get("from") or email.get("from_")
+    if not from_value:
+        raise ValidationError(f'Email at index {index}: "from" is required')
+    if not isinstance(from_value, str):
+        raise ValidationError(f'Email at index {index}: "from" must be a string')
+    _validate_email(from_value, "from")
+
+    _validate_recipients(email.get("to"), "to", required=True)
+    _validate_recipients(email.get("cc"), "cc")
+    _validate_recipients(email.get("bcc"), "bcc")
+
+    subject = email.get("subject")
+    if not subject:
+        raise ValidationError(f'Email at index {index}: "subject" is required')
+    if not isinstance(subject, str):
+        raise ValidationError(f'Email at index {index}: "subject" must be a string')
+
+    html = email.get("html")
+    text = email.get("text")
+    if not html and not text:
+        raise ValidationError(f'Email at index {index}: Either "html" or "text" body is required')
+    if html and isinstance(html, str) and not html.strip():
+        raise ValidationError(f'Email at index {index}: "html" body must not be empty or whitespace-only')
+    if text and isinstance(text, str) and not text.strip():
+        raise ValidationError(f'Email at index {index}: "text" body must not be empty or whitespace-only')
+
+    reply_to = email.get("reply_to") or email.get("replyTo")
+    if reply_to is not None:
+        if not isinstance(reply_to, str):
+            raise ValidationError(f'Email at index {index}: "reply_to" must be a string')
+        _validate_email(reply_to, "reply_to")
+
+
 class EmailsResource:
     """Synchronous emails resource."""
 
@@ -127,7 +175,7 @@ class EmailsResource:
             payload["metadata"] = metadata
 
         # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
-        data = self._client._request("POST", "/messages", json=payload, idempotency_key=idempotency_key)
+        data = self._client._request("POST", "/v1/messages", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
     def batch(
@@ -149,6 +197,12 @@ class EmailsResource:
         if len(emails) > _MAX_BATCH_SIZE:
             raise ValidationError(f'Maximum {_MAX_BATCH_SIZE} emails per batch, got {len(emails)}')
 
+        for index, email in enumerate(emails):
+            _validate_batch_email(email, index)
+
+        for index, email in enumerate(emails):
+            _validate_batch_email(email, index)
+
         # Convert from_ to from in each email
         processed = []
         for email in emails:
@@ -157,7 +211,7 @@ class EmailsResource:
                 processed_email["from"] = processed_email.pop("from_")
             processed.append(processed_email)
 
-        data = self._client._request("POST", "/messages/batch", json={"emails": processed})
+        data = self._client._request("POST", "/v1/messages/batch", json={"emails": processed})
         return [SendEmailResponse(**item) for item in data.get("results", [])]
 
     def get(self, email_id: str) -> Email:
@@ -171,7 +225,7 @@ class EmailsResource:
             Email details
         """
         _validate_id(email_id, 'email')
-        data = self._client._request("GET", f"/messages/{email_id}")
+        data = self._client._request("GET", f"/v1/messages/{email_id}")
         return Email(**data["email"])
 
     def list(
@@ -219,7 +273,7 @@ class EmailsResource:
         if until:
             params["until"] = until
 
-        data = self._client._request("GET", "/messages", params=params)
+        data = self._client._request("GET", "/v1/messages", params=params)
         return EmailListResponse(**data)
 
     def cancel(self, email_id: str) -> Email:
@@ -233,7 +287,7 @@ class EmailsResource:
             Updated email details
         """
         _validate_id(email_id, 'email')
-        data = self._client._request("POST", f"/messages/{email_id}/cancel")
+        data = self._client._request("POST", f"/v1/messages/{email_id}/cancel")
         return Email(**data["email"])
 
 
@@ -304,7 +358,7 @@ class AsyncEmailsResource:
             payload["metadata"] = metadata
 
         # FIX-500-CRITICAL: Thread idempotency_key to the HTTP client (was silently dropped!)
-        data = await self._client._request("POST", "/messages", json=payload, idempotency_key=idempotency_key)
+        data = await self._client._request("POST", "/v1/messages", json=payload, idempotency_key=idempotency_key)
         return SendEmailResponse(**data)
 
     async def batch(self, emails: list[dict[str, Any]]) -> list[SendEmailResponse]:
@@ -322,13 +376,13 @@ class AsyncEmailsResource:
                 processed_email["from"] = processed_email.pop("from_")
             processed.append(processed_email)
 
-        data = await self._client._request("POST", "/messages/batch", json={"emails": processed})
+        data = await self._client._request("POST", "/v1/messages/batch", json={"emails": processed})
         return [SendEmailResponse(**item) for item in data.get("results", [])]
 
     async def get(self, email_id: str) -> Email:
         """Get email details by ID asynchronously."""
         _validate_id(email_id, 'email')
-        data = await self._client._request("GET", f"/messages/{email_id}")
+        data = await self._client._request("GET", f"/v1/messages/{email_id}")
         return Email(**data["email"])
 
     async def list(
@@ -361,11 +415,11 @@ class AsyncEmailsResource:
         if until:
             params["until"] = until
 
-        data = await self._client._request("GET", "/messages", params=params)
+        data = await self._client._request("GET", "/v1/messages", params=params)
         return EmailListResponse(**data)
 
     async def cancel(self, email_id: str) -> Email:
         """Cancel a scheduled email asynchronously."""
         _validate_id(email_id, 'email')
-        data = await self._client._request("POST", f"/messages/{email_id}/cancel")
+        data = await self._client._request("POST", f"/v1/messages/{email_id}/cancel")
         return Email(**data["email"])

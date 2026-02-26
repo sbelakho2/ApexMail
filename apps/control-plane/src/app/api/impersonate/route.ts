@@ -16,7 +16,8 @@ import type { NextRequest } from 'next/server';
 import * as crypto from 'crypto';
 import { query } from '@/lib/db';
 
-const IMPERSONATION_TOKEN_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+// SEC-013 FIX: Reduced from 15 to 5 minutes for high-privilege access
+const IMPERSONATION_TOKEN_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 
 interface ControlPlaneSessionPayload {
     sub: string;
@@ -122,6 +123,14 @@ export async function POST(request: NextRequest) {
             );
         }
 
+        const session = verifyControlPlaneSession(cpSession);
+        if (!session) {
+            return NextResponse.json(
+                { error: 'Invalid or expired control plane session' },
+                { status: 401 }
+            );
+        }
+
         // FIX-500-305: Validate that tenantId corresponds to an actual tenant
         const tenantRows = await query<{ id: string }>(
             `SELECT id FROM tenants WHERE id = $1 AND status != 'deleted'`,
@@ -133,19 +142,16 @@ export async function POST(request: NextRequest) {
                 { status: 404 }
             );
         }
-        
-        const session = verifyControlPlaneSession(cpSession);
-        if (!session) {
-            return NextResponse.json(
-                { error: 'Invalid or expired control plane session' },
-                { status: 401 }
-            );
-        }
+
         const operatorId = session.sub;
         const operatorName = session.name || 'Control Plane Operator';
         const forwardedFor = request.headers.get('x-forwarded-for');
         const realIp = request.headers.get('x-real-ip');
-        const ipAddress = forwardedFor?.split(',')[0]?.trim() || realIp || null;
+        // SEC-003 FIX: Use rightmost x-forwarded-for entry (added by trusted proxy)
+        // The leftmost entry can be spoofed by the client
+        const ipAddress = forwardedFor
+            ? forwardedFor.split(',').map(s => s.trim()).filter(Boolean).pop() ?? realIp ?? null
+            : realIp ?? null;
         const userAgent = request.headers.get('user-agent');
         
         // Generate the impersonation token
@@ -180,18 +186,17 @@ export async function POST(request: NextRequest) {
                 userAgent,
                 JSON.stringify({ operatorName, tenantName: tenantName ?? null }),
             ]
-        ).catch((auditError) => {
-            console.error('[IMPERSONATION] Failed to persist audit record', auditError);
-        });
+        );
         
         // Return the token and console URL
         const consoleUrl = process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000';
-        const impersonateUrl = `${consoleUrl}/api/auth/impersonate?token=${encodeURIComponent(token)}`;
+        const postTarget = `${consoleUrl}/api/auth/impersonate`;
         
         return NextResponse.json({
             success: true,
             token,
-            url: impersonateUrl,
+            postTarget,
+            method: 'POST',
             expiresIn: IMPERSONATION_TOKEN_DURATION_MS / 1000,
         });
         

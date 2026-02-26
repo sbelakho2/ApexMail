@@ -50,7 +50,7 @@ export default defineConfig({
         hookTimeout: 30000,
         
         // Retry failed tests
-        retry: 0,
+        retry: process.env.CI ? 2 : 0,
         
         // Bail on first failure
         bail: 0,

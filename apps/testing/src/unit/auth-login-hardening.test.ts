@@ -7,14 +7,15 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const webAppRoot = join(currentDir, '../../../web/src/app');
 
 const loginPageSource = readFileSync(join(webAppRoot, 'login/page.tsx'), 'utf-8');
+const loginControllerSource = readFileSync(join(webAppRoot, 'login/use-login-controller.ts'), 'utf-8');
 const forgotPasswordSource = readFileSync(join(webAppRoot, 'forgot-password/page.tsx'), 'utf-8');
 const forgotPasswordRouteSource = readFileSync(join(webAppRoot, 'api/auth/forgot-password/route.ts'), 'utf-8');
 
 describe('Web auth hardening coverage', () => {
   it('covers mapped auth errors instead of ambiguous credential copy', () => {
-    expect(loginPageSource).toContain('mapAuthError');
-    expect(loginPageSource).toContain('auth.error.invalid_credentials');
-    expect(loginPageSource).toContain('Incorrect email, password, or verification code.');
+    expect(loginControllerSource).toContain('mapAuthError');
+    expect(loginControllerSource).toContain('auth.error.invalid_credentials');
+    expect(loginControllerSource).toContain('Incorrect email, password, or verification code.');
   });
 
   it('covers loading and retry states for login security primitives', () => {

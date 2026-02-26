@@ -50,13 +50,13 @@ export function PrivateCloudHero() {
  className="flex flex-col sm:flex-row gap-4"
  >
  <Link
- href="/contact/enterprise"
+ href="/pricing"
  className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors"
  >
  Request Demo
  </Link>
  <Link
- href="/docs/private-cloud"
+ href="https://docs.apexmail.ee"
  className="inline-flex items-center justify-center px-6 py-3 text-sm font-semibold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors"
  >
  View Architecture
@@ -77,7 +77,7 @@ export function PrivateCloudHero() {
  ].map((stat) => (
  <div key={stat.label}>
  <div className="text-2xl lg:text-3xl font-bold text-surface-900 tabular-nums mb-1">{stat.value}</div>
- <div className="text-xs font-medium text-surface-600 text-surface-500">{stat.label}</div>
+ <div className="text-xs font-medium text-surface-500">{stat.label}</div>
  </div>
  ))}
  </motion.div>

@@ -13,6 +13,7 @@ export const metadata: Metadata = {
     description:
       'Start free with 3,000 emails per month. Scale with predictable pricing. No hidden fees, no surprises.',
     type: 'website',
+    images: ['/og-image.png'],
   },
 };
 

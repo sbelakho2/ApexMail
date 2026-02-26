@@ -30,12 +30,16 @@ use rsa::{
 };
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use std::env;
 use zeroize::Zeroizing;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const AES_GCM_NONCE_LEN: usize = 12;
 const HKDF_DERIVED_LEN: usize = 32;
+const AES128_ENABLED: bool = false;
+const DEFAULT_ARGON2_MEMORY_KIB: u32 = 65_536;
+const MAX_RSA_BITS: u32 = 4096;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +65,11 @@ pub fn encrypt_aes128_gcm(
     plaintext: Buffer,
     aad: Option<Buffer>,
 ) -> Result<Buffer> {
+    if !AES128_ENABLED {
+        return Err(napi::Error::from_reason(
+            "AES-128-GCM is disabled; use AES-256-GCM",
+        ));
+    }
     if key.len() != 16 {
         return Err(napi::Error::from_reason(format!(
             "AES-128-GCM key must be 16 bytes, got {}",
@@ -94,6 +103,11 @@ pub fn decrypt_aes128_gcm(
     ciphertext: Buffer,
     aad: Option<Buffer>,
 ) -> Result<Buffer> {
+    if !AES128_ENABLED {
+        return Err(napi::Error::from_reason(
+            "AES-128-GCM is disabled; use AES-256-GCM",
+        ));
+    }
     if key.len() != 16 {
         return Err(napi::Error::from_reason(format!(
             "AES-128-GCM key must be 16 bytes, got {}",
@@ -258,7 +272,7 @@ pub fn hash_password(
     AsyncTask::new(HashPasswordTask {
         password: Zeroizing::new(password),
         time_cost: time_cost.unwrap_or(3),
-        memory_cost: memory_cost.unwrap_or(65_536),
+        memory_cost: memory_cost.unwrap_or_else(default_argon2_memory_cost),
         parallelism: parallelism.unwrap_or(4),
     })
 }
@@ -351,9 +365,9 @@ impl Task for GenerateDkimKeyPairTask {
 /// Off-thread via libuv thread-pool (RSA keygen is expensive).
 #[napi]
 pub fn generate_dkim_key_pair(bits: u32) -> Result<AsyncTask<GenerateDkimKeyPairTask>> {
-    if bits < 1024 || bits > 8192 {
+    if bits < 1024 || bits > MAX_RSA_BITS {
         return Err(napi::Error::from_reason(
-            "RSA key size must be between 1024 and 8192 bits",
+            format!("RSA key size must be between 1024 and {MAX_RSA_BITS} bits"),
         ));
     }
     Ok(AsyncTask::new(GenerateDkimKeyPairTask {
@@ -373,13 +387,24 @@ pub fn timing_safe_equal(a: Buffer, b: Buffer) -> bool {
     let max_len = a.len().max(b.len());
     let mut diff: u8 = (a.len() ^ b.len()) as u8;
 
+    let mut padded_a = Zeroizing::new(vec![0u8; max_len]);
+    let mut padded_b = Zeroizing::new(vec![0u8; max_len]);
+    padded_a[..a.len()].copy_from_slice(&a);
+    padded_b[..b.len()].copy_from_slice(&b);
+
     for idx in 0..max_len {
-        let x = a.get(idx).copied().unwrap_or(0);
-        let y = b.get(idx).copied().unwrap_or(0);
-        diff |= x ^ y;
+        diff |= padded_a[idx] ^ padded_b[idx];
     }
 
     diff == 0
+}
+
+fn default_argon2_memory_cost() -> u32 {
+    env::var("APEXMAIL_ARGON2_MEMORY_KIB")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (8_192..=1_048_576).contains(value))
+        .unwrap_or(DEFAULT_ARGON2_MEMORY_KIB)
 }
 
 // ─── Secure random bytes ──────────────────────────────────────────────────────

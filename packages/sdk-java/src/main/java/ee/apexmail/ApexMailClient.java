@@ -1,6 +1,11 @@
 package ee.apexmail;
 
-import ee.apexmail.resources.*;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
 
 import java.io.IOException;
 import java.net.URI;
@@ -39,6 +44,7 @@ public final class ApexMailClient {
     private final String apiKey;
     private final String baseUrl;
     private final HttpClient httpClient;
+    private final ObjectMapper objectMapper;
 
     // ── Resource accessors ────────────────────────────────────────────────
 
@@ -52,14 +58,22 @@ public final class ApexMailClient {
     // ── Constructors ──────────────────────────────────────────────────────
 
     public ApexMailClient(String apiKey) {
-        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT);
+        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, null);
     }
 
     public ApexMailClient(String apiKey, String baseUrl) {
-        this(apiKey, baseUrl, DEFAULT_TIMEOUT);
+        this(apiKey, baseUrl, DEFAULT_TIMEOUT, null);
     }
 
     public ApexMailClient(String apiKey, String baseUrl, Duration timeout) {
+        this(apiKey, baseUrl, timeout, null);
+    }
+
+    public ApexMailClient(String apiKey, HttpClient httpClient) {
+        this(apiKey, DEFAULT_BASE_URL, DEFAULT_TIMEOUT, httpClient);
+    }
+
+    public ApexMailClient(String apiKey, String baseUrl, Duration timeout, HttpClient httpClient) {
         if (apiKey == null || apiKey.isBlank()) {
             throw new IllegalArgumentException("apiKey must not be blank");
         }
@@ -68,10 +82,16 @@ public final class ApexMailClient {
         }
         this.apiKey  = apiKey;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        this.httpClient = HttpClient.newBuilder()
-            .connectTimeout(timeout)
-            .version(HttpClient.Version.HTTP_1_1)
-            .build();
+        this.httpClient = httpClient != null
+            ? httpClient
+            : HttpClient.newBuilder()
+                .connectTimeout(timeout)
+                .version(HttpClient.Version.HTTP_2)
+                .build();
+        this.objectMapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .registerModule(new Jdk8Module())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
         this.emails       = new Emails(this);
         this.domains      = new Domains(this);
@@ -98,20 +118,19 @@ public final class ApexMailClient {
      * @param method  HTTP method ("GET", "POST", "PATCH", "DELETE")
      * @param path    API path e.g. "/v1/messages"
      * @param body    Request body (will be JSON-encoded), or {@code null}
-     * @return Parsed response body as a {@code Map<String, Object>}
+     * @return Parsed response body as a typed object
      * @throws ApexMailException on API errors
      */
-    public Map<String, Object> request(String method, String path, Object body) {
-        return request(method, path, body, null);
+    <T> T request(String method, String path, Object body, Class<T> responseType) {
+        return request(method, path, body, responseType, null);
     }
 
-    @SuppressWarnings("unchecked")
-    public Map<String, Object> request(String method, String path, Object body,
-                                String idempotencyKey) {
+    <T> T request(String method, String path, Object body, Class<T> responseType,
+                          String idempotencyKey) {
         int attempt = 0;
         while (true) {
             try {
-                String jsonBody = body != null ? toJson(body) : "";
+                String jsonBody = body != null ? objectMapper.writeValueAsString(body) : "";
                 HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + path))
                     .header("X-API-Key", apiKey)
@@ -145,16 +164,16 @@ public final class ApexMailClient {
                     continue;
                 }
 
-                Map<String, Object> parsed = responseBody != null && !responseBody.isBlank()
-                    ? (Map<String, Object>) parseJson(responseBody)
-                    : new HashMap<>();
-
                 if (status >= 200 && status < 300) {
-                    return parsed;
+                    if (responseType == Void.class || responseBody == null || responseBody.isBlank()) {
+                        return null;
+                    }
+                    return objectMapper.readValue(responseBody, responseType);
                 }
 
+                Map<String, Object> parsed = parseErrorBody(responseBody);
                 throwApiException(status, parsed);
-                return parsed; // unreachable
+                return null; // unreachable
 
             } catch (IOException e) {
                 if (attempt < DEFAULT_MAX_RETRIES) {
@@ -175,73 +194,88 @@ public final class ApexMailClient {
         }
     }
 
-    // ── Minimal JSON serialiser / deserialiser ────────────────────────────
-    // Uses only JDK built-ins — no Jackson or Gson dependency.
-
-    static String toJson(Object obj) {
-        if (obj == null) return "null";
-        if (obj instanceof String s)  return "\"" + escapeString(s) + "\"";
-        if (obj instanceof Number)    return obj.toString();
-        if (obj instanceof Boolean)   return obj.toString();
-        if (obj instanceof Map<?,?> m) {
-            StringBuilder sb = new StringBuilder("{");
-            boolean first = true;
-            for (Map.Entry<?,?> e : m.entrySet()) {
-                if (e.getValue() == null) continue; // omit nulls
-                if (!first) sb.append(',');
-                first = false;
-                sb.append('"').append(escapeString(e.getKey().toString())).append("\":");
-                sb.append(toJson(e.getValue()));
-            }
-            return sb.append('}').toString();
-        }
-        if (obj instanceof Iterable<?> it) {
-            StringBuilder sb = new StringBuilder("[");
-            boolean first = true;
-            for (Object item : it) {
-                if (!first) sb.append(',');
-                first = false;
-                sb.append(toJson(item));
-            }
-            return sb.append(']').toString();
-        }
-        if (obj instanceof Object[] arr) {
-            StringBuilder sb = new StringBuilder("[");
-            for (int i = 0; i < arr.length; i++) {
-                if (i > 0) sb.append(',');
-                sb.append(toJson(arr[i]));
-            }
-            return sb.append(']').toString();
-        }
-        return "\"" + escapeString(obj.toString()) + "\"";
+    <T> T request(String method, String path, Object body, TypeReference<T> responseType) {
+        return request(method, path, body, responseType, null);
     }
 
-    private static String escapeString(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '\\' -> sb.append("\\\\");
-                case '"' -> sb.append("\\\"");
-                case '\b' -> sb.append("\\b");
-                case '\f' -> sb.append("\\f");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                case '\t' -> sb.append("\\t");
-                default -> {
-                    if (c <= 0x1F) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
+    <T> T request(String method, String path, Object body, TypeReference<T> responseType,
+                          String idempotencyKey) {
+        int attempt = 0;
+        while (true) {
+            try {
+                String jsonBody = body != null ? objectMapper.writeValueAsString(body) : "";
+                HttpRequest.Builder builder = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + path))
+                    .header("X-API-Key", apiKey)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "apexmail-java/1.0.0");
+
+                if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                    builder.header("X-Idempotency-Key", idempotencyKey);
                 }
+
+                HttpRequest.BodyPublisher publisher =
+                    jsonBody.isEmpty()
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(jsonBody);
+
+                builder.method(method, publisher);
+
+                HttpResponse<String> response = httpClient.send(
+                    builder.build(),
+                    HttpResponse.BodyHandlers.ofString()
+                );
+
+                int status = response.statusCode();
+                String responseBody = response.body();
+
+                if ((status == 429 || status >= 500) && attempt < DEFAULT_MAX_RETRIES) {
+                    Duration delay = retryDelay(response, attempt);
+                    Thread.sleep(delay.toMillis());
+                    attempt++;
+                    continue;
+                }
+
+                if (status >= 200 && status < 300) {
+                    if (responseBody == null || responseBody.isBlank()) {
+                        return null;
+                    }
+                    return objectMapper.readValue(responseBody, responseType);
+                }
+
+                Map<String, Object> parsed = parseErrorBody(responseBody);
+                throwApiException(status, parsed);
+                return null; // unreachable
+
+            } catch (IOException e) {
+                if (attempt < DEFAULT_MAX_RETRIES) {
+                    try {
+                        sleepBackoff(attempt);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new ApexMailException("Request interrupted", interrupted);
+                    }
+                    attempt++;
+                    continue;
+                }
+                throw new ApexMailException("Network error: " + e.getMessage(), e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new ApexMailException("Request interrupted", e);
             }
         }
-        return sb.toString();
     }
 
-    static Object parseJson(String json) {
-        return new JsonParser(json.trim()).parse();
+    private Map<String, Object> parseErrorBody(String responseBody) {
+        if (responseBody == null || responseBody.isBlank()) {
+            return new HashMap<>();
+        }
+        try {
+            return objectMapper.readValue(responseBody, new TypeReference<Map<String, Object>>() {});
+        } catch (IOException ignored) {
+            return new HashMap<>();
+        }
     }
 
     // ── Error mapping ─────────────────────────────────────────────────────

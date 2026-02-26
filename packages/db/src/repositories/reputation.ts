@@ -53,6 +53,32 @@ export interface ReputationSummary {
 export class ReputationRepository {
     constructor(private readonly db: DatabasePool) {}
 
+    private statColumnsValidated = false;
+
+    private async ensureStatColumns(): Promise<void> {
+        if (this.statColumnsValidated) return;
+
+        const result = await this.db.query<{ column_name: string }>(
+            `SELECT column_name
+             FROM information_schema.columns
+             WHERE table_name = 'reputation_stats'
+               AND table_schema = current_schema()`
+        );
+
+        if (!result.ok) throw result.error;
+
+        const columns = new Set(result.value.rows.map(row => row.column_name));
+        const missing = [...ReputationRepository.ALLOWED_STAT_COLUMNS].filter(col => !columns.has(col));
+
+        if (missing.length > 0) {
+            throw new Error(
+                `Reputation stats columns missing from schema: ${missing.join(', ')}`
+            );
+        }
+
+        this.statColumnsValidated = true;
+    }
+
     // -------------------------------------------------------------------------
     // Daily Stats
     // -------------------------------------------------------------------------
@@ -66,6 +92,8 @@ export class ReputationRepository {
      * Increment stats for a specific metric
      */
     async incrementStat(tenantId: string, metric: keyof Omit<ReputationStats, 'tenantId' | 'date'>): Promise<void> {
+        await this.ensureStatColumns();
+
         // Runtime whitelist check to prevent SQL injection via dynamic column name
         if (!ReputationRepository.ALLOWED_STAT_COLUMNS.has(metric)) {
             throw new Error(`Invalid metric column: ${metric}`);

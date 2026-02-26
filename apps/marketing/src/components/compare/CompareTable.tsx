@@ -87,8 +87,9 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
           initial={{ opacity: 0, y: 20 }}
           animate={inView ? { opacity: 1, y: 0 } : {}}
           transition={{ delay: 0.2 }}
-          className="bg-white rounded-lg border border-surface-200 shadow-sm overflow-hidden"
+          className="bg-white rounded-lg border border-surface-200 shadow-sm overflow-x-auto"
         >
+          <div className="min-w-[760px]">
           {/* Table Header */}
           <div className="grid grid-cols-4 gap-4 p-6 border-b border-surface-200 bg-surface-50">
             <div className="font-bold text-surface-600 text-xs self-center">
@@ -157,6 +158,7 @@ export function CompareTable({ categories, competitorName }: CompareTableProps) 
               ))}
             </div>
           ))}
+          </div>
         </motion.div>
       </div>
     </section>

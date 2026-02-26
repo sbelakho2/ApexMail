@@ -18,6 +18,8 @@
  * ```
  */
 
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -33,6 +35,8 @@ export interface ApexMailConfig {
     fetch?: typeof fetch;
     /** FIX-500-276: Enable debug logging */
     debug?: boolean;
+    /** Retry jitter range as ratio of base delay (default: { min: 0, max: 0.3 }) */
+    retryJitter?: { min: number; max: number };
 }
 
 export interface EmailAddress {
@@ -211,6 +215,16 @@ export interface CreateWebhookOptions {
     events: WebhookEvent[];
 }
 
+export interface VerifyWebhookSignatureOptions {
+    payload: string | Buffer;
+    signature?: string | string[];
+    secret: string;
+    /** Maximum age in seconds (default: 300) */
+    tolerance?: number;
+    /** Optional timestamp header when provided separately */
+    timestamp?: string | number;
+}
+
 export interface Analytics {
     sent: number;
     delivered: number;
@@ -222,6 +236,114 @@ export interface Analytics {
     openRate: number;
     clickRate: number;
     bounceRate: number;
+}
+
+export interface Template {
+    id: string;
+    name: string;
+    subject: string;
+    html_body: string;
+    text_body?: string | null;
+    version: number;
+    status: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface CreateTemplateOptions {
+    name: string;
+    subject: string;
+    htmlBody: string;
+    textBody?: string;
+}
+
+export interface UpdateTemplateOptions {
+    name?: string;
+    subject?: string;
+    htmlBody?: string;
+    textBody?: string;
+}
+
+export interface RenderTemplateResponse {
+    subject: string;
+    html: string;
+    text?: string | null;
+}
+
+export interface ListTemplatesOptions {
+    limit?: number;
+    offset?: number;
+    cursor?: number;
+}
+
+export interface Suppression {
+    id: string;
+    email: string;
+    reason: string;
+    source: string;
+    created_at: string;
+}
+
+export interface CreateSuppressionOptions {
+    email: string;
+    reason: string;
+    source?: string;
+}
+
+export interface ListSuppressionsOptions {
+    limit?: number;
+    offset?: number;
+    cursor?: number;
+    reason?: string;
+}
+
+export interface SuppressionCheckResponse {
+    email: string;
+    suppressed: boolean;
+    reason?: string | null;
+}
+
+export interface BulkSuppressionEntry {
+    email: string;
+    reason: string;
+}
+
+export interface BulkSuppressionResponse {
+    created: number;
+    duplicates: number;
+    invalid: number;
+}
+
+export interface Event {
+    id: string;
+    message_id?: string | null;
+    event_type: string;
+    recipient?: string | null;
+    metadata?: Record<string, unknown> | null;
+    timestamp: string;
+}
+
+export interface ListEventsOptions {
+    limit?: number;
+    offset?: number;
+    cursor?: number;
+    eventType?: string;
+    messageId?: string;
+}
+
+export interface EventStats {
+    total: number;
+    delivered: number;
+    bounced: number;
+    complained: number;
+    opened: number;
+    clicked: number;
+}
+
+export interface EventTimeseriesPoint {
+    timestamp: string;
+    count: number;
+    event_type: string;
 }
 
 export interface GetAnalyticsOptions {
@@ -310,6 +432,98 @@ function validateId(id: string, resourceName: string): void {
     }
 }
 
+const DEFAULT_RETRY_JITTER = { min: 0, max: 0.3 };
+
+function clamp01(value: number): number {
+    if (!Number.isFinite(value)) {
+        return 0;
+    }
+    return Math.min(1, Math.max(0, value));
+}
+
+function normalizeRetryJitter(range?: { min: number; max: number }): { min: number; max: number } {
+    if (!range) {
+        return { ...DEFAULT_RETRY_JITTER };
+    }
+    const min = clamp01(range.min);
+    const max = clamp01(range.max);
+    if (min > max) {
+        return { min: max, max: min };
+    }
+    return { min, max };
+}
+
+function isBufferValue(value: unknown): value is Buffer {
+    return typeof Buffer !== 'undefined' && Buffer.isBuffer(value);
+}
+
+function extractFieldFromValidationMessage(message: string): string | null {
+    const match = message.match(/"([^"]+)"/);
+    return match ? match[1] : null;
+}
+
+function parseSignatureHeader(signatureHeader: string): { timestamp?: string; signature?: string } {
+    const trimmed = signatureHeader.trim();
+    if (trimmed.includes('t=') && trimmed.includes('v1=')) {
+        const parts = trimmed.split(',');
+        let timestamp: string | undefined;
+        let signature: string | undefined;
+        for (const part of parts) {
+            const [key, value] = part.trim().split('=');
+            if (key === 't' && value) {
+                timestamp = value;
+            }
+            if (key === 'v1' && value) {
+                signature = value;
+            }
+        }
+        return { timestamp, signature };
+    }
+    if (trimmed.startsWith('sha256=')) {
+        return { signature: trimmed.slice('sha256='.length) };
+    }
+    return { signature: trimmed };
+}
+
+export function verifyWebhookSignature(options: VerifyWebhookSignatureOptions): boolean {
+    const signatureHeader = Array.isArray(options.signature)
+        ? options.signature[0]
+        : options.signature;
+    if (!signatureHeader || !options.secret) {
+        return false;
+    }
+
+    const parsed = parseSignatureHeader(signatureHeader);
+    const timestampValue = options.timestamp ?? parsed.timestamp;
+    if (!timestampValue || !parsed.signature) {
+        return false;
+    }
+
+    const timestamp = typeof timestampValue === 'string' ? Number(timestampValue) : timestampValue;
+    if (!Number.isFinite(timestamp)) {
+        return false;
+    }
+
+    const tolerance = options.tolerance ?? 300;
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSeconds - timestamp) > tolerance) {
+        return false;
+    }
+
+    const payload = typeof options.payload === 'string'
+        ? options.payload
+        : options.payload.toString('utf8');
+    const signedPayload = `${timestamp}.${payload}`;
+    const expected = createHmac('sha256', options.secret).update(signedPayload).digest('hex');
+
+    const expectedBuffer = Buffer.from(expected, 'hex');
+    const actualBuffer = Buffer.from(parsed.signature, 'hex');
+    if (expectedBuffer.length !== actualBuffer.length) {
+        return false;
+    }
+
+    return timingSafeEqual(expectedBuffer, actualBuffer);
+}
 // ============================================================================
 // HTTP Client with Retry Logic
 // ============================================================================
@@ -319,6 +533,7 @@ interface RetryConfig {
     initialDelayMs: number;
     maxDelayMs: number;
     retryableStatuses: Set<number>;
+    jitterRange: { min: number; max: number };
 }
 
 const DEFAULT_RETRY_CONFIG: RetryConfig = {
@@ -327,6 +542,7 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
     maxDelayMs: 30000,
     // Retry on network errors, rate limits, and server errors
     retryableStatuses: new Set([408, 429, 500, 502, 503, 504]),
+    jitterRange: { ...DEFAULT_RETRY_JITTER },
 };
 
 class HttpClient {
@@ -351,7 +567,10 @@ class HttpClient {
         // default, so connections are reused across requests automatically.
         // Custom fetch implementations should enable keep-alive similarly.
         this.fetchFn = config.fetch || fetch;
-        this.retryConfig = DEFAULT_RETRY_CONFIG;
+        this.retryConfig = {
+            ...DEFAULT_RETRY_CONFIG,
+            jitterRange: normalizeRetryJitter(config.retryJitter),
+        };
     }
 
     // FIX-500-274: Support idempotency key header
@@ -502,7 +721,8 @@ class HttpClient {
      */
     private calculateBackoff(attempt: number): number {
         const baseDelay = this.retryConfig.initialDelayMs * Math.pow(2, attempt);
-        const jitter = Math.random() * 0.3 * baseDelay; // Add up to 30% jitter
+        const { min, max } = this.retryConfig.jitterRange;
+        const jitter = (min + Math.random() * Math.max(0, max - min)) * baseDelay;
         return Math.min(baseDelay + jitter, this.retryConfig.maxDelayMs);
     }
 
@@ -563,6 +783,10 @@ class HttpClient {
 
     post<T>(path: string, body?: unknown): Promise<T> {
         return this.request<T>('POST', path, body);
+    }
+
+    put<T>(path: string, body?: unknown): Promise<T> {
+        return this.request<T>('PUT', path, body);
     }
 
     patch<T>(path: string, body?: unknown): Promise<T> {
@@ -646,8 +870,8 @@ class EmailsApi {
         validateRecipients(options.bcc, 'bcc');
 
         // String length limits
-        if (options.subject.length > 998) {
-            throw new ValidationError('"subject" exceeds maximum length of 998 characters (RFC 2822)');
+        if (Buffer.byteLength(options.subject, 'utf8') > 998) {
+            throw new ValidationError('"subject" exceeds maximum length of 998 bytes (RFC 2822)');
         }
         if (options.html && options.html.length > 10 * 1024 * 1024) {
             throw new ValidationError('"html" body exceeds maximum size of 10MB');
@@ -705,7 +929,14 @@ class EmailsApi {
                 this.validateSendOptions(options.emails[i]!);
             } catch (err) {
                 if (err instanceof ValidationError) {
-                    throw new ValidationError(`Email at index ${i}: ${err.message}`);
+                    const field = extractFieldFromValidationMessage(err.message);
+                    const prefix = field
+                        ? `Email at index ${i} (field: ${field}): `
+                        : `Email at index ${i}: `;
+                    throw new ValidationError(`${prefix}${err.message}`, {
+                        index: i,
+                        field: field ?? undefined,
+                    });
                 }
                 throw err;
             }
@@ -760,7 +991,7 @@ class EmailsApi {
         if (options.attachments) {
             result.attachments = options.attachments.map(a => ({
                 filename: a.filename,
-                content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+                content: isBufferValue(a.content) ? a.content.toString('base64') : a.content,
                 contentType: a.contentType,
             }));
         }
@@ -834,6 +1065,188 @@ class DomainsApi {
     async delete(id: string): Promise<void> {
         validateId(id, 'domain');
         await this.client.delete(`/v1/domains/${id}`);
+    }
+}
+
+/**
+ * Templates API - Manage email templates
+ */
+class TemplatesApi {
+    constructor(private client: HttpClient) {}
+
+    /**
+     * Create a new template
+     */
+    async create(options: CreateTemplateOptions): Promise<Template> {
+        return this.client.post<Template>('/v1/templates', {
+            name: options.name,
+            subject: options.subject,
+            html_body: options.htmlBody,
+            text_body: options.textBody,
+        });
+    }
+
+    /**
+     * List templates
+     */
+    async list(options?: ListTemplatesOptions): Promise<Template[]> {
+        const params = new URLSearchParams();
+        if (options?.limit) params.set('limit', options.limit.toString());
+        if (options?.offset) params.set('offset', options.offset.toString());
+        if (options?.cursor !== undefined) params.set('cursor', options.cursor.toString());
+        const query = params.toString();
+        return this.client.get<Template[]>(`/v1/templates${query ? `?${query}` : ''}`);
+    }
+
+    /**
+     * Get a template by ID
+     */
+    async get(id: string): Promise<Template> {
+        validateId(id, 'template');
+        return this.client.get<Template>(`/v1/templates/${id}`);
+    }
+
+    /**
+     * Update a template
+     */
+    async update(id: string, options: UpdateTemplateOptions): Promise<Template> {
+        validateId(id, 'template');
+        return this.client.put<Template>(`/v1/templates/${id}`, {
+            name: options.name,
+            subject: options.subject,
+            html_body: options.htmlBody,
+            text_body: options.textBody,
+        });
+    }
+
+    /**
+     * Delete a template
+     */
+    async delete(id: string): Promise<void> {
+        validateId(id, 'template');
+        await this.client.delete(`/v1/templates/${id}`);
+    }
+
+    /**
+     * Render a template with variables
+     */
+    async render(id: string, variables: Record<string, unknown>): Promise<RenderTemplateResponse> {
+        validateId(id, 'template');
+        return this.client.post<RenderTemplateResponse>(`/v1/templates/${id}/render`, { variables });
+    }
+}
+
+/**
+ * Suppressions API - Manage suppression list
+ */
+class SuppressionsApi {
+    constructor(private client: HttpClient) {}
+
+    /**
+     * Add a suppression
+     */
+    async create(options: CreateSuppressionOptions): Promise<Suppression> {
+        return this.client.post<Suppression>('/v1/suppressions', {
+            email: options.email,
+            reason: options.reason,
+            source: options.source,
+        });
+    }
+
+    /**
+     * List suppressions
+     */
+    async list(options?: ListSuppressionsOptions): Promise<Suppression[]> {
+        const params = new URLSearchParams();
+        if (options?.limit) params.set('limit', options.limit.toString());
+        if (options?.offset) params.set('offset', options.offset.toString());
+        if (options?.cursor !== undefined) params.set('cursor', options.cursor.toString());
+        if (options?.reason) params.set('reason', options.reason);
+        const query = params.toString();
+        return this.client.get<Suppression[]>(`/v1/suppressions${query ? `?${query}` : ''}`);
+    }
+
+    /**
+     * Delete a suppression by ID
+     */
+    async delete(id: string): Promise<void> {
+        validateId(id, 'suppression');
+        await this.client.delete(`/v1/suppressions/${id}`);
+    }
+
+    /**
+     * Check if an email is suppressed
+     */
+    async check(email: string): Promise<SuppressionCheckResponse> {
+        return this.client.get<SuppressionCheckResponse>(
+            `/v1/suppressions/check/${encodeURIComponent(email)}`,
+        );
+    }
+
+    /**
+     * Bulk add suppressions
+     */
+    async bulk(entries: BulkSuppressionEntry[]): Promise<BulkSuppressionResponse> {
+        return this.client.post<BulkSuppressionResponse>('/v1/suppressions/bulk', { entries });
+    }
+}
+
+/**
+ * Events API - Query delivery events
+ */
+class EventsApi {
+    constructor(private client: HttpClient) {}
+
+    /**
+     * List events
+     */
+    async list(options?: ListEventsOptions): Promise<Event[]> {
+        const params = new URLSearchParams();
+        if (options?.limit) params.set('limit', options.limit.toString());
+        if (options?.offset) params.set('offset', options.offset.toString());
+        if (options?.cursor !== undefined) params.set('cursor', options.cursor.toString());
+        if (options?.eventType) params.set('event_type', options.eventType);
+        if (options?.messageId) params.set('message_id', options.messageId);
+        const query = params.toString();
+        return this.client.get<Event[]>(`/v1/events${query ? `?${query}` : ''}`);
+    }
+
+    /**
+     * Get event by ID
+     */
+    async get(id: string): Promise<Event> {
+        validateId(id, 'event');
+        return this.client.get<Event>(`/v1/events/${id}`);
+    }
+
+    /**
+     * Get event stats
+     */
+    async stats(options?: { from?: string | Date; to?: string | Date }): Promise<EventStats> {
+        const params = new URLSearchParams();
+        if (options?.from) {
+            params.set('from', options.from instanceof Date ? options.from.toISOString() : options.from);
+        }
+        if (options?.to) {
+            params.set('to', options.to instanceof Date ? options.to.toISOString() : options.to);
+        }
+        const query = params.toString();
+        return this.client.get<EventStats>(`/v1/events/stats${query ? `?${query}` : ''}`);
+    }
+
+    /**
+     * Get event timeseries
+     */
+    async timeseries(options?: { from?: string | Date; to?: string | Date }): Promise<EventTimeseriesPoint[]> {
+        const params = new URLSearchParams();
+        if (options?.from) {
+            params.set('from', options.from instanceof Date ? options.from.toISOString() : options.from);
+        }
+        if (options?.to) {
+            params.set('to', options.to instanceof Date ? options.to.toISOString() : options.to);
+        }
+        const query = params.toString();
+        return this.client.get<EventTimeseriesPoint[]>(`/v1/events/timeseries${query ? `?${query}` : ''}`);
     }
 }
 
@@ -991,6 +1404,9 @@ class AnalyticsApi {
 export class ApexMail {
     public readonly emails: EmailsApi;
     public readonly domains: DomainsApi;
+    public readonly templates: TemplatesApi;
+    public readonly suppressions: SuppressionsApi;
+    public readonly events: EventsApi;
     public readonly apiKeys: ApiKeysApi;
     public readonly webhooks: WebhooksApi;
     public readonly analytics: AnalyticsApi;
@@ -1007,11 +1423,11 @@ export class ApexMail {
         }
 
         // SECURITY FIX: Stronger API key validation
-        // Valid formats: am_live_<32 chars> or am_test_<32 chars>
-        const apiKeyPattern = /^am_(live|test)_[a-zA-Z0-9]{32,}$/;
+        // Valid formats: am_live_<16+ chars> or am_test_<16+ chars>
+        const apiKeyPattern = /^am_(live|test)_[a-zA-Z0-9]{16,}$/;
         if (!apiKeyPattern.test(config.apiKey)) {
             throw new ValidationError(
-                'Invalid API key format. Keys should match "am_live_<key>" or "am_test_<key>" where <key> is at least 32 alphanumeric characters'
+                'Invalid API key format. Keys should match "am_live_<key>" or "am_test_<key>" where <key> is at least 16 alphanumeric characters'
             );
         }
 
@@ -1019,6 +1435,9 @@ export class ApexMail {
 
         this.emails = new EmailsApi(client);
         this.domains = new DomainsApi(client);
+        this.templates = new TemplatesApi(client);
+        this.suppressions = new SuppressionsApi(client);
+        this.events = new EventsApi(client);
         this.apiKeys = new ApiKeysApi(client);
         this.webhooks = new WebhooksApi(client);
         this.analytics = new AnalyticsApi(client);

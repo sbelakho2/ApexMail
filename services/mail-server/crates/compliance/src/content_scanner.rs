@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use uuid::Uuid;
 
@@ -65,7 +66,7 @@ static COMPILED_SPAM_RULES: LazyLock<Vec<CompiledSpamRule>> = LazyLock::new(|| {
         .iter()
         .filter(|r| !r.pattern.contains("PLACEHOLDER"))
         .filter_map(|r| {
-            Regex::new(r.pattern).ok().map(|regex| CompiledSpamRule {
+            compile_regex(r.pattern, "spam_rules").map(|regex| CompiledSpamRule {
                 name: r.name,
                 score: r.score,
                 description: r.description,
@@ -77,83 +78,112 @@ static COMPILED_SPAM_RULES: LazyLock<Vec<CompiledSpamRule>> = LazyLock::new(|| {
 });
 
 /// Combined alternation of all text-targeted spam rules for fast pre-check.
-static FAST_SPAM_CHECK: LazyLock<Regex> = LazyLock::new(|| {
+static FAST_SPAM_CHECK: LazyLock<Option<Regex>> = LazyLock::new(|| {
     let text_patterns: Vec<&str> = SPAM_RULES
         .iter()
         .filter(|r| r.target == RuleTarget::Text && !r.pattern.contains("PLACEHOLDER"))
         .map(|r| r.pattern)
         .collect();
-    Regex::new(&text_patterns.join("|")).unwrap()
+    if text_patterns.is_empty() {
+        return None;
+    }
+    compile_regex(&text_patterns.join("|"), "fast_spam_check")
 });
 
 // ─── Phishing ──────────────────────────────────────────
 
-static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"']+"#).unwrap());
-static IP_URL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}").unwrap());
+static URL_REGEX: LazyLock<Option<Regex>> =
+    LazyLock::new(|| compile_regex(r#"https?://[^\s<>"']+"#, "url_regex"));
+static IP_URL_REGEX: LazyLock<Option<Regex>> =
+    LazyLock::new(|| compile_regex(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", "ip_url_regex"));
 
-static URL_SHORTENERS: LazyLock<AhoCorasick> = LazyLock::new(|| {
-    AhoCorasick::new(&[
+static URL_SHORTENERS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
+    compile_aho(&[
         "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly",
         "is.gd", "buff.ly", "adf.ly", "tiny.cc", "shorte.st",
-    ])
-    .unwrap()
+    ], "url_shorteners")
 });
 
-static SUSPICIOUS_TLDS: LazyLock<AhoCorasick> = LazyLock::new(|| {
-    AhoCorasick::new(&[
+static SUSPICIOUS_TLDS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
+    compile_aho(&[
         ".xyz", ".top", ".work", ".date", ".review", ".bid",
         ".stream", ".click", ".download", ".loan", ".racing",
-    ])
-    .unwrap()
+    ], "suspicious_tlds")
 });
 
 static BRAND_PATTERNS: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
-    vec![
-        ("PayPal", Regex::new(r"(?i)paypa[l1]|pay[-_]?pal").unwrap()),
-        ("Apple", Regex::new(r"(?i)app[l1]e|ap[p]+le").unwrap()),
-        ("Amazon", Regex::new(r"(?i)amaz[o0]n|amazo[n]+").unwrap()),
-        (
-            "Microsoft",
-            Regex::new(r"(?i)micros[o0]ft|micr[o0]soft|m[i1]crosoft").unwrap(),
-        ),
-        ("Google", Regex::new(r"(?i)g[o0][o0]g[l1]e|googl[e3]").unwrap()),
-    ]
+    let patterns = [
+        ("PayPal", r"(?i)paypa[l1]|pay[-_]?pal"),
+        ("Apple", r"(?i)app[l1]e|ap[p]+le"),
+        ("Amazon", r"(?i)amaz[o0]n|amazo[n]+"),
+        ("Microsoft", r"(?i)micros[o0]ft|micr[o0]soft|m[i1]crosoft"),
+        ("Google", r"(?i)g[o0][o0]g[l1]e|googl[e3]"),
+    ];
+
+    patterns
+        .iter()
+        .filter_map(|(brand, pattern)| {
+            compile_regex(pattern, "brand_patterns").map(|re| (*brand, re))
+        })
+        .collect()
 });
 
 static URGENCY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    vec![
-        Regex::new(r"(?i)account.{0,20}suspended").unwrap(),
-        Regex::new(r"(?i)verify\s+your\s+(identity|account)").unwrap(),
-        Regex::new(r"(?i)unauthorized.{0,20}access").unwrap(),
-        Regex::new(r"(?i)confirm.{0,20}now.{0,20}or.{0,20}lose").unwrap(),
-        Regex::new(r"(?i)security\s+alert").unwrap(),
-        Regex::new(r"(?i)click\s+here\s+immediately").unwrap(),
-    ]
+    let patterns = [
+        r"(?i)account.{0,20}suspended",
+        r"(?i)verify\s+your\s+(identity|account)",
+        r"(?i)unauthorized.{0,20}access",
+        r"(?i)confirm.{0,20}now.{0,20}or.{0,20}lose",
+        r"(?i)security\s+alert",
+        r"(?i)click\s+here\s+immediately",
+    ];
+    patterns
+        .iter()
+        .filter_map(|pattern| compile_regex(pattern, "urgency_patterns"))
+        .collect()
 });
 
 /// Homograph / confusable Unicode chars.
-static HOMOGRAPH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\u{0400}-\u{04FF}\u{2000}-\u{206F}\u{FF00}-\u{FFEF}]").unwrap()
+static HOMOGRAPH_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    compile_regex(r"[\u{0400}-\u{04FF}\u{2000}-\u{206F}\u{FF00}-\u{FFEF}]", "homograph_regex")
 });
 
 // ─── Malware ───────────────────────────────────────────
 
-static DANGEROUS_EXTENSIONS: LazyLock<AhoCorasick> = LazyLock::new(|| {
-    AhoCorasick::new(&[
+static DANGEROUS_EXTENSIONS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
+    compile_aho(&[
         ".exe", ".bat", ".cmd", ".com", ".js", ".jse", ".vbs", ".vbe",
         ".wsf", ".wsh", ".ps1", ".scr", ".pif", ".msi", ".hta", ".cpl",
-    ])
-    .unwrap()
+    ], "dangerous_extensions")
 });
 
-static MACRO_EXTENSIONS: LazyLock<AhoCorasick> = LazyLock::new(|| {
-    AhoCorasick::new(&[".docm", ".xlsm", ".pptm", ".dotm", ".xltm"]).unwrap()
+static MACRO_EXTENSIONS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
+    compile_aho(&[".docm", ".xlsm", ".pptm", ".dotm", ".xltm"], "macro_extensions")
 });
 
-static PHYSICAL_ADDRESS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\d{1,6}\s+\w+\s+(St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)").unwrap()
+static PHYSICAL_ADDRESS_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    compile_regex(r"\d{1,6}\s+\w+\s+(St|Ave|Blvd|Dr|Rd|Ln|Way|Ct|Pl)", "physical_address_regex")
 });
+
+fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(e) => {
+            warn!(pattern = %pattern, label, error = %e, "Invalid regex pattern; disabling matcher");
+            None
+        }
+    }
+}
+
+fn compile_aho(patterns: &[&str], label: &str) -> Option<AhoCorasick> {
+    match AhoCorasick::new(patterns) {
+        Ok(ac) => Some(ac),
+        Err(e) => {
+            warn!(label, error = %e, "Invalid Aho-Corasick patterns; disabling matcher");
+            None
+        }
+    }
+}
 
 // ─── Magic bytes (file signature) ──────────────────────────────
 
@@ -322,7 +352,9 @@ impl ContentScanner {
         let combined_text = format!("{} {}", content.subject, text);
 
         // Fast pre-check: if combined regex doesn't match, skip text rules.
-        let text_rules_may_match = FAST_SPAM_CHECK.is_match(&combined_text);
+        let text_rules_may_match = FAST_SPAM_CHECK
+            .as_ref()
+            .map_or(true, |regex| regex.is_match(&combined_text));
 
         for rule in COMPILED_SPAM_RULES.iter() {
             match rule.target {
@@ -463,11 +495,15 @@ impl ContentScanner {
         let combined = format!("{} {} {}", content.subject, text, html);
 
         // URL analysis
-        for url_match in URL_REGEX.find_iter(&combined) {
-            let url_str = url_match.as_str();
+        if let Some(url_regex) = URL_REGEX.as_ref() {
+            for url_match in url_regex.find_iter(&combined) {
+                let url_str = url_match.as_str();
 
             // IP-based URL
-            if IP_URL_REGEX.is_match(url_str) {
+            if IP_URL_REGEX
+                .as_ref()
+                .map_or(false, |regex| regex.is_match(url_str))
+            {
                 score += 15.0;
                 indicators.push(PhishingIndicator {
                     indicator_type: PhishingIndicatorType::Url,
@@ -478,7 +514,10 @@ impl ContentScanner {
             }
 
             // URL shortener
-            if URL_SHORTENERS.is_match(url_str) {
+            if URL_SHORTENERS
+                .as_ref()
+                .map_or(false, |ac| ac.is_match(url_str))
+            {
                 score += 10.0;
                 indicators.push(PhishingIndicator {
                     indicator_type: PhishingIndicatorType::Url,
@@ -489,7 +528,10 @@ impl ContentScanner {
             }
 
             // Suspicious TLD
-            if SUSPICIOUS_TLDS.is_match(url_str) {
+            if SUSPICIOUS_TLDS
+                .as_ref()
+                .map_or(false, |ac| ac.is_match(url_str))
+            {
                 score += 8.0;
                 indicators.push(PhishingIndicator {
                     indicator_type: PhishingIndicatorType::Url,
@@ -533,7 +575,10 @@ impl ContentScanner {
                     }
 
                     // Homograph detection
-                    if HOMOGRAPH_REGEX.is_match(host) {
+                    if HOMOGRAPH_REGEX
+                        .as_ref()
+                        .map_or(false, |regex| regex.is_match(host))
+                    {
                         score += 20.0;
                         indicators.push(PhishingIndicator {
                             indicator_type: PhishingIndicatorType::Url,
@@ -619,7 +664,10 @@ impl ContentScanner {
             let name_lower = att.filename.to_lowercase();
 
             // Dangerous extension
-            if DANGEROUS_EXTENSIONS.is_match(&name_lower) {
+            if DANGEROUS_EXTENSIONS
+                .as_ref()
+                .map_or(false, |ac| ac.is_match(&name_lower))
+            {
                 threats.push(MalwareThreat {
                     name: format!("Dangerous file type: {}", att.filename),
                     threat_type: "dangerous_extension".into(),
@@ -632,7 +680,10 @@ impl ContentScanner {
             let parts: Vec<&str> = att.filename.split('.').collect();
             if parts.len() > 2 {
                 let last = format!(".{}", parts.last().unwrap_or(&""));
-                if DANGEROUS_EXTENSIONS.is_match(&last.to_lowercase()) {
+                if DANGEROUS_EXTENSIONS
+                    .as_ref()
+                    .map_or(false, |ac| ac.is_match(&last.to_lowercase()))
+                {
                     threats.push(MalwareThreat {
                         name: format!("Double extension: {}", att.filename),
                         threat_type: "double_extension".into(),
@@ -676,7 +727,10 @@ impl ContentScanner {
             }
 
             // Macro-enabled documents
-            if MACRO_EXTENSIONS.is_match(&name_lower) {
+            if MACRO_EXTENSIONS
+                .as_ref()
+                .map_or(false, |ac| ac.is_match(&name_lower))
+            {
                 threats.push(MalwareThreat {
                     name: format!("Macro-enabled document: {}", att.filename),
                     threat_type: "macro_document".into(),
@@ -719,7 +773,9 @@ impl ContentScanner {
         let body_combined = format!("{text} {html}");
 
         // Simplified physical address heuristic (US postal pattern)
-        let has_address = PHYSICAL_ADDRESS_REGEX.is_match(&body_combined);
+        let has_address = PHYSICAL_ADDRESS_REGEX
+            .as_ref()
+            .map_or(true, |regex| regex.is_match(&body_combined));
         if !has_address {
             violations.push(PolicyViolation {
                 policy: "CAN-SPAM".into(),
@@ -1229,11 +1285,17 @@ mod tests {
     #[test]
     fn test_fast_check_skips_clean_text() {
         // The combined regex should NOT match on clean text
-        assert!(!FAST_SPAM_CHECK.is_match("Hello, this is a normal monthly newsletter about technology."));
+        let Some(regex) = FAST_SPAM_CHECK.as_ref() else {
+            panic!("FAST_SPAM_CHECK regex missing");
+        };
+        assert!(!regex.is_match("Hello, this is a normal monthly newsletter about technology."));
     }
 
     #[test]
     fn test_fast_check_matches_spam_text() {
-        assert!(FAST_SPAM_CHECK.is_match("Congratulations! You are a winner of $1000!"));
+        let Some(regex) = FAST_SPAM_CHECK.as_ref() else {
+            panic!("FAST_SPAM_CHECK regex missing");
+        };
+        assert!(regex.is_match("Congratulations! You are a winner of $1000!"));
     }
 }

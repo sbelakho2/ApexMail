@@ -1,7 +1,9 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { formatNumber, formatDate, cn } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * Risk Monitoring - Tenant risk assessment and management
@@ -50,6 +52,10 @@ export default function RiskMonitoringPage() {
     const [loading, setLoading] = useState(true);
     const [selectedTenant, setSelectedTenant] = useState<TenantRisk | null>(null);
     const [filterLevel, setFilterLevel] = useState<string>('all');
+    const [error, setError] = useState<string | null>(null);
+    const [savingThresholds, setSavingThresholds] = useState(false);
+    const [runningAssessment, setRunningAssessment] = useState(false);
+    const [actionMessage, setActionMessage] = useState<string | null>(null);
     const [thresholds, setThresholds] = useState({
         bounceRateWarn: 5,
         bounceRateCritical: 10,
@@ -57,25 +63,63 @@ export default function RiskMonitoringPage() {
         complaintRateCritical: 3,
     });
     const [thresholdError, setThresholdError] = useState<string | null>(null);
+    const modalContainerRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
         loadTenants();
+        loadThresholds();
     }, []);
+
+    useEffect(() => {
+        if (!selectedTenant) return;
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setSelectedTenant(null);
+            }
+        };
+        const previousActive = document.activeElement as HTMLElement | null;
+        const focusTarget = modalContainerRef.current?.querySelector('button, input, [tabindex]:not([tabindex="-1"])') as HTMLElement | null;
+        focusTarget?.focus();
+        window.addEventListener('keydown', handleEscape);
+        return () => {
+            window.removeEventListener('keydown', handleEscape);
+            previousActive?.focus?.();
+        };
+    }, [selectedTenant]);
+
+    async function loadThresholds() {
+        try {
+            const response = await fetch('/api/risk?resource=thresholds', { credentials: 'include' });
+            if (!response.ok) return;
+            const data = await response.json() as { thresholds?: typeof thresholds };
+            if (data.thresholds) {
+                setThresholds(data.thresholds);
+            }
+        } catch {
+            // Keep defaults when unavailable
+        }
+    }
 
     async function loadTenants() {
         try {
+            setError(null);
             const response = await fetch('/api/risk', { credentials: 'include' });
             if (!response.ok) throw new Error(`Failed to fetch risk data: ${response.status}`);
             const data = await response.json();
             setTenants(data);
         } catch (err) {
             console.error('Failed to load risk data:', err);
+            setError('Unable to load risk data. Please retry.');
         } finally {
             setLoading(false);
         }
     }
 
-    function applyLimit(tenantId: string, limitType: 'daily' | 'hourly', value: number | null) {
+    async function applyLimit(tenantId: string, limitType: 'daily' | 'hourly', value: number | null) {
+        setActionMessage(null);
+        setError(null);
+        const previousTenants = tenants;
+        const previousSelected = selectedTenant;
         setTenants(prev => prev.map(t => 
             t.tenantId === tenantId
                 ? { ...t, limits: { ...t.limits, [limitType]: value } }
@@ -84,9 +128,35 @@ export default function RiskMonitoringPage() {
         if (selectedTenant?.tenantId === tenantId) {
             setSelectedTenant(prev => prev ? { ...prev, limits: { ...prev.limits, [limitType]: value } } : null);
         }
+
+        try {
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/api/risk', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ action: 'set_limit', tenantId, limitType, value }),
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to persist limit update: ${response.status}`);
+            }
+            setActionMessage('Limit saved.');
+        } catch (err) {
+            console.error('Failed to save limit:', err);
+            setTenants(previousTenants);
+            setSelectedTenant(previousSelected);
+            setError('Failed to save limit. Changes were reverted.');
+        }
     }
 
-    function resolveFlag(tenantId: string, flagId: string) {
+    async function resolveFlag(tenantId: string, flagId: string) {
+        setActionMessage(null);
+        setError(null);
+        const previousTenants = tenants;
+        const previousSelected = selectedTenant;
         setTenants(prev => prev.map(t => 
             t.tenantId === tenantId
                 ? { ...t, flags: t.flags.map(f => f.id === flagId ? { ...f, resolved: true } : f) }
@@ -98,6 +168,113 @@ export default function RiskMonitoringPage() {
                 flags: prev.flags.map(f => f.id === flagId ? { ...f, resolved: true } : f)
             } : null);
         }
+
+        try {
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/api/risk', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ action: 'resolve_flag', tenantId, flagId }),
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to persist flag resolution: ${response.status}`);
+            }
+            setActionMessage('Flag resolved.');
+        } catch (err) {
+            console.error('Failed to resolve flag:', err);
+            setTenants(previousTenants);
+            setSelectedTenant(previousSelected);
+            setError('Failed to resolve flag. Changes were reverted.');
+        }
+    }
+
+    async function runRiskAssessment() {
+        setRunningAssessment(true);
+        setActionMessage(null);
+        setError(null);
+        try {
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/api/risk', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ action: 'run_assessment' }),
+            });
+            if (!response.ok) {
+                throw new Error(`Risk assessment failed: ${response.status}`);
+            }
+            await loadTenants();
+            setActionMessage('Risk assessment completed.');
+        } catch (err) {
+            console.error('Failed to run risk assessment:', err);
+            setError('Failed to run risk assessment.');
+        } finally {
+            setRunningAssessment(false);
+        }
+    }
+
+    async function saveThresholds() {
+        setSavingThresholds(true);
+        setError(null);
+        try {
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/api/risk', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ action: 'save_thresholds', thresholds }),
+            });
+            if (!response.ok) {
+                throw new Error(`Threshold save failed: ${response.status}`);
+            }
+            setActionMessage('Thresholds validated and saved.');
+        } catch (err) {
+            console.error('Failed to save thresholds:', err);
+            setError('Failed to save thresholds.');
+        } finally {
+            setSavingThresholds(false);
+        }
+    }
+
+    async function suspendSelectedTenant() {
+        if (!selectedTenant) return;
+        setError(null);
+        setActionMessage(null);
+        try {
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/api/tenants', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ id: selectedTenant.tenantId, action: 'suspend' }),
+            });
+            if (!response.ok) {
+                throw new Error(`Suspend failed: ${response.status}`);
+            }
+            setActionMessage(`Tenant ${selectedTenant.tenantName} suspended.`);
+            setSelectedTenant(null);
+            await loadTenants();
+        } catch (err) {
+            console.error('Failed to suspend tenant:', err);
+            setError('Failed to suspend tenant.');
+        }
+    }
+
+    function viewAuditHistory(tenantId: string) {
+        window.open(`/audit?tenantId=${encodeURIComponent(tenantId)}`, '_blank', 'noopener,noreferrer');
     }
 
     const filteredTenants = filterLevel === 'all'
@@ -105,11 +282,7 @@ export default function RiskMonitoringPage() {
         : tenants.filter(t => t.riskLevel === filterLevel);
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading risk monitoring data..." />;
     }
 
     const riskCounts = {
@@ -128,10 +301,25 @@ export default function RiskMonitoringPage() {
                         Monitor and manage tenant sending behavior and compliance risks
                     </p>
                 </div>
-                <button className="px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium shadow-sm hover:bg-primary/90 transition-all hover:shadow-md">
-                    Run Risk Assessment
+                <button
+                    onClick={runRiskAssessment}
+                    disabled={runningAssessment}
+                    className="px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium shadow-sm hover:bg-primary/90 transition-all hover:shadow-md disabled:opacity-60"
+                >
+                    {runningAssessment ? 'Running…' : 'Run Risk Assessment'}
                 </button>
             </div>
+
+            {(error || actionMessage) && (
+                <div className={cn(
+                    'mb-4 rounded-lg border px-4 py-2 text-sm',
+                    error
+                        ? 'bg-destructive/10 border-destructive/30 text-destructive'
+                        : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700'
+                )}>
+                    {error ?? actionMessage}
+                </div>
+            )}
 
             <div className="mb-6 rounded-xl border border-border bg-card p-4">
                 <div className="flex items-center justify-between mb-3">
@@ -139,9 +327,10 @@ export default function RiskMonitoringPage() {
                     <span className="text-xs text-muted-foreground">Units: percentages (%)</span>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    <label className="text-xs text-muted-foreground">
+                    <label className="text-xs text-muted-foreground" htmlFor="risk-threshold-bounce-warn">
                         Bounce warn
                         <input
+                            id="risk-threshold-bounce-warn"
                             type="number"
                             value={thresholds.bounceRateWarn}
                             onChange={(event) => {
@@ -153,9 +342,10 @@ export default function RiskMonitoringPage() {
                             className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
                         />
                     </label>
-                    <label className="text-xs text-muted-foreground">
+                    <label className="text-xs text-muted-foreground" htmlFor="risk-threshold-bounce-critical">
                         Bounce critical
                         <input
+                            id="risk-threshold-bounce-critical"
                             type="number"
                             value={thresholds.bounceRateCritical}
                             onChange={(event) => {
@@ -167,9 +357,10 @@ export default function RiskMonitoringPage() {
                             className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
                         />
                     </label>
-                    <label className="text-xs text-muted-foreground">
+                    <label className="text-xs text-muted-foreground" htmlFor="risk-threshold-complaint-warn">
                         Complaint warn
                         <input
+                            id="risk-threshold-complaint-warn"
                             type="number"
                             value={thresholds.complaintRateWarn}
                             onChange={(event) => {
@@ -181,9 +372,10 @@ export default function RiskMonitoringPage() {
                             className="mt-1 w-full px-3 py-2 border border-border rounded-lg bg-background text-sm"
                         />
                     </label>
-                    <label className="text-xs text-muted-foreground">
+                    <label className="text-xs text-muted-foreground" htmlFor="risk-threshold-complaint-critical">
                         Complaint critical
                         <input
+                            id="risk-threshold-complaint-critical"
                             type="number"
                             value={thresholds.complaintRateCritical}
                             onChange={(event) => {
@@ -211,10 +403,12 @@ export default function RiskMonitoringPage() {
                                 return;
                             }
                             setThresholdError(null);
+                            void saveThresholds();
                         }}
+                        disabled={savingThresholds}
                         className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs font-medium"
                     >
-                        Validate Thresholds
+                        {savingThresholds ? 'Saving…' : 'Validate Thresholds'}
                     </button>
                     {thresholdError && <span className="text-xs text-destructive">{thresholdError}</span>}
                 </div>
@@ -223,14 +417,15 @@ export default function RiskMonitoringPage() {
             {/* Risk Summary */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                 {[
-                    { level: 'critical', label: 'Critical', count: riskCounts.critical, color: 'bg-destructive/10 border-destructive/20 text-destructive hover:bg-destructive/20' },
-                    { level: 'high', label: 'High Risk', count: riskCounts.high, color: 'bg-orange-500/10 border-orange-500/20 text-orange-600 hover:bg-orange-500/20' },
-                    { level: 'medium', label: 'Medium', count: riskCounts.medium, color: 'bg-amber-500/10 border-amber-500/20 text-amber-600 hover:bg-amber-500/20' },
-                    { level: 'low', label: 'Low Risk', count: riskCounts.low, color: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 hover:bg-emerald-500/20' },
-                ].map(({ level, label, count, color }) => (
+                    { level: 'critical', label: 'Critical', marker: '⛔', count: riskCounts.critical, color: 'bg-destructive/10 border-destructive/20 text-destructive hover:bg-destructive/20' },
+                    { level: 'high', label: 'High Risk', marker: '⚠️', count: riskCounts.high, color: 'bg-orange-500/10 border-orange-500/20 text-orange-600 hover:bg-orange-500/20' },
+                    { level: 'medium', label: 'Medium', marker: '•', count: riskCounts.medium, color: 'bg-amber-500/10 border-amber-500/20 text-amber-600 hover:bg-amber-500/20' },
+                    { level: 'low', label: 'Low Risk', marker: '✓', count: riskCounts.low, color: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 hover:bg-emerald-500/20' },
+                ].map(({ level, label, marker, count, color }) => (
                     <button
                         key={level}
                         onClick={() => setFilterLevel(filterLevel === level ? 'all' : level)}
+                        aria-pressed={filterLevel === level}
                         className={cn(
                             'rounded-xl border p-5 text-left transition-all',
                             color,
@@ -238,7 +433,7 @@ export default function RiskMonitoringPage() {
                         )}
                     >
                         <div className="text-3xl font-bold mb-1">{count}</div>
-                        <div className="text-sm font-medium opacity-90">{label}</div>
+                        <div className="text-sm font-medium opacity-90">{marker} {label}</div>
                     </button>
                 ))}
             </div>
@@ -269,6 +464,14 @@ export default function RiskMonitoringPage() {
                             key={tenant.tenantId}
                             className="p-5 hover:bg-muted/50 cursor-pointer transition-colors"
                             onClick={() => setSelectedTenant(tenant)}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault();
+                                    setSelectedTenant(tenant);
+                                }
+                            }}
                         >
                             <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-4">
@@ -284,6 +487,7 @@ export default function RiskMonitoringPage() {
                                     <div>
                                         <div className="font-bold text-foreground text-lg">{tenant.tenantName}</div>
                                         <div className="text-sm text-muted-foreground font-mono">{tenant.domain}</div>
+                                        <div className="text-xs text-muted-foreground mt-1">Risk level: {tenant.riskLevel.toUpperCase()}</div>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-8">
@@ -326,7 +530,14 @@ export default function RiskMonitoringPage() {
             {/* Tenant Detail Modal */}
             {selectedTenant && (
                 <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setSelectedTenant(null)}>
-                    <div className="bg-card rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-border max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+                    <div
+                        ref={modalContainerRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={`Risk details for ${selectedTenant.tenantName}`}
+                        className="bg-card rounded-2xl p-6 w-full max-w-2xl shadow-2xl border border-border max-h-[90vh] overflow-y-auto"
+                        onClick={(e) => e.stopPropagation()}
+                    >
                         <div className="flex items-start justify-between mb-8 border-b border-border pb-6">
                             <div className="flex items-center gap-5">
                                 <div className={cn(
@@ -414,9 +625,10 @@ export default function RiskMonitoringPage() {
                             <h3 className="font-semibold text-foreground mb-4">Enforcement & Limits</h3>
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                                 <div>
-                                    <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Daily Limit</div>
+                                    <label htmlFor="risk-modal-daily-limit" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Daily Limit</label>
                                     <div className="flex items-center gap-2 bg-card p-1 rounded-lg border border-border focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary transition-all">
                                         <input
+                                            id="risk-modal-daily-limit"
                                             type="number"
                                             value={selectedTenant.limits.daily || ''}
                                             placeholder="Unlimited"
@@ -427,9 +639,10 @@ export default function RiskMonitoringPage() {
                                     </div>
                                 </div>
                                 <div>
-                                    <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Hourly Limit</div>
+                                    <label htmlFor="risk-modal-hourly-limit" className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">Hourly Limit</label>
                                     <div className="flex items-center gap-2 bg-card p-1 rounded-lg border border-border focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary transition-all">
                                         <input
+                                            id="risk-modal-hourly-limit"
                                             type="number"
                                             value={selectedTenant.limits.hourly || ''}
                                             placeholder="Unlimited"
@@ -444,10 +657,16 @@ export default function RiskMonitoringPage() {
 
                         {/* Actions */}
                         <div className="flex gap-3 pt-4 border-t border-border">
-                            <button className="flex-1 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
+                            <button
+                                onClick={() => viewAuditHistory(selectedTenant.tenantId)}
+                                className="flex-1 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md"
+                            >
                                 View Full Audit History
                             </button>
-                            <button className="px-5 py-2.5 bg-card border border-destructive/30 text-destructive rounded-lg font-medium hover:bg-destructive/10 hover:border-destructive/50 shadow-sm transition-all">
+                            <button
+                                onClick={suspendSelectedTenant}
+                                className="px-5 py-2.5 bg-card border border-destructive/30 text-destructive rounded-lg font-medium hover:bg-destructive/10 hover:border-destructive/50 shadow-sm transition-all"
+                            >
                                 Suspend Tenant
                             </button>
                         </div>

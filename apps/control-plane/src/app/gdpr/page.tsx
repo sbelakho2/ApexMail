@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { formatDate, cn, getStatusColor } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 /**
  * GDPR Requests - Data subject request management
@@ -42,27 +44,44 @@ export default function GDPRPage() {
     const [loading, setLoading] = useState(true);
     const [selectedRequest, setSelectedRequest] = useState<GDPRRequest | null>(null);
     const [filterStatus, setFilterStatus] = useState<string>('');
-    const [now, setNow] = useState(() => new Date('2026-01-15T10:00:00Z'));
+    const [now, setNow] = useState(() => new Date());
+    const [error, setError] = useState<string | null>(null);
+    const [refreshing, setRefreshing] = useState(false);
 
     useEffect(() => {
-        setNow(new Date());
         loadRequests();
+        const interval = setInterval(() => {
+            setNow(new Date());
+            void refreshRequests();
+        }, 60000);
+        return () => clearInterval(interval);
     }, []);
+
+    async function refreshRequests() {
+        setRefreshing(true);
+        try {
+            await loadRequests();
+        } finally {
+            setRefreshing(false);
+        }
+    }
 
     async function loadRequests() {
         try {
+            setError(null);
             const response = await fetch('/api/gdpr', { credentials: 'include' });
             if (!response.ok) throw new Error(`Failed to fetch GDPR requests: ${response.status}`);
             const data = await response.json();
             setRequests(data);
         } catch (err) {
             console.error('Failed to load GDPR requests:', err);
+            setError('Failed to load GDPR requests.');
         } finally {
             setLoading(false);
         }
     }
 
-    function updateRequestStatus(requestId: string, newStatus: GDPRRequest['status']) {
+    async function updateRequestStatus(requestId: string, newStatus: GDPRRequest['status']) {
         const updates: Partial<GDPRRequest> = { status: newStatus };
         if (newStatus === 'verified') {
             updates.verifiedAt = new Date().toISOString();
@@ -70,12 +89,36 @@ export default function GDPRPage() {
         if (newStatus === 'completed') {
             updates.completedAt = new Date().toISOString();
         }
-        
+
+        const previousRequests = requests;
+        const previousSelected = selectedRequest;
         setRequests(prev => prev.map(r => 
             r.id === requestId ? { ...r, ...updates } : r
         ));
         if (selectedRequest?.id === requestId) {
             setSelectedRequest(prev => prev ? { ...prev, ...updates } : null);
+        }
+
+        try {
+            setError(null);
+            const csrfToken = await getCsrfToken();
+            const response = await fetch('/api/gdpr', {
+                method: 'PATCH',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
+                body: JSON.stringify({ id: requestId, status: newStatus }),
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to persist GDPR status: ${response.status}`);
+            }
+        } catch (err) {
+            console.error('Failed to persist GDPR status:', err);
+            setRequests(previousRequests);
+            setSelectedRequest(previousSelected);
+            setError('Failed to update request status. Changes were reverted.');
         }
     }
 
@@ -101,11 +144,7 @@ export default function GDPRPage() {
     };
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading GDPR requests..." />;
     }
 
     return (
@@ -118,9 +157,24 @@ export default function GDPRPage() {
                     </p>
                 </div>
                 <div className="text-sm text-muted-foreground">
-                    SLA: 30 days to complete requests
+                    <div className="flex items-center gap-3">
+                        <span>SLA: 30 days to complete requests</span>
+                        <button
+                            type="button"
+                            onClick={() => void refreshRequests()}
+                            className="px-2.5 py-1 rounded-md border border-border text-foreground hover:bg-muted transition-colors"
+                        >
+                            {refreshing ? 'Refreshing…' : 'Refresh'}
+                        </button>
+                    </div>
                 </div>
             </div>
+
+            {error && (
+                <div className="mb-4 p-3 rounded-lg border border-destructive/30 bg-destructive/10 text-sm text-destructive">
+                    {error}
+                </div>
+            )}
 
             {/* Status Overview */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -133,6 +187,7 @@ export default function GDPRPage() {
                     <button
                         key={status}
                         onClick={() => setFilterStatus(filterStatus === status ? '' : status)}
+                        aria-pressed={filterStatus === status}
                         className={cn(
                             'rounded-xl border p-4 text-left transition-all',
                             color,

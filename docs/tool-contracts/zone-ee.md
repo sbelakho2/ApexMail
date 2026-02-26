@@ -78,8 +78,8 @@ Zone.ee does not provide health-check-based DNS failover natively. Failover is m
 ## 5. Limitations
 
 - **No CDN**: Zone.ee is a DNS registrar, not a CDN. Static assets are served directly from the Hetzner server.
-- **No WAF**: Application-level rate limiting and security are handled by the Hono API middleware and Hetzner firewall rules.
-- **No DDoS protection at edge**: Basic protection is provided by Hetzner's network-level DDoS mitigation. Application-level protection is handled by rate limiting middleware.
+- **WAF**: Application-level security is handled by the custom Rust `waf-engine` crate (AST-based SQLi/XSS detection, OWASP CRS-compatible). See [Security Systems Reference](../security/Security_Systems.md).
+- **DDoS protection**: Application-level DDoS protection is provided by the custom Rust `ddos-protection` crate (5-layer defense, ML anomaly detection, SMTP state machine). Network-level protection is augmented by Hetzner's DDoS mitigation. See [Security Systems Reference](../security/Security_Systems.md).
 - **No traffic splitting**: Canary deployments use application-level routing, not DNS-based traffic splitting.
 
 ---

@@ -7,8 +7,20 @@
 
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { z } from 'zod';
 
 export const dynamic = 'force-dynamic';
+
+// SEC-004 FIX: Add strict input validation schema
+const createSecretSchema = z.object({
+    name: z.string()
+        .min(1, 'Name is required')
+        .max(100, 'Name must be 100 characters or less')
+        .regex(/^[a-zA-Z0-9_-]+$/, 'Name must contain only alphanumeric characters, underscores, and hyphens'),
+    type: z.enum(['api_key', 'oauth_secret', 'encryption_key', 'signing_key', 'custom']),
+    description: z.string().max(500, 'Description must be 500 characters or less').optional().default(''),
+    rotationPolicy: z.enum(['manual', 'daily', 'weekly', 'monthly']).optional().default('manual'),
+});
 
 interface SecretRow {
     id: string;
@@ -23,6 +35,29 @@ interface SecretRow {
     expires_at: string | null;
     created_at: string;
     updated_at: string;
+}
+
+async function logSecretAudit(action: string, secretId: string, metadata?: Record<string, unknown>) {
+    try {
+        await query(
+            `INSERT INTO audit_logs (
+                timestamp,
+                action,
+                resource_type,
+                resource_id,
+                metadata
+            ) VALUES (
+                NOW(),
+                $1,
+                'secret',
+                $2,
+                $3::jsonb
+            )`,
+            [action, secretId, JSON.stringify(metadata ?? {})]
+        );
+    } catch (error) {
+        console.error('Secrets audit log error:', error);
+    }
 }
 
 function mapRow(r: SecretRow) {
@@ -61,21 +96,28 @@ export async function GET() {
 export async function POST(request: Request) {
     try {
         const body = await request.json();
-        const { name, type, description, rotationPolicy } = body as {
-            name: string; type: string; description: string; rotationPolicy: string;
-        };
-        if (!name || !type) {
-            return NextResponse.json({ error: 'Name and type are required' }, { status: 400 });
+        
+        // SEC-004 FIX: Validate input with zod schema
+        const parseResult = createSecretSchema.safeParse(body);
+        if (!parseResult.success) {
+            return NextResponse.json(
+                { error: 'Invalid input', details: parseResult.error.flatten().fieldErrors },
+                { status: 400 }
+            );
         }
+        
+        const { name, type, description, rotationPolicy } = parseResult.data;
+        
         const rows = await query<SecretRow>(
             `INSERT INTO secrets (name, type, description, rotation_policy, status)
              VALUES ($1, $2, $3, $4, 'active')
              RETURNING *`,
-            [name, type, description || '', rotationPolicy || 'manual']
+            [name, type, description, rotationPolicy]
         );
         if (rows.length === 0) {
             return NextResponse.json({ error: 'Failed to create secret' }, { status: 500 });
         }
+        await logSecretAudit('control_plane.secret.created', rows[0].id, { type, name });
         return NextResponse.json(mapRow(rows[0]), { status: 201 });
     } catch (error) {
         console.error('Secrets POST error:', error);
@@ -99,6 +141,7 @@ export async function PATCH(request: Request) {
             if (rows.length === 0) {
                 return NextResponse.json({ error: 'Secret not found' }, { status: 404 });
             }
+            await logSecretAudit('control_plane.secret.rotated', id);
             return NextResponse.json({ success: true, message: `Secret ${id} rotated`, lastRotated: rows[0].last_rotated, status: 'active' });
         }
         if (action === 'revoke') {
@@ -109,6 +152,7 @@ export async function PATCH(request: Request) {
             if (rows.length === 0) {
                 return NextResponse.json({ error: 'Secret not found' }, { status: 404 });
             }
+            await logSecretAudit('control_plane.secret.revoked', id);
             return NextResponse.json({ success: true, message: `Secret ${id} revoked`, status: 'revoked' });
         }
         return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
@@ -120,8 +164,16 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
     try {
-        const { searchParams } = new URL(request.url);
-        const id = searchParams.get('id');
+        let id: string | null = null;
+
+        try {
+            const body = await request.json() as { id?: string };
+            id = body.id ?? null;
+        } catch {
+            const { searchParams } = new URL(request.url);
+            id = searchParams.get('id');
+        }
+
         if (!id) {
             return NextResponse.json({ error: 'Secret ID is required' }, { status: 400 });
         }
@@ -132,6 +184,7 @@ export async function DELETE(request: Request) {
         if (rows.length === 0) {
             return NextResponse.json({ error: 'Secret not found' }, { status: 404 });
         }
+        await logSecretAudit('control_plane.secret.deleted', id);
         return NextResponse.json({ success: true, message: `Secret ${id} deleted` });
     } catch (error) {
         console.error('Secrets DELETE error:', error);

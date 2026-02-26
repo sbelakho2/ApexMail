@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use regex::Regex;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 use crate::types::*;
 
@@ -25,11 +26,22 @@ const VELOCITY_THRESHOLD: usize = 3;
 const VELOCITY_CACHE_MAX: usize = 500_000;
 
 /// Combined bot UA regex.
-static BOT_UA_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)(bot|crawler|spider|slurp|mediapartners|preview|fetch|scan|check|monitor|wget|curl|python-requests|go-http|java/|ahrefsbot|bingbot|yandexbot|baiduspider|duckduckbot|facebot|ia_archiver|semrushbot|mj12bot|dotbot|petalbot|rogerbot|seznambot|exabot)"
-    ).unwrap()
+static BOT_UA_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    compile_regex(
+        r"(?i)(bot|crawler|spider|slurp|mediapartners|preview|fetch|scan|check|monitor|wget|curl|python-requests|go-http|java/|ahrefsbot|bingbot|yandexbot|baiduspider|duckduckbot|facebot|ia_archiver|semrushbot|mj12bot|dotbot|petalbot|rogerbot|seznambot|exabot)",
+        "bot_ua",
+    )
 });
+
+fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(e) => {
+            warn!(pattern = %pattern, label, error = %e, "Invalid regex pattern; disabling matcher");
+            None
+        }
+    }
+}
 
 /// Known bot IP prefixes (simplified – GCP/AWS crawlers).
 static KNOWN_BOT_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -179,7 +191,9 @@ impl BotDetectionService {
 
 /// Check if user-agent matches known bot patterns.
 pub fn is_bot_ua(ua: &str) -> bool {
-    BOT_UA_RE.is_match(ua)
+    BOT_UA_RE
+        .as_ref()
+        .map_or(false, |regex| regex.is_match(ua))
 }
 
 /// Check if IP matches known bot prefixes.

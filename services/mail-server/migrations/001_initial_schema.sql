@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS email_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     
     -- Email content
-    from_address TEXT NOT NULL,
+    from_address TEXT NOT NULL CHECK (
+        char_length(from_address) <= 320 AND from_address ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    ),
     to_addresses TEXT[] NOT NULL,
     cc_addresses TEXT[] DEFAULT '{}',
     bcc_addresses TEXT[] DEFAULT '{}',
@@ -43,7 +45,10 @@ CREATE TABLE IF NOT EXISTS email_queue (
     priority INT NOT NULL DEFAULT 0,
     tags TEXT[] DEFAULT '{}',
     metadata JSONB DEFAULT '{}'::jsonb
-);
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE IF NOT EXISTS email_queue_default
+    PARTITION OF email_queue DEFAULT;
 
 -- Indexes for email queue
 CREATE INDEX IF NOT EXISTS idx_email_queue_status_retry 
@@ -130,7 +135,9 @@ CREATE TABLE IF NOT EXISTS mail_messages (
     message_id TEXT NOT NULL, -- RFC 5322 Message-ID
     
     -- Envelope
-    from_address TEXT NOT NULL,
+    from_address TEXT NOT NULL CHECK (
+        char_length(from_address) <= 320 AND from_address ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    ),
     from_name TEXT,
     to_addresses JSONB NOT NULL DEFAULT '[]'::jsonb,
     cc_addresses JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -167,8 +174,8 @@ CREATE INDEX IF NOT EXISTS idx_mail_messages_unread
     ON mail_messages(account_id, is_read) 
     WHERE is_read = false AND is_deleted = false;
 
-CREATE INDEX IF NOT EXISTS idx_mail_messages_message_id 
-    ON mail_messages(message_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_messages_account_message_id 
+    ON mail_messages(account_id, message_id);
 
 -- Full-text search index
 CREATE INDEX IF NOT EXISTS idx_mail_messages_search 
@@ -199,7 +206,10 @@ CREATE TABLE IF NOT EXISTS email_delivery_log (
     
     -- Timestamps
     attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+) PARTITION BY RANGE (attempted_at);
+
+CREATE TABLE IF NOT EXISTS email_delivery_log_default
+    PARTITION OF email_delivery_log DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_email_delivery_log_email 
     ON email_delivery_log(email_id, attempted_at DESC);
@@ -212,7 +222,7 @@ CREATE TABLE IF NOT EXISTS dkim_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     domain TEXT NOT NULL,
     selector TEXT NOT NULL,
-    private_key_pem TEXT NOT NULL,
+    private_key_encrypted BYTEA NOT NULL,
     public_key_pem TEXT NOT NULL,
     
     -- Status

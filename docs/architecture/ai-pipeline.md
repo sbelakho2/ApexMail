@@ -163,6 +163,7 @@ The planner selects from a pre-indexed knowledge store:
 | `segmentation` | Audience targeting, segments |
 | `sto` | Send-time optimisation |
 | `capabilities` | Feature summary |
+| `security_systems` | 8-layer security stack: DDoS protection, WAF, IDS/IPS, spam filter, attachment sandbox, ATO protection, DLP, threat intelligence |
 
 Each context article is ~200-500 tokens, ensuring the full prompt (system + context + plan + user) stays well within the 8192-token context window.
 

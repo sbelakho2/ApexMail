@@ -15,8 +15,8 @@ use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
-static DNS_LOOKUP: LazyLock<DnsLookup> = LazyLock::new(|| {
-    DnsLookup::new().expect("DNS resolver initialization failed")
+static DNS_LOOKUP: LazyLock<Result<DnsLookup, String>> = LazyLock::new(|| {
+    DnsLookup::new().map_err(|e| format!("DNS resolver initialization failed: {e}"))
 });
 
 pub fn router() -> Router<AppState> {
@@ -226,7 +226,9 @@ async fn verify_domain(
     .ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
 
     // Perform real DNS lookups
-    let dns = &*DNS_LOOKUP;
+    let dns = DNS_LOOKUP.as_ref().map_err(|e| {
+        ApiError::ServiceUnavailable(format!("DNS verification unavailable: {e}"))
+    })?;
 
     // Check SPF record
     let spf = match dns.lookup_spf(&row.name).await {

@@ -1,7 +1,16 @@
 import { defineConfig, devices } from '@playwright/test';
+import crypto from 'node:crypto';
+import os from 'node:os';
 import dotenv from 'dotenv';
 
 dotenv.config({ path: '.env.test' });
+
+const e2eBypassKey = process.env.E2E_BYPASS_KEY ?? crypto.randomUUID();
+const sessionSecret = process.env.SESSION_SECRET ?? crypto.randomBytes(32).toString('hex');
+const ciWorkers = Math.max(2, Math.min(4, os.cpus().length));
+
+process.env.E2E_BYPASS_KEY = e2eBypassKey;
+process.env.SESSION_SECRET = sessionSecret;
 
 /**
  * Playwright Configuration for ApexMail E2E Testing
@@ -44,7 +53,7 @@ export default defineConfig({
     retries: process.env.CI ? 2 : 0,
     
     // Limit workers to prevent dev server overload under parallel load
-    workers: process.env.CI ? 1 : 2,
+    workers: process.env.CI ? ciWorkers : 2,
     
     // Reporter to use
     reporter: [
@@ -201,8 +210,8 @@ export default defineConfig({
                 ...process.env,
                 BASE_URL: process.env.BASE_URL || 'http://127.0.0.1:3010',
                 E2E_TEST_MODE: 'true',
-                E2E_BYPASS_KEY: process.env.E2E_BYPASS_KEY || 'apexmail-e2e-bypass-key',
-                SESSION_SECRET: process.env.SESSION_SECRET || 'test-web-session-secret',
+                E2E_BYPASS_KEY: e2eBypassKey,
+                SESSION_SECRET: sessionSecret,
                 API_URL: 'http://127.0.0.1:3001',
             },
         },

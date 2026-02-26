@@ -1,0 +1,10 @@
+target/
+crates/**/target/
+.git/
+.gitignore
+**/*.rs.bk
+**/*.log
+**/node_modules/
+**/dist/
+**/.turbo/
+**/.DS_Store

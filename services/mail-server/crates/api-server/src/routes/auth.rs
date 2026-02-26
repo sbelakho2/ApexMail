@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -168,9 +168,10 @@ async fn login(
     };
 
     let token = encode(
-        &Header::default(),
+        &Header::new(Algorithm::RS256),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| ApiError::Internal(format!("invalid JWT private key configuration: {e}")))?,
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
@@ -337,8 +338,9 @@ async fn refresh_token(
     Json(body): Json<RefreshRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     // Decode existing token to get claims
-    let key = jsonwebtoken::DecodingKey::from_secret(state.config.jwt_secret.as_bytes());
-    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    let key = jsonwebtoken::DecodingKey::from_rsa_pem(state.config.jwt_public_key_pem.as_bytes())
+        .map_err(|e| ApiError::Internal(format!("invalid JWT public key configuration: {e}")))?;
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "sub", "tenant_id"]);
 
     let token_data = jsonwebtoken::decode::<JwtClaims>(&body.token, &key, &validation)?;
@@ -389,9 +391,10 @@ async fn refresh_token(
     };
 
     let token = encode(
-        &Header::default(),
+        &Header::new(Algorithm::RS256),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| ApiError::Internal(format!("invalid JWT private key configuration: {e}")))?,
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 

@@ -25,6 +25,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Decoded tracking event payload.
@@ -45,6 +46,16 @@ pub struct UnsubscribeData {
     pub recipient: String,
     #[allow(dead_code)] // timestamp used for token expiry validation, wired in future middleware
     pub timestamp_ms: u64,
+}
+
+/// Detailed tracking token decode errors for auditing and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackingDecodeError {
+    InvalidLength,
+    InvalidBase64,
+    TruncatedPayload,
+    DecryptionFailed,
+    InvalidPayload,
 }
 
 // ── Blob lengths ─────────────────────────────────────────────────────────────
@@ -112,16 +123,29 @@ impl TrackingCodec {
     }
 
     /// Decode a URL-safe tracking token back into `TrackingData`.
-    /// Returns `None` on any parse or authentication failure.
+    /// Returns `None` on failure, while emitting an auditable error classification.
     pub fn decode(&self, token: &str) -> Option<TrackingData> {
+        match self.decode_with_error(token) {
+            Ok(data) => Some(data),
+            Err(err) => {
+                warn!(error = ?err, "Tracking token decode failed");
+                None
+            }
+        }
+    }
+
+    /// Decode a URL-safe tracking token with a typed failure reason.
+    pub fn decode_with_error(&self, token: &str) -> std::result::Result<TrackingData, TrackingDecodeError> {
         if token.len() < 10 || token.len() > 4096 {
-            return None;
+            return Err(TrackingDecodeError::InvalidLength);
         }
 
-        let combined = URL_SAFE_NO_PAD.decode(token).ok()?;
+        let combined = URL_SAFE_NO_PAD
+            .decode(token)
+            .map_err(|_| TrackingDecodeError::InvalidBase64)?;
 
         if combined.len() < IV_LEN + AUTH_TAG_LEN + 1 {
-            return None;
+            return Err(TrackingDecodeError::TruncatedPayload);
         }
 
         let (iv_bytes, rest) = combined.split_at(IV_LEN);
@@ -129,9 +153,9 @@ impl TrackingCodec {
 
         let plaintext = self
             .aes128gcm_decrypt(ciphertext, iv_bytes, tag_bytes)
-            .ok()?;
+            .map_err(|_| TrackingDecodeError::DecryptionFailed)?;
 
-        deserialize_tracking_data(&plaintext)
+        deserialize_tracking_data(&plaintext).ok_or(TrackingDecodeError::InvalidPayload)
     }
 
     // ── Unsubscribe token ─────────────────────────────────────────────

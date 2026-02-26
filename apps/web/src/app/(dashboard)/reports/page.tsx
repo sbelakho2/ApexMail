@@ -10,32 +10,40 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ApexAreaChart, ApexBarChart } from '@/components/charts';
 import { formatNumber } from '@/lib/utils';
+import { useAPI } from '@/hooks/use-api';
 
 interface StatsData {
     sent: number; delivered: number; opened: number; clicked: number; bounced: number;
     rates: { delivery: string; open: string; click: string; bounce: string };
 }
 
-export default function ReportsPage() {
+interface DashboardAnalyticsResponse {
+    dashboard?: {
+        engagement?: StatsData;
+    };
+}
+
+interface VolumeAnalyticsResponse {
+    volume?: Array<{ date: string; sent: number; delivered: number }>;
+}
+
+interface EngagementAnalyticsResponse {
+    engagement?: Array<{ date: string; opens: number; clicks: number }>;
+}
+
+function ReportsPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const [windowDays, setWindowDays] = React.useState<7 | 30 | 90>(30);
     const [showOpens, setShowOpens] = React.useState(true);
     const [showClicks, setShowClicks] = React.useState(true);
-    const [stats, setStats] = React.useState<StatsData | null>(null);
-    const [volume, setVolume] = React.useState<Array<{ date: string; sent: number; delivered: number }>>([]);
-    const [engagement, setEngagement] = React.useState<Array<{ date: string; opens: number; clicks: number }>>([]);
-    const [loading, setLoading] = React.useState(true);
-    const [sourceStatus, setSourceStatus] = React.useState({ stats: 'ok', volume: 'ok', engagement: 'ok' } as const);
-    const [exportProgress, setExportProgress] = React.useState(0);
     const [isExporting, setIsExporting] = React.useState(false);
     const [reportJobStatus, setReportJobStatus] = React.useState<'idle' | 'queued' | 'running' | 'done' | 'failed'>('idle');
-    const [integrityMessage, setIntegrityMessage] = React.useState('');
-    const [dataFidelity, setDataFidelity] = React.useState<'sampled' | 'full'>('full');
+    const [dataFidelity] = React.useState<'sampled' | 'full'>('full');
     const [showGlossary, setShowGlossary] = React.useState(false);
     const [showPrintMode, setShowPrintMode] = React.useState(false);
     const [supportsAdvancedCharts, setSupportsAdvancedCharts] = React.useState(true);
-    const [dataDelayed, setDataDelayed] = React.useState(false);
+    const [dataDelayed] = React.useState(false);
     const countFormatter = React.useCallback((value: number) => formatNumber(value), []);
 
     React.useEffect(() => {
@@ -52,89 +60,66 @@ export default function ReportsPage() {
         }
     }, []);
 
-    React.useEffect(() => {
-        const since = new Date(Date.now() - windowDays * 86_400_000).toISOString();
-        const until = new Date().toISOString();
-        setLoading(true);
+    const since = React.useMemo(() => new Date(Date.now() - windowDays * 86_400_000).toISOString(), [windowDays]);
+    const until = React.useMemo(() => new Date().toISOString(), [windowDays]);
 
-        Promise.allSettled([
-            fetch(`/v1/analytics/dashboard?since=${since}&until=${until}`),
-            fetch(`/v1/analytics/volume?since=${since}&until=${until}&granularity=day`),
-            fetch(`/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`),
-        ]).then(async ([dashRes, volRes, engRes]) => {
-            const nextStatus = {
-                stats: dashRes.status === 'fulfilled' && dashRes.value.ok ? 'ok' : 'error',
-                volume: volRes.status === 'fulfilled' && volRes.value.ok ? 'ok' : 'error',
-                engagement: engRes.status === 'fulfilled' && engRes.value.ok ? 'ok' : 'error',
-            } as const;
-            setSourceStatus(nextStatus);
+    const dashboardQuery = useAPI<DashboardAnalyticsResponse>(`/v1/analytics/dashboard?since=${since}&until=${until}`, {
+        refreshInterval: 60_000,
+        keepPreviousData: true,
+    });
+    const volumeQuery = useAPI<VolumeAnalyticsResponse>(`/v1/analytics/volume?since=${since}&until=${until}&granularity=day`, {
+        refreshInterval: 60_000,
+        keepPreviousData: true,
+    });
+    const engagementQuery = useAPI<EngagementAnalyticsResponse>(`/v1/analytics/engagement?since=${since}&until=${until}&granularity=day`, {
+        refreshInterval: 60_000,
+        keepPreviousData: true,
+    });
 
-            if (dashRes.status === 'fulfilled' && dashRes.value.ok) {
-                const json = await dashRes.value.json();
-                setStats(json.dashboard?.engagement ?? null);
-            } else {
-                setStats(null);
-            }
-            if (volRes.status === 'fulfilled' && volRes.value.ok) {
-                setVolume((await volRes.value.json()).volume ?? []);
-            } else {
-                setVolume([]);
-            }
-            if (engRes.status === 'fulfilled' && engRes.value.ok) {
-                setEngagement((await engRes.value.json()).engagement ?? []);
-            } else {
-                setEngagement([]);
-            }
-        }).finally(() => setLoading(false));
-    }, [windowDays]);
+    const stats = dashboardQuery.data?.dashboard?.engagement ?? null;
+    const volume = volumeQuery.data?.volume ?? [];
+    const engagement = engagementQuery.data?.engagement ?? [];
+    const loading = dashboardQuery.isLoading || volumeQuery.isLoading || engagementQuery.isLoading;
+    const sourceStatus = {
+        stats: dashboardQuery.error ? 'error' : 'ok',
+        volume: volumeQuery.error ? 'error' : 'ok',
+        engagement: engagementQuery.error ? 'error' : 'ok',
+    } as const;
 
     const handleExportCsv = () => {
         if (isExporting) return;
         setIsExporting(true);
-        setReportJobStatus('queued');
-        setExportProgress(5);
+        setReportJobStatus('running');
 
-        let progress = 5;
-        const timer = window.setInterval(() => {
-            progress = Math.min(progress + 20, 95);
-            setExportProgress(progress);
-            setReportJobStatus(progress > 20 ? 'running' : 'queued');
-        }, 400);
+        try {
+            const rows = [['Date', 'Sent', 'Delivered', 'Opens', 'Clicks']];
+            const entries = volume.slice(0, Math.max(volume.length, engagement.length));
+            entries.forEach((point, index) => {
+                rows.push([
+                    String(point?.date ?? engagement[index]?.date ?? ''),
+                    String(point?.sent ?? 0),
+                    String(point?.delivered ?? 0),
+                    String(engagement[index]?.opens ?? 0),
+                    String(engagement[index]?.clicks ?? 0),
+                ]);
+            });
 
-        window.setTimeout(() => {
-            window.clearInterval(timer);
-            setExportProgress(100);
-            window.setTimeout(() => {
-                const rows = [['Date', 'Sent', 'Delivered', 'Opens', 'Clicks']];
-                const entries = volume.slice(0, Math.max(volume.length, engagement.length));
-                entries.forEach((point, index) => {
-                    rows.push([
-                        String(point?.date ?? engagement[index]?.date ?? ''),
-                        String(point?.sent ?? 0),
-                        String(point?.delivered ?? 0),
-                        String(engagement[index]?.opens ?? 0),
-                        String(engagement[index]?.clicks ?? 0),
-                    ]);
-                });
+            const blob = new Blob([rows.map((row) => row.join(',')).join('\n')], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `reports-${windowDays}d.csv`;
+            document.body.appendChild(anchor);
+            anchor.click();
+            document.body.removeChild(anchor);
+            URL.revokeObjectURL(url);
 
-                const blob = new Blob([rows.map((row) => row.join(',')).join('\n')], { type: 'text/csv;charset=utf-8;' });
-                const url = URL.createObjectURL(blob);
-                const anchor = document.createElement('a');
-                anchor.href = url;
-                anchor.download = `reports-${windowDays}d.csv`;
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-                URL.revokeObjectURL(url);
-
-                const hash = String(rows.length * 9973);
-                setIntegrityMessage(`Download integrity check passed (checksum ${hash}).`);
-                setReportJobStatus('done');
-
-                setIsExporting(false);
-                setExportProgress(0);
-            }, 350);
-        }, 2200);
+            setReportJobStatus('done');
+        } catch {
+            setReportJobStatus('failed');
+        } finally {
+            setIsExporting(false);
+        }
     };
 
     return (
@@ -144,7 +129,7 @@ export default function ReportsPage() {
                 description="Analyze your email performance with detailed reports."
                 breadcrumbs={[{ label: 'Reports' }]}
                 actions={
-                    <div className="contents" data-testid="reports-range-controls">
+                    <div className="contents" data-testid="reports-range-controls" role="radiogroup" aria-label="Reports date range">
                         <Button variant="outline" onClick={() => setShowPrintMode((prev) => !prev)}>
                             {showPrintMode ? 'Exit Print Mode' : 'Print/PDF Mode'}
                         </Button>
@@ -152,6 +137,8 @@ export default function ReportsPage() {
                             <Button
                                 key={days}
                                 variant={windowDays === days ? 'default' : 'outline'}
+                                role="radio"
+                                aria-checked={windowDays === days}
                                 onClick={() => {
                                     const next = days as 7 | 30 | 90;
                                     setWindowDays(next);
@@ -176,7 +163,7 @@ export default function ReportsPage() {
                             </Button>
                         ))}
                         <Button variant="outline" disabled={isExporting} onClick={handleExportCsv}>
-                            <Download className="mr-2 h-4 w-4" />{isExporting ? `Exporting ${exportProgress}%` : 'Export CSV'}
+                            <Download className="mr-2 h-4 w-4" />{isExporting ? 'Exporting…' : 'Export CSV'}
                         </Button>
                     </div>
                 }
@@ -185,7 +172,7 @@ export default function ReportsPage() {
             {isExporting ? (
                 <Card>
                     <CardContent className="p-4 text-sm text-muted-foreground">
-                        Preparing CSV export… {exportProgress}% complete.
+                        Preparing CSV export…
                     </CardContent>
                 </Card>
             ) : null}
@@ -199,9 +186,6 @@ export default function ReportsPage() {
                 <Card>
                     <CardContent className="p-4 text-sm text-muted-foreground flex items-center justify-between gap-3">
                         <span>Data fidelity: <span className="font-semibold text-foreground">{dataFidelity}</span></span>
-                        <Button size="sm" variant="outline" onClick={() => setDataFidelity((prev) => (prev === 'full' ? 'sampled' : 'full'))}>
-                            Toggle fidelity
-                        </Button>
                     </CardContent>
                 </Card>
             </div>
@@ -214,7 +198,6 @@ export default function ReportsPage() {
                 <Card>
                     <CardContent className="p-4 text-sm text-muted-foreground">
                         Data freshness is within expected range.
-                        <Button size="sm" variant="ghost" className="ml-2" onClick={() => setDataDelayed(true)}>Simulate delay</Button>
                     </CardContent>
                 </Card>
             )}
@@ -224,12 +207,6 @@ export default function ReportsPage() {
                     <CardContent className="p-4 text-sm text-foreground">
                         Advanced chart interactions are limited in this browser/device profile.
                     </CardContent>
-                </Card>
-            ) : null}
-
-            {integrityMessage ? (
-                <Card>
-                    <CardContent className="p-4 text-sm text-muted-foreground">{integrityMessage}</CardContent>
                 </Card>
             ) : null}
 
@@ -372,5 +349,13 @@ export default function ReportsPage() {
                 </Card>
             )}
         </div>
+    );
+}
+
+export default function ReportsPage() {
+    return (
+        <React.Suspense fallback={<div className="flex flex-col gap-6 px-4 md:px-6 lg:px-8 py-6 text-sm text-muted-foreground">Loading reports...</div>}>
+            <ReportsPageContent />
+        </React.Suspense>
     );
 }

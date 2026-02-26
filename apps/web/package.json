@@ -7,7 +7,7 @@
         "dev": "next dev -p 3000",
         "build": "next build",
         "start": "next start -p 3000",
-        "lint": "next lint",
+        "lint": "eslint src --ext .ts,.tsx",
         "type-check": "tsc --noEmit"
     },
     "dependencies": {
@@ -60,8 +60,12 @@
         "@types/react": "^18.2.55",
         "@types/react-dom": "^18.2.19",
         "autoprefixer": "^10.4.17",
-        "eslint": "^8.56.0",
+        "@typescript-eslint/eslint-plugin": "^8.10.0",
+        "@typescript-eslint/parser": "^8.10.0",
+        "eslint": "^9.15.0",
         "eslint-config-next": "^14.1.0",
+        "eslint-plugin-react-hooks": "^4.6.2",
+        "eslint-plugin-unused-imports": "^3.0.0",
         "postcss": "^8.4.35",
         "tailwindcss": "^3.4.1",
         "tailwindcss-animate": "^1.0.7",

@@ -71,6 +71,9 @@ export function PricingFAQ() {
  <div key={faq.question} className="border-b border-surface-100 last:border-0">
  <button
  onClick={() => setOpenIndex(openIndex === index ? null : index)}
+ aria-expanded={openIndex === index}
+ aria-controls={`faq-panel-${index}`}
+ id={`faq-button-${index}`}
  className="w-full flex items-center justify-between py-6 text-left group"
  >
  <span className="text-lg font-medium text-surface-900 group-hover:text-primary-600 transition-colors">{faq.question}</span>
@@ -84,6 +87,9 @@ export function PricingFAQ() {
  <AnimatePresence>
  {openIndex === index && (
  <motion.div
+ id={`faq-panel-${index}`}
+ role="region"
+ aria-labelledby={`faq-button-${index}`}
  initial={{ opacity: 0, height: 0 }}
  animate={{ opacity: 1, height: 'auto' }}
  exit={{ opacity: 0, height: 0 }}

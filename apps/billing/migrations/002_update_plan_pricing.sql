@@ -13,28 +13,28 @@ BEGIN;
 -- Update Pro plan pricing to $65/mo (6500 cents, 65000 yearly)
 UPDATE plans SET 
   price_monthly = 6500,
-  price_yearly = 65000,
+  price_yearly = 6500 * 10,
   updated_at = NOW()
 WHERE name = 'pro';
 
 -- Update Growth plan pricing to $150/mo (15000 cents, 150000 yearly)
 UPDATE plans SET 
   price_monthly = 15000,
-  price_yearly = 150000,
+  price_yearly = 15000 * 10,
   updated_at = NOW()
 WHERE name = 'growth';
 
 -- Update Scale plan pricing to $350/mo (35000 cents, 350000 yearly)
 UPDATE plans SET 
   price_monthly = 35000,
-  price_yearly = 350000,
+  price_yearly = 35000 * 10,
   updated_at = NOW()
 WHERE name = 'scale';
 
 -- Update Enterprise plan pricing to $800/mo (80000 cents, 800000 yearly)
 UPDATE plans SET 
   price_monthly = 80000,
-  price_yearly = 800000,
+  price_yearly = 80000 * 10,
   updated_at = NOW()
 WHERE name = 'enterprise';
 
@@ -42,7 +42,7 @@ WHERE name = 'enterprise';
 -- NOTE: billing_audit_log columns are: tenant_id VARCHAR(26), action, actor_id, actor_type, details JSONB
 INSERT INTO billing_audit_log (tenant_id, action, actor_id, actor_type, details)
 SELECT 
-  'system',
+  NULL,
   'pricing_update',
   gen_random_uuid(),
   'system',

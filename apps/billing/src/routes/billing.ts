@@ -4,11 +4,17 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { withTransaction } from '@apexmail/db';
 import type { BillingEnv, BillingContext } from '../app.js';
-import { calculatePaygCost, PAYG_PRICING } from '../services/plans.js';
+import { calculateOverageCost, calculatePaygCost, PAYG_PRICING } from '../services/plans.js';
 
 export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
+
+  const operationFailed = (c: Parameters<typeof router.get>[1] extends (arg: infer C) => unknown ? C : never, error: Error, label = 'Billing operation failed') => {
+    console.error(`${label}:`, error);
+    return c.json({ error: 'Operation failed' }, 500);
+  };
 
   // Get usage summary
   router.get('/usage', async (c) => {
@@ -20,7 +26,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.metering.getUsage(tenantId, periodStart, periodEnd);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value);
@@ -29,14 +35,15 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
   // Get real-time counter
   router.get('/usage/realtime/:metric', async (c) => {
     const tenantId = c.get('tenantId');
-    const metric = c.req.param('metric') as 'emails_sent' | 'api_calls';
+    const metricSchema = z.enum(['emails_sent', 'api_calls']);
+    const metric = metricSchema.parse(c.req.param('metric'));
     const now = new Date();
     const periodKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
     const result = await ctx.metering.getRealtimeCounter(tenantId, metric, periodKey);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json({ metric, count: result.value, period: periodKey });
@@ -59,7 +66,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.usageAlerts.configureThresholds(tenantId, parsed.thresholds);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value, 201);
@@ -72,7 +79,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.stripe.getSubscription(tenantId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     if (!result.value) {
@@ -89,13 +96,24 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
 
     const schema = z.object({
       priceId: z.string(),
+      // SEC-011 FIX: Check exact domain match to prevent bypass via evil-apexmail.ee
       successUrl: z.string().url().refine(
-        (u) => { try { const h = new URL(u).hostname; return h.endsWith('apexmail.ee') || h === 'localhost'; } catch { return false; } },
-        'Redirect URL must belong to apexmail.ee'
+        (u) => { 
+          try { 
+            const h = new URL(u).hostname; 
+            return h === 'apexmail.ee' || h.endsWith('.apexmail.ee') || (process.env.NODE_ENV !== 'production' && h === 'localhost'); 
+          } catch { return false; } 
+        },
+        'Redirect URL must belong to apexmail.ee domain'
       ),
       cancelUrl: z.string().url().refine(
-        (u) => { try { const h = new URL(u).hostname; return h.endsWith('apexmail.ee') || h === 'localhost'; } catch { return false; } },
-        'Redirect URL must belong to apexmail.ee'
+        (u) => { 
+          try { 
+            const h = new URL(u).hostname; 
+            return h === 'apexmail.ee' || h.endsWith('.apexmail.ee') || (process.env.NODE_ENV !== 'production' && h === 'localhost'); 
+          } catch { return false; } 
+        },
+        'Redirect URL must belong to apexmail.ee domain'
       ),
     });
 
@@ -109,7 +127,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     );
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value);
@@ -121,9 +139,15 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const body = await c.req.json();
 
     const schema = z.object({
+      // SEC-011 FIX: Check exact domain match to prevent bypass
       returnUrl: z.string().url().refine(
-        (u) => { try { const h = new URL(u).hostname; return h.endsWith('apexmail.ee') || h === 'localhost'; } catch { return false; } },
-        'Redirect URL must belong to apexmail.ee'
+        (u) => { 
+          try { 
+            const h = new URL(u).hostname; 
+            return h === 'apexmail.ee' || h.endsWith('.apexmail.ee') || (process.env.NODE_ENV !== 'production' && h === 'localhost'); 
+          } catch { return false; } 
+        },
+        'Redirect URL must belong to apexmail.ee domain'
       ),
     });
 
@@ -132,7 +156,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.stripe.createPortalSession(tenantId, parsed.returnUrl);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value);
@@ -146,7 +170,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.proration.previewProration(tenantId, planName);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value);
@@ -161,10 +185,15 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.listInvoices(tenantId, { limit, offset });
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
-    return c.json({ invoices: result.value });
+    return c.json({
+      invoices: result.value.invoices,
+      totalCount: result.value.totalCount,
+      limit,
+      offset,
+    });
   });
 
   // Get invoice details
@@ -175,7 +204,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.getInvoice(invoiceId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     if (!result.value) {
@@ -198,7 +227,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.getInvoice(invoiceId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     if (!result.value) {
@@ -223,7 +252,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.invoices.getInvoice(invoiceId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     if (!result.value) {
@@ -250,7 +279,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.wallet.getBalance(tenantId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value);
@@ -266,7 +295,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.wallet.getTransactions(tenantId, { limit, offset, type });
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json({ transactions: result.value });
@@ -279,7 +308,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.slaCredits.getPendingCredits(tenantId);
 
     if (!result.ok) {
-      console.error("Billing operation failed:", result.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, result.error);
     }
 
     return c.json(result.value);
@@ -359,6 +388,28 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
   });
 
+  // Calculate subscription overage estimate
+  router.post('/overage/estimate', async (c) => {
+    const body = await c.req.json();
+
+    const schema = z.object({
+      emailsSent: z.number().min(0),
+      emailLimit: z.number(),
+    });
+
+    const parsed = schema.parse(body);
+    const overageCostCents = calculateOverageCost(parsed.emailsSent, parsed.emailLimit);
+
+    return c.json({
+      usage: {
+        emailsSent: parsed.emailsSent,
+        emailLimit: parsed.emailLimit,
+      },
+      overageCostCents,
+      overageCostUsd: `$${(overageCostCents / 100).toFixed(2)}`,
+    });
+  });
+
   // Get PAYG current period usage and cost
   router.get('/payg/usage', async (c) => {
     const tenantId = c.get('tenantId');
@@ -369,7 +420,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const usageResult = await ctx.metering.getUsage(tenantId, periodStart, periodEnd);
 
     if (!usageResult.ok) {
-      console.error("Usage check failed:", usageResult.error); return c.json({ error: "Operation failed" }, 500);
+      return operationFailed(c, usageResult.error, 'Usage check failed');
     }
 
     const usage = usageResult.value;
@@ -416,34 +467,47 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
         );
 
         if (!cancelResult.ok) {
-          console.error("Cancel failed:", cancelResult.error); return c.json({ error: "Operation failed" }, 500);
+          return operationFailed(c, cancelResult.error, 'Cancel failed');
         }
       }
 
-      // Update tenant plan to PAYG
-      const updateResult = await ctx.plans.updateTenantPlan(tenantId, 'payg');
-
-      if (!updateResult.ok) {
-        console.error("Update failed:", updateResult.error); return c.json({ error: "Operation failed" }, 500);
-      }
-
-      // E-170: Audit trail for plan change to PAYG
       const previousSub = subscriptionResult.ok ? subscriptionResult.value : null;
       const effectiveDate = previousSub?.billingCycleEnd ?? new Date().toISOString();
-      await ctx.db.query(
-        `INSERT INTO audit_logs (id, tenant_id, action, resource_type, metadata, created_at)
-         VALUES (gen_random_uuid(), $1, 'plan.changed', 'subscription',
-                 $2::jsonb, NOW())`,
-        [
-          tenantId,
-          JSON.stringify({
-            previousPlan: previousSub ? 'subscription' : 'unknown',
-            newPlan: 'payg',
-            changeType: 'downgrade',
-            effectiveDate,
-          }),
-        ]
-      );
+
+      // Atomically update tenant plan and append audit trail to avoid partial local state updates
+      const localUpdateResult = await withTransaction(ctx.db, async (tx) => {
+        const updateResult = await tx.client.query(
+          `UPDATE tenants SET plan = 'payg', updated_at = NOW() WHERE id = $1`,
+          [tenantId]
+        );
+
+        if (updateResult.rowCount !== 1) {
+          throw new Error('Failed to update tenant plan');
+        }
+
+        const auditResult = await tx.client.query(
+          `INSERT INTO audit_logs (id, tenant_id, action, resource_type, metadata, created_at)
+           VALUES (gen_random_uuid(), $1, 'plan.changed', 'subscription',
+                   $2::jsonb, NOW())`,
+          [
+            tenantId,
+            JSON.stringify({
+              previousPlan: previousSub ? 'subscription' : 'unknown',
+              newPlan: 'payg',
+              changeType: 'downgrade',
+              effectiveDate,
+            }),
+          ]
+        );
+
+        if (auditResult.rowCount !== 1) {
+          throw new Error('Failed to write audit log');
+        }
+      });
+
+      if (!localUpdateResult.ok) {
+        console.error("Update failed:", localUpdateResult.error); return c.json({ error: "Operation failed" }, 500);
+      }
 
       return c.json({
         success: true,
@@ -471,7 +535,7 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     }
 
     // E-170: Audit trail for plan change
-    await ctx.db.query(
+    const auditResult = await ctx.db.query(
       `INSERT INTO audit_logs (id, tenant_id, action, resource_type, metadata, created_at)
        VALUES (gen_random_uuid(), $1, 'plan.changed', 'subscription',
                $2::jsonb, NOW())`,
@@ -485,6 +549,11 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
         }),
       ]
     );
+
+    if (!auditResult.ok || auditResult.value.rowCount !== 1) {
+      console.error("Audit insert failed:", auditResult.ok ? new Error('No audit row inserted') : auditResult.error);
+      return c.json({ error: 'Failed to persist audit log' }, 500);
+    }
 
     return c.json({
       success: true,

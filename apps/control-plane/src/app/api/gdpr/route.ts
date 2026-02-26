@@ -7,16 +7,9 @@
 
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { tableExists } from '@/lib/schema';
 
 export const dynamic = 'force-dynamic';
-
-async function tableExists(tableName: string): Promise<boolean> {
-    const rows = await query<{ exists: boolean }>(
-        `SELECT to_regclass($1) IS NOT NULL as exists`,
-        [`public.${tableName}`]
-    );
-    return rows[0]?.exists ?? false;
-}
 
 export async function GET(request: Request) {
     try {
@@ -73,6 +66,45 @@ export async function GET(request: Request) {
         // in production masks real failures and misleads operators.
         return NextResponse.json(
             { error: 'Failed to fetch GDPR requests' },
+            { status: 500 }
+        );
+    }
+}
+
+export async function PATCH(request: Request) {
+    try {
+        const hasGdprRequests = await tableExists('gdpr_requests');
+        if (!hasGdprRequests) {
+            return NextResponse.json({ error: 'gdpr_requests table not found' }, { status: 500 });
+        }
+
+        const body = await request.json() as { id?: string; status?: string };
+        const id = body.id;
+        const status = body.status;
+
+        if (!id || !status) {
+            return NextResponse.json({ error: 'id and status are required' }, { status: 400 });
+        }
+
+        const allowedStatuses = new Set(['pending', 'verified', 'processing', 'completed', 'rejected']);
+        if (!allowedStatuses.has(status)) {
+            return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
+        }
+
+        await query(
+            `UPDATE gdpr_requests
+             SET status = $2,
+                 verified_at = CASE WHEN $2 = 'verified' THEN NOW() ELSE verified_at END,
+                 completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END
+             WHERE id = $1`,
+            [id, status]
+        );
+
+        return NextResponse.json({ success: true });
+    } catch (error) {
+        console.error('GDPR PATCH API error:', error);
+        return NextResponse.json(
+            { error: 'Failed to update GDPR request' },
             { status: 500 }
         );
     }

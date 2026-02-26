@@ -1,25 +1,20 @@
--- Migration: Add dunning_records table
--- The DunningService code expects this table with specific columns.
--- Note: This is separate from dunning_states which has a different schema.
+-- Migration: Provide dunning_records without duplicating dunning_states
+-- The DunningService expects dunning_records; map it to dunning_states via a view.
 
-CREATE TABLE IF NOT EXISTS dunning_records (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    status VARCHAR(30) NOT NULL DEFAULT 'healthy',
-    failed_payment_count INTEGER NOT NULL DEFAULT 0,
-    first_failed_at TIMESTAMPTZ,
-    last_failed_at TIMESTAMPTZ,
-    next_retry_at TIMESTAMPTZ,
-    suspended_at TIMESTAMPTZ,
-    grace_period_ends_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_dunning_records_status ON dunning_records(status);
-CREATE INDEX IF NOT EXISTS idx_dunning_records_next_retry ON dunning_records(next_retry_at);
-CREATE INDEX IF NOT EXISTS idx_dunning_records_tenant ON dunning_records(tenant_id);
+CREATE OR REPLACE VIEW dunning_records AS
+SELECT
+    id,
+    tenant_id,
+    dunning_state AS status,
+    retry_count AS failed_payment_count,
+    NULL::timestamptz AS first_failed_at,
+    last_retry_at AS last_failed_at,
+    next_retry_at,
+    hard_suspended_at AS suspended_at,
+    grace_period_ends_at,
+    created_at,
+    updated_at
+FROM dunning_states;
 
 -- Dunning events table for audit trail
 CREATE TABLE IF NOT EXISTS dunning_events (

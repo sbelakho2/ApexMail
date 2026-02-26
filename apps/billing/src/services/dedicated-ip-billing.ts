@@ -28,12 +28,12 @@ import { config } from '../config.js';
 const logger = createLogger();
 
 /** Stripe price ID for the $30/mo dedicated IP add-on */
-function getDedicatedIpPriceId(): string {
+function getDedicatedIpPriceId(): Result<string, Error> {
   const priceId = config.stripeDedicatedIpPriceId;
   if (!priceId) {
-    throw new Error('STRIPE_DEDICATED_IP_PRICE_ID is not configured');
+    return Result.err(new Error('STRIPE_DEDICATED_IP_PRICE_ID is not configured'));
   }
-  return priceId;
+  return Result.ok(priceId);
 }
 
 /** $30/mo in cents — must match the Stripe price and the API service constant */
@@ -164,20 +164,36 @@ export class DedicatedIpBillingService {
 
     const sub = subResult.value.rows[0];
     if (!sub) {
-      // No active subscription — cannot bill. Leave as pending for retry.
+      // No active subscription — mark retry metadata so the row is not stuck hot-looping in pending_charge.
+      await this.db.query(
+        `UPDATE dedicated_ips SET
+           billing_failure_count = COALESCE(billing_failure_count, 0) + 1,
+           billing_retry_after = NOW() + (
+             LEAST(POWER(2, LEAST(COALESCE(billing_failure_count, 0), 5)), 30) || ' minutes'
+           )::interval,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [ip.id],
+      ).catch((dbErr: unknown) => { logger.error('Failed to update pending charge retry metadata', { ipId: ip.id, dbErr: String(dbErr) }); });
+
       logger.warn('No active Stripe subscription for tenant, skipping IP billing', {
         tenantId: ip.tenant_id,
         ipId: ip.id,
       });
-      return Result.ok(undefined);
+      return Result.err(new Error('No active Stripe subscription for tenant'));
     }
 
     try {
+      const priceIdResult = getDedicatedIpPriceId();
+      if (!priceIdResult.ok) {
+        return Result.err(priceIdResult.error);
+      }
+
       // Create a new subscription item for this dedicated IP
       const subscriptionItem = await this.stripe.subscriptionItems.create(
         {
           subscription: sub.stripe_subscription_id,
-          price: getDedicatedIpPriceId(),
+          price: priceIdResult.value,
           quantity: 1,
           proration_behavior: 'create_prorations',
           metadata: {

@@ -7,7 +7,8 @@
   "license": "PROPRIETARY",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "services/*"
   ],
   "scripts": {
     "dev": "turbo run dev",
@@ -46,7 +47,7 @@
   },
   "engines": {
     "node": ">=20.11.0",
-    "pnpm": ">=8.14.0"
+    "pnpm": ">=9.0.0"
   },
-  "packageManager": "pnpm@8.14.0"
+  "packageManager": "pnpm@9.0.0"
 }

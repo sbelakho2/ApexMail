@@ -14,11 +14,17 @@ services:
     ports:
       - "127.0.0.1:50052:50052"  # gRPC
     environment:
-      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
       - FROM_DOMAIN=apexmail.ee
       - DKIM_SELECTOR=apexmail2026
       - DKIM_KEY_PATH=/etc/apexmail/dkim/private.pem
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        exec /usr/bin/tini -- outbound-queue --listen 0.0.0.0:50052
     volumes:
       - ./config/dkim:/etc/apexmail/dkim:ro
     depends_on:
@@ -41,8 +47,11 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: '0.5'
         reservations:
           memory: 128M
+    secrets:
+      - postgres_password
 
   # SMTP Edge Server (Inbound)
   # Receives incoming emails on port 25
@@ -52,12 +61,18 @@ services:
       dockerfile: Dockerfile
       target: smtp-edge
     ports:
-      - "25:25"     # SMTP
+      - "${SMTP_EDGE_BIND:-127.0.0.1}:25:25"     # SMTP
     environment:
-      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
       - HOSTNAME=mail.apexmail.ee
       - MAILSTORE_URL=http://mailstore:50051
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        exec /usr/bin/tini -- smtp-edge --listen 0.0.0.0:25
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,8 +97,11 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: '0.5'
         reservations:
           memory: 128M
+    secrets:
+      - postgres_password
 
   # Submission Server (Authenticated SMTP)
   # For clients to send mail via port 587
@@ -93,15 +111,21 @@ services:
       dockerfile: Dockerfile
       target: submission
     ports:
-      - "587:587"   # Submission
-      - "465:465"   # SMTPS (TLS)
+      - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:587:587"   # Submission
+      - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:465:465"   # SMTPS (TLS)
     environment:
-      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
       - HOSTNAME=mail.apexmail.ee
       - OUTBOUND_URL=http://outbound-queue:50052
       - REQUIRE_AUTH=true
       - ENABLE_STARTTLS=true
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        exec /usr/bin/tini -- submission-server --listen 0.0.0.0:587
     volumes:
       - ./config/certs:/etc/apexmail/certs:ro
     depends_on:
@@ -126,8 +150,11 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: '0.5'
         reservations:
           memory: 128M
+    secrets:
+      - postgres_password
 
   # Mailstore Service
   # Message storage and retrieval
@@ -139,8 +166,14 @@ services:
     ports:
       - "127.0.0.1:50051:50051"  # gRPC
     environment:
-      - DATABASE_URL=postgres://apexmail:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/apexmail_mail
       - RUST_LOG=info
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        exec /usr/bin/tini -- mailstore
     depends_on:
       postgres:
         condition: service_healthy
@@ -161,8 +194,11 @@ services:
       resources:
         limits:
           memory: 512M
+          cpus: '0.5'
         reservations:
           memory: 128M
+    secrets:
+      - postgres_password
 
   # PostgreSQL Database
   postgres:
@@ -171,7 +207,7 @@ services:
       - "127.0.0.1:5433:5432"  # Different port to avoid conflicts
     environment:
       - POSTGRES_USER=apexmail
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
       - POSTGRES_DB=apexmail_mail
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -193,8 +229,38 @@ services:
       resources:
         limits:
           memory: 1G
+          cpus: '1.0'
         reservations:
           memory: 256M
+    secrets:
+      - postgres_password
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru"
+    ports:
+      - "127.0.0.1:6379:6379"
+    networks:
+      - apexmail
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
 
 networks:
   apexmail:
@@ -202,3 +268,7 @@ networks:
 
 volumes:
   postgres_data:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password

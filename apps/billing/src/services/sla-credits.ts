@@ -154,11 +154,7 @@ export class SlaCreditsService {
     // Safe JSON parsing for features
     let features: Record<string, unknown> = {};
     try {
-      try {
-        features = JSON.parse(row.features || '{}');
-      } catch {
-        features = {};
-      }
+      features = JSON.parse(row.features || '{}') as Record<string, unknown>;
     } catch {
       console.warn(`[SlaCredits] Failed to parse plan features for tenant ${tenantId}`);
       return Result.ok(null);
@@ -394,7 +390,7 @@ export class SlaCreditsService {
    * Calculate availability for a period
    */
   private async calculateAvailability(
-    _tenantId: string,
+    tenantId: string,
     periodStart: Date,
     periodEnd: Date
   ): Promise<Result<{ actual: number }, Error>> {
@@ -407,8 +403,10 @@ export class SlaCreditsService {
          COUNT(*)::text as total_checks,
          COUNT(*) FILTER (WHERE status = 'healthy')::text as successful_checks
        FROM health_check_logs
-       WHERE checked_at >= $1 AND checked_at < $2`,
-      [periodStart, periodEnd]
+       WHERE tenant_id = $1
+         AND checked_at >= $2
+         AND checked_at < $3`,
+      [tenantId, periodStart, periodEnd]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -478,11 +476,14 @@ export class SlaCreditsService {
 
     if (!tenantsResult.ok) return Result.err(tenantsResult.error);
 
+    const results = await Promise.all(
+      tenantsResult.value.rows.map((row) => this.checkCompliance(row.id, periodStart, periodEnd))
+    );
+
     let totalBreaches = 0;
     let totalCredits = 0;
 
-    for (const row of tenantsResult.value.rows) {
-      const result = await this.checkCompliance(row.id, periodStart, periodEnd);
+    for (const result of results) {
       if (result.ok) {
         totalBreaches += result.value.breaches.length;
         totalCredits += result.value.totalCreditAmount;

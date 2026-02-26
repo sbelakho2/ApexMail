@@ -251,10 +251,17 @@ export class EnterpriseContractService {
       : 0;
 
     // Calculate monthly committed volume
-    const monthsInContract = Math.ceil(
+    const monthsInContract = Math.max(1, Math.ceil(
       (contract.endDate.getTime() - contract.startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)
+    ));
+    const monthIndex = Math.max(0, Math.floor(
+      (periodStart.getTime() - contract.startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)
+    ));
+    const monthlyCommitted = this.calculateMonthlyCommittedVolume(
+      contract.committedVolume,
+      monthsInContract,
+      monthIndex
     );
-    const monthlyCommitted = Math.floor(contract.committedVolume / monthsInContract);
 
     let overageCharge = 0;
     if (totalUsage > monthlyCommitted) {
@@ -280,7 +287,7 @@ export class EnterpriseContractService {
   /**
    * Get contract by ID
    */
-  async getContract(contractId: string): Promise<Result<Contract | null, Error>> {
+  async getContract(contractId: string, tenantId?: string): Promise<Result<Contract | null, Error>> {
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -307,8 +314,10 @@ export class EnterpriseContractService {
               base_price, committed_volume, overage_rate, annual_prepay_discount,
               additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
               signed_at, signed_by, purchase_order_number, created_at, updated_at
-       FROM enterprise_contracts WHERE id = $1`,
-      [contractId]
+       FROM enterprise_contracts
+       WHERE id = $1
+         AND ($2::text IS NULL OR tenant_id = $2)`,
+      [contractId, tenantId ?? null]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -462,6 +471,12 @@ export class EnterpriseContractService {
     const formatDate = (date: Date): string =>
       date.toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
 
+    const clientName = contract.name || `Tenant ${contract.tenantId}`;
+    const clientAddress = `Tenant ID: ${contract.tenantId}`;
+    const clientVatOrReference = contract.purchaseOrderNumber
+      ? `PO Number: ${contract.purchaseOrderNumber}`
+      : 'VAT Number: Not provided';
+
     return `
 <!DOCTYPE html>
 <html>
@@ -498,9 +513,9 @@ export class EnterpriseContractService {
     </div>
     <div class="party">
       <strong>Client:</strong><br>
-      [Client Name]<br>
-      [Client Address]<br>
-      [Client VAT Number]
+          ${esc(clientName)}<br>
+          ${esc(clientAddress)}<br>
+          ${esc(clientVatOrReference)}
     </div>
   </div>
 
@@ -625,11 +640,7 @@ export class EnterpriseContractService {
     // Safe JSON parsing for additional_fees
     let additionalFees: Contract['additionalFees'] = [];
     try {
-      try {
-        additionalFees = JSON.parse(row.additional_fees || '[]');
-      } catch {
-        additionalFees = [];
-      }
+      additionalFees = JSON.parse(row.additional_fees || '[]') as Contract['additionalFees'];
     } catch {
       console.warn(`[EnterpriseContracts] Failed to parse additional_fees for contract ${row.id}`);
     }
@@ -656,6 +667,18 @@ export class EnterpriseContractService {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  private calculateMonthlyCommittedVolume(
+    committedVolume: number,
+    monthsInContract: number,
+    monthIndex: number
+  ): number {
+    const safeMonths = Math.max(1, monthsInContract);
+    const boundedMonthIndex = Math.min(Math.max(0, monthIndex), safeMonths - 1);
+    const baseMonthly = Math.floor(committedVolume / safeMonths);
+    const remainder = committedVolume % safeMonths;
+    return baseMonthly + (boundedMonthIndex < remainder ? 1 : 0);
   }
 
   /**
@@ -706,7 +729,7 @@ export class EnterpriseContractService {
     projectedUsage: number;
     overageEstimate: number;
   }, Error>> {
-    const contractResult = await this.getContract(contractId);
+    const contractResult = await this.getContract(contractId, tenantId);
     if (!contractResult.ok) return Result.err(contractResult.error);
     if (!contractResult.value) return Result.err(new Error('Contract not found'));
 
@@ -743,10 +766,14 @@ export class EnterpriseContractService {
       : 0;
 
     // Calculate committed volume for the current period
-    const monthsInContract = Math.ceil(
+    const monthsInContract = Math.max(1, Math.ceil(
       (contract.endDate.getTime() - contract.startDate.getTime()) / (1000 * 60 * 60 * 24 * 30)
+    ));
+    const monthlyCommitted = this.calculateMonthlyCommittedVolume(
+      contract.committedVolume,
+      monthsInContract,
+      monthsSinceStart
     );
-    const monthlyCommitted = Math.floor(contract.committedVolume / Math.max(1, monthsInContract));
     
     // Calculate percentage used
     const percentUsed = monthlyCommitted > 0 ? (currentUsage / monthlyCommitted) * 100 : 0;
@@ -778,7 +805,7 @@ export class EnterpriseContractService {
   /**
    * Submit contract for signature
    */
-  async submitForSignature(_tenantId: string, contractId: string): Promise<Result<Contract, Error>> {
+  async submitForSignature(tenantId: string, contractId: string): Promise<Result<Contract, Error>> {
     const result = await this.db.query<{
       id: string;
       tenant_id: string;
@@ -801,9 +828,9 @@ export class EnterpriseContractService {
       created_at: Date;
       updated_at: Date;
     }>(
-      `UPDATE enterprise_contracts SET status = 'pending_signature', updated_at = NOW() 
-       WHERE id = $1 RETURNING *`,
-      [contractId]
+      `UPDATE enterprise_contracts SET status = 'pending_signature', updated_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+      [contractId, tenantId]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -815,7 +842,7 @@ export class EnterpriseContractService {
   /**
    * Sign contract
    */
-  async signContract(_tenantId: string, contractId: string, data: {
+  async signContract(tenantId: string, contractId: string, data: {
     signatureData: string;
     signerName: string;
     signerTitle: string;
@@ -848,8 +875,8 @@ export class EnterpriseContractService {
         signed_at = $2, 
         signed_by = $3,
         updated_at = NOW() 
-       WHERE id = $1 RETURNING *`,
-      [contractId, data.signedAt, `${data.signerName} (${data.signerTitle})`]
+       WHERE id = $1 AND tenant_id = $4 RETURNING *`,
+      [contractId, data.signedAt, `${data.signerName} (${data.signerTitle})`, tenantId]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -865,7 +892,7 @@ export class EnterpriseContractService {
    * Amendments are stored in the contract_amendments table and go through
    * an approval workflow before being applied to the contract.
    */
-  async requestAmendment(_tenantId: string, contractId: string, amendment: {
+  async requestAmendment(tenantId: string, contractId: string, amendment: {
     reason: string;
     proposedChanges: Record<string, unknown>;
   }): Promise<Result<{ id: string; status: string }, Error>> {
@@ -873,9 +900,12 @@ export class EnterpriseContractService {
     const result = await this.db.query<{ id: string; status: string }>(
       `INSERT INTO contract_amendments (
         contract_id, reason, proposed_changes, status, created_at
-      ) VALUES ($1, $2, $3, 'pending', NOW())
+      )
+      SELECT c.id, $3, $4, 'pending', NOW()
+      FROM enterprise_contracts c
+      WHERE c.id = $1 AND c.tenant_id = $2
       RETURNING id, status`,
-      [contractId, amendment.reason, JSON.stringify(amendment.proposedChanges)]
+      [contractId, tenantId, amendment.reason, JSON.stringify(amendment.proposedChanges)]
     );
     
     if (!result.ok) {
@@ -885,7 +915,7 @@ export class EnterpriseContractService {
     
     const row = result.value.rows[0];
     if (!row) {
-      return Result.err(new Error('Failed to create amendment record'));
+      return Result.err(new Error('Contract not found'));
     }
 
     logger.info('Amendment requested', { 
@@ -900,7 +930,7 @@ export class EnterpriseContractService {
   /**
    * Cancel contract
    */
-  async cancelContract(_tenantId: string, contractId: string, data: {
+  async cancelContract(tenantId: string, contractId: string, data: {
     reason: string;
     effectiveDate?: Date;
   }): Promise<Result<Contract, Error>> {
@@ -930,8 +960,8 @@ export class EnterpriseContractService {
         status = 'terminated', 
         end_date = $2,
         updated_at = NOW() 
-       WHERE id = $1 RETURNING *`,
-      [contractId, data.effectiveDate || new Date()]
+       WHERE id = $1 AND tenant_id = $3 RETURNING *`,
+      [contractId, data.effectiveDate || new Date(), tenantId]
     );
 
     if (!result.ok) return Result.err(result.error);
@@ -944,7 +974,7 @@ export class EnterpriseContractService {
   /**
    * Get renewal quote
    */
-  async getRenewalQuote(_tenantId: string, contractId: string): Promise<Result<{
+  async getRenewalQuote(tenantId: string, contractId: string): Promise<Result<{
     currentContract: Contract;
     proposedTerms: {
       basePrice: number;
@@ -953,7 +983,7 @@ export class EnterpriseContractService {
     };
     savings: number;
   }, Error>> {
-    const contractResult = await this.getContract(contractId);
+    const contractResult = await this.getContract(contractId, tenantId);
     if (!contractResult.ok) return Result.err(contractResult.error);
     if (!contractResult.value) return Result.err(new Error('Contract not found'));
 
@@ -975,7 +1005,7 @@ export class EnterpriseContractService {
   /**
    * Renew contract
    */
-  async renewContract(_tenantId: string, contractId: string, terms: {
+  async renewContract(tenantId: string, contractId: string, terms: {
     newEndDate: Date;
     newTerms?: {
       baseFee?: number;
@@ -983,7 +1013,7 @@ export class EnterpriseContractService {
       overageRates?: Record<string, number>;
     };
   }): Promise<Result<Contract, Error>> {
-    const existingResult = await this.getContract(contractId);
+    const existingResult = await this.getContract(contractId, tenantId);
     if (!existingResult.ok) return Result.err(existingResult.error);
     if (!existingResult.value) return Result.err(new Error('Contract not found'));
 
@@ -1010,7 +1040,7 @@ export class EnterpriseContractService {
   /**
    * Submit purchase order
    */
-  async submitPurchaseOrder(_tenantId: string, contractId: string, po: {
+  async submitPurchaseOrder(tenantId: string, contractId: string, po: {
     poNumber: string;
     amount: number;
     issuedDate: Date;
@@ -1042,8 +1072,8 @@ export class EnterpriseContractService {
       `UPDATE enterprise_contracts SET 
         purchase_order_number = $2,
         updated_at = NOW() 
-       WHERE id = $1 RETURNING *`,
-      [contractId, po.poNumber]
+       WHERE id = $1 AND tenant_id = $3 RETURNING *`,
+      [contractId, po.poNumber, tenantId]
     );
 
     if (!result.ok) return Result.err(result.error);

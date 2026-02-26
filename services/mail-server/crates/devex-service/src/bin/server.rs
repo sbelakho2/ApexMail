@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use tokio::signal;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use devex_service::config::DevExConfig;
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     );
 
     // ── App state + router ────────────────────────────────────────────
-    let state = AppState::from_config(cfg);
+    let state = AppState::from_config(cfg).context("Failed to build DevEx app state")?;
     let router = build_router(state);
 
     // ── Bind & serve ──────────────────────────────────────────────────
@@ -55,17 +55,21 @@ async fn main() -> Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(err) = signal::ctrl_c().await {
+            warn!(error = %err, "Failed to install Ctrl+C handler");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(err) => {
+                warn!(error = %err, "Failed to install SIGTERM handler");
+            }
+        }
     };
 
     #[cfg(not(unix))]

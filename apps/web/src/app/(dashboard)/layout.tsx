@@ -6,6 +6,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { ImpersonationBanner } from '@/components/impersonation-banner';
 import { cn } from '@/lib/utils';
+import { useUserStore } from '@/stores';
 
 export default function DashboardLayout({
     children,
@@ -15,21 +16,42 @@ export default function DashboardLayout({
     const router = useRouter();
     const pathname = usePathname();
     const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
+    const setUser = useUserStore((state) => state.setUser);
+    const setLoading = useUserStore((state) => state.setLoading);
 
     React.useEffect(() => {
         let cancelled = false;
+        let activeController: AbortController | null = null;
 
         const verifySession = async () => {
             try {
-                const response = await fetch('/api/auth/session', { cache: 'no-store' });
+                activeController?.abort();
+                activeController = new AbortController();
+
+                const response = await fetch('/api/auth/session', {
+                    cache: 'no-store',
+                    signal: activeController.signal,
+                });
                 if (!response.ok) return;
                 const data = await response.json();
+                if (!cancelled) {
+                    setUser(data?.authenticated ? (data?.user ?? null) : null);
+                    setLoading(false);
+                }
                 if (!cancelled && !data?.authenticated) {
                     const next = pathname?.startsWith('/') ? pathname : '/dashboard';
                     router.replace(`/login?next=${encodeURIComponent(next)}&reason=session_expired`);
                 }
-            } catch {
-                // no-op on transient errors
+            } catch (error) {
+                if (error instanceof DOMException && error.name === 'AbortError') {
+                    return;
+                }
+                if (!cancelled) {
+                    setUser(null);
+                    setLoading(false);
+                    const next = pathname?.startsWith('/') ? pathname : '/dashboard';
+                    router.replace(`/login?next=${encodeURIComponent(next)}&reason=session_check_failed`);
+                }
             }
         };
 
@@ -38,9 +60,10 @@ export default function DashboardLayout({
 
         return () => {
             cancelled = true;
+            activeController?.abort();
             window.clearInterval(interval);
         };
-    }, [pathname, router]);
+    }, [pathname, router, setLoading, setUser]);
 
     return (
         <div className="flex h-screen overflow-hidden bg-surface-50">

@@ -153,10 +153,19 @@ export const PAYG_PRICING = {
  * Calculate PAYG cost for a given usage
  */
 export function calculatePaygCost(emailsSent: number, apiCalls: number): {
-  emailCost: number;
-  apiCost: number;
-  totalCost: number;
+  emailCostCents: number;
+  apiCostCents: number;
+  totalCostCents: number;
+  emailCostUsd: string;
+  apiCostUsd: string;
+  totalCostUsd: string;
 } {
+  const centsToUsdString = (cents: number): string => {
+    const dollars = Math.floor(cents / 100);
+    const remainder = cents % 100;
+    return `$${dollars}.${remainder.toString().padStart(2, '0')}`;
+  };
+
   let emailCostMillicents = 0;
   let remaining = emailsSent;
 
@@ -179,9 +188,12 @@ export function calculatePaygCost(emailsSent: number, apiCalls: number): {
   const totalCostCents = Math.max(emailCostCents + apiCostCents, minimumMonthlyChargeCents);
 
   return {
-    emailCost: emailCostCents / 100,
-    apiCost: apiCostCents / 100,
-    totalCost: totalCostCents / 100,
+    emailCostCents,
+    apiCostCents,
+    totalCostCents,
+    emailCostUsd: centsToUsdString(emailCostCents),
+    apiCostUsd: centsToUsdString(apiCostCents),
+    totalCostUsd: centsToUsdString(totalCostCents),
   };
 }
 
@@ -545,9 +557,13 @@ export class PlansService {
    * Initialize default plans
    */
   async initializeDefaultPlans(): Promise<Result<void, Error>> {
-    for (const plan of DEFAULT_PLANS) {
-      await this.createOrUpdatePlan(plan);
+    const results = await Promise.all(DEFAULT_PLANS.map((plan) => this.createOrUpdatePlan(plan)));
+    for (const result of results) {
+      if (!result.ok) {
+        return Result.err(result.error);
+      }
     }
+
     return Result.ok(undefined);
   }
 

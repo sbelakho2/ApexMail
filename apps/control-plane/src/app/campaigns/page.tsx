@@ -1,7 +1,9 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { formatNumber, formatDate, cn } from '../../lib/utils';
+import { PageLoadingState } from '../../components/ui/async-state';
+import { useApiResource } from '../../lib/use-api-resource';
 
 /**
  * Campaigns Management - Drip campaign automation
@@ -43,26 +45,15 @@ interface SequenceStep {
 }
 
 export default function CampaignsPage() {
-    const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-    const [loading, setLoading] = useState(true);
+    const {
+        data: campaigns,
+        setData: setCampaigns,
+        loading,
+    } = useApiResource<Campaign[]>('/api/campaigns', {
+        initialData: [],
+        errorMessage: 'Failed to load campaigns.',
+    });
     const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
-
-    useEffect(() => {
-        loadCampaigns();
-    }, []);
-
-    async function loadCampaigns() {
-        try {
-            const response = await fetch('/api/campaigns', { credentials: 'include' });
-            if (!response.ok) throw new Error(`Failed to fetch campaigns: ${response.status}`);
-            const data = await response.json();
-            setCampaigns(data);
-        } catch (err) {
-            console.error('Failed to load campaigns:', err);
-        } finally {
-            setLoading(false);
-        }
-    }
 
     function toggleCampaignStatus(campaignId: string) {
         setCampaigns(prev => prev.map(c => {
@@ -83,11 +74,7 @@ export default function CampaignsPage() {
     }
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading campaigns..." />;
     }
 
     return (

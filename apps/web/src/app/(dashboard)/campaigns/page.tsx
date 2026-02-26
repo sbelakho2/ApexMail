@@ -1,6 +1,5 @@
 'use client';
 
-import * as React from 'react';
 import Link from 'next/link';
 import {
     Plus,
@@ -12,9 +11,7 @@ import {
     Copy,
     Pencil,
     Trash2,
-    Play,
     Pause,
-    Calendar,
 } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
 import { Card, CardContent } from '@/components/ui/card';
@@ -50,348 +47,56 @@ import { PaginationControls } from '@/components/ui/pagination-controls';
 import { SortableTableHead } from '@/components/ui/sortable-table-head';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { cn, formatNumber, formatPercent, formatRelativeTime } from '@/lib/utils';
-import { APIError, useCampaigns, useDeleteCampaign, type Campaign, type CampaignStats } from '@/hooks/use-api';
-
-// Campaign UI type with computed fields for display
-interface CampaignDisplay {
-    id: string;
-    name: string;
-    subject: string;
-    status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'paused';
-    listName: string;
-    sentAt?: string;
-    scheduledAt?: string;
-    stats: { sent: number; openRate: number; clickRate: number; bounceRate: number };
-}
-
-// Transform API campaign to display format
-function toCampaignDisplay(c: Campaign): CampaignDisplay {
-    const stats = c.stats || { sent: 0, delivered: 0, opens: 0, uniqueOpens: 0, clicks: 0, uniqueClicks: 0, bounces: 0, complaints: 0, unsubscribes: 0, openRate: 0, clickRate: 0, bounceRate: 0 };
-    return {
-        id: c.id,
-        name: c.name,
-        subject: c.subject,
-        status: c.status,
-        listName: c.listId ? `List ${c.listId.slice(0, 8)}` : 'No list',
-        sentAt: c.sentAt,
-        scheduledAt: c.scheduledAt,
-        stats: {
-            sent: stats.sent,
-            openRate: stats.openRate,
-            clickRate: stats.clickRate,
-            bounceRate: stats.bounceRate ?? (stats.bounces && stats.sent ? (stats.bounces / stats.sent) * 100 : 0),
-        },
-    };
-}
-
-type CampaignFilterPreset = 'all_campaigns' | 'scheduled_queue' | 'sent_top_open';
+import { useCampaignsController } from './use-campaigns-controller';
 
 export default function CampaignsPage() {
-    const [page, setPage] = React.useState(1);
-    const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
-    const [statusFilter, setStatusFilter] = React.useState<string>('all');
-    const [searchInput, setSearchInput] = React.useState('');
-    const [searchQuery, setSearchQuery] = React.useState('');
-    const [sortField, setSortField] = React.useState<'name' | 'sentAt' | 'openRate'>('sentAt');
-    const [sortOrder, setSortOrder] = React.useState<'asc' | 'desc'>('desc');
-    const [activePreset, setActivePreset] = React.useState<CampaignFilterPreset>('all_campaigns');
-    const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
-    const [campaignToDelete, setCampaignToDelete] = React.useState<string | null>(null);
-    const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = React.useState(false);
-    const [bulkPauseDialogOpen, setBulkPauseDialogOpen] = React.useState(false);
-    const [actionError, setActionError] = React.useState<string | null>(null);
-    const [retryAfterSeconds, setRetryAfterSeconds] = React.useState(0);
-    const [retryFetchIn, setRetryFetchIn] = React.useState(0);
-    const [isCloningId, setIsCloningId] = React.useState<string | null>(null);
-    const [cloneError, setCloneError] = React.useState<string | null>(null);
-    const [optimisticCampaigns, setOptimisticCampaigns] = React.useState<CampaignDisplay[]>([]);
-    const [recentlyDeleted, setRecentlyDeleted] = React.useState<CampaignDisplay | null>(null);
-    const [showUndoDelete, setShowUndoDelete] = React.useState(false);
-    const [resendDialogOpen, setResendDialogOpen] = React.useState(false);
-    const [campaignToResend, setCampaignToResend] = React.useState<CampaignDisplay | null>(null);
-
-    const { data: campaignsData, error, isLoading, mutate } = useCampaigns(page, 100);
-    const deleteCampaign = useDeleteCampaign(campaignToDelete || '');
-
-    React.useEffect(() => {
-        if (typeof window === 'undefined') return;
-        const preset = window.localStorage.getItem('campaigns.filterPreset') as CampaignFilterPreset | null;
-        if (!preset) return;
-        applyPreset(preset);
-    }, []);
-
-    React.useEffect(() => {
-        const timer = window.setTimeout(() => setSearchQuery(searchInput), 300);
-        return () => window.clearTimeout(timer);
-    }, [searchInput]);
-
-    React.useEffect(() => {
-        if (retryAfterSeconds <= 0) return;
-        const interval = window.setInterval(() => {
-            setRetryAfterSeconds((prev) => Math.max(0, prev - 1));
-        }, 1000);
-        return () => window.clearInterval(interval);
-    }, [retryAfterSeconds]);
-
-    React.useEffect(() => {
-        if (typeof window === 'undefined') return;
-        const params = new URLSearchParams(window.location.search);
-        const initialPage = Number.parseInt(params.get('page') || '1', 10);
-        if (!Number.isNaN(initialPage) && initialPage > 0) {
-            setPage(initialPage);
-        }
-
-        const savedScroll = window.sessionStorage.getItem('campaigns.scrollY');
-        if (savedScroll) {
-            window.requestAnimationFrame(() => {
-                window.scrollTo(0, Number(savedScroll));
-            });
-            window.sessionStorage.removeItem('campaigns.scrollY');
-        }
-    }, []);
-
-    React.useEffect(() => {
-        if (typeof window === 'undefined') return;
-        const params = new URLSearchParams(window.location.search);
-        params.set('page', String(page));
-        window.history.replaceState(null, '', `${window.location.pathname}?${params.toString()}`);
-    }, [page]);
-
-    React.useEffect(() => {
-        if (retryFetchIn <= 0) return;
-        const interval = window.setInterval(() => {
-            setRetryFetchIn((prev) => Math.max(0, prev - 1));
-        }, 1000);
-        return () => window.clearInterval(interval);
-    }, [retryFetchIn]);
-
-    React.useEffect(() => {
-        if (retryFetchIn === 0) {
-            mutate();
-        }
-    }, [retryFetchIn, mutate]);
-
-    React.useEffect(() => {
-        if (error && retryFetchIn === 0) {
-            setRetryFetchIn(5);
-        }
-    }, [error, retryFetchIn]);
-
-    // Transform API data to display format
-    const campaigns = React.useMemo(() => {
-        if (!campaignsData?.data) return [];
-        return [...optimisticCampaigns, ...campaignsData.data.map(toCampaignDisplay)];
-    }, [campaignsData, optimisticCampaigns]);
-
-    // Filter and sort campaigns
-    const filteredCampaigns = React.useMemo(() => {
-        let result = campaigns;
-
-        // Filter by status
-        if (statusFilter !== 'all') {
-            result = result.filter((c) => c.status === statusFilter);
-        }
-
-        // Filter by search
-        if (searchQuery) {
-            const query = searchQuery.toLowerCase();
-            result = result.filter(
-                (c) =>
-                    c.name.toLowerCase().includes(query) ||
-                    c.subject.toLowerCase().includes(query)
-            );
-        }
-
-        // Sort
-        result = [...result].sort((a, b) => {
-            let comparison = 0;
-            if (sortField === 'name') {
-                comparison = a.name.localeCompare(b.name);
-            } else if (sortField === 'sentAt') {
-                const dateA = a.sentAt || a.scheduledAt || '';
-                const dateB = b.sentAt || b.scheduledAt || '';
-                comparison = dateA.localeCompare(dateB);
-            } else if (sortField === 'openRate') {
-                comparison = a.stats.openRate - b.stats.openRate;
-            }
-            return sortOrder === 'asc' ? comparison : -comparison;
-        });
-
-        return result;
-    }, [campaigns, statusFilter, searchQuery, sortField, sortOrder]);
-
-    const toggleSelectAll = () => {
-        if (selectedIds.length === filteredCampaigns.length) {
-            setSelectedIds([]);
-        } else {
-            setSelectedIds(filteredCampaigns.map((c) => c.id));
-        }
-    };
-
-    const toggleSelect = (id: string) => {
-        setSelectedIds((prev) =>
-            prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]
-        );
-    };
-
-    const handleSort = (field: typeof sortField) => {
-        if (sortField === field) {
-            setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
-        } else {
-            setSortField(field);
-            setSortOrder('desc');
-        }
-    };
-
-    const applyPreset = (preset: CampaignFilterPreset) => {
-        setActivePreset(preset);
-        if (typeof window !== 'undefined') {
-            window.localStorage.setItem('campaigns.filterPreset', preset);
-        }
-
-        if (preset === 'scheduled_queue') {
-            setStatusFilter('scheduled');
-            setSearchQuery('');
-            setSortField('sentAt');
-            setSortOrder('asc');
-            return;
-        }
-
-        if (preset === 'sent_top_open') {
-            setStatusFilter('sent');
-            setSearchQuery('');
-            setSortField('openRate');
-            setSortOrder('desc');
-            return;
-        }
-
-        setStatusFilter('all');
-        setSearchQuery('');
-        setSortField('sentAt');
-        setSortOrder('desc');
-    };
-
-    const handleDelete = (id: string) => {
-        setCampaignToDelete(id);
-        setDeleteDialogOpen(true);
-    };
-
-    const handleClone = async (campaign: CampaignDisplay) => {
-        setCloneError(null);
-        setIsCloningId(campaign.id);
-        try {
-            await new Promise((resolve) => window.setTimeout(resolve, 900));
-            const clone: CampaignDisplay = {
-                ...campaign,
-                id: `clone-${Date.now()}`,
-                name: `${campaign.name || 'Untitled Campaign'} (Copy)`,
-                status: 'draft',
-                sentAt: undefined,
-                scheduledAt: undefined,
-                stats: { sent: 0, openRate: 0, clickRate: 0, bounceRate: 0 },
-            };
-            setOptimisticCampaigns((prev) => [clone, ...prev]);
-        } catch {
-            setCloneError('Campaign cloning failed. Please retry.');
-        } finally {
-            setIsCloningId(null);
-        }
-    };
-
-    const confirmDelete = async () => {
-        if (campaignToDelete) {
-            try {
-                setActionError(null);
-                await deleteCampaign.trigger();
-                const deletedCampaign = campaigns.find((campaign) => campaign.id === campaignToDelete) || null;
-                setRecentlyDeleted(deletedCampaign);
-                setShowUndoDelete(Boolean(deletedCampaign));
-                if (deletedCampaign) {
-                    window.setTimeout(() => setShowUndoDelete(false), 8000);
-                }
-                mutate(); // Refresh list
-            } catch (err) {
-                if (err instanceof APIError && err.status === 429) {
-                    setRetryAfterSeconds(30);
-                    setActionError('Rate limited while deleting campaign. Please wait before retrying.');
-                } else {
-                    setActionError('Failed to delete campaign. Please try again.');
-                }
-            }
-        }
-        setDeleteDialogOpen(false);
-        setCampaignToDelete(null);
-    };
-
-    const handleUndoDelete = () => {
-        if (!recentlyDeleted) return;
-        setOptimisticCampaigns((prev) => [recentlyDeleted, ...prev]);
-        setShowUndoDelete(false);
-        setRecentlyDeleted(null);
-    };
-
-    const handleBulkDelete = () => {
-        if (selectedIds.length === 0) return;
-        if (retryAfterSeconds > 0) {
-            setActionError(`Rate limited. Try again in ${retryAfterSeconds}s.`);
-            return;
-        }
-        const removed = campaigns.filter((campaign) => selectedIds.includes(campaign.id));
-        setOptimisticCampaigns((prev) => prev.filter((campaign) => !selectedIds.includes(campaign.id)));
-        if (removed.length > 0) {
-            setRecentlyDeleted(removed[0]);
-            setShowUndoDelete(true);
-            window.setTimeout(() => setShowUndoDelete(false), 8000);
-        }
-        setSelectedIds([]);
-        setBulkDeleteDialogOpen(false);
-    };
-
-    const handleBulkPause = () => {
-        if (selectedIds.length === 0) return;
-        setOptimisticCampaigns((prev) => prev.map((campaign) => (
-            selectedIds.includes(campaign.id) ? { ...campaign, status: 'paused' } : campaign
-        )));
-        setSelectedIds([]);
-        setBulkPauseDialogOpen(false);
-    };
-
-    const handleResend = (campaign: CampaignDisplay) => {
-        if (campaign.status === 'scheduled' || campaign.status === 'sent') {
-            setCampaignToResend(campaign);
-            setResendDialogOpen(true);
-            return;
-        }
-        window.alert(`Re-send queued for ${campaign.name}.`);
-    };
-
-    const confirmResend = () => {
-        if (campaignToResend) {
-            window.alert(`Re-send confirmed for ${campaignToResend.name}.`);
-        }
-        setResendDialogOpen(false);
-        setCampaignToResend(null);
-    };
-
-    const statusCounts = React.useMemo(() => {
-        const counts: Record<string, number> = { all: campaigns.length };
-        campaigns.forEach((c) => {
-            counts[c.status] = (counts[c.status] || 0) + 1;
-        });
-        return counts;
-    }, [campaigns]);
-
-    const handleSelectionKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
-            e.preventDefault();
-            setSelectedIds(filteredCampaigns.map((campaign) => campaign.id));
-            return;
-        }
-
-        if (e.key === 'Escape') {
-            setSelectedIds([]);
-        }
-    };
+    const {
+        page,
+        setPage,
+        selectedIds,
+        statusFilter,
+        setStatusFilter,
+        searchInput,
+        setSearchInput,
+        sortField,
+        sortOrder,
+        activePreset,
+        deleteDialogOpen,
+        setDeleteDialogOpen,
+        bulkDeleteDialogOpen,
+        setBulkDeleteDialogOpen,
+        bulkPauseDialogOpen,
+        setBulkPauseDialogOpen,
+        resendDialogOpen,
+        setResendDialogOpen,
+        isCloningId,
+        actionError,
+        cloneError,
+        showUndoDelete,
+        recentlyDeleted,
+        retryFetchIn,
+        campaignsData,
+        campaigns,
+        filteredCampaigns,
+        statusCounts,
+        isLoading,
+        error,
+        toggleSelectAll,
+        toggleSelect,
+        handleSort,
+        applyPreset,
+        clearSearch,
+        handleDelete,
+        handleClone,
+        confirmDelete,
+        handleUndoDelete,
+        handleBulkDelete,
+        handleBulkPause,
+        handleResend,
+        confirmResend,
+        handleSelectionKeyDown,
+        handleRetryLoad,
+    } = useCampaignsController();
 
     // Loading state
     if (isLoading) {
@@ -405,10 +110,7 @@ export default function CampaignsPage() {
             <PageErrorState
                 title="Failed to load campaigns"
                 description={isRouteMismatch ? 'Campaign endpoint may be unreachable or mismatched. Verify /api/campaigns mapping to backend /v1/campaigns.' : `We couldn't fetch your campaign list. Retrying in ${retryFetchIn}s...`}
-                onRetry={() => {
-                    setRetryFetchIn(0);
-                    mutate();
-                }}
+                onRetry={handleRetryLoad}
             />
         );
     }
@@ -521,10 +223,7 @@ export default function CampaignsPage() {
                                 {searchInput && (
                                     <button
                                         type="button"
-                                        onClick={() => {
-                                            setSearchInput('');
-                                            setSearchQuery('');
-                                        }}
+                                        onClick={clearSearch}
                                         className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
                                         aria-label="Clear campaign search"
                                     >

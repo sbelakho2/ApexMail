@@ -5,6 +5,7 @@ import { useInView } from 'react-intersection-observer';
 import { useState, useMemo } from 'react';
 import { Mail, CheckCircle } from '@/components/ui/icons';
 import { cn } from '@/lib/utils';
+import { getApexMailBasePriceForVolume } from '@/lib/pricing';
 
 interface PricingTier {
   name: string;
@@ -15,14 +16,7 @@ interface PricingTier {
 const providers: Record<string, PricingTier> = {
   apexmail: {
     name: 'ApexMail',
-    calculate: (emails: number) => {
-      if (emails <= 10000) return 0;
-      if (emails <= 100000) return 29;
-      if (emails <= 500000) return 99;
-      if (emails <= 1000000) return 199;
-      if (emails <= 5000000) return 499;
-      return 499 + Math.ceil((emails - 5000000) / 1000000) * 80;
-    },
+    calculate: (emails: number) => getApexMailBasePriceForVolume(emails),
     color: 'bg-primary-600',
   },
   sendgrid: {
@@ -71,7 +65,7 @@ const volumeMarks = [
 ];
 
 export function InteractiveCalculator() {
-  const [ref, _inView] = useInView({ triggerOnce: true, threshold: 0.1 });
+  const [ref] = useInView({ triggerOnce: true, threshold: 0.1 });
   const [emailVolume, setEmailVolume] = useState(100000);
 
   const prices = useMemo(() => {

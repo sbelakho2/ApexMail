@@ -21,6 +21,9 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().startsWith('whsec_'),
   STRIPE_PUBLISHABLE_KEY: z.string().startsWith('pk_').optional(),
   STRIPE_DEDICATED_IP_PRICE_ID: z.string().startsWith('price_').optional(),
+
+  // Company banking details
+  BILLING_COMPANY_IBAN: z.string().min(15).optional(),
   
   // Internal service auth
   SERVICE_AUTH_TOKEN: z.string().min(32),
@@ -88,7 +91,8 @@ export const config = {
     return getConfig().JWT_SECRET;
   },
   get port(): number {
-    return parseInt(getConfig().PORT, 10) || 3000;
+    const parsed = parseInt(getConfig().PORT, 10);
+    return Number.isNaN(parsed) ? 3000 : parsed;
   },
   get host(): string {
     return getConfig().HOST;
@@ -137,7 +141,7 @@ export const COMPANY_INFO = {
   },
   bank: {
     name: 'Swedbank AS',
-    iban: 'EE382200221012345678',
+    iban: getConfig().BILLING_COMPANY_IBAN ?? 'UNCONFIGURED',
     bic: 'HABAEE2X',
   },
 } as const;

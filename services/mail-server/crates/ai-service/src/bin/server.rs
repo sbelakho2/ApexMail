@@ -15,7 +15,13 @@ async fn main() {
         .json()
         .init();
 
-    let config = AiConfig::from_env();
+    let config = match AiConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!(error = %err, "invalid AI configuration");
+            return;
+        }
+    };
     tracing::info!(
         endpoint = %config.model_endpoint,
         embedding_dim = config.embedding_dim,

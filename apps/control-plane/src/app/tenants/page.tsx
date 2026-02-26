@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import { formatNumber, formatDate, formatCurrency, cn, getRiskColor, getStatusChipClasses } from '../../lib/utils';
+import { PageLoadingState } from '../../components/ui/async-state';
+import { useApiResource } from '../../lib/use-api-resource';
 
 /**
  * Tenants Overview - Platform-wide tenant management
@@ -47,9 +49,22 @@ const PLAN_COLORS: Record<string, string> = {
     enterprise: 'bg-primary text-primary-foreground shadow-sm',
 };
 
+const STATUS_COLORS: Record<Tenant['status'], string> = {
+    active: 'bg-success/10 text-success border border-success/20',
+    suspended: 'bg-destructive/10 text-destructive border border-destructive/20',
+    churned: 'bg-muted text-muted-foreground border border-border',
+    trialing: 'bg-info/10 text-info border border-info/20',
+};
+
 export default function TenantsPage() {
-    const [tenants, setTenants] = useState<Tenant[]>([]);
-    const [loading, setLoading] = useState(true);
+    const {
+        data: tenants,
+        setData: setTenants,
+        loading,
+    } = useApiResource<Tenant[]>('/api/tenants', {
+        initialData: [],
+        errorMessage: 'Failed to load tenants.',
+    });
     const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [filterPlan, setFilterPlan] = useState('');
@@ -60,23 +75,6 @@ export default function TenantsPage() {
     const canExecuteTenantActions = currentRole === 'owner' || currentRole === 'admin';
     const VIRTUAL_ROWS = 30;
     const ROW_HEIGHT = 74;
-
-    useEffect(() => {
-        loadTenants();
-    }, []);
-
-    async function loadTenants() {
-        try {
-            const response = await fetch('/api/tenants', { credentials: 'include' });
-            if (!response.ok) throw new Error(`Failed to fetch tenants: ${response.status}`);
-            const data = await response.json();
-            setTenants(data);
-        } catch (err) {
-            console.error('Failed to load tenants:', err);
-        } finally {
-            setLoading(false);
-        }
-    }
 
     async function toggleSuspension(tenantId: string) {
         const tenant = tenants.find(t => t.id === tenantId);
@@ -114,11 +112,7 @@ export default function TenantsPage() {
     const bottomSpacer = Math.max(0, (filteredTenants.length - (virtualStart + virtualizedTenants.length)) * ROW_HEIGHT);
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading tenants..." />;
     }
 
     return (
@@ -374,19 +368,35 @@ export default function TenantsPage() {
                                         
                                         if (response.ok) {
                                             const data = await response.json();
-                                            // Open console in new tab with impersonation token
-                                            window.open(data.url, '_blank');
+                                            if (typeof data?.postTarget === 'string' && typeof data?.token === 'string') {
+                                                const form = document.createElement('form');
+                                                form.method = 'POST';
+                                                form.action = data.postTarget;
+                                                form.target = '_blank';
+                                                form.style.display = 'none';
+
+                                                const input = document.createElement('input');
+                                                input.type = 'hidden';
+                                                input.name = 'token';
+                                                input.value = data.token;
+
+                                                form.appendChild(input);
+                                                document.body.appendChild(form);
+                                                form.submit();
+                                                form.remove();
+                                            } else {
+                                                console.error('Impersonation response missing token or postTarget');
+                                            }
                                         } else {
                                             console.error('Failed to generate impersonation token');
                                             // Fallback to direct URL (dev mode)
-                                            const impersonateUrl = `${process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000'}?impersonate=${selectedTenant.id}`;
-                                            window.open(impersonateUrl, '_blank');
+                                            const consoleUrl = process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000';
+                                            window.open(consoleUrl, '_blank');
                                         }
                                     } catch (error) {
                                         console.error('Impersonation error:', error);
-                                        // Fallback to direct URL
-                                        const impersonateUrl = `${process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000'}?impersonate=${selectedTenant.id}`;
-                                        window.open(impersonateUrl, '_blank');
+                                        const consoleUrl = process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000';
+                                        window.open(consoleUrl, '_blank');
                                     }
                                 }}
                                 className="flex-1 px-4 py-2 min-h-[44px] bg-warning text-warning-foreground rounded-sm text-center hover:bg-warning/90 font-medium transition-colors flex items-center justify-center gap-2"

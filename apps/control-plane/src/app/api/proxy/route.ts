@@ -1,165 +1,34 @@
 /**
  * Control Plane Proxy API
- * 
- * SECURITY: This proxy endpoint includes comprehensive SSRF protection with:
- * - IP address validation (blocks private, loopback, link-local, metadata endpoints)
- * - DNS rebinding protection (validates IPs at request time, not just configuration)
- * - Hostname blocklist for known internal services
- * - Protocol validation (HTTPS required in production)
- * 
- * SSRF-002 FIX: Implements proper URL validation with DNS rebinding protection
  *
- * FIX-500-499: SECURITY NOTE — The GET /api/proxy endpoint allows authenticated
- * control-plane users to make arbitrary HTTP GET requests through the server.
- * While SSRF protections are in place, this remains an elevated attack surface.
- * Consider restricting to an allowlist of destination hosts in production, or
- * removing the GET handler entirely if only POST is needed.
+ * SECURITY: Proxy is restricted to an explicit hostname allowlist.
+ * No custom DNS/IP SSRF engine is used; destination control is enforced through
+ * host allowlisting and protocol restrictions only.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import * as dns from 'dns/promises';
-import * as net from 'net';
 
-/**
- * Check if an IP address is private/internal
- * Comprehensive check covering all private ranges
- */
-function isPrivateIP(ip: string): boolean {
-    // Check IPv4
-    if (net.isIPv4(ip)) {
-        const parts = ip.split('.').map(Number);
-        const [a, b, c, d] = parts;
-        
-        // Loopback (127.0.0.0/8)
-        if (a === 127) return true;
-        
-        // Private Class A (10.0.0.0/8)
-        if (a === 10) return true;
-        
-        // Private Class B (172.16.0.0/12)
-        if (a === 172 && b >= 16 && b <= 31) return true;
-        
-        // Private Class C (192.168.0.0/16)
-        if (a === 192 && b === 168) return true;
-        
-        // Link-local (169.254.0.0/16) - includes AWS/GCP metadata
-        if (a === 169 && b === 254) return true;
-        
-        // Multicast (224.0.0.0/4)
-        if (a >= 224 && a <= 239) return true;
-        
-        // Reserved/broadcast
-        if (a === 0 || a === 255) return true;
-        
-        // Documentation ranges (TEST-NET)
-        if (a === 192 && b === 0 && c === 2) return true;    // 192.0.2.0/24
-        if (a === 198 && b === 51 && c === 100) return true; // 198.51.100.0/24
-        if (a === 203 && b === 0 && c === 113) return true;  // 203.0.113.0/24
-        
-        // Carrier-grade NAT (100.64.0.0/10)
-        if (a === 100 && b >= 64 && b <= 127) return true;
-        
+const PROXY_ALLOWLIST = (process.env.CONTROL_PLANE_PROXY_ALLOWLIST || '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+
+const DEV_PROXY_ALLOWLIST = ['localhost', '127.0.0.1'];
+
+function isHostnameAllowed(hostname: string): boolean {
+    const normalized = hostname.toLowerCase();
+    const allowlist = PROXY_ALLOWLIST.length > 0
+        ? PROXY_ALLOWLIST
+        : (process.env.NODE_ENV === 'production' ? [] : DEV_PROXY_ALLOWLIST);
+
+    if (allowlist.length === 0) {
         return false;
     }
-    
-    // Check IPv6
-    if (net.isIPv6(ip)) {
-        const normalized = ip.toLowerCase();
-        
-        // Loopback (::1)
-        if (normalized === '::1') return true;
-        
-        // Unspecified (::)
-        if (normalized === '::') return true;
-        
-        // Link-local (fe80::/10)
-        if (normalized.startsWith('fe80:') || normalized.startsWith('fe8') || 
-            normalized.startsWith('fe9') || normalized.startsWith('fea') || 
-            normalized.startsWith('feb')) return true;
-        
-        // Unique local (fc00::/7) - like private IPv4
-        if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
-        
-        // Multicast (ff00::/8)
-        if (normalized.startsWith('ff')) return true;
-        
-        // IPv4-mapped IPv6 (::ffff:x.x.x.x) - check the IPv4 portion
-        if (normalized.startsWith('::ffff:')) {
-            const ipv4Part = normalized.slice(7);
-            if (net.isIPv4(ipv4Part)) {
-                return isPrivateIP(ipv4Part);
-            }
-        }
-        
-        // IPv4-compatible IPv6 - deprecated but check anyway
-        if (normalized.includes('.')) {
-            const ipv4Match = normalized.match(/(\d+\.\d+\.\d+\.\d+)$/);
-            if (ipv4Match && net.isIPv4(ipv4Match[1])) {
-                return isPrivateIP(ipv4Match[1]);
-            }
-        }
-        
-        return false;
-    }
-    
-    // Unknown format - deny by default
-    return true;
+
+    return allowlist.some((allowed) => normalized === allowed || normalized.endsWith(`.${allowed}`));
 }
 
-/**
- * Blocked hostnames that should never be accessed
- */
-const BLOCKED_HOSTNAMES = [
-    // Loopback variations
-    'localhost',
-    'localhost.localdomain',
-    '127.0.0.1',
-    '::1',
-    '0.0.0.0',
-    '[::1]',
-    '[::ffff:127.0.0.1]',
-    
-    // Cloud provider metadata endpoints
-    '169.254.169.254',              // AWS/GCP/Azure metadata
-    'metadata.google.internal',      // GCP metadata
-    'metadata.google.com',           // GCP
-    'instance-data',                 // AWS alias
-    'metadata.azure.internal',       // Azure metadata
-    
-    // Kubernetes internal services
-    'kubernetes.default',
-    'kubernetes.default.svc',
-    'kubernetes.default.svc.cluster.local',
-    'kubernetes',
-    
-    // Internal service discovery
-    'internal',
-    'corp',
-    'local',
-];
-
-/**
- * Blocked hostname patterns (suffixes)
- */
-const BLOCKED_HOSTNAME_PATTERNS = [
-    '.internal',
-    '.local',
-    '.localhost',
-    '.localdomain',
-    '.cluster.local',
-    '.svc.cluster.local',
-    '.corp',       // FIX-500-306: Block .corp suffix (was only blocking exact 'corp')
-    '.intranet',   // FIX-500-306: Block common internal domain suffixes
-    '.lan',        // FIX-500-306: Block .lan suffix
-];
-
-/**
- * Validate URL for SSRF vulnerabilities with DNS rebinding protection
- * 
- * @param urlString - The URL to validate
- * @throws Error if URL is not safe
- */
-async function validateUrlSafe(urlString: string): Promise<void> {
+function validateUrlSafe(urlString: string): URL {
     let url: URL;
     try {
         url = new URL(urlString);
@@ -169,6 +38,10 @@ async function validateUrlSafe(urlString: string): Promise<void> {
     
     const hostname = url.hostname.toLowerCase();
     const protocol = url.protocol;
+
+    if (!isHostnameAllowed(hostname)) {
+        throw new Error('URL hostname is not in proxy allowlist');
+    }
     
     // 1. Protocol validation - only allow http(s)
     if (protocol !== 'http:' && protocol !== 'https:') {
@@ -179,53 +52,8 @@ async function validateUrlSafe(urlString: string): Promise<void> {
     if (process.env.NODE_ENV === 'production' && protocol !== 'https:') {
         throw new Error('HTTPS required in production environment');
     }
-    
-    // 3. Check against blocked hostnames
-    if (BLOCKED_HOSTNAMES.includes(hostname)) {
-        throw new Error('URL hostname is blocked for security reasons');
-    }
-    
-    // 4. Check against blocked hostname patterns
-    for (const pattern of BLOCKED_HOSTNAME_PATTERNS) {
-        if (hostname.endsWith(pattern)) {
-            throw new Error(`URL hostname pattern '${pattern}' is blocked for security reasons`);
-        }
-    }
-    
-    // 5. Check if hostname is an IP address
-    const cleanHostname = hostname.replace(/^\[|\]$/g, ''); // Remove IPv6 brackets
-    if (net.isIP(cleanHostname)) {
-        if (isPrivateIP(cleanHostname)) {
-            throw new Error('URL cannot point to private/internal IP addresses');
-        }
-        return; // IP is public and safe
-    }
-    
-    // 6. DNS rebinding protection - resolve hostname and check all IPs
-    try {
-        const addresses4 = await dns.resolve4(hostname).catch(() => []);
-        const addresses6 = await dns.resolve6(hostname).catch(() => []);
-        const allAddresses = [...addresses4, ...addresses6];
-        
-        if (allAddresses.length === 0) {
-            throw new Error('URL hostname could not be resolved');
-        }
-        
-        // Check ALL resolved IPs to prevent DNS rebinding attacks
-        for (const ip of allAddresses) {
-            if (isPrivateIP(ip)) {
-                throw new Error(
-                    `URL hostname resolves to private IP (${ip}). ` +
-                    'This is blocked to prevent SSRF attacks.'
-                );
-            }
-        }
-    } catch (error) {
-        if (error instanceof Error && error.message.includes('SSRF')) {
-            throw error; // Re-throw our security errors
-        }
-        throw new Error(`DNS resolution failed for hostname: ${hostname}`);
-    }
+
+    return url;
 }
 
 /**
@@ -233,15 +61,14 @@ async function validateUrlSafe(urlString: string): Promise<void> {
  * Re-validates IP at connection time to prevent TOCTOU/DNS rebinding
  */
 async function safeFetch(url: string, options: RequestInit = {}): Promise<Response> {
-    // Initial validation
-    await validateUrlSafe(url);
+    const validatedUrl = validateUrlSafe(url);
     
     // Make the request with timeout
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
     
     try {
-        const response = await fetch(url, {
+        const response = await fetch(validatedUrl.toString(), {
             ...options,
             signal: controller.signal,
             // Prevent redirects to internal URLs
@@ -254,7 +81,7 @@ async function safeFetch(url: string, options: RequestInit = {}): Promise<Respon
             if (location) {
                 // Resolve relative URLs
                 const redirectUrl = new URL(location, url).toString();
-                await validateUrlSafe(redirectUrl);
+                validateUrlSafe(redirectUrl);
             }
         }
         

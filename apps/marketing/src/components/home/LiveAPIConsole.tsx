@@ -234,7 +234,7 @@ export function LiveAPIConsole() {
 
             {/* CTA — real sending requires an account */}
             <Link
-              href="/signup"
+              href="https://app.apexmail.ee/signup"
               className="btn-primary w-full flex items-center justify-center gap-2 py-3 text-sm font-semibold"
             >
               <ExternalLink className="w-4 h-4" aria-hidden="true" />
@@ -292,7 +292,7 @@ export function LiveAPIConsole() {
               <div className="flex-1 p-0 overflow-auto custom-scrollbar">
                 <CodeBlock 
                   code={sdkExamples[selectedLanguage as keyof typeof sdkExamples]} 
-                  language={selectedLanguage === 'typescript' ? 'typescript' : selectedLanguage === 'go' ? 'go' : 'python'}
+                  language={selectedLanguage}
                 />
               </div>
             </div>

@@ -50,7 +50,9 @@ export function PaygUsageDashboard({ initialData }: PaygUsageDashboardProps) {
         setUsage(data);
       }
     } catch (error) {
-      console.error('Failed to fetch PAYG usage:', error);
+      if (process.env.NODE_ENV !== 'production') {
+        console.error('Failed to fetch PAYG usage:', error);
+      }
     } finally {
       setIsLoading(false);
     }

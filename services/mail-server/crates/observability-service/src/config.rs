@@ -168,7 +168,7 @@ impl Default for ObservabilityConfig {
 
 impl ObservabilityConfig {
     /// Build a config from environment variables (falls back to defaults).
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         fn env_or(key: &str, default: &str) -> String {
             std::env::var(key).unwrap_or_else(|_| default.to_string())
         }
@@ -262,10 +262,8 @@ impl ObservabilityConfig {
                 .parse()
                 .unwrap_or(30),
         };
-        if let Err(err) = config.validate() {
-            panic!("Invalid observability config: {err}");
-        }
-        config
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn validate(&self) -> Result<(), String> {

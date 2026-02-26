@@ -47,9 +47,9 @@ CREATE TABLE IF NOT EXISTS proration_records (
     stripe_subscription_id UUID REFERENCES stripe_subscriptions(id) ON DELETE CASCADE,
     old_plan VARCHAR(50),
     new_plan VARCHAR(50) NOT NULL,
-    credit_amount DECIMAL(10, 2) NOT NULL DEFAULT 0,
-    charge_amount DECIMAL(10, 2) NOT NULL DEFAULT 0,
-    net_amount DECIMAL(10, 2) NOT NULL DEFAULT 0,
+    credit_amount INTEGER NOT NULL DEFAULT 0,
+    charge_amount INTEGER NOT NULL DEFAULT 0,
+    net_amount INTEGER NOT NULL DEFAULT 0,
     applied_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS slo_breaches (
     period_start TIMESTAMPTZ NOT NULL,
     period_end TIMESTAMPTZ NOT NULL,
     credit_percentage DECIMAL(5, 2) NOT NULL DEFAULT 0, -- percentage of bill to credit
-    credit_amount DECIMAL(10, 2) NOT NULL DEFAULT 0, -- calculated credit amount
+    credit_amount INTEGER NOT NULL DEFAULT 0, -- calculated credit amount (cents)
     applied_at TIMESTAMPTZ, -- when credit was applied
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -99,7 +99,7 @@ CREATE INDEX idx_slo_breaches_unapplied ON slo_breaches(tenant_id) WHERE applied
 CREATE TABLE IF NOT EXISTS credit_memos (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    amount DECIMAL(10, 2) NOT NULL, -- credit amount
+    amount INTEGER NOT NULL, -- credit amount (cents)
     reason VARCHAR(100) NOT NULL, -- 'SLO Credit', 'refund', 'goodwill', 'billing_error'
     slo_breach_ids UUID[] DEFAULT '{}', -- array of slo_breach IDs this credit covers
     created_at TIMESTAMPTZ DEFAULT NOW()

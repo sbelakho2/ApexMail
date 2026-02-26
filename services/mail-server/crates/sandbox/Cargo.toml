@@ -1,0 +1,20 @@
+[package]
+name = "sandbox"
+version = "0.1.0"
+edition.workspace = true
+description = "Secure attachment detonation sandbox using Linux namespaces, cgroups v2, and seccomp-bpf"
+license = "MIT"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+sha2 = { workspace = true }
+hex = "0.4"
+chrono = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

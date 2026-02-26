@@ -52,14 +52,62 @@ interface ScheduleRow {
     updated_at: string;
 }
 
-export async function GET() {
+async function logWarmupAudit(request: Request, poolId: string, action: 'start' | 'pause' | 'reset'): Promise<void> {
+    const forwardedFor = request.headers.get('x-forwarded-for');
+    const realIp = request.headers.get('x-real-ip');
+    const ipAddress = forwardedFor?.split(',')[0]?.trim() || realIp || null;
+    const userAgent = request.headers.get('user-agent');
+
+    await query(
+        `INSERT INTO audit_logs (
+            timestamp,
+            action,
+            resource_type,
+            resource_id,
+            user_id,
+            tenant_id,
+            ip_address,
+            user_agent,
+            metadata
+        ) VALUES (
+            NOW(),
+            $1,
+            'warmup_pool',
+            $2,
+            NULL,
+            NULL,
+            $3,
+            $4,
+            $5::jsonb
+        )`,
+        [
+            `control_plane.warmup.${action}`,
+            poolId,
+            ipAddress,
+            userAgent,
+            JSON.stringify({ action }),
+        ]
+    );
+}
+
+export async function GET(request: Request) {
     try {
+        const url = new URL(request.url);
+        const poolLimit = Math.min(Math.max(parseInt(url.searchParams.get('poolLimit') || '50', 10) || 50, 1), 200);
+        const poolOffset = Math.max(parseInt(url.searchParams.get('poolOffset') || '0', 10) || 0, 0);
+        const addressLimit = Math.min(Math.max(parseInt(url.searchParams.get('addressLimit') || '500', 10) || 500, 1), 2000);
+        const addressOffset = Math.max(parseInt(url.searchParams.get('addressOffset') || '0', 10) || 0, 0);
+        const scheduleLimit = Math.min(Math.max(parseInt(url.searchParams.get('scheduleLimit') || '100', 10) || 100, 1), 500);
+        const scheduleOffset = Math.max(parseInt(url.searchParams.get('scheduleOffset') || '0', 10) || 0, 0);
+
         const [pools, addresses, schedules] = await Promise.all([
             query<PoolRow>(
                 `SELECT id, name, description, warmup_enabled, warmup_started_at,
                         warmup_day, daily_limit, status, created_at, updated_at
                  FROM ip_pools
-                 ORDER BY name ASC`
+                 ORDER BY name ASC
+                 LIMIT $1 OFFSET $2`,
+                [poolLimit, poolOffset]
             ),
             query<AddressRow>(
                 `SELECT id, pool_id, ip_address, hostname, ptr_verified,
@@ -67,13 +115,17 @@ export async function GET() {
                         daily_limit, daily_sent, last_reset_at,
                         reputation_score, status, created_at, updated_at
                  FROM ip_pool_addresses
-                 ORDER BY pool_id, ip_address`
+                 ORDER BY pool_id, ip_address
+                 LIMIT $1 OFFSET $2`,
+                [addressLimit, addressOffset]
             ),
             query<ScheduleRow>(
                 `SELECT id, isp_name, mx_patterns, warmup_schedule, notes,
                         created_at, updated_at
                  FROM isp_warmup_schedules
-                 ORDER BY isp_name ASC`
+                 ORDER BY isp_name ASC
+                 LIMIT $1 OFFSET $2`,
+                [scheduleLimit, scheduleOffset]
             ),
         ]);
 
@@ -157,6 +209,7 @@ export async function POST(request: Request) {
                  WHERE pool_id = $1`,
                 [poolId]
             );
+            await logWarmupAudit(request, poolId, 'start');
             return NextResponse.json({ success: true, pool: updated[0] });
         }
 
@@ -171,6 +224,7 @@ export async function POST(request: Request) {
             if (updated.length === 0) {
                 return NextResponse.json({ error: 'Pool not found' }, { status: 404 });
             }
+            await logWarmupAudit(request, poolId, 'pause');
             return NextResponse.json({ success: true, pool: updated[0] });
         }
 
@@ -191,6 +245,7 @@ export async function POST(request: Request) {
                  WHERE pool_id = $1`,
                 [poolId]
             );
+            await logWarmupAudit(request, poolId, 'reset');
             return NextResponse.json({ success: true, pool: updated[0] });
         }
 

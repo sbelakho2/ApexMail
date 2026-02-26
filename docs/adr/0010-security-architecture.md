@@ -312,6 +312,21 @@ security-scan:
 
 ## Consequences
 
+### Implemented Security Crate Stack (2026-02)
+
+> **Update:** In addition to the authentication, encryption, input validation, and rate limiting controls described above, the mail server now implements 8 dedicated Rust security crates providing comprehensive defense-in-depth. All 230 unit tests pass. See [Security Systems Reference](../security/Security_Systems.md) for full details.
+
+| Crate | Purpose | Tests |
+|-------|---------|-------|
+| `ddos-protection` | 5-layer DDoS defense: XDP, TLS fingerprinting, cost-based rate limiting, ML Isolation Forest anomaly detection, SMTP state machine protection, Redis CRDT cross-region coordination | 68 |
+| `waf-engine` | AST-based SQL injection detection, HTML/JS XSS analysis, path traversal, command injection, OWASP CRS-compatible anomaly scoring with 4 paranoia levels | 25 |
+| `ids-engine` | Suricata-compatible signature matching, SMTP/DNS/TLS protocol analysis, stateful connection tracking for port scan and SYN flood detection | 13 |
+| `spam-filter` | Bayesian classification with online learning, SPF/DKIM/DMARC header analysis, Aho-Corasick content scoring, URL reputation (shorteners, suspicious TLDs, IDN homographs) | 23 |
+| `sandbox` | File magic detection (PE/ELF/PDF/ZIP/OLE2/HTML), SHA-256 hashing, OLE2 macro detection, double extension attacks, policy engine with 40 dangerous extensions | 25 |
+| `ato-protection` | Haversine impossible travel detection, SHA-256 device fingerprinting, failed-attempt lockout, time-of-day behavioral profiling | 21 |
+| `dlp-engine` | PII detection (CC with Luhn validation, SSN, phone, email), Shannon entropy secret scanning, confidential keyword policy, domain allowlisting | 27 |
+| `threat-intel` | IP/domain blocklist management with CIDR matching, TTL-based expiration, composite reputation scoring, Spamhaus DROP/EDROP feed support | 28 |
+
 ### Positive
 
 - **Defense in Depth**: Multiple layers prevent single point of failure

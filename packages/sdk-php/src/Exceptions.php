@@ -20,6 +20,8 @@ class ApexMailException extends \RuntimeException
 
 class NetworkException       extends ApexMailException {}
 class AuthenticationException extends ApexMailException {}
+class ForbiddenException      extends ApexMailException {}
+class ConflictException       extends ApexMailException {}
 class NotFoundException       extends ApexMailException {}
 class ValidationException     extends ApexMailException {}
 class RateLimitException      extends ApexMailException {}

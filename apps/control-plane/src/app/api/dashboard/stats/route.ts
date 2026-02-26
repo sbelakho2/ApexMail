@@ -10,6 +10,8 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
+const DASHBOARD_CACHE_TTL_MS = 30_000;
+let dashboardCache: { expiresAt: number; value: DashboardStats } | null = null;
 
 interface ActivityRow {
     id: string;
@@ -71,6 +73,11 @@ function toIsoTimestamp(value: Date | string): string {
 
 export async function GET(): Promise<NextResponse<DashboardStats | { error: string }>> {
     try {
+        const now = Date.now();
+        if (dashboardCache && dashboardCache.expiresAt > now) {
+            return NextResponse.json(dashboardCache.value);
+        }
+
         const [
             hasSalesLeads,
             hasDripCampaigns,
@@ -291,9 +298,9 @@ export async function GET(): Promise<NextResponse<DashboardStats | { error: stri
             }
         }
 
-        const healthStatus: 'healthy' | 'degraded' | 'down' = criticalAlertCount > 0
+        const healthStatus: 'healthy' | 'degraded' | 'down' = criticalAlertCount >= 5
             ? 'down'
-            : highAlertCount > 0
+            : (criticalAlertCount > 0 || highAlertCount > 0)
                 ? 'degraded'
                 : 'healthy';
 
@@ -353,6 +360,11 @@ export async function GET(): Promise<NextResponse<DashboardStats | { error: stri
                 timestamp: toIsoTimestamp(row.timestamp),
             })),
             pipeline,
+        };
+
+        dashboardCache = {
+            expiresAt: now + DASHBOARD_CACHE_TTL_MS,
+            value: stats,
         };
 
         return NextResponse.json(stats);

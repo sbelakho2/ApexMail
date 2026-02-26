@@ -7,44 +7,17 @@
 
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { constantTimeEqual, verifySignedToken } from '@/lib/signatures';
+import { logSecurityEvent } from '@/lib/server-logger';
 
-const _enc = new TextEncoder();
-
-function _b64url(buf: Uint8Array): string {
-    let bin = '';
-    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
-
-function _b64urlDecode(s: string): string {
-    const base64 = s.replace(/-/g, '+').replace(/_/g, '/');
-    return atob(base64);
-}
-
-async function _hmacSign(secret: string, data: string): Promise<string> {
-    const key = await crypto.subtle.importKey(
-        'raw', _enc.encode(secret),
-        { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-    );
-    const sig = await crypto.subtle.sign('HMAC', key, _enc.encode(data));
-    return _b64url(new Uint8Array(sig));
-}
-
-function _constTimeEq(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    let r = 0;
-    for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    return r === 0;
-}
+let hasLoggedMissingSessionSecret = false;
 
 const PUBLIC_PATHS = [
     '/login',
     '/api/auth/login',
-    '/api/auth/impersonate',
     '/api/auth/session',
     '/api/csrf',
     '/api/health',
-    '/_next',
     '/favicon.ico',
 ];
 
@@ -54,8 +27,12 @@ const IMPERSONATION_SESSION_COOKIE = 'impersonation_session';
 const USER_SESSION_COOKIE = 'am_session';
 const E2E_BYPASS_HEADER = 'x-e2e-bypass-key';
 
+function isNonProductionE2EModeEnabled(): boolean {
+    return process.env.NODE_ENV !== 'production' && process.env.E2E_TEST_MODE === 'true';
+}
+
 function hasValidE2EBypass(request: NextRequest): boolean {
-    const enabled = process.env.E2E_TEST_MODE === 'true';
+    const enabled = isNonProductionE2EModeEnabled();
     const expectedKey = process.env.E2E_BYPASS_KEY;
     const providedKey = request.headers.get(E2E_BYPASS_HEADER);
 
@@ -63,12 +40,52 @@ function hasValidE2EBypass(request: NextRequest): boolean {
         return false;
     }
 
-    return _constTimeEq(expectedKey, providedKey);
+    return constantTimeEqual(expectedKey, providedKey);
 }
 
-function isPublicPath(pathname: string): boolean {
+async function validateImpersonationBootstrapToken(token: string, secret: string): Promise<boolean> {
+    try {
+        const validation = await verifySignedToken<{
+            type?: string;
+            tenantId?: string;
+            operatorId?: string;
+            exp?: number;
+        }>(token, secret);
+        if (!validation.valid || !validation.payload) return false;
+
+        const payload = validation.payload;
+        if (payload.type !== 'impersonation') return false;
+        if (typeof payload.tenantId !== 'string' || !payload.tenantId) return false;
+        if (typeof payload.operatorId !== 'string' || !payload.operatorId) return false;
+        if (!payload.exp || typeof payload.exp !== 'number') return false;
+        if (Date.now() > payload.exp) return false;
+
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function isPublicPath(request: NextRequest): Promise<boolean> {
+    const pathname = request.nextUrl.pathname;
+    const method = request.method.toUpperCase();
+
     if (PUBLIC_PATHS.includes(pathname)) {
         return true;
+    }
+
+    if (pathname === '/api/auth/impersonate') {
+        if (method === 'POST') {
+            return true;
+        }
+
+        const token = request.nextUrl.searchParams.get('token');
+        const secret = process.env.IMPERSONATION_SECRET;
+        if (!token || !secret) {
+            return false;
+        }
+
+        return validateImpersonationBootstrapToken(token, secret);
     }
 
     return PUBLIC_PREFIXES.some((prefix) => pathname.startsWith(prefix));
@@ -76,14 +93,10 @@ function isPublicPath(pathname: string): boolean {
 
 async function validateImpersonationSession(sessionToken: string, secret: string): Promise<boolean> {
     try {
-        const [payloadB64, signature] = sessionToken.split('.');
-        if (!payloadB64 || !signature) return false;
+        const validation = await verifySignedToken<{ exp?: number; type?: string }>(sessionToken, secret);
+        if (!validation.valid || !validation.payload) return false;
 
-        const expectedSignature = await _hmacSign(secret, payloadB64);
-
-        if (!_constTimeEq(signature, expectedSignature)) return false;
-
-        const payload = JSON.parse(_b64urlDecode(payloadB64));
+        const payload = validation.payload;
         if (payload.exp && Date.now() > payload.exp) return false;
         if (payload.type !== 'impersonation') return false;
 
@@ -112,14 +125,8 @@ async function validateJwtSession(token: string, apiBaseUrl: string): Promise<bo
 export async function middleware(request: NextRequest) {
     const { pathname } = request.nextUrl;
 
-    if (isPublicPath(pathname)) {
+    if (await isPublicPath(request)) {
         return NextResponse.next();
-    }
-
-    if (process.env.E2E_TEST_MODE === 'true') {
-        const response = NextResponse.next();
-        response.headers.set('X-E2E-Bypass', '1');
-        return response;
     }
 
     if (hasValidE2EBypass(request)) {
@@ -133,7 +140,10 @@ export async function middleware(request: NextRequest) {
 
     const sessionSecret = process.env.SESSION_SECRET;
     if (!sessionSecret && process.env.NODE_ENV !== 'development') {
-        console.error('[SECURITY] SESSION_SECRET is not configured');
+        if (!hasLoggedMissingSessionSecret) {
+            hasLoggedMissingSessionSecret = true;
+            logSecurityEvent('missing_session_secret', { path: pathname });
+        }
         return NextResponse.redirect(new URL('/login', request.url));
     }
 

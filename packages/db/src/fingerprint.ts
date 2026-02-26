@@ -50,21 +50,24 @@ async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObje
       column_definitions: string;
     }>(`
       SELECT 
-        c.table_schema,
-        c.table_name,
+        n.nspname as table_schema,
+        c.relname as table_name,
         string_agg(
-          c.column_name || ' ' || c.data_type || 
-          CASE WHEN c.is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END ||
-          COALESCE(' DEFAULT ' || c.column_default, ''),
-          ', ' ORDER BY c.ordinal_position
+          a.attname || ' ' || pg_catalog.format_type(a.atttypid, a.atttypmod) ||
+          CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END ||
+          COALESCE(' DEFAULT ' || pg_get_expr(ad.adbin, ad.adrelid), ''),
+          ', ' ORDER BY a.attnum
         ) as column_definitions
-      FROM information_schema.columns c
-      JOIN information_schema.tables t 
-        ON c.table_schema = t.table_schema AND c.table_name = t.table_name
-      WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
-        AND t.table_type = 'BASE TABLE'
-      GROUP BY c.table_schema, c.table_name
-      ORDER BY c.table_schema, c.table_name
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a ON a.attrelid = c.oid
+        AND a.attnum > 0
+        AND NOT a.attisdropped
+      LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+        AND c.relkind IN ('r', 'p')
+      GROUP BY n.nspname, c.relname
+      ORDER BY n.nspname, c.relname
     `);
 
     for (const row of tablesResult.rows) {

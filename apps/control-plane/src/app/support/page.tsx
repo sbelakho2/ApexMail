@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { cn, timeAgo, getStatusChipClasses } from '../../lib/utils';
+import { getCsrfToken } from '../../lib/client-csrf';
+import { PageLoadingState } from '../../components/ui/async-state';
 
 export const dynamic = 'force-dynamic';
 
@@ -82,7 +84,10 @@ const CATEGORY_CONFIG: Record<string, { label: string; icon: string }> = {
     general: { label: 'General', icon: '📝' },
 };
 
-const TEAM_MEMBERS = ['Alex (Support)', 'Jordan (Support)', 'Sam (Engineering)', 'Taylor (Billing)'];
+const ENV_TEAM_MEMBERS = (process.env.NEXT_PUBLIC_CONTROL_PLANE_TEAM_MEMBERS || '')
+    .split(',')
+    .map((member) => member.trim())
+    .filter(Boolean);
 
 function SupportPageContent() {
     const searchParams = useSearchParams();
@@ -102,7 +107,21 @@ function SupportPageContent() {
     const [sendingReply, setSendingReply] = useState(false);
     const [triageShortcut, setTriageShortcut] = useState<'none' | 'urgent_unassigned' | 'sla_breach' | 'my_queue'>('none');
     const messagesEndRef = useRef<HTMLDivElement>(null);
-    const currentOperator = 'Alex (Support)';
+    const [teamMembers, setTeamMembers] = useState<string[]>(() => ENV_TEAM_MEMBERS.length > 0 ? ENV_TEAM_MEMBERS : ['Support Queue']);
+    const [currentOperator, setCurrentOperator] = useState<string>(() => ENV_TEAM_MEMBERS[0] || 'Support Queue');
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const savedOperator = window.localStorage.getItem('control-plane.current-operator');
+        if (savedOperator) {
+            setCurrentOperator(savedOperator);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        window.localStorage.setItem('control-plane.current-operator', currentOperator);
+    }, [currentOperator]);
 
     useEffect(() => { loadTickets(); }, []);
     useEffect(() => { if (activeView === 'analytics') loadAnalytics(); }, [activeView]);
@@ -114,6 +133,20 @@ function SupportPageContent() {
             if (!response.ok) throw new Error(`Failed: ${response.status}`);
             const data = await response.json();
             setTickets(data);
+
+            const dynamicMembers = new Set<string>(teamMembers);
+            for (const ticket of data as Ticket[]) {
+                if (ticket.assignee) {
+                    dynamicMembers.add(ticket.assignee);
+                }
+            }
+            const nextMembers = Array.from(dynamicMembers);
+            if (nextMembers.length > 0) {
+                setTeamMembers(nextMembers);
+                if (!nextMembers.includes(currentOperator)) {
+                    setCurrentOperator(nextMembers[0]);
+                }
+            }
         } catch (err) {
             console.error('Failed to load tickets:', err);
         } finally {
@@ -136,10 +169,14 @@ function SupportPageContent() {
 
     async function updateTicketStatus(ticketId: string, status: Ticket['status']) {
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/support', {
                 method: 'PUT',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({ ticketId, status }),
             });
             if (!response.ok) throw new Error('Failed to update');
@@ -158,10 +195,14 @@ function SupportPageContent() {
 
     async function assignTicket(ticketId: string, assignee: string | null) {
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/support', {
                 method: 'PUT',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({ ticketId, assignee }),
             });
             if (!response.ok) throw new Error('Failed to assign');
@@ -180,10 +221,14 @@ function SupportPageContent() {
 
     async function updateTicketPriority(ticketId: string, priority: string) {
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/support', {
                 method: 'PUT',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({ ticketId, priority }),
             });
             if (!response.ok) throw new Error('Failed to update priority');
@@ -205,10 +250,14 @@ function SupportPageContent() {
 
         setSendingReply(true);
         try {
+            const csrfToken = await getCsrfToken();
             const response = await fetch('/api/support', {
                 method: 'POST',
                 credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+                },
                 body: JSON.stringify({
                     ticketId: selectedTicket.id,
                     content: replyContent,
@@ -278,11 +327,7 @@ function SupportPageContent() {
     const urgentCount = tickets.filter(t => t.priority === 'urgent' && t.status !== 'resolved' && t.status !== 'closed').length;
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading support tickets..." />;
     }
 
     return (
@@ -325,9 +370,7 @@ function SupportPageContent() {
             {activeView === 'analytics' && (
                 <div>
                     {analyticsLoading ? (
-                        <div className="flex items-center justify-center h-64">
-                            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-                        </div>
+                        <PageLoadingState label="Loading support analytics..." />
                     ) : analytics ? (
                         <div className="space-y-6">
                             {/* KPI Cards */}
@@ -513,12 +556,27 @@ function SupportPageContent() {
                                                     const sCfg = STATUS_CONFIG[t.status] ?? STATUS_CONFIG.open;
                                                     const pCfg = PRIORITY_CONFIG[t.priority] ?? PRIORITY_CONFIG.medium;
                                                     const cCfg = CATEGORY_CONFIG[t.category] ?? CATEGORY_CONFIG.general;
+                                                    const openTicketFromAnalytics = () => {
+                                                        const found = tickets.find(tk => tk.id === t.id);
+                                                        if (found) {
+                                                            setSelectedTicket(found);
+                                                            setActiveView('tickets');
+                                                        }
+                                                    };
                                                     return (
-                                                        <tr key={t.id} className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer"
-                                                            onClick={() => {
-                                                                const found = tickets.find(tk => tk.id === t.id);
-                                                                if (found) { setSelectedTicket(found); setActiveView('tickets'); }
-                                                            }}>
+                                                        <tr
+                                                            key={t.id}
+                                                            className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer"
+                                                            onClick={openTicketFromAnalytics}
+                                                            role="button"
+                                                            tabIndex={0}
+                                                            onKeyDown={(event) => {
+                                                                if (event.key === 'Enter' || event.key === ' ') {
+                                                                    event.preventDefault();
+                                                                    openTicketFromAnalytics();
+                                                                }
+                                                            }}
+                                                        >
                                                             <td className="py-2 pr-4 max-w-[200px] truncate font-medium">{t.subject}</td>
                                                             <td className="py-2 pr-4">{t.tenantName}</td>
                                                             <td className="py-2 pr-4">{cCfg.icon} {cCfg.label}</td>
@@ -741,7 +799,7 @@ function SupportPageContent() {
                                             onChange={(e) => assignTicket(selectedTicket.id, e.target.value || null)}
                                             className="px-3 py-1.5 border border-input rounded-lg text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none bg-background text-foreground">
                                             <option value="">Unassigned</option>
-                                            {TEAM_MEMBERS.map(member => (
+                                            {teamMembers.map(member => (
                                                 <option key={member} value={member}>{member}</option>
                                             ))}
                                         </select>
@@ -837,7 +895,7 @@ function SupportPageContent() {
 
 export default function SupportPage() {
     return (
-        <Suspense fallback={<div className="flex items-center justify-center h-64"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div></div>}>
+        <Suspense fallback={<PageLoadingState label="Loading support tickets..." />}>
             <SupportPageContent />
         </Suspense>
     );

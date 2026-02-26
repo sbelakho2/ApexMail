@@ -35,17 +35,17 @@ pub struct AppState {
 
 impl AppState {
     /// Build `AppState` from a `DevExConfig`.
-    pub fn from_config(cfg: DevExConfig) -> Self {
+    pub fn from_config(cfg: DevExConfig) -> Result<Self, crate::types::DevExError> {
         let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
-        let webhook_tester = WebhookTester::new(cfg.webhook_signing_secret.clone());
-        Self {
+        let webhook_tester = WebhookTester::new(cfg.webhook_signing_secret.clone())?;
+        Ok(Self {
             config: Arc::new(cfg),
             versions: Arc::new(VersionRegistry::new()),
             sdk_manager: Arc::new(SdkManager::new()),
             openapi: Arc::new(openapi),
             onboarding: Arc::new(OnboardingService::new()),
             webhook_tester: Arc::new(webhook_tester),
-        }
+        })
     }
 }
 

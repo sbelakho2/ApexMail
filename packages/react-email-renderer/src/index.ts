@@ -29,11 +29,8 @@
  */
 
 import { transform } from 'esbuild';
-import { render } from '@react-email/render';
-import * as React from 'react';
-import * as ReactJsxRuntime from 'react/jsx-runtime';
-import * as ReactEmailComponents from '@react-email/components';
-import { Script, createContext } from 'vm';
+import { createHash } from 'node:crypto';
+import { Worker } from 'node:worker_threads';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -53,39 +50,81 @@ export interface RenderResult {
   text: string;
 }
 
-// ── Module allowlist ───────────────────────────────────────────────────────────
-
-/**
- * Only these modules can be `require()`-d inside a React Email template.
- * Anything outside this list throws immediately at sandbox execution time
- * so a rogue template can never load `child_process`, `fs`, etc.
- */
-const ALLOWED_MODULES: Record<string, unknown> = {
-  react: React,
-  'react/jsx-runtime': ReactJsxRuntime,
-  '@react-email/components': ReactEmailComponents,
-  // Convenience: allow importing individual @react-email/* sub-packages that
-  // resolve to the same component namespace.
-  '@react-email/html': ReactEmailComponents,
-  '@react-email/head': ReactEmailComponents,
-  '@react-email/body': ReactEmailComponents,
-  '@react-email/button': ReactEmailComponents,
-  '@react-email/container': ReactEmailComponents,
-  '@react-email/column': ReactEmailComponents,
-  '@react-email/row': ReactEmailComponents,
-  '@react-email/font': ReactEmailComponents,
-  '@react-email/heading': ReactEmailComponents,
-  '@react-email/hr': ReactEmailComponents,
-  '@react-email/img': ReactEmailComponents,
-  '@react-email/link': ReactEmailComponents,
-  '@react-email/preview': ReactEmailComponents,
-  '@react-email/section': ReactEmailComponents,
-  '@react-email/text': ReactEmailComponents,
-  '@react-email/tailwind': ReactEmailComponents,
-};
 
 const MAX_TEMPLATE_BYTES = 1024 * 1024;
 const MAX_RENDERED_BYTES = 5 * 1024 * 1024;
+const MAX_WORKER_OLD_SPACE_MB = 128;
+const TRANSPILE_CACHE_MAX = 200;
+const transpileCache = new Map<string, string>();
+
+function getCachedTranspiled(source: string): string | null {
+  const key = createHash('sha256').update(source).digest('hex');
+  const cached = transpileCache.get(key);
+  if (cached) {
+    transpileCache.delete(key);
+    transpileCache.set(key, cached);
+    return cached;
+  }
+  return null;
+}
+
+function setCachedTranspiled(source: string, code: string): void {
+  const key = createHash('sha256').update(source).digest('hex');
+  transpileCache.set(key, code);
+  if (transpileCache.size > TRANSPILE_CACHE_MAX) {
+    const oldestKey = transpileCache.keys().next().value as string | undefined;
+    if (oldestKey) {
+      transpileCache.delete(oldestKey);
+    }
+  }
+}
+
+async function renderInWorker(payload: {
+  transpiledCode: string;
+  props: Record<string, unknown>;
+  pretty: boolean;
+  timeoutMs: number;
+}): Promise<RenderResult> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./worker.js', import.meta.url), {
+      type: 'module',
+      workerData: {
+        ...payload,
+        maxRenderedBytes: MAX_RENDERED_BYTES,
+      },
+      resourceLimits: {
+        maxOldGenerationSizeMb: MAX_WORKER_OLD_SPACE_MB,
+      },
+    });
+
+    const timeout = setTimeout(() => {
+      worker.terminate().catch(() => undefined);
+      reject(new ReactEmailRenderError('Template rendering timed out', 'RENDER_TIMEOUT'));
+    }, payload.timeoutMs + 1000);
+
+    worker.once('message', (message: { ok: boolean; value?: RenderResult; error?: { message: string; code?: string } }) => {
+      clearTimeout(timeout);
+      if (message.ok && message.value) {
+        resolve(message.value);
+      } else {
+        const err = message.error;
+        reject(new ReactEmailRenderError(err?.message ?? 'Template rendering failed', err?.code ?? 'RENDER_ERROR'));
+      }
+    });
+
+    worker.once('error', (err) => {
+      clearTimeout(timeout);
+      reject(new ReactEmailRenderError(`Worker error: ${err.message}`, 'WORKER_ERROR', err));
+    });
+
+    worker.once('exit', (code) => {
+      if (code !== 0) {
+        clearTimeout(timeout);
+        reject(new ReactEmailRenderError(`Worker exited with code ${code}`, 'WORKER_EXIT'));
+      }
+    });
+  });
+}
 
 // ── Core renderer ──────────────────────────────────────────────────────────────
 
@@ -108,19 +147,25 @@ export async function renderReactEmailTemplate(
   // ── Step 1: Transpile JSX → CommonJS (in-memory, no disk I/O) ──────────────
   let transpiledCode: string;
   try {
-    const result = await transform(jsxSource, {
-      loader: 'tsx',
-      format: 'cjs',
-      target: 'node18',
-      jsx: 'automatic',
-      jsxImportSource: 'react',
-      // Strip TypeScript type annotations
-      tsconfigRaw: { compilerOptions: { jsx: 'react-jsx' } },
-      // Minify whitespace only to keep source maps reasonable
-      minifyWhitespace: false,
-      logLevel: 'silent',
-    });
-    transpiledCode = result.code;
+    const cached = getCachedTranspiled(jsxSource);
+    if (cached) {
+      transpiledCode = cached;
+    } else {
+      const result = await transform(jsxSource, {
+        loader: 'tsx',
+        format: 'cjs',
+        target: 'node18',
+        jsx: 'automatic',
+        jsxImportSource: 'react',
+        // Strip TypeScript type annotations
+        tsconfigRaw: { compilerOptions: { jsx: 'react-jsx' } },
+        // Minify whitespace only to keep source maps reasonable
+        minifyWhitespace: false,
+        logLevel: 'silent',
+      });
+      transpiledCode = result.code;
+      setCachedTranspiled(jsxSource, transpiledCode);
+    }
     if (Buffer.byteLength(transpiledCode, 'utf8') > MAX_TEMPLATE_BYTES) {
       throw new ReactEmailRenderError(
         'Template size exceeds the maximum allowed size.',
@@ -135,118 +180,13 @@ export async function renderReactEmailTemplate(
     );
   }
 
-  // ── Step 2: Execute in an isolated VM context ───────────────────────────────
-  let ComponentModule: { default?: React.ComponentType<Record<string, unknown>> };
-  try {
-    const moduleExports: Record<string, unknown> = {};
-    const sandboxedRequire = (id: string): unknown => {
-      const mod = ALLOWED_MODULES[id];
-      if (mod === undefined) {
-        throw new Error(
-          `Module "${id}" is not allowed in React Email templates. ` +
-          `Allowed modules: ${Object.keys(ALLOWED_MODULES).join(', ')}`,
-        );
-      }
-      return mod;
-    };
-
-    const sandbox = createContext({
-      module: { exports: moduleExports },
-      exports: moduleExports,
-      require: sandboxedRequire,
-      // Minimal globals needed by transpiled React code
-      process: { env: { NODE_ENV: 'production' } },
-      console: {
-        log: () => undefined,
-        warn: () => undefined,
-        error: () => undefined,
-      },
-    });
-
-    const script = new Script(transpiledCode, {
-      filename: 'react-email-template.js',
-    });
-    script.runInContext(sandbox, { timeout: timeoutMs });
-
-    ComponentModule = sandbox.module.exports as typeof ComponentModule;
-  } catch (err) {
-    throw new ReactEmailRenderError(
-      `Template execution failed: ${err instanceof Error ? err.message : String(err)}`,
-      'EXECUTION_ERROR',
-      err,
-    );
-  }
-
-  // ── Step 3: Validate the default export ────────────────────────────────────
-  const Component = ComponentModule?.default;
-  if (typeof Component !== 'function') {
-    throw new ReactEmailRenderError(
-      'React Email template must have a default export that is a React component function.',
-      'NO_DEFAULT_EXPORT',
-    );
-  }
-
-  // ── Step 4: Render to HTML via @react-email/render ─────────────────────────
-  let html: string;
-  try {
-    const element = React.createElement(
-      Component as React.ComponentType<Record<string, unknown>>,
-      props,
-    );
-    html = await render(element, { pretty });
-    if (Buffer.byteLength(html, 'utf8') > MAX_RENDERED_BYTES) {
-      throw new ReactEmailRenderError(
-        'Rendered output exceeds the maximum allowed size.',
-        'RENDER_OUTPUT_TOO_LARGE',
-      );
-    }
-  } catch (err) {
-    throw new ReactEmailRenderError(
-      `React rendering failed: ${err instanceof Error ? err.message : String(err)}`,
-      'RENDER_ERROR',
-      err,
-    );
-  }
-
-  // ── Step 5: Generate plain-text fallback ────────────────────────────────────
-  const text = htmlToPlainText(html);
-
-  return { html, text };
-}
-
-// ── Plain-text converter ────────────────────────────────────────────────────────
-
-/**
- * Convert an HTML email string to a readable plain-text fallback.
- * This is not a universal HTML→text converter — it targets the output
- * of @react-email/render which uses known patterns (no JS, controlled structure).
- */
-function htmlToPlainText(html: string): string {
-  return html
-    // Replace common block elements with newlines
-    .replace(/<(br|hr)\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|h[1-6]|li|td|section|article)>/gi, '\n')
-    // Replace <a href="...">text</a> with "text (url)"
-    .replace(/<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, '$2 ($1)')
-    // Strip remaining tags
-    .replace(/<[^>]+>/g, '')
-    // Decode common HTML entities
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
-      String.fromCodePoint(parseInt(hex, 16)),
-    )
-    .replace(/&#(\d+);/g, (_, num) =>
-      String.fromCodePoint(parseInt(num, 10)),
-    )
-    // Collapse multiple blank lines to max two
-    .replace(/\n{3,}/g, '\n\n')
-    // Trim leading/trailing whitespace
-    .trim();
+  // ── Step 2: Execute + render in a constrained worker ───────────────────────
+  return renderInWorker({
+    transpiledCode,
+    props,
+    pretty,
+    timeoutMs,
+  });
 }
 
 // ── Error class ────────────────────────────────────────────────────────────────

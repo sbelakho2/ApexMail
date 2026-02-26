@@ -190,3 +190,105 @@ class WebhookListResponse(BaseModel):
     """Response from listing webhooks."""
 
     webhooks: list[Webhook]
+
+
+class Template(BaseModel):
+    """Template details."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    name: str
+    subject: str
+    html_body: str = Field(alias="htmlBody")
+    text_body: Optional[str] = Field(default=None, alias="textBody")
+    version: int
+    status: str
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+
+
+class TemplateRenderResponse(BaseModel):
+    """Rendered template output."""
+
+    subject: str
+    html: str
+    text: Optional[str] = None
+
+
+class TemplateListResponse(BaseModel):
+    """Response from listing templates."""
+
+    templates: list[Template]
+
+
+class Suppression(BaseModel):
+    """Suppression entry."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    email: EmailStr
+    reason: str
+    source: str
+    created_at: datetime = Field(alias="createdAt")
+
+
+class SuppressionCheckResponse(BaseModel):
+    """Suppression check response."""
+
+    email: EmailStr
+    suppressed: bool
+    reason: Optional[str] = None
+
+
+class SuppressionListResponse(BaseModel):
+    """Response from listing suppressions."""
+
+    suppressions: list[Suppression]
+
+
+class BulkSuppressionResponse(BaseModel):
+    """Response from bulk suppression operations."""
+
+    created: int
+    duplicates: int
+    invalid: int
+
+
+class Event(BaseModel):
+    """Delivery event details."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    message_id: Optional[str] = Field(default=None, alias="messageId")
+    event_type: str = Field(alias="eventType")
+    recipient: Optional[EmailStr] = None
+    metadata: Optional[dict[str, Any]] = None
+    timestamp: datetime
+
+
+class EventStats(BaseModel):
+    """Event stats summary."""
+
+    total: int
+    delivered: int
+    bounced: int
+    complained: int
+    opened: int
+    clicked: int
+
+
+class EventTimeseriesPoint(BaseModel):
+    """Event timeseries point."""
+
+    timestamp: datetime
+    count: int
+    event_type: str = Field(alias="eventType")
+
+
+class EventListResponse(BaseModel):
+    """Response from listing events."""
+
+    events: list[Event]

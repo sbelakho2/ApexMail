@@ -25,28 +25,25 @@ interface UserState {
 
 export const useUserStore = create<UserState>()(
     devtools(
-        persist(
-            immer((set) => ({
-                user: null,
-                isAuthenticated: false,
-                isLoading: true,
-                setUser: (user) =>
-                    set((state) => {
-                        state.user = user;
-                        state.isAuthenticated = !!user;
-                    }),
-                setLoading: (loading) =>
-                    set((state) => {
-                        state.isLoading = loading;
-                    }),
-                logout: () =>
-                    set((state) => {
-                        state.user = null;
-                        state.isAuthenticated = false;
-                    }),
-            })),
-            { name: 'apexmail-user' }
-        ),
+        immer((set) => ({
+            user: null,
+            isAuthenticated: false,
+            isLoading: true,
+            setUser: (user) =>
+                set((state) => {
+                    state.user = user;
+                    state.isAuthenticated = !!user;
+                }),
+            setLoading: (loading) =>
+                set((state) => {
+                    state.isLoading = loading;
+                }),
+            logout: () =>
+                set((state) => {
+                    state.user = null;
+                    state.isAuthenticated = false;
+                }),
+        })),
         { name: 'UserStore' }
     )
 );
@@ -92,198 +89,6 @@ export const useUIStore = create<UIState>()(
     )
 );
 
-// Campaign store
-interface Campaign {
-    id: string;
-    name: string;
-    subject: string;
-    status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'paused';
-    listId: string;
-    templateId?: string;
-    scheduledAt?: string;
-    sentAt?: string;
-    stats?: {
-        sent: number;
-        delivered: number;
-        opens: number;
-        clicks: number;
-        bounces: number;
-        unsubscribes: number;
-    };
-    createdAt: string;
-    updatedAt: string;
-}
-
-interface CampaignState {
-    campaigns: Campaign[];
-    currentCampaign: Campaign | null;
-    isLoading: boolean;
-    error: string | null;
-    setCampaigns: (campaigns: Campaign[]) => void;
-    addCampaign: (campaign: Campaign) => void;
-    updateCampaign: (id: string, updates: Partial<Campaign>) => void;
-    deleteCampaign: (id: string) => void;
-    setCurrentCampaign: (campaign: Campaign | null) => void;
-    setLoading: (loading: boolean) => void;
-    setError: (error: string | null) => void;
-}
-
-export const useCampaignStore = create<CampaignState>()(
-    devtools(
-        immer((set) => ({
-            campaigns: [],
-            currentCampaign: null,
-            isLoading: false,
-            error: null,
-            setCampaigns: (campaigns) =>
-                set((state) => {
-                    state.campaigns = campaigns;
-                }),
-            addCampaign: (campaign) =>
-                set((state) => {
-                    state.campaigns.push(campaign);
-                }),
-            updateCampaign: (id, updates) =>
-                set((state) => {
-                    const index = state.campaigns.findIndex((c: Campaign) => c.id === id);
-                    if (index !== -1) {
-                        state.campaigns[index] = { ...state.campaigns[index], ...updates };
-                    }
-                }),
-            deleteCampaign: (id) =>
-                set((state) => {
-                    state.campaigns = state.campaigns.filter((c: Campaign) => c.id !== id);
-                }),
-            setCurrentCampaign: (campaign) =>
-                set((state) => {
-                    state.currentCampaign = campaign;
-                }),
-            setLoading: (loading) =>
-                set((state) => {
-                    state.isLoading = loading;
-                }),
-            setError: (error) =>
-                set((state) => {
-                    state.error = error;
-                }),
-        })),
-        { name: 'CampaignStore' }
-    )
-);
-
-// Contact store
-interface Contact {
-    id: string;
-    email: string;
-    firstName?: string;
-    lastName?: string;
-    phone?: string;
-    company?: string;
-    status: 'subscribed' | 'unsubscribed' | 'bounced' | 'complained';
-    tags: string[];
-    customFields: Record<string, string | number | boolean>;
-    score?: number;
-    createdAt: string;
-    updatedAt: string;
-}
-
-interface ContactState {
-    contacts: Contact[];
-    totalCount: number;
-    currentPage: number;
-    pageSize: number;
-    isLoading: boolean;
-    error: string | null;
-    selectedContactIds: string[];
-    setContacts: (contacts: Contact[], totalCount: number) => void;
-    addContact: (contact: Contact) => void;
-    updateContact: (id: string, updates: Partial<Contact>) => void;
-    deleteContacts: (ids: string[]) => void;
-    setCurrentPage: (page: number) => void;
-    setPageSize: (size: number) => void;
-    setLoading: (loading: boolean) => void;
-    setError: (error: string | null) => void;
-    selectContact: (id: string) => void;
-    deselectContact: (id: string) => void;
-    selectAll: () => void;
-    deselectAll: () => void;
-}
-
-export const useContactStore = create<ContactState>()(
-    devtools(
-        immer((set) => ({
-            contacts: [],
-            totalCount: 0,
-            currentPage: 1,
-            pageSize: 50,
-            isLoading: false,
-            error: null,
-            selectedContactIds: [],
-            setContacts: (contacts, totalCount) =>
-                set((state) => {
-                    state.contacts = contacts;
-                    state.totalCount = totalCount;
-                }),
-            addContact: (contact) =>
-                set((state) => {
-                    state.contacts.unshift(contact);
-                    state.totalCount += 1;
-                }),
-            updateContact: (id, updates) =>
-                set((state) => {
-                    const index = state.contacts.findIndex((c: Contact) => c.id === id);
-                    if (index !== -1) {
-                        state.contacts[index] = { ...state.contacts[index], ...updates };
-                    }
-                }),
-            deleteContacts: (ids) =>
-                set((state) => {
-                    state.contacts = state.contacts.filter((c: Contact) => !ids.includes(c.id));
-                    state.totalCount -= ids.length;
-                    state.selectedContactIds = state.selectedContactIds.filter(
-                        (id: string) => !ids.includes(id)
-                    );
-                }),
-            setCurrentPage: (page) =>
-                set((state) => {
-                    state.currentPage = page;
-                }),
-            setPageSize: (size) =>
-                set((state) => {
-                    state.pageSize = size;
-                    state.currentPage = 1;
-                }),
-            setLoading: (loading) =>
-                set((state) => {
-                    state.isLoading = loading;
-                }),
-            setError: (error) =>
-                set((state) => {
-                    state.error = error;
-                }),
-            selectContact: (id) =>
-                set((state) => {
-                    if (!state.selectedContactIds.includes(id)) {
-                        state.selectedContactIds.push(id);
-                    }
-                }),
-            deselectContact: (id) =>
-                set((state) => {
-                    state.selectedContactIds = state.selectedContactIds.filter((i: string) => i !== id);
-                }),
-            selectAll: () =>
-                set((state) => {
-                    state.selectedContactIds = state.contacts.map((c: Contact) => c.id);
-                }),
-            deselectAll: () =>
-                set((state) => {
-                    state.selectedContactIds = [];
-                }),
-        })),
-        { name: 'ContactStore' }
-    )
-);
-
 // Notification store
 interface Notification {
     id: string;
@@ -305,6 +110,8 @@ interface NotificationState {
     clearAll: () => void;
 }
 
+const NOTIFICATION_LIMIT = 200;
+
 export const useNotificationStore = create<NotificationState>()(
     devtools(
         immer((set) => ({
@@ -319,7 +126,13 @@ export const useNotificationStore = create<NotificationState>()(
                         createdAt: new Date().toISOString(),
                     };
                     state.notifications.unshift(newNotification);
-                    state.unreadCount += 1;
+                    if (state.notifications.length > NOTIFICATION_LIMIT) {
+                        state.notifications = state.notifications.slice(0, NOTIFICATION_LIMIT);
+                    }
+                    state.unreadCount = state.notifications.reduce(
+                        (count, item) => count + (item.read ? 0 : 1),
+                        0
+                    );
                 }),
             markAsRead: (id) =>
                 set((state) => {

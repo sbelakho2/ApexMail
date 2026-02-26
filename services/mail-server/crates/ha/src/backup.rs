@@ -333,8 +333,13 @@ impl BackupService {
 
     /// Validate that an identifier (table or column name) contains only safe characters.
     fn is_valid_identifier(name: &str) -> bool {
-        !name.is_empty()
-            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+
+        (first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
     /// Restore a single table from backup data

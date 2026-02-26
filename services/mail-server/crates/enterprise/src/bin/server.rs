@@ -20,7 +20,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Load configuration
-    let config = Config::from_env();
+    let config = Config::from_env()
+        .map_err(|err| anyhow::anyhow!("Invalid enterprise config: {err}"))?;
     if let Err(err) = config.validate() {
         return Err(anyhow::anyhow!("Invalid enterprise config: {err}"));
     }

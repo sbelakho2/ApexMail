@@ -8,14 +8,23 @@ import { NextResponse } from 'next/server';
 
 export const CSRF_COOKIE = 'csrf_token';
 export const CSRF_SIG_COOKIE = 'csrf_token_sig';
+const SESSION_COOKIE = 'cp_session';
 
 function getCsrfSecret(): string | null {
-    return process.env.CSRF_SECRET || process.env.CONTROL_PLANE_JWT_SECRET || null;
+    return process.env.CSRF_SECRET || null;
 }
 
-export function createCsrfToken(secret: string): { token: string; signature: string } {
+function getSessionBinding(request: NextRequest): string {
+    return request.cookies.get(SESSION_COOKIE)?.value || 'anonymous';
+}
+
+function signCsrfToken(secret: string, token: string, sessionBinding: string): string {
+    return crypto.createHmac('sha256', secret).update(`${token}.${sessionBinding}`).digest('base64url');
+}
+
+export function createCsrfToken(secret: string, sessionBinding: string): { token: string; signature: string } {
     const token = crypto.randomBytes(32).toString('base64url');
-    const signature = crypto.createHmac('sha256', secret).update(token).digest('base64url');
+    const signature = signCsrfToken(secret, token, sessionBinding);
     return { token, signature };
 }
 
@@ -39,6 +48,7 @@ export function validateCsrf(request: NextRequest): { ok: boolean; response?: Ne
     const headerToken = request.headers.get('x-csrf-token');
     const cookieToken = request.cookies.get(CSRF_COOKIE)?.value;
     const cookieSig = request.cookies.get(CSRF_SIG_COOKIE)?.value;
+    const sessionBinding = getSessionBinding(request);
 
     if (!headerToken || !cookieToken || !cookieSig) {
         return {
@@ -60,7 +70,7 @@ export function validateCsrf(request: NextRequest): { ok: boolean; response?: Ne
         };
     }
 
-    const expectedSig = crypto.createHmac('sha256', secret).update(cookieToken).digest('base64url');
+    const expectedSig = signCsrfToken(secret, cookieToken, sessionBinding);
     if (!safeEqual(expectedSig, cookieSig)) {
         return {
             ok: false,
@@ -74,7 +84,7 @@ export function validateCsrf(request: NextRequest): { ok: boolean; response?: Ne
     return { ok: true };
 }
 
-export function buildCsrfResponse(): NextResponse {
+export function buildCsrfResponse(request: NextRequest): NextResponse {
     const secret = getCsrfSecret();
     if (!secret) {
         return NextResponse.json(
@@ -83,7 +93,8 @@ export function buildCsrfResponse(): NextResponse {
         );
     }
 
-    const { token, signature } = createCsrfToken(secret);
+    const sessionBinding = getSessionBinding(request);
+    const { token, signature } = createCsrfToken(secret, sessionBinding);
 
     const response = NextResponse.json({ token });
     response.cookies.set(CSRF_COOKIE, token, {

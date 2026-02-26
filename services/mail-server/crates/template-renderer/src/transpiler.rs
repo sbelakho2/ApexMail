@@ -12,38 +12,46 @@ use crate::types::{
 };
 
 // ─── Regex patterns ────────────────────────────────────────────
+// SEC-001 FIX: Replace unwrap() with expect() for better panic messages.
+// These patterns are compile-time constants that are guaranteed to be valid.
 
 static IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?:import\s+(?:.*?\s+from\s+)?['"]|(?:import|require)\s*\(\s*['"])([^'"]+)['"]"#).unwrap()
+    Regex::new(r#"(?:import\s+(?:.*?\s+from\s+)?['"]|(?:import|require)\s*\(\s*['"])([^'"]+)['"]"#)
+        .expect("IMPORT_RE: invalid regex pattern - this is a bug")
 });
 
 static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}").unwrap()
+    Regex::new(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}")
+        .expect("PLACEHOLDER_RE: invalid regex pattern - this is a bug")
 });
 
 static TAG_OPEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>").unwrap()
+    Regex::new(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>")
+        .expect("TAG_OPEN_RE: invalid regex pattern - this is a bug")
 });
 
 static TAG_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"</([a-zA-Z][a-zA-Z0-9]*)>").unwrap()
+    Regex::new(r"</([a-zA-Z][a-zA-Z0-9]*)>")
+        .expect("TAG_CLOSE_RE: invalid regex pattern - this is a bug")
 });
 
 static SELF_CLOSE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)\s*/>").unwrap()
+    Regex::new(r"<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)\s*/>")
+        .expect("SELF_CLOSE_RE: invalid regex pattern - this is a bug")
 });
 
 static ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})"#).unwrap()
+    Regex::new(r#"([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})"#)
+        .expect("ATTR_RE: invalid regex pattern - this is a bug")
 });
 
 static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        Regex::new(r"(?i)\beval\s*\(").unwrap(),
-        Regex::new(r"(?i)\bFunction\s*\(").unwrap(),
-        Regex::new(r"(?i)\bprocess\b").unwrap(),
-        Regex::new(r"(?i)\b__proto__\b").unwrap(),
-        Regex::new(r"(?i)\bconstructor\b\s*\[").unwrap(),
+        Regex::new(r"(?i)\beval\s*\(").expect("DANGEROUS_PATTERNS[0]: invalid regex"),
+        Regex::new(r"(?i)\bFunction\s*\(").expect("DANGEROUS_PATTERNS[1]: invalid regex"),
+        Regex::new(r"(?i)\bprocess\b").expect("DANGEROUS_PATTERNS[2]: invalid regex"),
+        Regex::new(r"(?i)\b__proto__\b").expect("DANGEROUS_PATTERNS[3]: invalid regex"),
+        Regex::new(r"(?i)\bconstructor\b\s*\[").expect("DANGEROUS_PATTERNS[4]: invalid regex"),
     ]
 });
 
@@ -78,7 +86,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
         if !ALLOWED_MODULES.iter().any(|m| module.starts_with(m)) {
             errors.push(ValidationError {
                 message: format!("Forbidden module import: {}", module),
-                line: find_line_number(source, cap.get(0).unwrap().start()),
+                line: find_line_number(source, cap.get(0).map(|m| m.start()).unwrap_or(0)),
                 column: None,
             });
         }
@@ -113,7 +121,7 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
     // HTML tag balance check
     let open_tags: Vec<&str> = TAG_OPEN_RE
         .captures_iter(source)
-        .map(|c| c.get(1).unwrap().as_str())
+        .filter_map(|c| c.get(1).map(|m| m.as_str()))
         .collect();
     let self_closing: usize = SELF_CLOSE_RE.captures_iter(source).count();
     let close_tags: usize = TAG_CLOSE_RE.captures_iter(source).count();
@@ -213,52 +221,56 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
     while pos < source.len() {
         // Try self-closing tag first
         if let Some(cap) = SELF_CLOSE_RE.captures(&source[pos..]) {
-            let full = cap.get(0).unwrap();
-            if full.start() == 0 {
-                let tag = cap[1].to_string();
-                let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-                let attributes = parse_attributes(attrs_str);
-                nodes.push(TemplateNode {
-                    kind: NodeKind::Element { tag },
-                    attributes,
-                    children: vec![],
-                });
-                pos += full.end();
-                continue;
+            // SEC-001 FIX: Use if-let instead of unwrap()
+            if let Some(full) = cap.get(0) {
+                if full.start() == 0 {
+                    let tag = cap[1].to_string();
+                    let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                    let attributes = parse_attributes(attrs_str);
+                    nodes.push(TemplateNode {
+                        kind: NodeKind::Element { tag },
+                        attributes,
+                        children: vec![],
+                    });
+                    pos += full.end();
+                    continue;
+                }
             }
         }
 
         // Try opening tag
         if bytes[pos] == b'<' && pos + 1 < source.len() && bytes[pos + 1] != b'/' {
             if let Some(cap) = TAG_OPEN_RE.captures(&source[pos..]) {
-                let full = cap.get(0).unwrap();
-                if full.start() == 0 {
-                    let tag = cap[1].to_string();
-                    let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
-                    let attributes = parse_attributes(attrs_str);
+                // SEC-001 FIX: Use if-let instead of unwrap()
+                if let Some(full) = cap.get(0) {
+                    if full.start() == 0 {
+                        let tag = cap[1].to_string();
+                        let attrs_str = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+                        let attributes = parse_attributes(attrs_str);
 
-                    // Find matching close tag (simplified: doesn't handle nesting of same tag)
-                    let inner_start = pos + full.end();
-                    let close_pattern = format!("</{}>", tag);
-                    if let Some(close_pos) = source[inner_start..].find(&close_pattern) {
-                        let inner = &source[inner_start..inner_start + close_pos];
-                        let children = parse_html_to_nodes(inner)?;
-                        nodes.push(TemplateNode {
-                            kind: NodeKind::Element { tag },
-                            attributes,
-                            children,
-                        });
-                        pos = inner_start + close_pos + close_pattern.len();
-                        continue;
-                    } else {
-                        // Self-contained or unclosed — treat as leaf
-                        nodes.push(TemplateNode {
-                            kind: NodeKind::Element { tag },
-                            attributes,
-                            children: vec![],
-                        });
-                        pos += full.end();
-                        continue;
+                        // Find matching close tag (simplified: doesn't handle nesting of same tag)
+                        let inner_start = pos + full.end();
+                        let close_pattern = format!("</{}>", tag);
+                        if let Some(close_pos) = source[inner_start..].find(&close_pattern) {
+                            let inner = &source[inner_start..inner_start + close_pos];
+                            let children = parse_html_to_nodes(inner)?;
+                            nodes.push(TemplateNode {
+                                kind: NodeKind::Element { tag },
+                                attributes,
+                                children,
+                            });
+                            pos = inner_start + close_pos + close_pattern.len();
+                            continue;
+                        } else {
+                            // Self-contained or unclosed — treat as leaf
+                            nodes.push(TemplateNode {
+                                kind: NodeKind::Element { tag },
+                                attributes,
+                                children: vec![],
+                            });
+                            pos += full.end();
+                            continue;
+                        }
                     }
                 }
             }
@@ -288,9 +300,12 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
         // Skip close tags at current position
         if pos < source.len() {
             if let Some(cap) = TAG_CLOSE_RE.captures(&source[pos..]) {
-                if cap.get(0).unwrap().start() == 0 {
-                    pos += cap.get(0).unwrap().end();
-                    continue;
+                // SEC-001 FIX: Use if-let instead of unwrap()
+                if let Some(full) = cap.get(0) {
+                    if full.start() == 0 {
+                        pos += full.end();
+                        continue;
+                    }
                 }
             }
         }

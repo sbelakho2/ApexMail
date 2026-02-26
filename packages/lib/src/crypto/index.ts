@@ -15,7 +15,7 @@ import {
   createDecipheriv,
   randomBytes,
   createHash,
-  generateKeyPairSync,
+  generateKeyPair,
   timingSafeEqual,
   scrypt,
   scryptSync,
@@ -23,6 +23,7 @@ import {
 } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { Result } from '../result.js';
+import { createLogger } from '../logger/index.js';
 
 // ── Native addon acceleration ──────────────────────────────────────────────
 // When @apexmail/crypto-native is compiled, hot-path functions delegate to
@@ -37,10 +38,13 @@ interface NativeCrypto {
 
 const _cjsRequire = createRequire(import.meta.url);
 let _native: NativeCrypto | null = null;
+const logger = createLogger({ name: 'crypto' });
 try {
   _native = _cjsRequire('@apexmail/crypto-native') as NativeCrypto;
-} catch {
-  // Native addon not compiled or not installed — all operations use Node.js crypto.
+} catch (error) {
+  logger.warn('Native crypto addon unavailable, falling back to Node.js crypto', {
+    error: error instanceof Error ? error.message : String(error),
+  });
 }
 
 // Promisified scrypt with proper typing
@@ -62,9 +66,10 @@ function scryptAsync(
 const AES_KEY_LENGTH = 32; // 256 bits
 const AES_IV_LENGTH = 12; // 96 bits for GCM
 const SCRYPT_KEYLEN = 32;
-const SCRYPT_N = 16384;
+const SCRYPT_N = 32768;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
+const SCRYPT_MAXMEM = 64 * 1024 * 1024;
 
 export interface HMACOptions {
   algorithm?: 'sha256' | 'sha384' | 'sha512';
@@ -202,7 +207,7 @@ export async function hashPassword(password: string): Promise<string> {
     password,
     salt,
     SCRYPT_KEYLEN,
-    { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P }
+    { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM }
   );
   
   // Format: $scrypt$N$r$p$salt$hash
@@ -225,7 +230,13 @@ export async function verifyPassword(
 ): Promise<boolean> {
   const parts = hash.split('$');
   
+  // SEC-009 FIX: Perform fake work on invalid hash format to prevent timing oracle
+  // This prevents attackers from detecting user existence via timing differences
   if (parts.length !== 7 || parts[1] !== 'scrypt') {
+    // Perform fake scrypt work to prevent timing oracle
+    await scryptAsync('dummy', 'dummy-salt-value', SCRYPT_KEYLEN, { 
+      N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM 
+    });
     return false;
   }
   
@@ -239,7 +250,7 @@ export async function verifyPassword(
     password,
     salt,
     SCRYPT_KEYLEN,
-    { N: n, r, p }
+    { N: n, r, p, maxmem: SCRYPT_MAXMEM }
   );
   
   return timingSafeEqual(storedKey, derivedKey);
@@ -337,17 +348,22 @@ export function verifyHashChain(entries: HashChainEntry[]): Result<boolean, { in
 /**
  * Generate DKIM key pair
  */
-export function generateDKIMKeyPair(selector: string, domain: string): DKIMKeyPair {
-  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    publicKeyEncoding: {
-      type: 'spki',
-      format: 'pem',
-    },
-    privateKeyEncoding: {
-      type: 'pkcs8',
-      format: 'pem',
-    },
+export async function generateDKIMKeyPair(selector: string, domain: string): Promise<DKIMKeyPair> {
+  const { privateKey, publicKey } = await new Promise<{ privateKey: string; publicKey: string }>((resolve, reject) => {
+    generateKeyPair('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: {
+        type: 'spki',
+        format: 'pem',
+      },
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem',
+      },
+    }, (err, publicKey, privateKey) => {
+      if (err) return reject(err);
+      resolve({ privateKey, publicKey });
+    });
   });
   
   // Extract the base64 part for DNS record
@@ -401,6 +417,7 @@ export async function deriveKey(password: string, salt: Buffer): Promise<Buffer>
     N: SCRYPT_N,
     r: SCRYPT_R,
     p: SCRYPT_P,
+    maxmem: SCRYPT_MAXMEM,
   });
 }
 

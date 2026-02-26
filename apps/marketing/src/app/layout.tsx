@@ -4,6 +4,8 @@ import { Analytics } from '@vercel/analytics/react';
 import './globals.css';
 import { Header } from '@/components/layout/Header';
 import { Footer } from '@/components/layout/Footer';
+import { BackToTopButton } from '@/components/layout/BackToTopButton';
+import { CookieConsentBanner } from '@/components/layout/CookieConsentBanner';
 
 const apex = localFont({
   src: [
@@ -22,6 +24,19 @@ const plexMono = localFont({
   variable: '--font-mono',
   display: 'swap',
 });
+
+const organizationJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'Organization',
+  name: 'ApexMail',
+  url: 'https://apexmail.ee',
+  logo: 'https://apexmail.ee/icon.svg',
+  sameAs: [
+    'https://github.com/Bel-Consulting-OU/ApexMail',
+    'https://linkedin.com/company/apexmail',
+    'https://twitter.com/apexmail',
+  ],
+};
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://apexmail.ee'),
@@ -79,6 +94,10 @@ export const metadata: Metadata = {
   },
   alternates: {
     canonical: 'https://apexmail.ee',
+    languages: {
+      'en-US': 'https://apexmail.ee',
+      'x-default': 'https://apexmail.ee',
+    },
   },
 };
 
@@ -101,8 +120,12 @@ export default function RootLayout({
         <link rel="icon" href="/icon.svg" type="image/svg+xml" />
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <link rel="manifest" href="/manifest.json" />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationJsonLd) }}
+        />
       </head>
-      <body className="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom">
+      <body className="font-apex antialiased text-[17px] leading-[1.6] min-h-screen safe-area-inset-bottom flex flex-col">
         {/* Deterministic fallback for visitors with JS disabled */}
         <noscript>
           <div style={{ background: '#1e40af', color: '#fff', textAlign: 'center', padding: '12px 16px', fontSize: '14px', fontFamily: 'sans-serif' }}>
@@ -118,6 +141,8 @@ export default function RootLayout({
         <Header />
         <main className="flex-1">{children}</main>
         <Footer />
+        <CookieConsentBanner />
+        <BackToTopButton />
         <Analytics />
       </body>
     </html>

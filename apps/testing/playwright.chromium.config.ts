@@ -1,6 +1,17 @@
 import { defineConfig, devices } from '@playwright/test';
+import crypto from 'node:crypto';
+import os from 'node:os';
 
-const bypassKey = process.env.E2E_BYPASS_KEY || 'apexmail-e2e-bypass-key';
+const bypassKey = process.env.E2E_BYPASS_KEY ?? crypto.randomUUID();
+const sessionSecret = process.env.SESSION_SECRET ?? crypto.randomBytes(32).toString('hex');
+const controlPlaneJwtSecret = process.env.CONTROL_PLANE_JWT_SECRET ?? crypto.randomBytes(32).toString('hex');
+const controlPlaneApiKey = process.env.CONTROL_PLANE_API_KEY ?? crypto.randomBytes(24).toString('hex');
+const ciWorkers = Math.max(2, Math.min(4, os.cpus().length));
+
+process.env.E2E_BYPASS_KEY = bypassKey;
+process.env.SESSION_SECRET = sessionSecret;
+process.env.CONTROL_PLANE_JWT_SECRET = controlPlaneJwtSecret;
+process.env.CONTROL_PLANE_API_KEY = controlPlaneApiKey;
 
 export default defineConfig({
     testDir: './src/e2e-chromium',
@@ -8,7 +19,7 @@ export default defineConfig({
     timeout: 60000,
     fullyParallel: true,
     retries: process.env.CI ? 1 : 0,
-    workers: process.env.CI ? 1 : undefined,
+    workers: process.env.CI ? ciWorkers : undefined,
     reporter: [
         ['list'],
         ['html', { outputFolder: 'reports/chromium/html' }],
@@ -28,6 +39,18 @@ export default defineConfig({
                 ...devices['Desktop Chrome'],
             },
         },
+        {
+            name: 'firefox',
+            use: {
+                ...devices['Desktop Firefox'],
+            },
+        },
+        {
+            name: 'webkit',
+            use: {
+                ...devices['Desktop Safari'],
+            },
+        },
     ],
     outputDir: 'reports/chromium/artifacts',
     webServer: [
@@ -40,7 +63,7 @@ export default defineConfig({
                 ...process.env,
                 E2E_TEST_MODE: 'true',
                 E2E_BYPASS_KEY: bypassKey,
-                SESSION_SECRET: process.env.SESSION_SECRET || 'test-web-session-secret',
+                SESSION_SECRET: sessionSecret,
                 API_URL: process.env.API_URL || 'http://localhost:3001',
             },
         },
@@ -53,8 +76,8 @@ export default defineConfig({
                 ...process.env,
                 E2E_TEST_MODE: 'true',
                 E2E_BYPASS_KEY: bypassKey,
-                CONTROL_PLANE_JWT_SECRET: process.env.CONTROL_PLANE_JWT_SECRET || 'test-control-plane-jwt-secret',
-                CONTROL_PLANE_API_KEY: process.env.CONTROL_PLANE_API_KEY || 'test-control-plane-api-key',
+                CONTROL_PLANE_JWT_SECRET: controlPlaneJwtSecret,
+                CONTROL_PLANE_API_KEY: controlPlaneApiKey,
             },
         },
     ],

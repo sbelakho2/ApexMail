@@ -10,6 +10,9 @@ use moka::sync::Cache;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+use tokio_rustls::TlsConnector;
 use tracing::warn;
 
 // #132: Multiple DoH providers for TLSA lookups – avoids single point of trust
@@ -22,7 +25,7 @@ const DOH_PROVIDERS: &[&str] = &[
 static TLSA_CACHE: LazyLock<Cache<String, Vec<TlsaRecord>>> = LazyLock::new(|| {
     Cache::builder()
         .max_capacity(1_000)
-        .time_to_live(Duration::from_secs(300))
+    .time_to_live(Duration::from_secs(tlsa_cache_ttl_secs()))
         .build()
 });
 
@@ -32,6 +35,14 @@ static DOH_CLIENT: LazyLock<Client> = LazyLock::new(|| {
         .build()
         .expect("DoH HTTP client")
 });
+
+fn tlsa_cache_ttl_secs() -> u64 {
+    std::env::var("DANE_TLSA_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|val| val.parse::<u64>().ok())
+        .filter(|val| *val > 0)
+        .unwrap_or(300)
+}
 
 /// Parsed TLSA record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,7 +168,9 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
     // Check AD flag (DNSSEC authenticated)
     let ad = body.get("AD").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ad {
-        result.warnings.push("DNSSEC validation not confirmed (AD flag not set)".into());
+        result.errors.push("DNSSEC validation not confirmed (AD flag not set)".into());
+        result.recommendations.push("Enable DNSSEC and ensure validated resolver sets AD for TLSA lookups".into());
+        return result;
     }
 
     // Parse TLSA answers
@@ -196,6 +209,26 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
         result.recommendations.push(format!(
             "Add TLSA record at {name} for DANE support"
         ));
+    } else {
+        match fetch_remote_leaf_certificate(domain, port).await {
+            Ok(cert_der) => {
+                let matches_tlsa = result
+                    .tlsa_records
+                    .iter()
+                    .any(|record| validate_certificate_against_tlsa(&cert_der, record));
+
+                if !matches_tlsa {
+                    result.errors.push("TLSA records do not match the target server certificate".into());
+                    result.supported = false;
+                }
+            }
+            Err(e) => {
+                result.warnings.push(format!(
+                    "Could not fetch target TLS certificate for DANE validation: {e}"
+                ));
+                result.supported = false;
+            }
+        }
     }
 
     // #133: Cache the result
@@ -335,6 +368,39 @@ fn extract_der_from_pem(pem: &str) -> Option<Vec<u8>> {
     let stop = pem.find(end)?;
     let b64: String = pem[start..stop].chars().filter(|c| !c.is_whitespace()).collect();
     B64.decode(&b64).ok()
+}
+
+async fn fetch_remote_leaf_certificate(domain: &str, port: u16) -> anyhow::Result<Vec<u8>> {
+    let addr = format!("{domain}:{port}");
+    let tcp = timeout(Duration::from_secs(10), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| anyhow::anyhow!("TCP connect timeout to {addr}"))??;
+
+    let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(std::sync::Arc::new(config));
+
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(domain.to_string())
+        .map_err(|e| anyhow::anyhow!("Invalid TLS server name {domain}: {e}"))?;
+
+    let tls_stream = timeout(Duration::from_secs(10), connector.connect(server_name, tcp))
+        .await
+        .map_err(|_| anyhow::anyhow!("TLS handshake timeout to {addr}"))??;
+
+    let (_, conn) = tls_stream.get_ref();
+    let certs = conn
+        .peer_certificates()
+        .ok_or_else(|| anyhow::anyhow!("No peer certificates from {addr}"))?;
+
+    let leaf = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Missing leaf certificate from {addr}"))?;
+
+    Ok(leaf.to_vec())
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────

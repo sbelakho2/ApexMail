@@ -1,7 +1,9 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { formatDate, cn } from '../../lib/utils';
+import { PageLoadingState } from '../../components/ui/async-state';
+import { useApiResource } from '../../lib/use-api-resource';
 
 /**
  * Inbox Sentinel - AI-powered email reply management
@@ -42,27 +44,16 @@ const CLASSIFICATION_CONFIG: Record<string, { label: string; color: string; icon
 
 
 export default function InboxPage() {
-    const [messages, setMessages] = useState<InboxMessage[]>([]);
-    const [loading, setLoading] = useState(true);
+    const {
+        data: messages,
+        setData: setMessages,
+        loading,
+    } = useApiResource<InboxMessage[]>('/api/inbox', {
+        initialData: [],
+        errorMessage: 'Failed to load inbox.',
+    });
     const [selectedMessage, setSelectedMessage] = useState<InboxMessage | null>(null);
     const [filterClassification, setFilterClassification] = useState<string>('');
-
-    useEffect(() => {
-        loadMessages();
-    }, []);
-
-    async function loadMessages() {
-        try {
-            const response = await fetch('/api/inbox', { credentials: 'include' });
-            if (!response.ok) throw new Error(`Failed to fetch inbox: ${response.status}`);
-            const data = await response.json();
-            setMessages(data);
-        } catch (err) {
-            console.error('Failed to load inbox:', err);
-        } finally {
-            setLoading(false);
-        }
-    }
 
     function toggleStar(messageId: string) {
         setMessages(prev => prev.map(m => 
@@ -93,11 +84,7 @@ export default function InboxPage() {
     const interestedCount = messages.filter(m => m.classification === 'interested').length;
 
     if (loading) {
-        return (
-            <div className="flex items-center justify-center h-64">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
-            </div>
-        );
+        return <PageLoadingState label="Loading inbox..." />;
     }
 
     return (

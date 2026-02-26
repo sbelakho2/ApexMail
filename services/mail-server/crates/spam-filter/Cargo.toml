@@ -1,0 +1,31 @@
+[package]
+name = "spam-filter"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-layer spam & phishing detection: Bayesian classifier, URL reputation, header analysis, content scoring"
+license = "PROPRIETARY"
+
+[features]
+default = ["core"]
+full = ["core", "phishing"]
+core = []
+phishing = []  # Enables deep URL and attachment analysis
+
+[dependencies]
+tokio = { version = "1.44", features = ["full"] }
+tracing = "0.1"
+parking_lot = "0.12"
+dashmap = "6.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+aho-corasick = { version = "1.1", features = ["perf-literal"] }
+regex = { version = "1.10", features = ["perf"] }
+sha2 = "0.10"
+hex = "0.4"
+url = "2.5"
+prometheus = "0.13"
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -147,9 +147,8 @@ export class AuditLogsRepository {
       await client.query('BEGIN');
       
       // Advisory lock per tenant to serialize hash chain updates
-      // Use hashCode of tenantId to get a consistent lock key
-      const lockKey = this.hashString(input.tenantId);
-      await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+      const [lockNamespace, lockKey] = this.advisoryLockKeys(input.tenantId);
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [lockNamespace, lockKey]);
 
       // Get the previous hash for chain integrity (now safe within lock)
       const previousResult = await client.query<{ hash: string }>(
@@ -246,6 +245,13 @@ export class AuditLogsRepository {
     return hash;
   }
 
+  /**
+   * Two-key lock to scope advisory locks per tenant without global contention.
+   */
+  private advisoryLockKeys(tenantId: string): [number, number] {
+    return [this.hashString('audit_logs'), this.hashString(tenantId)];
+  }
+
   async createBulk(inputs: CreateAuditLogInput[]): Promise<Result<number, Error>> {
     if (inputs.length === 0) {
       return Result.ok(0);
@@ -271,8 +277,8 @@ export class AuditLogsRepository {
       await client.query('BEGIN');
       
       // Advisory lock per tenant to serialize hash chain updates
-      const lockKey = this.hashString(tenantId);
-      await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+      const [lockNamespace, lockKey] = this.advisoryLockKeys(tenantId);
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [lockNamespace, lockKey]);
 
       const previousResult = await client.query<{ hash: string }>(
         `SELECT hash FROM audit_logs 

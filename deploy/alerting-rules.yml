@@ -176,6 +176,26 @@ groups:
           description: "Postgres exporter is reporting down for more than 2 minutes."
           runbook_url: "https://docs.apexmail.ee/runbooks/alerts/PostgresDown"
 
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis exporter is reporting down for more than 2 minutes."
+          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/RedisDown"
+
+      - alert: ClickHouseDown
+        expr: up{job="clickhouse"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse is down"
+          description: "ClickHouse exporter is reporting down for more than 2 minutes."
+          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/ClickHouseDown"
+
       - alert: PostgresHighConnections
         expr: pg_stat_activity_count / pg_settings_max_connections > 0.9
         for: 5m
@@ -185,3 +205,37 @@ groups:
           summary: "Postgres connections near limit"
           description: "Postgres connection usage above 90% for 5 minutes."
           runbook_url: "https://docs.apexmail.ee/runbooks/alerts/PostgresHighConnections"
+
+  - name: apexmail-storage
+    rules:
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}"
+          description: "Disk free space below 15% for 10 minutes."
+          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/LowDiskSpace"
+
+  - name: apexmail-tls
+    rules:
+      - alert: TlsCertificateExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) < 604800
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expiring soon"
+          description: "TLS certificate for {{ $labels.instance }} expires in less than 7 days."
+          runbook_url: "https://docs.apexmail.ee/runbooks/alerts/TlsCertificateExpiringSoon"
+
+  - name: apexmail-watchdog
+    rules:
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: info
+        annotations:
+          summary: "Alerting pipeline watchdog"
+          description: "This alert should always be firing to verify alert delivery."

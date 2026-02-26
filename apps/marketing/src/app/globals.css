@@ -51,29 +51,30 @@
   --radius-xl: 24px;
 }
 
-.dark {
-  --text: 229 231 235;
-  --muted: 203 213 225;
-  --surface: 15 23 42;
-  --card-dark: 18 26 42;
-  --divider-dark: 31 41 55;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: 229 231 235;
+    --muted: 203 213 225;
+    --surface: 15 23 42;
+    --card-dark: 18 26 42;
+    --divider-dark: 31 41 55;
 
-  /* Surface Colors - Dark Mode */
-  --surface-50: 15 23 42;
-  --surface-100: 18 26 42;
-  --surface-200: 31 41 55;
-  --surface-300: 51 65 85;
-  --surface-400: 71 85 105;
-  --surface-500: 100 116 139;
-  --surface-600: 148 163 184;
-  --surface-700: 203 213 225;
-  --surface-800: 226 232 240;
-  --surface-900: 248 250 252;
+    /* Surface Colors - Dark Mode */
+    --surface-50: 15 23 42;
+    --surface-100: 18 26 42;
+    --surface-200: 31 41 55;
+    --surface-300: 51 65 85;
+    --surface-400: 71 85 105;
+    --surface-500: 100 116 139;
+    --surface-600: 148 163 184;
+    --surface-700: 203 213 225;
+    --surface-800: 226 232 240;
+    --surface-900: 248 250 252;
+  }
 }
 
 @layer base {
   html {
-    scroll-behavior: smooth;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -143,14 +144,14 @@
 
   /* Focus visible styles for accessibility */
   :focus-visible {
-    @apply outline-none ring-2 ring-primary-500 ring-offset-2 ring-offset-white;
+    @apply outline-none ring-2 ring-primary-500 ring-offset-2 ring-offset-surface-50 dark:ring-offset-surface-900;
   }
 }
 
 @layer components {
   /* Premium transitions */
   .transition-premium {
-    transition-property: all;
+    transition-property: color, background-color, border-color, opacity, transform, box-shadow;
     transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
     transition-duration: 300ms;
   }

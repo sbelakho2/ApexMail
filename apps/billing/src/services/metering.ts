@@ -52,6 +52,7 @@ export interface UsageSummary {
 export interface MeteringConfig {
   batchSize: number;
   flushIntervalMs: number;
+  maxBufferSize: number;
 }
 
 /**
@@ -73,6 +74,7 @@ export class MeteringService {
     this.config = {
       batchSize: config?.batchSize ?? 100,
       flushIntervalMs: config?.flushIntervalMs ?? 10000,
+      maxBufferSize: config?.maxBufferSize ?? 5000,
     };
     this.startFlushTimer();
   }
@@ -116,6 +118,23 @@ export class MeteringService {
     }
 
     // Add to buffer (event is safely persisted in Redis)
+    // D-049: Bound in-memory buffer size to prevent OOM when DB is unavailable.
+    // BUG-003 FIX: Return error when buffer is full to enable backpressure
+    if (this.buffer.length >= this.config.maxBufferSize) {
+      const flushResult = await this.flush();
+      if (!flushResult.ok) {
+        console.error('[Metering] Flush attempt during buffer pressure failed:', flushResult.error.message);
+      }
+
+      if (this.buffer.length >= this.config.maxBufferSize) {
+        // Event is still durable in Redis pending key, but signal backpressure to caller
+        console.error(
+          `[Metering] Buffer at capacity (${this.config.maxBufferSize}); returning error for backpressure: ${event.id}`
+        );
+        return Result.err(new Error('Metering buffer full - apply backpressure'));
+      }
+    }
+
     this.buffer.push(event);
 
     // Flush if batch size reached
@@ -136,23 +155,25 @@ export class MeteringService {
     eventId?: string;
     metadata?: Record<string, unknown>;
   }>): Promise<Result<{ recorded: number; duplicates: number }, Error>> {
-    let recorded = 0;
-    let duplicates = 0;
-
-    for (const event of events) {
-      const result = await this.recordEvent(
+    const results = await Promise.all(
+      events.map((event) => this.recordEvent(
         event.tenantId,
         event.eventType,
         event.quantity ?? 1,
         event.eventId,
         event.metadata ?? {}
-      );
+      ))
+    );
 
+    let recorded = 0;
+    let duplicates = 0;
+
+    for (const result of results) {
       if (result.ok) {
         if (result.value) {
-          recorded++;
+          recorded += 1;
         } else {
-          duplicates++;
+          duplicates += 1;
         }
       }
     }
@@ -250,6 +271,10 @@ export class MeteringService {
    * SECURITY FIX: Buffer preserved until successful DB write
    */
   async flush(): Promise<Result<number, Error>> {
+    if (this.buffer.length === 0) {
+      await this.backfillFromPending(this.config.batchSize);
+    }
+
     if (this.buffer.length === 0) {
       return Result.ok(0);
     }
@@ -400,6 +425,79 @@ export class MeteringService {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
   }
 
+  /**
+   * Backfill events from Redis pending queue into in-memory buffer
+   * while respecting max buffer constraints.
+   */
+  private async backfillFromPending(maxEvents: number): Promise<void> {
+    if (maxEvents <= 0 || this.buffer.length >= this.config.maxBufferSize) {
+      return;
+    }
+
+    const existingIds = new Set(this.buffer.map((event) => event.id));
+    const keysToLoad: string[] = [];
+    let cursor = '0';
+
+    do {
+      const [newCursor, keys] = await this.redis.scan(
+        cursor,
+        'MATCH', 'meter:pending:*',
+        'COUNT', 200
+      );
+      cursor = newCursor;
+
+      for (const key of keys) {
+        const id = key.replace('meter:pending:', '');
+        if (!existingIds.has(id)) {
+          keysToLoad.push(key);
+          existingIds.add(id);
+        }
+
+        if (
+          keysToLoad.length >= maxEvents
+          || this.buffer.length + keysToLoad.length >= this.config.maxBufferSize
+        ) {
+          break;
+        }
+      }
+
+      if (
+        keysToLoad.length >= maxEvents
+        || this.buffer.length + keysToLoad.length >= this.config.maxBufferSize
+      ) {
+        break;
+      }
+    } while (cursor !== '0');
+
+    if (keysToLoad.length === 0) {
+      return;
+    }
+
+    const values = await this.redis.mget(...keysToLoad);
+    const invalidKeys: string[] = [];
+
+    for (let i = 0; i < keysToLoad.length; i += 1) {
+      if (this.buffer.length >= this.config.maxBufferSize) break;
+
+      const key = keysToLoad[i] ?? '';
+      const raw = values[i];
+
+      if (!raw) continue;
+
+      try {
+        const event = JSON.parse(raw) as MeterEvent;
+        event.timestamp = new Date(event.timestamp);
+        this.buffer.push(event);
+      } catch {
+        invalidKeys.push(key);
+      }
+    }
+
+    if (invalidKeys.length > 0) {
+      await this.redis.del(...invalidKeys);
+    }
+  }
+
   private startFlushTimer(): void {
     this.flushTimer = setInterval(() => {
       this.flush().catch(err => {
@@ -432,20 +530,27 @@ export class MeteringService {
         return Result.ok(0);
       }
 
-      // Recover events
+      // Recover events in bulk to avoid O(N) Redis roundtrips
       const events: MeterEvent[] = [];
-      for (const key of pendingKeys) {
-        const data = await this.redis.get(key);
+      const values = await this.redis.mget(...pendingKeys);
+      const invalidKeys: string[] = [];
+
+      for (let i = 0; i < pendingKeys.length; i += 1) {
+        const key = pendingKeys[i] ?? '';
+        const data = values[i];
         if (data) {
           try {
             const event = JSON.parse(data) as MeterEvent;
             event.timestamp = new Date(event.timestamp); // Restore Date object
             events.push(event);
           } catch {
-            // Invalid data, delete the key
-            await this.redis.del(key);
+            invalidKeys.push(key);
           }
         }
+      }
+
+      if (invalidKeys.length > 0) {
+        await this.redis.del(...invalidKeys);
       }
 
       if (events.length > 0) {

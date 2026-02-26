@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowRight, CheckCircle2 } from '@/components/ui/icons';
+import { useLoginController } from './use-login-controller';
 
 /**
  * Customer Console Login Page
@@ -16,256 +16,49 @@ import { ArrowRight, CheckCircle2 } from '@/components/ui/icons';
  * - Social login placeholders (Google, GitHub)
  * - Password reset flow
  */
-export default function LoginPage() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [authErrorKey, setAuthErrorKey] = useState('');
-  const [csrfError, setCsrfError] = useState('');
-  const [online, setOnline] = useState(true);
-  const [retryAfterSeconds, setRetryAfterSeconds] = useState(0);
-  const [mfaRequired, setMfaRequired] = useState(false);
-  const [mfaCode, setMfaCode] = useState('');
-  const [rememberMe, setRememberMe] = useState(true);
-  const [lockoutMessage, setLockoutMessage] = useState('');
-  const [csrfToken, setCsrfToken] = useState<string | null>(null);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [emailError, setEmailError] = useState('');
-  const [passwordError, setPasswordError] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [capsLockOn, setCapsLockOn] = useState(false);
-  const [ssoLoading, setSsoLoading] = useState<'google' | 'github' | null>(null);
-  const [failedAttempts, setFailedAttempts] = useState(0);
-  const returnTo = (() => {
-    const next = searchParams.get('next');
-    if (!next || !next.startsWith('/')) return '/dashboard';
-    return next;
-  })();
-
-  const validateEmail = (value: string) => {
-    if (!value.trim()) return 'Email is required';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'Enter a valid email address';
-    return '';
-  };
-
-  const validatePassword = (value: string) => {
-    if (!value.trim()) return 'Password is required';
-    if (value.length < 8) return 'Password must be at least 8 characters';
-    return '';
-  };
-
-  const getNetworkClass = () => {
-    const connection = (navigator as Navigator & { connection?: { effectiveType?: string } }).connection;
-    return connection?.effectiveType || 'unknown';
-  };
-
-  const reportAuthTelemetry = async (reason: string, status?: number) => {
-    try {
-      await fetch('/api/auth/telemetry', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          reason,
-          status,
-          networkClass: typeof navigator === 'undefined' ? 'unknown' : getNetworkClass(),
-          at: Date.now(),
-        }),
-        keepalive: true,
-      });
-    } catch {
-      // non-blocking telemetry
-    }
-  };
-
-  const mapAuthError = (status: number, data: { error?: string; errorCode?: string }) => {
-    if (status === 429) {
-      return { key: 'auth.error.rate_limited', message: 'Too many sign-in attempts. Please wait and try again.' };
-    }
-
-    if (status === 423 || data.errorCode === 'ACCOUNT_LOCKED') {
-      return { key: 'auth.error.locked', message: 'Your account is temporarily locked. Reset your password or contact support to regain access.' };
-    }
-
-    if (data.errorCode === 'MFA_REQUIRED') {
-      return { key: 'auth.error.mfa_required', message: 'Additional verification required. Enter your MFA code.' };
-    }
-
-    if (status === 401 || status === 400 || data.errorCode === 'INVALID_CREDENTIALS') {
-      return { key: 'auth.error.invalid_credentials', message: 'Incorrect email, password, or verification code.' };
-    }
-
-    return { key: 'auth.error.generic', message: 'We could not sign you in. Please try again.' };
-  };
-
-  const loadCsrfToken = async () => {
-    setCsrfError('');
-    try {
-      const res = await fetch('/api/csrf');
-      const data = await res.json();
-      setCsrfToken(data.token || null);
-    } catch {
-      setCsrfError('Unable to initialize security token.');
-    }
-  };
+function LoginPageContent() {
+  const {
+    isLoading,
+    error,
+    authErrorKey,
+    csrfError,
+    online,
+    retryAfterSeconds,
+    mfaRequired,
+    mfaCode,
+    setMfaCode,
+    rememberMe,
+    setRememberMe,
+    lockoutMessage,
+    csrfToken,
+    email,
+    setEmail,
+    password,
+    setPassword,
+    emailError,
+    setEmailError,
+    passwordError,
+    setPasswordError,
+    showPassword,
+    setShowPassword,
+    capsLockOn,
+    setCapsLockOn,
+    ssoLoading,
+    setSsoLoading,
+    failedAttempts,
+    returnTo,
+    loadCsrfToken,
+    setRetryAfterSeconds,
+    handleSubmit,
+    validateEmail,
+    validatePassword,
+  } = useLoginController();
 
   useEffect(() => {
-    setOnline(typeof navigator === 'undefined' ? true : navigator.onLine);
-    loadCsrfToken();
-
-    const checkSession = async () => {
-      try {
-        const res = await fetch('/api/auth/session', { cache: 'no-store' });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data?.authenticated) {
-          router.replace(returnTo);
-        }
-      } catch {
-        // ignore redirect guard failures
-      }
-    };
-
-    checkSession();
-
-    const onOnline = () => setOnline(true);
-    const onOffline = () => setOnline(false);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-
-    const csrfRefreshInterval = window.setInterval(() => {
-      loadCsrfToken();
-    }, 10 * 60 * 1000);
-
-    return () => {
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-      window.clearInterval(csrfRefreshInterval);
-    };
-  }, [router, returnTo]);
-
-  useEffect(() => {
-    if (retryAfterSeconds <= 0) return;
-    const timer = window.setInterval(() => {
-      setRetryAfterSeconds((prev) => Math.max(0, prev - 1));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [retryAfterSeconds]);
-
-  useEffect(() => {
-    const reason = searchParams.get('reason');
-    if (reason === 'session_expired') {
-      setError('Your session expired. Please sign in again.');
-      setAuthErrorKey('auth.error.session_expired');
+    if (retryAfterSeconds < 0) {
+      setRetryAfterSeconds(0);
     }
-  }, [searchParams]);
-
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setIsLoading(true);
-    setError('');
-    setAuthErrorKey('');
-    setLockoutMessage('');
-
-    if (!online) {
-      setError('You appear to be offline. Reconnect and try again.');
-      setAuthErrorKey('auth.error.offline');
-      reportAuthTelemetry('offline');
-      setIsLoading(false);
-      return;
-    }
-
-    if (retryAfterSeconds > 0) {
-      setError(`Too many attempts. Try again in ${retryAfterSeconds}s.`);
-      setAuthErrorKey('auth.error.rate_limited');
-      reportAuthTelemetry('rate_limited_active');
-      setIsLoading(false);
-      return;
-    }
-
-    if (!csrfToken) {
-      setCsrfError('Security token missing. Retry initialization below.');
-      setAuthErrorKey('auth.error.csrf_missing');
-      reportAuthTelemetry('csrf_missing');
-      setIsLoading(false);
-      return;
-    }
-    
-    const nextEmailError = validateEmail(email);
-    const nextPasswordError = validatePassword(password);
-    setEmailError(nextEmailError);
-    setPasswordError(nextPasswordError);
-    if (nextEmailError || nextPasswordError) {
-      setAuthErrorKey('auth.error.validation');
-      setIsLoading(false);
-      return;
-    }
-    
-    try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': csrfToken,
-        },
-        body: JSON.stringify({ email, password, mfaCode: mfaCode || undefined, rememberMe }),
-        credentials: 'include',
-      });
-      
-      const data = await response.json();
-
-      if (response.status === 429) {
-        const retryAfter = Number.parseInt(response.headers.get('Retry-After') || '30', 10);
-        setRetryAfterSeconds(Number.isNaN(retryAfter) ? 30 : retryAfter);
-        const mapped = mapAuthError(response.status, data || {});
-        setError(mapped.message);
-        setAuthErrorKey(mapped.key);
-        setFailedAttempts((prev) => prev + 1);
-        reportAuthTelemetry('rate_limited_response', response.status);
-        setIsLoading(false);
-        return;
-      }
-
-      if (data?.requiresMfa || data?.errorCode === 'MFA_REQUIRED') {
-        setMfaRequired(true);
-        const mapped = mapAuthError(response.status, data || {});
-        setError(mapped.message);
-        setAuthErrorKey(mapped.key);
-        reportAuthTelemetry('mfa_required', response.status);
-        setIsLoading(false);
-        return;
-      }
-      
-      if (!response.ok) {
-        const mapped = mapAuthError(response.status, data || {});
-        const safeMessage = /exception|stack|trace|sql|internal|panic/i.test(data?.error || '')
-          ? mapped.message
-          : mapped.message;
-
-        if (mapped.key === 'auth.error.locked') {
-          setLockoutMessage(mapped.message);
-        }
-
-        setError(safeMessage);
-        setAuthErrorKey(mapped.key);
-        setFailedAttempts((prev) => prev + 1);
-        reportAuthTelemetry(mapped.key, response.status);
-        setIsLoading(false);
-        return;
-      }
-      
-      // Authentication successful - redirect to dashboard
-      setFailedAttempts(0);
-      router.push(returnTo);
-    } catch {
-      setError('Network error. Please try again.');
-      setAuthErrorKey('auth.error.network');
-      setFailedAttempts((prev) => prev + 1);
-      reportAuthTelemetry('network_error');
-      setIsLoading(false);
-    }
-  };
+  }, [retryAfterSeconds, setRetryAfterSeconds]);
 
   return (
     <div className="min-h-screen bg-surface-50 relative overflow-hidden">
@@ -372,7 +165,7 @@ export default function LoginPage() {
                   if (emailError) setEmailError(validateEmail(value));
                 }}
                 onBlur={() => setEmailError(validateEmail(email))}
-                className="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-white/90 text-sm font-medium text-foreground"
+                className="w-full px-4 py-3 rounded-xl border border-surface-200 focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-all placeholder:text-muted-foreground bg-background text-sm font-medium text-foreground"
               />
               {emailError ? <p className="text-xs text-destructive" role="alert">{emailError}</p> : null}
             </div>
@@ -457,6 +250,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={isLoading || !online || retryAfterSeconds > 0}
+              aria-busy={isLoading}
               className="w-full bg-primary hover:bg-primary/90 text-primary-foreground font-semibold flex items-center justify-center gap-2 py-3 rounded-xl shadow-lg shadow-primary/25 mt-2 transition-all"
             >
               {isLoading ? (
@@ -547,5 +341,13 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Loading sign-in…</div>}>
+      <LoginPageContent />
+    </Suspense>
   );
 }

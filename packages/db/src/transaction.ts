@@ -111,7 +111,12 @@ export async function withTransaction<T>(
       let startCommand = 'BEGIN';
       const modifiers: string[] = [];
       
+      // BUG-002 FIX: Explicit whitelist validation for isolation level
+      const VALID_ISOLATION_LEVELS = ['READ COMMITTED', 'REPEATABLE READ', 'SERIALIZABLE'] as const;
       if (opts.isolationLevel) {
+        if (!VALID_ISOLATION_LEVELS.includes(opts.isolationLevel as typeof VALID_ISOLATION_LEVELS[number])) {
+          throw new Error(`Invalid isolation level: ${opts.isolationLevel}`);
+        }
         modifiers.push(`ISOLATION LEVEL ${opts.isolationLevel}`);
       }
       if (opts.readOnly) {

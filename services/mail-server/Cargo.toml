@@ -37,6 +37,17 @@ members = [
     "crates/perf-tests",
     "crates/fuzz-tests",
     "crates/load-tests",
+    # DDoS Protection
+    "crates/ddos-protection",
+    "crates/fingerprint",
+    # Security Systems (WAF, IDS, Anti-Spam, Sandbox, ATO, DLP, Threat Intel)
+    "crates/waf-engine",
+    "crates/ids-engine",
+    "crates/spam-filter",
+    "crates/sandbox",
+    "crates/ato-protection",
+    "crates/dlp-engine",
+    "crates/threat-intel",
 ]
 
 [workspace.package]
@@ -148,6 +159,19 @@ hex = "0.4"
 # URL parsing / percent-decoding
 url = "2.5"
 urlencoding = "2.1"
+
+# DDoS Protection workspace crates
+apexmail-ddos-protection = { path = "crates/ddos-protection" }
+apexmail-fingerprint = { path = "crates/fingerprint" }
+
+# Security Systems workspace crates
+waf-engine = { path = "crates/waf-engine" }
+ids-engine = { path = "crates/ids-engine" }
+spam-filter = { path = "crates/spam-filter" }
+sandbox = { path = "crates/sandbox" }
+ato-protection = { path = "crates/ato-protection" }
+dlp-engine = { path = "crates/dlp-engine" }
+threat-intel = { path = "crates/threat-intel" }
 
 [profile.release]
 lto = "thin"

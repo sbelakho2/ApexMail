@@ -11,7 +11,7 @@
 
 import { Result } from '../result.js';
 import { getLogger, type Logger } from '../logger/index.js';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 
 export interface QueueJob<T = unknown> {
   id: string;
@@ -41,6 +41,10 @@ export interface DequeueOptions {
   visibilityTimeout?: number;
   maxJobs?: number;
   tenantId?: string;
+}
+
+export interface QueueClientContext {
+  client?: PoolClient;
 }
 
 export interface QueueStats {
@@ -78,6 +82,8 @@ export interface QueueProvider {
   deadLetter(jobId: string, reason: string): Promise<Result<void, Error>>;
   getStats(queue: string): Promise<Result<QueueStats, Error>>;
   purge(queue: string): Promise<Result<number, Error>>;
+  waitForJob?(queue: string, timeoutMs?: number): Promise<Result<boolean, Error>>;
+  createSession?(): Promise<QueueSession>;
 }
 
 /**
@@ -99,14 +105,33 @@ export class PostgresQueueProvider implements QueueProvider {
     this.defaultMaxAttempts = options.defaultMaxAttempts ?? 3;
   }
 
+  private async withClient<T>(
+    client: PoolClient | undefined,
+    fn: (client: PoolClient) => Promise<T>
+  ): Promise<T> {
+    if (client) {
+      return fn(client);
+    }
+    const owned = await this.pool.connect();
+    try {
+      return await fn(owned);
+    } finally {
+      owned.release();
+    }
+  }
+
+  async createSession(): Promise<QueueSession> {
+    const client = await this.pool.connect();
+    return new QueueSession(this, client);
+  }
+
   async enqueue<T>(
     queue: string,
     payload: T,
-    options: EnqueueOptions = {}
+    options: EnqueueOptions = {},
+    context: QueueClientContext = {}
   ): Promise<Result<string, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+    return this.withClient(context.client, async (client) => {
       const id = crypto.randomUUID();
       const now = new Date();
       const scheduledAt = options.delaySeconds
@@ -133,22 +158,21 @@ export class PostgresQueueProvider implements QueueProvider {
         ]
       );
 
+      await client.query('NOTIFY queue_jobs, $1', [queue]);
+
       this.logger.debug('Job enqueued', { jobId: id, queue });
       return Result.ok(id);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
   async dequeue<T>(
     queue: string,
-    options: DequeueOptions = {}
+    options: DequeueOptions = {},
+    context: QueueClientContext = {}
   ): Promise<Result<QueueJob<T>[], Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+    return this.withClient(context.client, async (client) => {
       const visibilityTimeout = options.visibilityTimeout ?? this.defaultVisibilityTimeout;
       const maxJobs = options.maxJobs ?? 1;
       const now = new Date();
@@ -198,6 +222,7 @@ export class PostgresQueueProvider implements QueueProvider {
 
       // FIX-500-372: Wrap JSON.parse in try-catch to handle corrupt job payloads
       // without crashing the entire dequeue batch
+      // BUG-005 FIX: Move corrupt jobs to dead-letter queue instead of silently skipping
       const jobs: QueueJob<T>[] = [];
       for (const row of result.rows as QueueJobRow[]) {
         try {
@@ -216,11 +241,22 @@ export class PostgresQueueProvider implements QueueProvider {
             metadata: JSON.parse(row.metadata) as Record<string, unknown>,
           });
         } catch (parseError) {
-          // Skip corrupt jobs — log and let them expire via visibility timeout
-          this.logger.error('Failed to parse job payload/metadata', {
+          // BUG-005 FIX: Move corrupt jobs to DLQ instead of silently dropping
+          const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+          this.logger.error('Moving corrupt job to DLQ', {
             jobId: row.id,
             queue,
-            error: parseError instanceof Error ? parseError.message : String(parseError),
+            error: errorMsg,
+          });
+          // Move to dead letter queue asynchronously (don't block dequeue)
+          void client.query(
+            `UPDATE queue_jobs SET status = 'dead_letter', error = $2, failed_at = NOW() WHERE id = $1`,
+            [row.id, `JSON parse error: ${errorMsg}`]
+          ).catch((dlqErr) => {
+            this.logger.error('Failed to move corrupt job to DLQ', { 
+              jobId: row.id, 
+              error: dlqErr instanceof Error ? dlqErr.message : String(dlqErr) 
+            });
           });
         }
       }
@@ -230,17 +266,53 @@ export class PostgresQueueProvider implements QueueProvider {
       }
 
       return Result.ok(jobs);
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
+  }
+
+  async waitForJob(queue: string, timeoutMs = 30000): Promise<Result<boolean, Error>> {
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('LISTEN queue_jobs');
+
+      const result = await new Promise<Result<boolean, Error>>((resolve) => {
+        const timer = setTimeout(() => {
+          cleanup();
+          resolve(Result.ok(false));
+        }, timeoutMs);
+
+        const onNotification = (msg: { channel: string; payload?: string | null }) => {
+          if (msg.channel !== 'queue_jobs') return;
+          if (msg.payload && msg.payload !== queue) return;
+          cleanup();
+          resolve(Result.ok(true));
+        };
+
+        const cleanup = () => {
+          clearTimeout(timer);
+          client.removeListener('notification', onNotification);
+        };
+
+        client.on('notification', onNotification);
+      });
+
+      return result;
     } catch (error) {
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     } finally {
+      try {
+        await client.query('UNLISTEN queue_jobs');
+      } catch {
+        // Ignore unlisten errors
+      }
       client.release();
     }
   }
 
-  async complete(jobId: string): Promise<Result<void, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+  async complete(jobId: string, context: QueueClientContext = {}): Promise<Result<void, Error>> {
+    return this.withClient(context.client, async (client) => {
       await client.query(
         `UPDATE queue_jobs 
          SET status = 'completed', completed_at = NOW()
@@ -250,55 +322,52 @@ export class PostgresQueueProvider implements QueueProvider {
 
       this.logger.debug('Job completed', { jobId });
       return Result.ok(undefined);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
-  async fail(jobId: string, error: Error): Promise<Result<void, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
-      // Check if should retry or dead-letter
-      const result = await client.query<{
-        attempts: number;
-        max_attempts: number;
-        visibility_timeout: number;
-      }>(
-        'SELECT attempts, max_attempts, visibility_timeout FROM queue_jobs WHERE id = $1',
-        [jobId]
+  async fail(jobId: string, error: Error, context: QueueClientContext = {}): Promise<Result<void, Error>> {
+    return this.withClient(context.client, async (client) => {
+      const result = await client.query<{ status: string }>(
+        `UPDATE queue_jobs
+         SET status = CASE WHEN attempts >= max_attempts THEN 'dead_letter' ELSE 'pending' END,
+             failed_at = CASE WHEN attempts >= max_attempts THEN NOW() ELSE failed_at END,
+             error_message = CASE WHEN attempts >= max_attempts THEN $2 ELSE error_message END,
+             locked_until = NULL,
+             scheduled_at = CASE
+               WHEN attempts >= max_attempts THEN scheduled_at
+               ELSE NOW() + (LEAST(visibility_timeout * POWER(2, GREATEST(attempts - 1, 0)), 3600) || ' seconds')::interval
+             END
+         WHERE id = $1
+         RETURNING status`,
+        [jobId, error.message]
       );
 
-      const job = result.rows[0];
-      if (!job) {
+      const row = result.rows[0];
+      if (!row) {
         return Result.err(new Error(`Job not found: ${jobId}`));
       }
 
-      if (job.attempts >= job.max_attempts) {
-        // Move to dead-letter
-        return this.deadLetter(jobId, error.message);
+      if (row.status === 'dead_letter') {
+        this.logger.warn('Job moved to dead-letter queue', { jobId, reason: error.message });
+      } else {
+        this.logger.debug('Job scheduled for retry', { jobId });
       }
 
-      // Retry with exponential backoff
-      const delaySeconds = Math.min(
-        job.visibility_timeout * Math.pow(2, job.attempts - 1),
-        3600 // Max 1 hour
-      );
-      
-      return this.retry(jobId, delaySeconds);
-    } catch (err) {
-      return Result.err(err instanceof Error ? err : new Error(String(err)));
-    } finally {
-      client.release();
-    }
+      return Result.ok(undefined);
+    }).catch((err) =>
+      Result.err(err instanceof Error ? err : new Error(String(err)))
+    );
   }
 
-  async retry(jobId: string, delaySeconds = 0, options: { resetAttempt?: boolean } = {}): Promise<Result<void, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+  async retry(
+    jobId: string,
+    delaySeconds = 0,
+    options: { resetAttempt?: boolean } = {},
+    context: QueueClientContext = {}
+  ): Promise<Result<void, Error>> {
+    return this.withClient(context.client, async (client) => {
       const scheduledAt = new Date(Date.now() + delaySeconds * 1000);
 
       const resetClause = options.resetAttempt ? ', attempts = GREATEST(attempts - 1, 0)' : '';
@@ -311,17 +380,13 @@ export class PostgresQueueProvider implements QueueProvider {
 
       this.logger.debug('Job scheduled for retry', { jobId, delaySeconds });
       return Result.ok(undefined);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
-  async deadLetter(jobId: string, reason: string): Promise<Result<void, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+  async deadLetter(jobId: string, reason: string, context: QueueClientContext = {}): Promise<Result<void, Error>> {
+    return this.withClient(context.client, async (client) => {
       await client.query(
         `UPDATE queue_jobs 
          SET status = 'dead_letter', 
@@ -333,17 +398,13 @@ export class PostgresQueueProvider implements QueueProvider {
 
       this.logger.warn('Job moved to dead-letter queue', { jobId, reason });
       return Result.ok(undefined);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
-  async getStats(queue: string): Promise<Result<QueueStats, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+  async getStats(queue: string, context: QueueClientContext = {}): Promise<Result<QueueStats, Error>> {
+    return this.withClient(context.client, async (client) => {
       const result = await client.query<{
         status: string;
         count: string;
@@ -399,17 +460,13 @@ export class PostgresQueueProvider implements QueueProvider {
       }
 
       return Result.ok(stats);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
   }
 
-  async purge(queue: string): Promise<Result<number, Error>> {
-    const client = await this.pool.connect();
-    
-    try {
+  async purge(queue: string, context: QueueClientContext = {}): Promise<Result<number, Error>> {
+    return this.withClient(context.client, async (client) => {
       const result = await client.query(
         `DELETE FROM queue_jobs WHERE queue = $1 AND status IN ('pending', 'dead_letter')`,
         [queue]
@@ -417,11 +474,52 @@ export class PostgresQueueProvider implements QueueProvider {
 
       this.logger.info('Queue purged', { queue, deleted: result.rowCount });
       return Result.ok(result.rowCount ?? 0);
-    } catch (error) {
-      return Result.err(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      client.release();
-    }
+    }).catch((error) =>
+      Result.err(error instanceof Error ? error : new Error(String(error)))
+    );
+  }
+}
+
+export class QueueSession {
+  constructor(
+    private readonly provider: PostgresQueueProvider,
+    private readonly client: PoolClient
+  ) {}
+
+  async enqueue<T>(queue: string, payload: T, options: EnqueueOptions = {}): Promise<Result<string, Error>> {
+    return this.provider.enqueue(queue, payload, options, { client: this.client });
+  }
+
+  async dequeue<T>(queue: string, options: DequeueOptions = {}): Promise<Result<QueueJob<T>[], Error>> {
+    return this.provider.dequeue(queue, options, { client: this.client });
+  }
+
+  async complete(jobId: string): Promise<Result<void, Error>> {
+    return this.provider.complete(jobId, { client: this.client });
+  }
+
+  async fail(jobId: string, error: Error): Promise<Result<void, Error>> {
+    return this.provider.fail(jobId, error, { client: this.client });
+  }
+
+  async retry(jobId: string, delaySeconds = 0, options: { resetAttempt?: boolean } = {}): Promise<Result<void, Error>> {
+    return this.provider.retry(jobId, delaySeconds, options, { client: this.client });
+  }
+
+  async deadLetter(jobId: string, reason: string): Promise<Result<void, Error>> {
+    return this.provider.deadLetter(jobId, reason, { client: this.client });
+  }
+
+  async getStats(queue: string): Promise<Result<QueueStats, Error>> {
+    return this.provider.getStats(queue, { client: this.client });
+  }
+
+  async purge(queue: string): Promise<Result<number, Error>> {
+    return this.provider.purge(queue, { client: this.client });
+  }
+
+  async close(): Promise<void> {
+    this.client.release();
   }
 }
 

@@ -44,7 +44,6 @@ const DEFAULT_CONFIG: DunningConfig = {
  */
 export class DunningService {
   private readonly config: DunningConfig;
-  private configTableEnsured = false;
 
   constructor(
     private readonly db: DatabasePool,
@@ -224,6 +223,12 @@ export class DunningService {
         UPDATE tenants 
         SET status = 'active', updated_at = NOW() 
         WHERE id = $1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM abuse_reports ar
+            WHERE ar.tenant_id = $1
+              AND ar.status IN ('open', 'investigating', 'confirmed')
+          )
         RETURNING id
       )
       SELECT 
@@ -452,7 +457,6 @@ export class DunningService {
   private async getConfigForTenant(tenantId: string): Promise<DunningConfig> {
     try {
       await this.ensureConfigTable();
-
       const result = await this.db.query<{
         retry_schedule_days: number[];
         soft_suspend_after_days: number;
@@ -474,12 +478,8 @@ export class DunningService {
         return this.config;
       }
 
-      const retryScheduleDays = Array.isArray(row.retry_schedule_days)
-        ? row.retry_schedule_days.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
-        : this.config.retryScheduleDays;
-
       return {
-        retryScheduleDays: retryScheduleDays.length > 0 ? retryScheduleDays : this.config.retryScheduleDays,
+        retryScheduleDays: row.retry_schedule_days,
         softSuspendAfterDays: row.soft_suspend_after_days,
         hardSuspendAfterDays: row.hard_suspend_after_days,
         gracePeriodDays: row.grace_period_days,

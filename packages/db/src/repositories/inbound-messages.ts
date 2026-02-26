@@ -178,11 +178,11 @@ export class InboundMessagesRepository {
         let paramIndex = 2;
 
         if (options.fromAddress) {
-            conditions.push(`from_address ILIKE $${paramIndex++}`);
+            conditions.push(`from_address ILIKE $${paramIndex++} ESCAPE '\\'`);
             values.push(`%${escapeIlike(options.fromAddress)}%`);
         }
         if (options.toAddress) {
-            conditions.push(`to_address ILIKE $${paramIndex++}`);
+            conditions.push(`to_address ILIKE $${paramIndex++} ESCAPE '\\'`);
             values.push(`%${escapeIlike(options.toAddress)}%`);
         }
         if (options.since) {

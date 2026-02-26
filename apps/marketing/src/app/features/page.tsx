@@ -13,6 +13,7 @@ export const metadata: Metadata = {
     description:
       'Discover all ApexMail features: deliverability tools, compliance automation, AI-powered optimization, and enterprise security.',
     type: 'website',
+    images: ['/og-image.png'],
   },
 };
 

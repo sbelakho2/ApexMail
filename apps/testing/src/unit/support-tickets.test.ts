@@ -9,7 +9,7 @@
  * 5. Ticket creation validation (subject, category enforcement)
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 /* ================================================================== */
 /*  Mocked DB Pool                                                     */

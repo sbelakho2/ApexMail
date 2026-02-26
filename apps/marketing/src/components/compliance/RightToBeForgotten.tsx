@@ -64,7 +64,6 @@ export function RightToBeForgotten() {
  const timeout = setTimeout(startDemo, prefersReducedMotion ? 0 : 1000);
  return () => clearTimeout(timeout);
  }
- // eslint-disable-next-line react-hooks/exhaustive-deps
  }, [inView]);
 
  const getStageStatus = (stepId: DeletionStage): 'pending' | 'active' | 'complete' => {

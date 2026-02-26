@@ -207,12 +207,14 @@ impl AuditService {
         }
 
         let where_clause = conditions.join(" AND ");
+        let limit_param = param_count + 1;
+        let offset_param = param_count + 2;
         let count_sql = format!("SELECT COUNT(*) FROM iso_audit_logs WHERE {}", where_clause);
         let select_sql = format!(
             "SELECT id, organization_id, workspace_id, event_type, severity, actor_id, actor_type,
              actor_ip, actor_user_agent, resource, resource_id, action, details, metadata, created_at
-             FROM iso_audit_logs WHERE {} ORDER BY created_at DESC LIMIT {} OFFSET {}",
-            where_clause, limit, offset
+             FROM iso_audit_logs WHERE {} ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
+            where_clause, limit_param, offset_param
         );
 
         // Build count query
@@ -243,6 +245,8 @@ impl AuditService {
             count_q = count_q.bind(et);
             select_q = select_q.bind(et);
         }
+
+        select_q = select_q.bind(limit).bind(offset);
 
         let total = count_q.fetch_one(&self.db).await?;
         let rows = select_q.fetch_all(&self.db).await?;

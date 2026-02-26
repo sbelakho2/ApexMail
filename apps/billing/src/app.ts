@@ -8,7 +8,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { secureHeaders } from 'hono/secure-headers';
 import { timing } from 'hono/timing';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { ApiKeysRepository, createDatabase, DatabasePool } from '@apexmail/db';
 import { Redis } from 'ioredis';
 import { config, loadConfig } from './config.js';
@@ -41,6 +41,7 @@ export interface BillingEnv {
     userId: string;
     isAdmin: boolean;
     adminId: string;
+    requestId: string;
   };
 }
 
@@ -118,6 +119,12 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   app.use('*', logger());
   app.use('*', timing());
   app.use('*', secureHeaders());
+  app.use('*', async (c, next) => {
+    const requestId = c.req.header('X-Request-ID') ?? randomUUID();
+    c.set('requestId', requestId);
+    c.header('X-Request-ID', requestId);
+    return next();
+  });
   app.use('*', cors({
     origin: config.corsOrigins,
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -145,6 +152,18 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
   });
 
   // Webhooks - no auth required, signature verified
+  app.use('/webhooks/*', async (c, next) => {
+    const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024; // 1MB
+    const contentLengthRaw = c.req.header('content-length');
+    const contentLength = contentLengthRaw ? parseInt(contentLengthRaw, 10) : NaN;
+
+    if (!Number.isNaN(contentLength) && contentLength > MAX_WEBHOOK_BODY_BYTES) {
+      return c.json({ error: 'Payload too large' }, 413);
+    }
+
+    return next();
+  });
+
   app.route('/webhooks', webhooksRoutes(ctx));
 
   // Auth middleware for all other routes
@@ -187,6 +206,35 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
     return next();
   });
 
+  // Baseline rate limiting for authenticated billing APIs
+  app.use('/api/*', async (c, next) => {
+    const tenantId = c.get('tenantId');
+    const clientIp = getClientIp(c.req.header('x-forwarded-for'), c.req.header('x-real-ip'));
+    const windowSeconds = 60;
+    const maxRequestsPerWindow = 300;
+    const windowBucket = Math.floor(Date.now() / (windowSeconds * 1000));
+    const key = `billing:rate:${tenantId}:${clientIp}:${windowBucket}`;
+
+    try {
+      const currentCount = await ctx.redis.incr(key);
+      if (currentCount === 1) {
+        await ctx.redis.expire(key, windowSeconds);
+      }
+
+      c.header('X-RateLimit-Limit', String(maxRequestsPerWindow));
+      c.header('X-RateLimit-Remaining', String(Math.max(0, maxRequestsPerWindow - currentCount)));
+      c.header('X-RateLimit-Reset', String((windowBucket + 1) * windowSeconds));
+
+      if (currentCount > maxRequestsPerWindow) {
+        return c.json({ error: 'Too many requests' }, 429);
+      }
+    } catch (error) {
+      console.error('Rate limit check failed:', error);
+    }
+
+    return next();
+  });
+
   // API routes
   app.route('/api/billing', billingRoutes(ctx));
   app.route('/api/plans', plansRoutes(ctx));
@@ -195,13 +243,14 @@ export function createApp(): { app: Hono<BillingEnv>; ctx: BillingContext } {
 
   // Error handler
   app.onError((err, c) => {
-    console.error('Billing API Error:', err);
+    const requestId = c.get('requestId');
+    console.error('Billing API Error:', { requestId, error: err });
 
     if (err instanceof ZodError) {
-      return c.json({ error: 'Validation error', fields: err.issues.map((i) => ({ path: i.path, message: i.message })) }, 400);
+      return c.json({ requestId, error: 'Validation error', fields: err.issues.map((i) => ({ path: i.path, message: i.message })) }, 400);
     }
 
-    return c.json({ error: 'Internal server error' }, 500);
+    return c.json({ requestId, error: 'Internal server error' }, 500);
   });
 
   // 404 handler

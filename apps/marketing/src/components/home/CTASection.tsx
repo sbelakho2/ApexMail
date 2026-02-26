@@ -69,7 +69,7 @@ export function CTASection() {
      <ArrowRight className="w-4 h-4 ml-2" />
    </Link>
    <Link
-     href="/contact"
+     href="/private-cloud"
      className="inline-flex items-center justify-center px-8 py-4 text-base font-bold text-surface-900 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors w-full sm:w-auto"
    >
      Book Architecture Review

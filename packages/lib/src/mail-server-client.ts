@@ -14,6 +14,7 @@
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { createLogger } from '@apexmail/lib';
 
 const logger = createLogger({ name: 'mail-server-client', level: 'info' });
@@ -41,6 +42,12 @@ function getGrpcObject(): grpc.GrpcObject {
         _grpcObject = grpc.loadPackageDefinition(_packageDef);
     }
     return _grpcObject;
+}
+
+function ensureProtoPath(): void {
+    if (!fs.existsSync(PROTO_PATH)) {
+        throw new Error(`mail.proto not found at ${PROTO_PATH}`);
+    }
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -180,6 +187,7 @@ export class MailServerClient {
     private mailstoreClient: GrpcServiceClient | null = null;
     
     constructor(config: MailServerConfig) {
+        ensureProtoPath();
         this.config = {
             outboundGrpcUrl: config.outboundGrpcUrl,
             mailstoreGrpcUrl: config.mailstoreGrpcUrl || '',

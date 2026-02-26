@@ -76,11 +76,7 @@ export default function RootLayout({
                 <meta name="theme-color" content="#2563EB" />
                 <meta name="color-scheme" content="light dark" />
                 {/* FIX-095: Prevent flash of wrong theme on load */}
-                <script
-                    dangerouslySetInnerHTML={{
-                        __html: `(function(){try{var s=JSON.parse(localStorage.getItem('apexmail-ui')||'{}');var t=(s.state&&s.state.theme)||'system';if(t==='system'){t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'}if(t==='dark'){document.documentElement.classList.add('dark')}}catch(e){}})();`,
-                    }}
-                />
+                <script src="/theme-init.js" />
             </head>
             <body className="font-apex antialiased text-[16px] leading-[1.55]">
                 <main className="min-h-screen bg-background">{children}</main>

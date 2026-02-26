@@ -483,8 +483,13 @@ impl WebhookProcessor {
     /// Sign payload with HMAC-SHA256.
     fn sign_payload(&self, secret: &str, timestamp: i64, payload: &str) -> String {
         let message = format!("{}.{}", timestamp, payload);
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .expect("HMAC can take key of any size");
+        let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+            Ok(mac) => mac,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to initialize webhook HMAC signer");
+                return format!("{}", SIGNATURE_VERSION);
+            }
+        };
         mac.update(message.as_bytes());
         let result = mac.finalize();
         format!("{}{}", SIGNATURE_VERSION, hex::encode(result.into_bytes()))

@@ -1,0 +1,17 @@
+[package]
+name = "threat-intel"
+version = "0.1.0"
+edition.workspace = true
+description = "Threat intelligence feed ingestion, IP/domain blocklist management, and reputation scoring"
+license = "MIT"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+sha2 = { workspace = true }
+hex = "0.4"
+chrono = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+dashmap = { workspace = true }
+parking_lot = { workspace = true }

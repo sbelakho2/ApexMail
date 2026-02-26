@@ -18,6 +18,39 @@ const loginSchema = z.object({
 });
 
 const USER_SESSION_COOKIE = 'am_session';
+const DEFAULT_SESSION_MAX_AGE_SECONDS = 60 * 60 * 12;
+const REMEMBER_ME_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
+type LoginErrorPayload = {
+    error?: unknown;
+    errorCode?: unknown;
+};
+
+function getSafeLoginError(status: number, payload: LoginErrorPayload): { error: string; errorCode?: string } {
+    const rawErrorCode = typeof payload.errorCode === 'string'
+        ? payload.errorCode
+        : (typeof payload.error === 'object' && payload.error && typeof (payload.error as { code?: unknown }).code === 'string'
+            ? (payload.error as { code: string }).code
+            : undefined);
+
+    if (status === 429) {
+        return { error: 'Too many sign-in attempts. Please wait and try again.', errorCode: 'RATE_LIMITED' };
+    }
+
+    if (status === 423 || rawErrorCode === 'ACCOUNT_LOCKED') {
+        return { error: 'Your account is temporarily locked. Reset your password or contact support.', errorCode: 'ACCOUNT_LOCKED' };
+    }
+
+    if (status === 401 || status === 400 || rawErrorCode === 'INVALID_CREDENTIALS') {
+        return { error: 'Incorrect email, password, or verification code.', errorCode: 'INVALID_CREDENTIALS' };
+    }
+
+    if (status === 403 || rawErrorCode === 'MFA_REQUIRED') {
+        return { error: 'Additional verification is required.', errorCode: 'MFA_REQUIRED' };
+    }
+
+    return { error: 'Unable to sign in. Please try again.' };
+}
 
 function parseExpiryToSeconds(value: string | number | undefined): number | undefined {
     if (value === undefined || value === null) return undefined;
@@ -52,7 +85,7 @@ function parseExpiryToSeconds(value: string | number | undefined): number | unde
 }
 
 export async function POST(request: NextRequest) {
-    const csrf = validateCsrf(request);
+    const csrf = await validateCsrf(request);
     if (!csrf.ok) {
         return csrf.response!;
     }
@@ -69,11 +102,12 @@ export async function POST(request: NextRequest) {
             signal: AbortSignal.timeout(5000),
         });
 
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
+            const safeError = getSafeLoginError(response.status, data as LoginErrorPayload);
             return NextResponse.json(
-                { error: data?.error?.message || data?.error || 'Invalid credentials' },
+                safeError,
                 { status: response.status }
             );
         }
@@ -88,7 +122,8 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const maxAge = parseExpiryToSeconds(expiresIn);
+        const maxAge = parseExpiryToSeconds(expiresIn)
+            ?? (rememberMe ? REMEMBER_ME_SESSION_MAX_AGE_SECONDS : DEFAULT_SESSION_MAX_AGE_SECONDS);
 
         const result = NextResponse.json({
             success: true,

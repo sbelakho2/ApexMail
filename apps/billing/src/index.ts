@@ -12,6 +12,36 @@ const logger = createLogger({ name: 'billing' });
 // Track interval handles for cleanup
 const intervalHandles: NodeJS.Timeout[] = [];
 const timeoutHandles: NodeJS.Timeout[] = [];
+let shutdownHandler: ((reason: string, error?: unknown) => Promise<void>) | null = null;
+let shutdownInProgress = false;
+
+async function triggerGracefulShutdown(reason: string, error?: unknown): Promise<void> {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+
+  logger.error('Fatal process event', {
+    reason,
+    error: error instanceof Error ? error.message : String(error ?? ''),
+  });
+
+  if (!shutdownHandler) {
+    process.exit(1);
+    return;
+  }
+
+  const forceExitTimer = setTimeout(() => {
+    logger.error('Forced process exit after graceful shutdown timeout', { reason });
+    process.exit(1);
+  }, 15_000);
+  forceExitTimer.unref();
+
+  try {
+    await shutdownHandler(reason, error);
+    process.exit(1);
+  } finally {
+    clearTimeout(forceExitTimer);
+  }
+}
 
 async function main(): Promise<void> {
   logger.info('Starting ApexMail Billing Service...');
@@ -22,8 +52,11 @@ async function main(): Promise<void> {
   const { app, ctx } = createApp();
 
   // Graceful shutdown
-  const shutdown = async (): Promise<void> => {
-    logger.info('Shutting down billing service...');
+  const shutdown = async (reason = 'signal', error?: unknown): Promise<void> => {
+    logger.info('Shutting down billing service...', {
+      reason,
+      error: error instanceof Error ? error.message : String(error ?? ''),
+    });
 
     // Clear all intervals first to prevent callbacks executing after cleanup
     for (const handle of intervalHandles) {
@@ -46,11 +79,12 @@ async function main(): Promise<void> {
     // Close database pool
     await ctx.db.disconnect();
 
-    process.exit(0);
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  shutdownHandler = shutdown;
+
+  process.on('SIGTERM', () => { void shutdown('SIGTERM').then(() => process.exit(0)); });
+  process.on('SIGINT', () => { void shutdown('SIGINT').then(() => process.exit(0)); });
 
   // Start server
   serve({
@@ -116,6 +150,16 @@ async function startBackgroundWorkers(ctx: ReturnType<typeof createApp>['ctx']):
       if (result.ok) {
         logger.info('Dunning processed', { processedCount: result.value.processedCount });
       }
+
+      const retryResult = await ctx.stripe.processScheduledRetries();
+      if (retryResult.ok && retryResult.value.attempted > 0) {
+        logger.info('Scheduled Stripe retries processed', retryResult.value);
+      }
+
+      const cleanupResult = await ctx.stripe.cleanupStuckSubscriptionSagas();
+      if (cleanupResult.ok && cleanupResult.value.cleaned > 0) {
+        logger.info('Cleaned stuck subscription sagas', cleanupResult.value);
+      }
     } catch (error) {
       logger.error('Dunning processing failed', { error: error instanceof Error ? error.message : String(error) });
     }
@@ -180,19 +224,19 @@ async function startBackgroundWorkers(ctx: ReturnType<typeof createApp>['ctx']):
 
 function scheduleDailyTask(task: () => Promise<void>, hour: number, minute: number): void {
   const now = new Date();
-  const targetTime = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate(),
+  const targetTime = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
     hour,
     minute,
     0,
     0
-  );
+  ));
 
   // If target time has passed today, schedule for tomorrow
   if (targetTime <= now) {
-    targetTime.setDate(targetTime.getDate() + 1);
+    targetTime.setUTCDate(targetTime.getUTCDate() + 1);
   }
 
   const msUntilTarget = targetTime.getTime() - now.getTime();
@@ -214,16 +258,13 @@ function scheduleDailyTask(task: () => Promise<void>, hour: number, minute: numb
 
 // Global error handlers
 process.on('uncaughtException', (error) => {
-  logger.error('Uncaught exception', { error: error.message, stack: error.stack });
-  process.exit(1);
+  void triggerGracefulShutdown('uncaughtException', error);
 });
 
 process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled rejection', { reason: reason instanceof Error ? reason.message : String(reason) });
-  process.exit(1);
+  void triggerGracefulShutdown('unhandledRejection', reason);
 });
 
 main().catch((error) => {
-  logger.error('Fatal error', { error: error instanceof Error ? error.message : String(error) });
-  process.exit(1);
+  void triggerGracefulShutdown('main.catch', error);
 });

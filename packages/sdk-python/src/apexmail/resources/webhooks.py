@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlparse
 
 from ..exceptions import ValidationError
 from ..models import Webhook, WebhookListResponse
@@ -30,8 +31,10 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
 
 def _validate_webhook_url(url: str) -> None:
     """FIX-500-292: Validate webhook URL is HTTPS (unless localhost)."""
-    if not url.startswith("https://"):
-        if "localhost" not in url and "127.0.0.1" not in url:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https":
+        if hostname not in {"localhost", "127.0.0.1", "::1"}:
             raise ValidationError(
                 f'Webhook URL must use HTTPS: "{url}". '
                 'HTTP is only allowed for localhost development.'
@@ -86,7 +89,7 @@ class WebhooksResource:
         if headers:
             payload["headers"] = headers
 
-        data = self._client._request("POST", "/webhooks", json=payload)
+        data = self._client._request("POST", "/v1/webhooks", json=payload)
         return Webhook(**data["webhook"])
 
     def get(self, webhook_id: str) -> Webhook:
@@ -100,7 +103,7 @@ class WebhooksResource:
             Webhook details
         """
         _validate_id(webhook_id, 'webhook')
-        data = self._client._request("GET", f"/webhooks/{webhook_id}")
+        data = self._client._request("GET", f"/v1/webhooks/{webhook_id}")
         return Webhook(**data["webhook"])
 
     def list(
@@ -124,7 +127,7 @@ class WebhooksResource:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        data = self._client._request("GET", "/webhooks", params=params or None)
+        data = self._client._request("GET", "/v1/webhooks", params=params or None)
         return WebhookListResponse(**data)
 
     def update(
@@ -174,7 +177,7 @@ class WebhooksResource:
         if not payload:
             raise ValidationError("Update payload must include at least one field")
 
-        data = self._client._request("PATCH", f"/webhooks/{webhook_id}", json=payload)
+        data = self._client._request("PATCH", f"/v1/webhooks/{webhook_id}", json=payload)
         return Webhook(**data["webhook"])
 
     def delete(self, webhook_id: str) -> None:
@@ -185,7 +188,7 @@ class WebhooksResource:
             webhook_id: The webhook ID to delete
         """
         _validate_id(webhook_id, 'webhook')
-        self._client._request("DELETE", f"/webhooks/{webhook_id}")
+        self._client._request("DELETE", f"/v1/webhooks/{webhook_id}")
 
     def test(self, webhook_id: str, event_type: str = "message.delivered") -> dict[str, Any]:
         """
@@ -200,7 +203,7 @@ class WebhooksResource:
         """
         _validate_id(webhook_id, 'webhook')
         payload = {"eventType": event_type}
-        return self._client._request("POST", f"/webhooks/{webhook_id}/test", json=payload)
+        return self._client._request("POST", f"/v1/webhooks/{webhook_id}/test", json=payload)
 
 
 class AsyncWebhooksResource:
@@ -238,13 +241,13 @@ class AsyncWebhooksResource:
         if headers:
             payload["headers"] = headers
 
-        data = await self._client._request("POST", "/webhooks", json=payload)
+        data = await self._client._request("POST", "/v1/webhooks", json=payload)
         return Webhook(**data["webhook"])
 
     async def get(self, webhook_id: str) -> Webhook:
         """Get webhook details by ID asynchronously."""
         _validate_id(webhook_id, 'webhook')
-        data = await self._client._request("GET", f"/webhooks/{webhook_id}")
+        data = await self._client._request("GET", f"/v1/webhooks/{webhook_id}")
         return Webhook(**data["webhook"])
 
     async def list(
@@ -259,7 +262,7 @@ class AsyncWebhooksResource:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        data = await self._client._request("GET", "/webhooks", params=params or None)
+        data = await self._client._request("GET", "/v1/webhooks", params=params or None)
         return WebhookListResponse(**data)
 
     async def update(
@@ -295,13 +298,13 @@ class AsyncWebhooksResource:
         if not payload:
             raise ValidationError('At least one field must be provided for update')
 
-        data = await self._client._request("PATCH", f"/webhooks/{webhook_id}", json=payload)
+        data = await self._client._request("PATCH", f"/v1/webhooks/{webhook_id}", json=payload)
         return Webhook(**data["webhook"])
 
     async def delete(self, webhook_id: str) -> None:
         """Delete a webhook asynchronously."""
         _validate_id(webhook_id, 'webhook')
-        await self._client._request("DELETE", f"/webhooks/{webhook_id}")
+        await self._client._request("DELETE", f"/v1/webhooks/{webhook_id}")
 
     async def test(
         self, webhook_id: str, event_type: str = "message.delivered"
@@ -309,4 +312,4 @@ class AsyncWebhooksResource:
         """Send a test event to a webhook asynchronously."""
         _validate_id(webhook_id, 'webhook')
         payload = {"eventType": event_type}
-        return await self._client._request("POST", f"/webhooks/{webhook_id}/test", json=payload)
+        return await self._client._request("POST", f"/v1/webhooks/{webhook_id}/test", json=payload)

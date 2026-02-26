@@ -5,7 +5,7 @@
  * Focus: boundary conditions, security, error paths, concurrency, Unicode
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as os from 'os';
@@ -103,11 +103,7 @@ import {
   validateEmails,
   EmailValidator,
 } from '../validation/index.js';
-import {
-  TemplateEngine,
-  createTemplateEngine,
-  renderTemplate,
-} from '../templates/index.js';
+import { TemplateEngine, createTemplateEngine } from '../templates/index.js';
 import { LocalStorageProvider, CompressedStorageProvider } from '../storage/index.js';
 
 // ============================================================================
@@ -478,8 +474,8 @@ describe('Crypto — hash chain', () => {
 });
 
 describe('Crypto — DKIM key pair', () => {
-  it('generates 2048-bit RSA key pair with valid DNS record', () => {
-    const kp = generateDKIMKeyPair('sel1', 'example.com');
+  it('generates 2048-bit RSA key pair with valid DNS record', async () => {
+    const kp = await generateDKIMKeyPair('sel1', 'example.com');
     expect(kp.privateKey).toContain('BEGIN PRIVATE KEY');
     expect(kp.publicKey).toContain('BEGIN PUBLIC KEY');
     expect(kp.publicKeyDNS).toContain('v=DKIM1');

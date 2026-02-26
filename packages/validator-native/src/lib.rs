@@ -9,7 +9,9 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use regex::Regex;
-use std::sync::{LazyLock, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
@@ -28,8 +30,8 @@ static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Known disposable email domains.
-static DISPOSABLE_DOMAINS: LazyLock<std::collections::HashSet<String>> = LazyLock::new(|| {
-    let mut domains: std::collections::HashSet<String> = [
+static DISPOSABLE_DOMAINS: LazyLock<RwLock<HashSet<String>>> = LazyLock::new(|| {
+    let mut domains: HashSet<String> = [
         "mailinator.com", "guerrillamail.com", "tempmail.com", "throwaway.email",
         "yopmail.com", "sharklasers.com", "guerrillamailblock.com", "grr.la",
         "dispostable.com", "trashmail.com", "temp-mail.org", "fakeinbox.com",
@@ -56,8 +58,18 @@ static DISPOSABLE_DOMAINS: LazyLock<std::collections::HashSet<String>> = LazyLoc
         }
     }
 
-    domains
+    RwLock::new(domains)
 });
+
+static DNS_CACHE: LazyLock<RwLock<HashMap<String, DnsCacheEntry>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+struct DnsCacheEntry {
+    has_mx: bool,
+    expires_at: Instant,
+}
 
 static RESOLVER: OnceLock<TokioAsyncResolver> = OnceLock::new();
 
@@ -65,6 +77,33 @@ fn get_resolver() -> &'static TokioAsyncResolver {
     RESOLVER.get_or_init(|| {
         TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
     })
+}
+
+fn lookup_dns_cache(domain: &str) -> Option<bool> {
+    let Ok(cache) = DNS_CACHE.read() else {
+        return None;
+    };
+    cache.get(domain).and_then(|entry| {
+        if entry.expires_at > Instant::now() {
+            Some(entry.has_mx)
+        } else {
+            None
+        }
+    })
+}
+
+fn store_dns_cache(domain: String, has_mx: bool) {
+    let Ok(mut cache) = DNS_CACHE.write() else {
+        return;
+    };
+    cache.retain(|_, entry| entry.expires_at > Instant::now());
+    cache.insert(
+        domain,
+        DnsCacheEntry {
+            has_mx,
+            expires_at: Instant::now() + DNS_CACHE_TTL,
+        },
+    );
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -190,7 +229,10 @@ fn validate_email_sync(email: &str) -> ValidationResult {
         warnings.push("Address contains international characters (EAI/RFC 6531)".into());
     }
 
-    let is_disposable = DISPOSABLE_DOMAINS.contains(&domain.to_lowercase());
+    let is_disposable = DISPOSABLE_DOMAINS
+        .read()
+        .map(|domains| domains.contains(&domain.to_lowercase()))
+        .unwrap_or(false);
     if is_disposable {
         warnings.push("Disposable email domain detected".into());
     }
@@ -232,6 +274,14 @@ pub async fn validate_email_with_mx(email: String) -> Result<ValidationResult> {
 
     if result.valid {
         let domain = result.domain.clone();
+        if let Some(cached) = lookup_dns_cache(&domain) {
+            result.has_mx = Some(cached);
+            if !cached {
+                result.errors.push("Domain has no MX or A records".into());
+                result.valid = false;
+            }
+            return Ok(result);
+        }
         let resolver = get_resolver();
 
         let has_mx = match resolver.mx_lookup(&domain).await {
@@ -247,6 +297,7 @@ pub async fn validate_email_with_mx(email: String) -> Result<ValidationResult> {
             result.errors.push("Domain has no MX or A records".into());
             result.valid = false;
         }
+        store_dns_cache(domain, has_mx);
     }
 
     Ok(result)
@@ -254,8 +305,21 @@ pub async fn validate_email_with_mx(email: String) -> Result<ValidationResult> {
 
 /// Batch validate multiple emails (sync).
 #[napi]
-pub fn validate_emails_batch(emails: Vec<String>) -> BatchResult {
-    let results: Vec<ValidationResult> = emails.iter().map(|e| validate_email_sync(e)).collect();
+pub async fn validate_emails_batch(emails: Vec<String>) -> BatchResult {
+    let mut set = tokio::task::JoinSet::new();
+    for (index, email) in emails.into_iter().enumerate() {
+        set.spawn_blocking(move || (index, validate_email_sync(&email)));
+    }
+
+    let mut ordered: Vec<(usize, ValidationResult)> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(item) = joined {
+            ordered.push(item);
+        }
+    }
+
+    ordered.sort_by_key(|(index, _)| *index);
+    let results: Vec<ValidationResult> = ordered.into_iter().map(|(_, result)| result).collect();
     let valid_count = results.iter().filter(|r| r.valid).count() as u32;
     let invalid_count = results.len() as u32 - valid_count;
     BatchResult {
@@ -263,6 +327,24 @@ pub fn validate_emails_batch(emails: Vec<String>) -> BatchResult {
         valid_count,
         invalid_count,
     }
+}
+
+/// Replace or extend the disposable domain list at runtime.
+#[napi]
+pub fn set_disposable_domains(domains: Vec<String>, replace: bool) -> Result<u32> {
+    let Ok(mut guard) = DISPOSABLE_DOMAINS.write() else {
+        return Err(napi::Error::from_reason("Disposable domain list lock poisoned"));
+    };
+    if replace {
+        guard.clear();
+    }
+    for domain in domains {
+        let trimmed = domain.trim().to_lowercase();
+        if !trimmed.is_empty() {
+            guard.insert(trimmed);
+        }
+    }
+    Ok(guard.len() as u32)
 }
 
 /// Check MX records for a domain.

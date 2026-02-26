@@ -10,12 +10,13 @@ use ha::multi_region::MultiRegionService;
 use ha::replication::ReplicationService;
 use ha::routes::{build_router, AppState};
 
+use std::error::Error;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     let config = Arc::new(Config::from_env());
@@ -27,8 +28,7 @@ async fn main() {
         .idle_timeout(std::time::Duration::from_millis(config.database.idle_timeout_ms))
         .acquire_timeout(std::time::Duration::from_millis(config.database.connection_timeout_ms))
         .connect(&config.database.primary_url())
-        .await
-        .expect("Failed to connect to database");
+        .await?;
 
     // Build shared state
     let state = Arc::new(AppState {
@@ -103,7 +103,8 @@ async fn main() {
     // Start HTTP server
     let app = build_router(state);
     let addr = format!("0.0.0.0:{}", config.port);
-    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+    let listener = TcpListener::bind(&addr).await?;
     info!(addr, "HA service listening");
-    axum::serve(listener, app).await.expect("Server failed");
+    axum::serve(listener, app).await?;
+    Ok(())
 }

@@ -9,9 +9,9 @@ export default function AcceptableUsePage() {
     return (
         <div className="max-w-3xl mx-auto px-6 py-24">
             <h1 className="text-4xl font-bold mb-4">Acceptable Use Policy</h1>
-            <p className="text-muted-foreground mb-8">Last updated: February 2026</p>
+            <p className="text-surface-500 mb-8">Last updated: February 2026</p>
 
-            <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6 text-[15px] leading-relaxed">
+            <div className="prose prose-neutral max-w-none space-y-6 text-[15px] leading-relaxed">
                 <h2 className="text-xl font-semibold mt-8">Prohibited Activities</h2>
                 <p>You may not use the ApexMail service to:</p>
                 <ul className="list-disc pl-6 space-y-2">

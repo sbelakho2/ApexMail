@@ -7,14 +7,8 @@
 
 -- Add billing_cycle_start/end as aliases for current_period_start/end
 ALTER TABLE stripe_subscriptions 
-    ADD COLUMN IF NOT EXISTS billing_cycle_start TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS billing_cycle_end TIMESTAMPTZ;
-
--- Keep them in sync with current_period columns
-UPDATE stripe_subscriptions 
-SET billing_cycle_start = current_period_start,
-    billing_cycle_end = current_period_end
-WHERE billing_cycle_start IS NULL;
+    ADD COLUMN IF NOT EXISTS billing_cycle_start TIMESTAMPTZ GENERATED ALWAYS AS (current_period_start) STORED,
+    ADD COLUMN IF NOT EXISTS billing_cycle_end TIMESTAMPTZ GENERATED ALWAYS AS (current_period_end) STORED;
 
 -- Add Stripe price ID for subscription syncing
 ALTER TABLE stripe_subscriptions
@@ -35,32 +29,10 @@ WHERE cancel_at_period_end IS NULL;
 
 -- Add timestamp column as alias for recorded_at
 ALTER TABLE metering_events
-    ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ;
-
--- Populate from recorded_at
-UPDATE metering_events
-SET timestamp = recorded_at
-WHERE timestamp IS NULL;
-
--- Create trigger to keep columns in sync
-CREATE OR REPLACE FUNCTION sync_metering_event_timestamps()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.timestamp IS NOT NULL AND NEW.recorded_at IS NULL THEN
-            NEW.recorded_at := NEW.timestamp;
-        ELSIF NEW.recorded_at IS NOT NULL AND NEW.timestamp IS NULL THEN
-            NEW.timestamp := NEW.recorded_at;
-        END IF;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+    ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ GENERATED ALWAYS AS (recorded_at) STORED;
 
 DROP TRIGGER IF EXISTS sync_metering_timestamps ON metering_events;
-CREATE TRIGGER sync_metering_timestamps
-    BEFORE INSERT ON metering_events
-    FOR EACH ROW EXECUTE FUNCTION sync_metering_event_timestamps();
+DROP FUNCTION IF EXISTS sync_metering_event_timestamps();
 
 -- ============================================
 -- 3. wallet_transactions fixes
@@ -68,40 +40,22 @@ CREATE TRIGGER sync_metering_timestamps
 
 -- Add balance column as alias for balance_after
 ALTER TABLE wallet_transactions
-    ADD COLUMN IF NOT EXISTS balance INTEGER;
-
-UPDATE wallet_transactions
-SET balance = balance_after
-WHERE balance IS NULL;
+    ADD COLUMN IF NOT EXISTS balance INTEGER GENERATED ALWAYS AS (balance_after) STORED;
 
 -- Add metadata column
 ALTER TABLE wallet_transactions
     ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
 
--- wallet_id might need to be nullable for credit operations
--- where wallet is created in same transaction
-ALTER TABLE wallet_transactions
-    ALTER COLUMN wallet_id DROP NOT NULL;
-
--- Create trigger to sync balance columns
-CREATE OR REPLACE FUNCTION sync_wallet_balance()
-RETURNS TRIGGER AS $$
+DO $$
 BEGIN
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.balance IS NOT NULL AND NEW.balance_after IS NULL THEN
-            NEW.balance_after := NEW.balance;
-        ELSIF NEW.balance_after IS NOT NULL AND NEW.balance IS NULL THEN
-            NEW.balance := NEW.balance_after;
-        END IF;
+    IF NOT EXISTS (SELECT 1 FROM wallet_transactions WHERE wallet_id IS NULL) THEN
+        ALTER TABLE wallet_transactions
+            ALTER COLUMN wallet_id SET NOT NULL;
     END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+END $$;
 
 DROP TRIGGER IF EXISTS sync_wallet_balance_trigger ON wallet_transactions;
-CREATE TRIGGER sync_wallet_balance_trigger
-    BEFORE INSERT ON wallet_transactions
-    FOR EACH ROW EXECUTE FUNCTION sync_wallet_balance();
+DROP FUNCTION IF EXISTS sync_wallet_balance();
 
 -- ============================================
 -- 4. plans table - add email_limit/api_call_limit

@@ -200,7 +200,7 @@ export default function ControlPlaneLogin() {
                                     onChange={(e) => setEmail(e.target.value)}
                                     onBlur={() => setEmailError(validateEmail(email))}
                                     className="w-full px-4 py-3 min-h-[44px] rounded-sm border border-input focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all placeholder:text-muted-foreground bg-muted/30 text-sm font-medium text-foreground"
-                                    placeholder="admin@apexmail.ee"
+                                    placeholder="you@example.com"
                                     required
                                     disabled={loading}
                                 />

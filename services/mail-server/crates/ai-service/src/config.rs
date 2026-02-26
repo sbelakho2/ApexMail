@@ -34,7 +34,7 @@ impl Default for AiConfig {
 
 impl AiConfig {
     /// Build config from environment variables, falling back to defaults.
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let defaults = Self::default();
         let config = Self {
             model_endpoint: std::env::var("AI_MODEL_ENDPOINT")
@@ -60,10 +60,8 @@ impl AiConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(defaults.sto_lookback_days),
         };
-        if let Err(err) = config.validate() {
-            panic!("Invalid AI config: {err}");
-        }
-        config
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn validate(&self) -> Result<(), String> {

@@ -15,17 +15,24 @@ pub struct RateLimitConfig {
     pub jitter_ms: Option<u64>,
 }
 
+fn nonzero_or_min(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).unwrap_or_else(|| {
+        // Safety: 1 is a valid non-zero value.
+        unsafe { NonZeroU32::new_unchecked(1) }
+    })
+}
+
 impl RateLimitConfig {
     pub fn new(rps: u32) -> Self {
         Self {
-            requests_per_second: NonZeroU32::new(rps).expect("rps must be > 0"),
+            requests_per_second: nonzero_or_min(rps),
             burst_size: None,
             jitter_ms: None,
         }
     }
 
     pub fn with_burst(mut self, burst: u32) -> Self {
-        self.burst_size = Some(NonZeroU32::new(burst).expect("burst must be > 0"));
+        self.burst_size = Some(nonzero_or_min(burst));
         self
     }
 

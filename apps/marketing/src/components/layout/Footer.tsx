@@ -5,8 +5,8 @@ const footerLinks = {
   product: [
     { name: 'Features', href: '/features' },
     { name: 'Pricing', href: '/pricing' },
-    { name: 'Security', href: '/security' },
-    { name: 'Enterprise', href: '/enterprise' },
+    { name: 'Security', href: '/compliance' },
+    { name: 'Enterprise', href: '/private-cloud' },
     { name: 'Private Cloud', href: '/private-cloud' },
     { name: 'Compliance', href: '/compliance' },
   ],
@@ -15,23 +15,23 @@ const footerLinks = {
     { name: 'API Reference', href: 'https://docs.apexmail.ee/api' },
     { name: 'SDKs', href: 'https://docs.apexmail.ee/sdks' },
     { name: 'Webhooks', href: 'https://docs.apexmail.ee/webhooks' },
-    { name: 'Changelog', href: '/changelog' },
-    { name: 'Status', href: 'https://status.apexmail.ee' },
+    { name: 'API Console', href: '/api-console' },
+    { name: 'Status', href: '/status' },
   ],
   resources: [
-    { name: 'Blog', href: '/blog' },
+    { name: 'API Console', href: '/api-console' },
     { name: 'Case Studies', href: '/case-studies' },
-    { name: 'Guides', href: '/guides' },
-    { name: 'Email Best Practices', href: '/guides/best-practices' },
-    { name: 'Deliverability', href: '/guides/deliverability' },
-    { name: 'GDPR Guide', href: '/guides/gdpr' },
+    { name: 'Compare Providers', href: '/compare' },
+    { name: 'Forensic Tools', href: '/forensic' },
+    { name: 'Status', href: '/status' },
+    { name: 'Compliance', href: '/compliance' },
   ],
   company: [
-    { name: 'About', href: '/about' },
-    { name: 'Careers', href: '/careers' },
-    { name: 'Contact', href: '/contact' },
-    { name: 'Partners', href: '/partners' },
-    { name: 'Press Kit', href: '/press' },
+    { name: 'Private Cloud', href: '/private-cloud' },
+    { name: 'Case Studies', href: '/case-studies' },
+    { name: 'Compare', href: '/compare' },
+    { name: 'Status', href: '/status' },
+    { name: 'Features', href: '/features' },
   ],
   legal: [
     { name: 'Privacy Policy', href: '/privacy' },
@@ -72,8 +72,8 @@ export function Footer() {
                 <a
                   key={link.name}
                   href={link.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  target={link.href.startsWith('mailto:') ? undefined : '_blank'}
+                  rel={link.href.startsWith('mailto:') ? undefined : 'noopener noreferrer'}
                   className="w-11 h-11 rounded-lg bg-surface-50 border border-surface-200 flex items-center justify-center text-surface-500 hover:text-surface-900 hover:border-surface-300 transition-colors"
                   aria-label={link.name}
                 >

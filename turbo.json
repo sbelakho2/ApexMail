@@ -10,7 +10,9 @@
         "NEXT_PUBLIC_API_URL",
         "NEXT_PUBLIC_TRACKING_URL",
         "NEXT_PUBLIC_APP_URL",
-        "BASE_URL"
+        "BASE_URL",
+        "STRIPE_PUBLIC_KEY",
+        "SENTRY_DSN"
       ]
     },
     "dev": {
@@ -23,7 +25,6 @@
       "persistent": true
     },
     "test": {
-      "dependsOn": ["build"],
       "outputs": ["coverage/**"],
       "env": ["CI", "NODE_ENV"]
     },
@@ -32,22 +33,18 @@
       "persistent": true
     },
     "test:e2e": {
-      "dependsOn": ["build"],
       "outputs": [],
       "env": ["CI", "NODE_ENV"]
     },
     "test:unit": {
-      "dependsOn": ["build"],
       "outputs": ["coverage/**"],
       "env": ["CI", "NODE_ENV"]
     },
     "test:integration": {
-      "dependsOn": ["build"],
       "outputs": [],
       "env": ["CI", "NODE_ENV"]
     },
     "test:coverage": {
-      "dependsOn": ["build"],
       "outputs": ["coverage/**"],
       "env": ["CI", "NODE_ENV"]
     },

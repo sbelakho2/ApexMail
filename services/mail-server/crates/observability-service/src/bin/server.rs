@@ -22,7 +22,13 @@ async fn main() {
         .json()
         .init();
 
-    let config = ObservabilityConfig::from_env();
+    let config = match ObservabilityConfig::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(error = %err, "Invalid observability configuration");
+            return;
+        }
+    };
 
     tracing::info!(
         port = config.port,

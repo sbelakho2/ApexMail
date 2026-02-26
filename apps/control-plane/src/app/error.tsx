@@ -35,7 +35,7 @@ export default function GlobalError({
                     Something went wrong
                 </h2>
                 <p className="text-sm text-muted-foreground mb-6">
-                    {error.message || 'An unexpected error occurred in the control plane.'}
+                    An unexpected error occurred in the control plane.
                 </p>
                 {error.digest && (
                     <p className="text-xs text-muted-foreground mb-4 font-mono">

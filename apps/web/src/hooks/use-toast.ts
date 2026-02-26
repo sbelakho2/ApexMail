@@ -20,13 +20,6 @@ const actionTypes = {
     REMOVE_TOAST: 'REMOVE_TOAST',
 } as const;
 
-let count = 0;
-
-function genId() {
-    count = (count + 1) % Number.MAX_SAFE_INTEGER;
-    return count.toString();
-}
-
 type ActionType = typeof actionTypes;
 
 type Action =
@@ -51,22 +44,62 @@ interface State {
     toasts: ToasterToast[];
 }
 
-const toastTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+interface ToastStore {
+    state: State;
+    listeners: Array<(state: State) => void>;
+    toastTimeouts: Map<string, ReturnType<typeof setTimeout>>;
+    count: number;
+}
+
+declare global {
+    interface Window {
+        __apexmailToastStore__?: ToastStore;
+    }
+}
+
+function createToastStore(): ToastStore {
+    return {
+        state: { toasts: [] },
+        listeners: [],
+        toastTimeouts: new Map<string, ReturnType<typeof setTimeout>>(),
+        count: 0,
+    };
+}
+
+function getToastStore(): ToastStore {
+    if (typeof window === 'undefined') {
+        return createToastStore();
+    }
+
+    if (!window.__apexmailToastStore__) {
+        window.__apexmailToastStore__ = createToastStore();
+    }
+
+    return window.__apexmailToastStore__;
+}
+
+function genId(): string {
+    const store = getToastStore();
+    store.count = (store.count + 1) % Number.MAX_SAFE_INTEGER;
+    return store.count.toString();
+}
 
 const addToRemoveQueue = (toastId: string) => {
-    if (toastTimeouts.has(toastId)) {
+    const store = getToastStore();
+
+    if (store.toastTimeouts.has(toastId)) {
         return;
     }
 
     const timeout = setTimeout(() => {
-        toastTimeouts.delete(toastId);
+        store.toastTimeouts.delete(toastId);
         dispatch({
             type: 'REMOVE_TOAST',
             toastId: toastId,
         });
     }, TOAST_REMOVE_DELAY);
 
-    toastTimeouts.set(toastId, timeout);
+    store.toastTimeouts.set(toastId, timeout);
 };
 
 export const reducer = (state: State, action: Action): State => {
@@ -122,14 +155,11 @@ export const reducer = (state: State, action: Action): State => {
     }
 };
 
-const listeners: Array<(state: State) => void> = [];
-
-let memoryState: State = { toasts: [] };
-
 function dispatch(action: Action) {
-    memoryState = reducer(memoryState, action);
-    listeners.forEach((listener) => {
-        listener(memoryState);
+    const store = getToastStore();
+    store.state = reducer(store.state, action);
+    store.listeners.forEach((listener) => {
+        listener(store.state);
     });
 }
 
@@ -165,17 +195,19 @@ function toast({ ...props }: Toast) {
 }
 
 function useToast() {
-    const [state, setState] = React.useState<State>(memoryState);
+    const store = getToastStore();
+    const [state, setState] = React.useState<State>(store.state);
 
     React.useEffect(() => {
-        listeners.push(setState);
+        const runtimeStore = getToastStore();
+        runtimeStore.listeners.push(setState);
         return () => {
-            const index = listeners.indexOf(setState);
+            const index = runtimeStore.listeners.indexOf(setState);
             if (index > -1) {
-                listeners.splice(index, 1);
+                runtimeStore.listeners.splice(index, 1);
             }
         };
-    }, [state]);
+    }, []);
 
     return {
         ...state,

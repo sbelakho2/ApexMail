@@ -245,7 +245,8 @@ mod tests {
     fn test_canonicalize_body_relaxed() {
         let signer = DkimSigner {
             config: DkimConfig::default(),
-            private_key: RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap(),
+            private_key: RsaPrivateKey::new(&mut rand::thread_rng(), 2048)
+                .expect("generate RSA private key"),
         };
         
         let body = "Hello  World\r\nThis is   a test  \r\n\r\n";

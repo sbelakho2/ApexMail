@@ -42,7 +42,7 @@ class ApexMailClientTest {
         });
         server.start();
         int port = server.getAddress().getPort();
-        var client = new ApexMailClient("test_key", "http://127.0.0.1:" + port);
+        var client = new ApexMailClient("am_test_1234567890abcdef", "http://127.0.0.1:" + port);
         return new Object[]{ client, recorded, server };
     }
 
@@ -65,9 +65,7 @@ class ApexMailClientTest {
                 ));
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/messages", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var msg = (Map<String, Object>) resp.get("message");
-                assertEquals("msg_1", msg.get("id"));
+                assertEquals("msg_1", resp.message().id());
             } finally { stop(arr); }
         }
 
@@ -92,8 +90,7 @@ class ApexMailClientTest {
                 ));
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/messages/batch", recorded(arr).get().path());
-                var results = (List<?>) resp.get("results");
-                assertEquals(1, results.size());
+                assertEquals(1, resp.results().size());
             } finally { stop(arr); }
         }
 
@@ -104,9 +101,7 @@ class ApexMailClientTest {
                 var resp = client(arr).emails().get("msg_789");
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/messages/msg_789", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var msg = (Map<String, Object>) resp.get("message");
-                assertEquals("msg_789", msg.get("id"));
+                assertEquals("msg_789", resp.message().id());
             } finally { stop(arr); }
         }
 
@@ -132,9 +127,7 @@ class ApexMailClientTest {
                 var resp = client(arr).domains().create("mail.example.com");
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/domains", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var dom = (Map<String, Object>) resp.get("domain");
-                assertEquals("dom_1", dom.get("id"));
+                assertEquals("dom_1", resp.domain().id());
             } finally { stop(arr); }
         }
 
@@ -165,7 +158,7 @@ class ApexMailClientTest {
                 var resp = client(arr).domains().verify("dom_1");
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/domains/dom_1/verify", recorded(arr).get().path());
-                assertEquals(false, resp.get("verified"));
+                assertEquals(false, resp.verified());
             } finally { stop(arr); }
         }
 
@@ -186,7 +179,7 @@ class ApexMailClientTest {
                 var resp = client(arr).domains().health("dom_1");
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/domains/dom_1/health", recorded(arr).get().path());
-                assertEquals(true, resp.get("healthy"));
+                assertEquals(true, resp.healthy());
             } finally { stop(arr); }
         }
     }
@@ -204,9 +197,7 @@ class ApexMailClientTest {
                 ));
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/webhooks", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var wh = (Map<String, Object>) resp.get("webhook");
-                assertEquals("wh_1", wh.get("id"));
+                assertEquals("wh_1", resp.webhook().id());
             } finally { stop(arr); }
         }
 
@@ -217,8 +208,7 @@ class ApexMailClientTest {
                 var resp = client(arr).webhooks().list();
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/webhooks", recorded(arr).get().path());
-                var whs = (List<?>) resp.get("webhooks");
-                assertEquals(2, whs.size());
+                assertEquals(2, resp.webhooks().size());
             } finally { stop(arr); }
         }
 
@@ -229,9 +219,7 @@ class ApexMailClientTest {
                 var resp = client(arr).webhooks().get("wh_1");
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/webhooks/wh_1", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var wh = (Map<String, Object>) resp.get("webhook");
-                assertEquals("wh_1", wh.get("id"));
+                assertEquals("wh_1", resp.webhook().id());
             } finally { stop(arr); }
         }
 
@@ -267,9 +255,7 @@ class ApexMailClientTest {
                 var resp = client(arr).templates().create(Map.of("name", "Welcome", "subject", "Hi", "html", "<p>Hello</p>"));
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/templates", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var tpl = (Map<String, Object>) resp.get("template");
-                assertEquals("tpl_1", tpl.get("id"));
+                assertEquals("tpl_1", resp.template().id());
             } finally { stop(arr); }
         }
 
@@ -290,9 +276,7 @@ class ApexMailClientTest {
                 var resp = client(arr).templates().getBySlug("welcome");
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/templates/slug/welcome", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var tpl = (Map<String, Object>) resp.get("template");
-                assertEquals("welcome", tpl.get("slug"));
+                assertEquals("welcome", resp.template().slug());
             } finally { stop(arr); }
         }
 
@@ -314,9 +298,7 @@ class ApexMailClientTest {
                 var resp = client(arr).templates().update("tpl_1", Map.of("name", "Updated"));
                 assertEquals("PATCH", recorded(arr).get().method());
                 assertEquals("/v1/templates/tpl_1", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var tpl = (Map<String, Object>) resp.get("template");
-                assertEquals("Updated", tpl.get("name"));
+                assertEquals("Updated", resp.template().name());
             } finally { stop(arr); }
         }
 
@@ -337,7 +319,7 @@ class ApexMailClientTest {
                 var resp = client(arr).templates().render("tpl_1", Map.of("name", "Alice"));
                 assertEquals("POST", recorded(arr).get().method());
                 assertEquals("/v1/templates/tpl_1/render", recorded(arr).get().path());
-                assertEquals("<p>Hello Alice</p>", resp.get("html"));
+                assertEquals("<p>Hello Alice</p>", resp.html());
             } finally { stop(arr); }
         }
 
@@ -348,7 +330,7 @@ class ApexMailClientTest {
                 var resp = client(arr).templates().validateReactEmail("export default () => <h1>Hi</h1>");
                 assertEquals("POST", recorded(arr).get().method());
                 assertTrue(recorded(arr).get().path().contains("react-email/validate"));
-                assertEquals(true, resp.get("valid"));
+                assertEquals(true, resp.valid());
             } finally { stop(arr); }
         }
 
@@ -360,7 +342,7 @@ class ApexMailClientTest {
                 assertEquals("GET", recorded(arr).get().method());
                 assertTrue(recorded(arr).get().path().contains("react-email/starter"));
                 assertTrue(recorded(arr).get().path().contains("name=MyEmail"));
-                assertNotNull(resp.get("source"));
+                assertNotNull(resp.source());
             } finally { stop(arr); }
         }
     }
@@ -421,7 +403,7 @@ class ApexMailClientTest {
                 assertEquals("GET", recorded(arr).get().method());
                 assertTrue(recorded(arr).get().path().contains("/v1/suppressions/check"));
                 assertTrue(recorded(arr).get().path().contains("email=bad"));
-                assertEquals(true, resp.get("suppressed"));
+                assertEquals(true, resp.suppressed());
             } finally { stop(arr); }
         }
 
@@ -459,8 +441,7 @@ class ApexMailClientTest {
                 assertEquals("GET", recorded(arr).get().method());
                 assertTrue(recorded(arr).get().path().contains("messageId=msg_123"));
                 assertTrue(recorded(arr).get().path().contains("limit=100"));
-                var events = (List<?>) resp.get("events");
-                assertEquals(1, events.size());
+                assertEquals(1, resp.events().size());
             } finally { stop(arr); }
         }
 
@@ -471,9 +452,7 @@ class ApexMailClientTest {
                 var resp = client(arr).events().get("evt_42");
                 assertEquals("GET", recorded(arr).get().method());
                 assertEquals("/v1/events/evt_42", recorded(arr).get().path());
-                @SuppressWarnings("unchecked")
-                var event = (Map<String, Object>) resp.get("event");
-                assertEquals("evt_42", event.get("id"));
+                assertEquals("evt_42", resp.event().id());
             } finally { stop(arr); }
         }
     }

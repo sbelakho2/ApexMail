@@ -100,7 +100,7 @@ export class HttpClient {
   private readonly baseUrl?: string;
   private readonly defaultHeaders: Record<string, string>;
   private readonly defaultTimeout: number;
-  private readonly circuitBreakers: Map<string, CircuitBreaker> = new Map();
+  private readonly circuitBreakers: Map<string, { breaker: CircuitBreaker; lastAccess: number }> = new Map();
   private readonly circuitBreakerConfig: CircuitBreakerConfig;
   private static readonly MAX_BREAKERS = 1000;
 
@@ -126,21 +126,28 @@ export class HttpClient {
   }
 
   private getCircuitBreaker(host: string): CircuitBreaker {
-    let breaker = this.circuitBreakers.get(host);
-    if (!breaker) {
-      breaker = new CircuitBreaker(this.circuitBreakerConfig);
-      if (this.circuitBreakers.size >= HttpClient.MAX_BREAKERS) {
-        const oldestKey = this.circuitBreakers.keys().next().value as string | undefined;
-        if (oldestKey) {
-          this.circuitBreakers.delete(oldestKey);
+    const now = Date.now();
+    const existing = this.circuitBreakers.get(host);
+    if (existing) {
+      existing.lastAccess = now;
+      return existing.breaker;
+    }
+
+    const breaker = new CircuitBreaker(this.circuitBreakerConfig);
+    if (this.circuitBreakers.size >= HttpClient.MAX_BREAKERS) {
+      let oldestKey: string | undefined;
+      let oldestAccess = Infinity;
+      for (const [key, value] of this.circuitBreakers.entries()) {
+        if (value.lastAccess < oldestAccess) {
+          oldestAccess = value.lastAccess;
+          oldestKey = key;
         }
       }
-      this.circuitBreakers.set(host, breaker);
-    } else {
-      // Refresh insertion order for LRU-style eviction.
-      this.circuitBreakers.delete(host);
-      this.circuitBreakers.set(host, breaker);
+      if (oldestKey) {
+        this.circuitBreakers.delete(oldestKey);
+      }
     }
+    this.circuitBreakers.set(host, { breaker, lastAccess: now });
     return breaker;
   }
 
@@ -167,6 +174,7 @@ export class HttpClient {
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       const startTime = Date.now();
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
       try {
         const headers: Record<string, string> = {
@@ -184,12 +192,16 @@ export class HttpClient {
           }
         }
 
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(new Error('Request timeout')), timeout);
+
         const response = await request(fullUrl, {
           method: method as Dispatcher.HttpMethod,
           headers,
           body,
           headersTimeout: timeout,
           bodyTimeout: timeout,
+          signal: controller.signal,
         });
 
         const latencyMs = Date.now() - startTime;
@@ -265,6 +277,10 @@ export class HttpClient {
             maxRetryDelay
           );
           await this.sleep(delay);
+        }
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
         }
       }
     }

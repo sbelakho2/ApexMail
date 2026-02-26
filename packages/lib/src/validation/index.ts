@@ -48,10 +48,12 @@ export interface EmailValidationOptions {
     checkRoleBased?: boolean;
     /** Suggest corrections for typos (default: true) */
     suggestCorrections?: boolean;
-    /** Timeout for DNS lookups in ms (default: 5000) */
+    /** Timeout for DNS lookups in ms (default: 2000) - SEC-012 FIX: reduced from 5000 */
     timeout?: number;
     /** Allow subaddressing like user+tag@domain.com (default: true) */
     allowSubaddressing?: boolean;
+    /** Enable provider-specific normalization (e.g., Gmail dot handling) */
+    normalizeProviderSpecific?: boolean;
 }
 
 // ============================================================================
@@ -245,12 +247,17 @@ function validateSyntax(email: string): { valid: boolean; local: string; domain:
  */
 async function checkMxRecords(domain: string, timeout: number): Promise<{ valid: boolean; records?: dns.MxRecord[] }> {
     try {
-        const records = await Promise.race([
-            resolveMx(domain),
-            new Promise<never>((_, reject) => 
-                setTimeout(() => reject(new Error('DNS timeout')), timeout)
-            ),
-        ]);
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('DNS timeout')), timeout);
+        });
+
+        const records = await Promise.race([resolveMx(domain), timeoutPromise])
+            .finally(() => {
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                }
+            });
         
         if (records && records.length > 0) {
             return { valid: true, records: records.sort((a, b) => a.priority - b.priority) };
@@ -260,7 +267,19 @@ async function checkMxRecords(domain: string, timeout: number): Promise<{ valid:
     } catch (err) {
         // Try resolving A record as fallback (some domains accept mail without MX)
         try {
-            const aRecords = await promisify(dns.resolve4)(domain);
+            let timeoutId: ReturnType<typeof setTimeout> | null = null;
+            const timeoutPromise = new Promise<never>((_, reject) => {
+                timeoutId = setTimeout(() => reject(new Error('DNS timeout')), timeout);
+            });
+
+            const aRecords = await Promise.race([
+                promisify(dns.resolve4)(domain),
+                timeoutPromise,
+            ]).finally(() => {
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                }
+            });
             if (aRecords && aRecords.length > 0) {
                 return { valid: true, records: [{ exchange: domain, priority: 10 }] };
             }
@@ -374,7 +393,7 @@ function levenshteinDistance(a: string, b: string): number {
 /**
  * Normalize email address
  */
-function normalizeEmail(email: string, allowSubaddressing: boolean): string {
+function normalizeEmail(email: string, allowSubaddressing: boolean, normalizeProviderSpecific: boolean): string {
     const [local, domain] = email.toLowerCase().split('@');
     if (!local || !domain) return email.toLowerCase();
     
@@ -385,8 +404,8 @@ function normalizeEmail(email: string, allowSubaddressing: boolean): string {
         normalizedLocal = local.split('+')[0] || local;
     }
     
-    // Gmail-specific: remove dots (they're ignored by Gmail)
-    if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    // Provider-specific: remove dots (Gmail ignores dots in local part)
+    if (normalizeProviderSpecific && (domain === 'gmail.com' || domain === 'googlemail.com')) {
         normalizedLocal = normalizedLocal.replace(/\./g, '');
     }
     
@@ -409,8 +428,10 @@ export async function validateEmail(
         checkDisposable: checkDisp = true,
         checkRoleBased: checkRole = false,
         suggestCorrections: suggest = true,
-        timeout = 5000,
+        // SEC-012 FIX: Reduced from 5000ms to prevent DoS via slow DNS domains
+        timeout = 2000,
         allowSubaddressing = true,
+        normalizeProviderSpecific = true,
     } = options;
     
     const trimmedEmail = email.trim();
@@ -438,7 +459,7 @@ export async function validateEmail(
     }
     
     const { local, domain } = syntaxResult;
-    const normalized = normalizeEmail(trimmedEmail, allowSubaddressing);
+    const normalized = normalizeEmail(trimmedEmail, allowSubaddressing, normalizeProviderSpecific);
     
     // Step 2: MX record check
     let mxValid = true;
@@ -534,8 +555,9 @@ export async function validateEmails(
 
 /**
  * Check if domain accepts email (has MX records)
+ * SEC-012 FIX: Reduced default timeout from 5000ms to 2000ms
  */
-export async function domainAcceptsEmail(domain: string, timeout = 5000): Promise<boolean> {
+export async function domainAcceptsEmail(domain: string, timeout = 2000): Promise<boolean> {
     const result = await checkMxRecords(domain, timeout);
     return result.valid;
 }

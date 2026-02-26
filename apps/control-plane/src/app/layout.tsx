@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import localFont from 'next/font/local';
 import './globals.css';
+import '@/lib/console-guard';
 import { ControlPlaneShell } from '../components/layout/control-plane-shell';
 import { Providers } from '../components/layout/providers';
 

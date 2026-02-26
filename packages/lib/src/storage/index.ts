@@ -15,7 +15,7 @@ import { createGzip, createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { join, dirname, resolve, normalize } from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { createHash, createHmac } from 'node:crypto';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { Result } from '../result.js';
 
 /**
@@ -229,9 +229,13 @@ export class LocalStorageProvider implements StorageProvider {
     try {
       const fullPath = this.getFullPath(prefix);
       const keys: string[] = [];
+      const maxDepth = 10;
 
-      const listDir = async (dir: string, base: string): Promise<void> => {
+      const listDir = async (dir: string, base: string, depth: number): Promise<void> => {
         try {
+          if (depth > maxDepth) {
+            return;
+          }
           const entries = await fs.readdir(dir, { withFileTypes: true });
           for (const entry of entries) {
             if (keys.length >= maxKeys) break;
@@ -240,7 +244,7 @@ export class LocalStorageProvider implements StorageProvider {
             const relativePath = join(base, entry.name);
 
             if (entry.isDirectory()) {
-              await listDir(entryPath, relativePath);
+              await listDir(entryPath, relativePath, depth + 1);
             } else if (!entry.name.endsWith('.meta.json')) {
               keys.push(relativePath);
             }
@@ -250,7 +254,7 @@ export class LocalStorageProvider implements StorageProvider {
         }
       };
 
-      await listDir(fullPath, prefix);
+      await listDir(fullPath, prefix, 0);
 
       return Result.ok({
         keys,
@@ -323,9 +327,20 @@ interface S3StorageConfig {
 
 export class S3StorageProvider implements StorageProvider {
   private readonly config: S3StorageConfig;
+  private readonly client: S3Client;
 
   constructor(config: S3StorageConfig) {
     this.config = config;
+    this.client = new S3Client({
+      region: config.region,
+      endpoint: config.endpoint,
+      forcePathStyle: config.forcePathStyle,
+      credentials: {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+        sessionToken: config.sessionToken,
+      },
+    });
   }
 
   async put(
@@ -334,29 +349,17 @@ export class S3StorageProvider implements StorageProvider {
     metadata?: StorageMetadata
   ): Promise<Result<void, Error>> {
     try {
-      const payload = Buffer.isBuffer(data) ? data : await this.readStreamToBuffer(data);
-      const payloadHash = this.sha256Hex(payload);
+      const payload = Buffer.isBuffer(data) ? data : data;
+      const command = new PutObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+        Body: payload,
+        ContentType: metadata?.contentType,
+        ContentLength: Buffer.isBuffer(payload) ? payload.length : undefined,
+        Metadata: metadata?.customMetadata,
+      });
 
-      const headers: Record<string, string> = {
-        'Content-Length': String(payload.length),
-        'x-amz-content-sha256': payloadHash,
-      };
-
-      if (metadata?.contentType) {
-        headers['Content-Type'] = metadata.contentType;
-      }
-
-      if (metadata?.customMetadata) {
-        for (const [metaKey, metaValue] of Object.entries(metadata.customMetadata)) {
-          headers[`x-amz-meta-${metaKey.toLowerCase()}`] = metaValue;
-        }
-      }
-
-      const response = await this.sendSignedRequest('PUT', key, '', headers, payload, payloadHash);
-
-      if (!response.ok) {
-        return Result.err(new Error(`S3 put failed (${response.status}): ${await response.text()}`));
-      }
+      await this.client.send(command);
 
       return Result.ok(undefined);
     } catch (error) {
@@ -366,16 +369,24 @@ export class S3StorageProvider implements StorageProvider {
 
   async get(key: string): Promise<Result<StorageObject, Error>> {
     try {
-      const response = await this.sendSignedRequest('GET', key, '', {
-        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      }, undefined, 'UNSIGNED-PAYLOAD');
+      const command = new GetObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+      });
+      const response = await this.client.send(command);
 
-      if (!response.ok) {
-        return Result.err(new Error(`Object not found: ${key}`));
+      if (!response.Body) {
+        return Result.err(new Error(`Empty response body for ${key}`));
       }
 
-      const data = Buffer.from(await response.arrayBuffer());
-      const metadata = this.extractMetadataFromHeaders(response.headers, data.length);
+      const data = await this.readStreamToBuffer(response.Body as Readable);
+      const metadata: StorageMetadata = {
+        contentType: response.ContentType,
+        contentLength: data.length,
+        lastModified: response.LastModified,
+        etag: response.ETag?.replace(/"/g, ''),
+        customMetadata: response.Metadata ?? {},
+      };
 
       return Result.ok({ key, data, metadata });
     } catch (error) {
@@ -385,20 +396,17 @@ export class S3StorageProvider implements StorageProvider {
 
   async getStream(key: string): Promise<Result<Readable, Error>> {
     try {
-      const response = await this.sendSignedRequest('GET', key, '', {
-        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      }, undefined, 'UNSIGNED-PAYLOAD');
+      const command = new GetObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+      });
+      const response = await this.client.send(command);
 
-      if (!response.ok) {
-        return Result.err(new Error(`Object not found: ${key}`));
-      }
-
-      if (!response.body) {
+      if (!response.Body) {
         return Result.err(new Error(`Empty response body for ${key}`));
       }
 
-      const stream = Readable.fromWeb(response.body as unknown as ReadableStream<Uint8Array>);
-      return Result.ok(stream);
+      return Result.ok(response.Body as Readable);
     } catch (error) {
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
@@ -406,13 +414,11 @@ export class S3StorageProvider implements StorageProvider {
 
   async delete(key: string): Promise<Result<void, Error>> {
     try {
-      const response = await this.sendSignedRequest('DELETE', key, '', {
-        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      }, undefined, 'UNSIGNED-PAYLOAD');
-
-      if (!response.ok && response.status !== 404) {
-        return Result.err(new Error(`S3 delete failed (${response.status}): ${await response.text()}`));
-      }
+      const command = new DeleteObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+      });
+      await this.client.send(command);
 
       return Result.ok(undefined);
     } catch (error) {
@@ -422,10 +428,12 @@ export class S3StorageProvider implements StorageProvider {
 
   async exists(key: string): Promise<boolean> {
     try {
-      const response = await this.sendSignedRequest('HEAD', key, '', {
-        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      }, undefined, 'UNSIGNED-PAYLOAD');
-      return response.ok;
+      const command = new HeadObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+      });
+      await this.client.send(command);
+      return true;
     } catch {
       return false;
     }
@@ -437,34 +445,21 @@ export class S3StorageProvider implements StorageProvider {
     continuationToken?: string
   ): Promise<Result<ListResult, Error>> {
     try {
-      const queryParams = new URLSearchParams({
-        'list-type': '2',
-        'prefix': prefix,
-        'max-keys': String(maxKeys),
+      const command = new ListObjectsV2Command({
+        Bucket: this.config.bucket,
+        Prefix: prefix,
+        MaxKeys: maxKeys,
+        ContinuationToken: continuationToken,
       });
-
-      if (continuationToken) {
-        queryParams.set('continuation-token', continuationToken);
-      }
-
-      const query = queryParams.toString();
-      const response = await this.sendSignedRequest('GET', '', query, {
-        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      }, undefined, 'UNSIGNED-PAYLOAD');
-
-      if (!response.ok) {
-        return Result.err(new Error(`S3 list failed (${response.status}): ${await response.text()}`));
-      }
-
-      const xml = await response.text();
-      const keys = Array.from(xml.matchAll(/<Key>(.*?)<\/Key>/g)).map((match) => this.decodeXml(match[1] ?? ''));
-      const isTruncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
-      const nextContinuationTokenMatch = xml.match(/<NextContinuationToken>(.*?)<\/NextContinuationToken>/);
+      const response = await this.client.send(command);
+      const keys = (response.Contents ?? [])
+        .map((item) => item.Key)
+        .filter((key): key is string => Boolean(key));
 
       return Result.ok({
         keys,
-        continuationToken: nextContinuationTokenMatch ? this.decodeXml(nextContinuationTokenMatch[1] ?? '') : undefined,
-        isTruncated,
+        continuationToken: response.NextContinuationToken,
+        isTruncated: response.IsTruncated ?? false,
       });
     } catch (error) {
       return Result.err(error instanceof Error ? error : new Error(String(error)));
@@ -473,16 +468,19 @@ export class S3StorageProvider implements StorageProvider {
 
   async getMetadata(key: string): Promise<Result<StorageMetadata, Error>> {
     try {
-      const response = await this.sendSignedRequest('HEAD', key, '', {
-        'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
-      }, undefined, 'UNSIGNED-PAYLOAD');
+      const command = new HeadObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+      });
+      const response = await this.client.send(command);
 
-      if (!response.ok) {
-        return Result.err(new Error(`Object not found: ${key}`));
-      }
-
-      const contentLength = Number(response.headers.get('content-length') ?? '0');
-      return Result.ok(this.extractMetadataFromHeaders(response.headers, contentLength));
+      return Result.ok({
+        contentType: response.ContentType,
+        contentLength: response.ContentLength,
+        lastModified: response.LastModified,
+        etag: response.ETag?.replace(/"/g, ''),
+        customMetadata: response.Metadata ?? {},
+      });
     } catch (error) {
       return Result.err(error instanceof Error ? error : new Error(String(error)));
     }
@@ -490,18 +488,17 @@ export class S3StorageProvider implements StorageProvider {
 
   async copy(sourceKey: string, destKey: string): Promise<Result<void, Error>> {
     try {
-      const encodedCopySource = this.config.forcePathStyle
-        ? `/${this.config.bucket}/${sourceKey}`
-        : `/${this.config.bucket}/${sourceKey}`;
-
-      const response = await this.sendSignedRequest('PUT', destKey, '', {
-        'x-amz-content-sha256': this.sha256Hex(Buffer.alloc(0)),
-        'x-amz-copy-source': encodedCopySource,
-      }, Buffer.alloc(0), this.sha256Hex(Buffer.alloc(0)));
-
-      if (!response.ok) {
-        return Result.err(new Error(`S3 copy failed (${response.status}): ${await response.text()}`));
-      }
+      const encodedSourceKey = sourceKey
+        .split('/')
+        .map((part) => encodeURIComponent(part))
+        .join('/');
+      const copySource = `/${this.config.bucket}/${encodedSourceKey}`;
+      const command = new CopyObjectCommand({
+        Bucket: this.config.bucket,
+        Key: destKey,
+        CopySource: copySource,
+      });
+      await this.client.send(command);
 
       return Result.ok(undefined);
     } catch (error) {
@@ -515,166 +512,6 @@ export class S3StorageProvider implements StorageProvider {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     }
     return Buffer.concat(chunks);
-  }
-
-  private extractMetadataFromHeaders(headers: Headers, contentLength: number): StorageMetadata {
-    const customMetadata: Record<string, string> = {};
-
-    headers.forEach((value, key) => {
-      if (key.toLowerCase().startsWith('x-amz-meta-')) {
-        customMetadata[key.slice('x-amz-meta-'.length)] = value;
-      }
-    });
-
-    return {
-      contentType: headers.get('content-type') ?? undefined,
-      contentLength,
-      lastModified: headers.get('last-modified') ? new Date(headers.get('last-modified') as string) : undefined,
-      etag: headers.get('etag')?.replace(/"/g, ''),
-      customMetadata,
-    };
-  }
-
-  private decodeXml(value: string): string {
-    return value
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
-  }
-
-  private sha256Hex(payload: Buffer): string {
-    return createHash('sha256').update(payload).digest('hex');
-  }
-
-  private getHost(): string {
-    if (this.config.endpoint) {
-      return new URL(this.config.endpoint).host;
-    }
-
-    if (this.config.forcePathStyle) {
-      return `s3.${this.config.region}.amazonaws.com`;
-    }
-
-    return `${this.config.bucket}.s3.${this.config.region}.amazonaws.com`;
-  }
-
-  private getRequestUrl(key: string, query = ''): string {
-    const endpoint = this.config.endpoint
-      ? this.config.endpoint.replace(/\/$/, '')
-      : `https://${this.getHost()}`;
-
-    const encodedKey = key
-      .split('/')
-      .map((part) => encodeURIComponent(part))
-      .join('/');
-    const keyPath = encodedKey ? `/${encodedKey}` : '/';
-
-    const basePath = this.config.forcePathStyle ? `/${this.config.bucket}${keyPath}` : keyPath;
-    return query ? `${endpoint}${basePath}?${query}` : `${endpoint}${basePath}`;
-  }
-
-  private getCanonicalUri(key: string): string {
-    const encodedKey = key
-      .split('/')
-      .map((part) => encodeURIComponent(part))
-      .join('/');
-    const keyPath = encodedKey ? `/${encodedKey}` : '/';
-    return this.config.forcePathStyle ? `/${this.config.bucket}${keyPath}` : keyPath;
-  }
-
-  private canonicalizeQuery(query: string): string {
-    if (!query) return '';
-
-    const params = new URLSearchParams(query);
-    return Array.from(params.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
-      .join('&');
-  }
-
-  private signRequest(
-    method: string,
-    canonicalUri: string,
-    canonicalQuery: string,
-    headers: Record<string, string>,
-    payloadHash: string,
-    amzDate: string,
-    dateStamp: string,
-  ): string {
-    const normalizedHeaders = Object.entries(headers)
-      .map(([name, value]) => [name.toLowerCase(), value.trim()] as const)
-      .filter(([name]) => name !== 'authorization')
-      .sort(([a], [b]) => a.localeCompare(b));
-
-    const canonicalHeaders = normalizedHeaders
-      .map(([name, value]) => `${name}:${value}`)
-      .join('\n');
-
-    const signedHeaders = normalizedHeaders.map(([name]) => name).join(';');
-
-    const canonicalRequest = [
-      method,
-      canonicalUri,
-      canonicalQuery,
-      canonicalHeaders,
-      '',
-      signedHeaders,
-      payloadHash,
-    ].join('\n');
-
-    const credentialScope = `${dateStamp}/${this.config.region}/s3/aws4_request`;
-    const stringToSign = [
-      'AWS4-HMAC-SHA256',
-      amzDate,
-      credentialScope,
-      createHash('sha256').update(canonicalRequest).digest('hex'),
-    ].join('\n');
-
-    const kDate = createHmac('sha256', `AWS4${this.config.secretAccessKey}`).update(dateStamp).digest();
-    const kRegion = createHmac('sha256', kDate).update(this.config.region).digest();
-    const kService = createHmac('sha256', kRegion).update('s3').digest();
-    const kSigning = createHmac('sha256', kService).update('aws4_request').digest();
-    const signature = createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-
-    return `AWS4-HMAC-SHA256 Credential=${this.config.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-  }
-
-  private async sendSignedRequest(
-    method: 'GET' | 'PUT' | 'HEAD' | 'DELETE',
-    key: string,
-    query: string,
-    extraHeaders: Record<string, string>,
-    body?: Buffer,
-    payloadHash = 'UNSIGNED-PAYLOAD',
-  ): Promise<Response> {
-    const now = new Date();
-    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-    const dateStamp = amzDate.slice(0, 8);
-
-    const canonicalUri = this.getCanonicalUri(key);
-    const canonicalQuery = this.canonicalizeQuery(query);
-
-    const headers: Record<string, string> = {
-      Host: this.getHost(),
-      'x-amz-date': amzDate,
-      ...extraHeaders,
-    };
-
-    if (this.config.sessionToken) {
-      headers['x-amz-security-token'] = this.config.sessionToken;
-    }
-
-    const signature = this.signRequest(method, canonicalUri, canonicalQuery, headers, payloadHash, amzDate, dateStamp);
-    headers.Authorization = signature;
-
-    const url = this.getRequestUrl(key, canonicalQuery);
-    return fetch(url, {
-      method,
-      headers,
-      body,
-    });
   }
 }
 

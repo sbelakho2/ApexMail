@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY crates/*/Cargo.toml crates/*/Cargo.toml
 
-RUN cargo fetch
+RUN cargo fetch --locked
 
 # =============================================================================
 # Build Stage
@@ -47,6 +47,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user
 RUN useradd -m -u 10001 -s /sbin/nologin apexmail
 
+LABEL org.opencontainers.image.title="apexmail-mail-server" \
+    org.opencontainers.image.description="ApexMail mail server services" \
+    org.opencontainers.image.source="https://github.com/apexmail/apexmail" \
+    org.opencontainers.image.licenses="PROPRIETARY"
+
 # =============================================================================
 # Outbound Queue Service
 # =============================================================================
@@ -72,6 +77,7 @@ COPY --from=builder /app/target/release/smtp-edge /usr/local/bin/
 
 USER apexmail
 EXPOSE 25
+# Port 25 requires NET_BIND_SERVICE when running as non-root.
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
     CMD ["sh", "-c", "nc -z 127.0.0.1 25"]
@@ -118,5 +124,8 @@ FROM runtime-base AS send-email
 COPY --from=builder /app/target/release/send-email /usr/local/bin/
 
 USER apexmail
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "/usr/local/bin/send-email --help > /dev/null 2>&1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "send-email"]
