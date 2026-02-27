@@ -7,11 +7,9 @@ use ddos_protection::{
     adaptive::{AdaptiveConfig, AdaptiveRateLimiter, TrafficObservation},
     bot_detection::SessionBehavior,
     config::ProtectorConfig,
-    cost_based::{CostBasedLimiter, CostLimiterConfig, RequestCost},
     decision::ProtectionDecision,
     middleware::{evaluate_request, extract_client_ip, RequestContextBuilder},
     reputation::ReputationScore,
-    session::SessionTracker,
     smtp_protection::*,
     DdosProtector, RequestContext,
 };
@@ -90,16 +88,49 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
     };
     let protector = DdosProtector::new(config).await.unwrap();
     let ip: IpAddr = "203.0.113.42".parse().unwrap();
+    let trusted_ip: IpAddr = "203.0.113.43".parse().unwrap();
 
-    // Sends with suspiciously short fingerprint → reputation -10 per request
-    for _ in 0..5 {
+    // Baseline trusted traffic should stay allowed.
+    let trusted_warmup = RequestContextBuilder::new(trusted_ip, "/v1/health", "GET")
+        .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
+        .build();
+    let warmup_decision = protector.evaluate(&trusted_warmup).await;
+    assert!(
+        matches!(warmup_decision, ProtectionDecision::Allow),
+        "Trusted warmup should be allowed, got: {:?}",
+        warmup_decision
+    );
+
+    // Mix suspicious signals: malformed JA4 + very short token.
+    // This should degrade reputation on every request for this IP.
+    let suspicious_fingerprints = ["not-a-ja4", "ab", "cd", "ef", "gh"];
+    let mut saw_block = false;
+    for (idx, fp) in suspicious_fingerprints.into_iter().enumerate() {
         let ctx = RequestContextBuilder::new(ip, "/v1/messages/send", "POST")
-            .tls_fingerprint("ab") // Very short = suspicious
+            .tls_fingerprint(fp)
             .build();
-        let _decision = protector.evaluate(&ctx).await;
-    }
+        let decision = protector.evaluate(&ctx).await;
 
-    // After 5 requests with suspicious FP: 50 - (5 * 10) = 0 → should be blocked
+        if idx < 4 {
+            assert!(
+                matches!(decision, ProtectionDecision::Allow),
+                "Request #{} should still be pre-block threshold, got: {:?}",
+                idx + 1,
+                decision
+            );
+        } else {
+            assert!(
+                matches!(decision, ProtectionDecision::Block),
+                "Request #{} should cross block threshold, got: {:?}",
+                idx + 1,
+                decision
+            );
+            saw_block = true;
+        }
+    }
+    assert!(saw_block, "Expected suspicious sequence to eventually block");
+
+    // Once blocked, subsequent requests from this IP remain blocked.
     let ctx = RequestContextBuilder::new(ip, "/v1/health", "GET")
         .tls_fingerprint("valid_enough_fingerprint_here")
         .build();
@@ -108,6 +139,55 @@ async fn test_suspicious_fingerprint_degrades_reputation() {
         matches!(decision, ProtectionDecision::Block),
         "After repeated suspicious fingerprints, should be blocked: {:?}",
         decision
+    );
+
+    // Ensure unrelated trusted IP does not inherit penalties.
+    let trusted_ctx = RequestContextBuilder::new(trusted_ip, "/v1/health", "GET")
+        .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
+        .build();
+    let trusted_decision = protector.evaluate(&trusted_ctx).await;
+    assert!(
+        matches!(trusted_decision, ProtectionDecision::Allow),
+        "Trusted IP should remain allowed, got: {:?}",
+        trusted_decision
+    );
+}
+
+#[tokio::test]
+async fn test_suspicious_fingerprint_penalty_is_ip_scoped() {
+    let config = ProtectorConfig {
+        block_threshold: 20,
+        ..ProtectorConfig::default()
+    };
+    let protector = DdosProtector::new(config).await.unwrap();
+    let attacker_ip: IpAddr = "198.51.100.120".parse().unwrap();
+    let normal_ip: IpAddr = "198.51.100.121".parse().unwrap();
+
+    for _ in 0..4 {
+        let attacker_ctx = RequestContextBuilder::new(attacker_ip, "/v1/messages/send", "POST")
+            .tls_fingerprint("xy")
+            .build();
+        let _ = protector.evaluate(&attacker_ctx).await;
+    }
+
+    let attacker_followup = RequestContextBuilder::new(attacker_ip, "/v1/health", "GET")
+        .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
+        .build();
+    let attacker_decision = protector.evaluate(&attacker_followup).await;
+    assert!(
+        matches!(attacker_decision, ProtectionDecision::Block),
+        "Attacker IP should be blocked after repeated suspicious fingerprints, got: {:?}",
+        attacker_decision
+    );
+
+    let normal_ctx = RequestContextBuilder::new(normal_ip, "/v1/health", "GET")
+        .tls_fingerprint("t13d1517h2_8daaf6152771_e5627efa2ab1")
+        .build();
+    let normal_decision = protector.evaluate(&normal_ctx).await;
+    assert!(
+        matches!(normal_decision, ProtectionDecision::Allow),
+        "Non-attacker IP should remain allowed, got: {:?}",
+        normal_decision
     );
 }
 

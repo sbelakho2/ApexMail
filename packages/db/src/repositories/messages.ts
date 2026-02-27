@@ -4,6 +4,7 @@
 
 import { Result, parseJsonOrDefault } from '@apexmail/lib';
 import { generateUuid, generateMessageId, generateVerpAddress } from '@apexmail/lib/id';
+import { createHash } from 'crypto';
 import type { DatabasePool } from '../pool.js';
 import { withTransaction } from '../transaction.js';
 
@@ -158,6 +159,17 @@ export interface UpdateMessageInput {
 export class MessagesRepository {
   constructor(private readonly db: DatabasePool) {}
 
+  private deriveSendingDomain(fromEmail: string): string {
+    const [, domain = ''] = fromEmail.split('@');
+    return domain.trim().toLowerCase();
+  }
+
+  private deriveAttachmentChecksum(attachment: EmailAttachment): string {
+    return createHash('sha256')
+      .update(`${attachment.storageKey}:${attachment.size}:${attachment.filename}`)
+      .digest('hex');
+  }
+
   async create(input: CreateMessageInput): Promise<Result<Message, Error>> {
     // Check idempotency key first
     if (input.idempotencyKey) {
@@ -168,7 +180,7 @@ export class MessagesRepository {
     }
 
     const id = generateUuid();
-    const sendingDomain = input.fromEmail.split('@')[1] || '';
+    const sendingDomain = this.deriveSendingDomain(input.fromEmail);
     const messageIdResult = generateMessageId(sendingDomain);
     const verpAddress = generateVerpAddress(id, sendingDomain);
     const now = new Date();
@@ -187,7 +199,7 @@ export class MessagesRepository {
 
     const attachments: EmailAttachment[] = (input.attachments ?? []).map((att) => ({
       ...att,
-      checksum: '', // Will be computed during upload
+      checksum: att.checksum || this.deriveAttachmentChecksum(att),
     }));
 
     /**

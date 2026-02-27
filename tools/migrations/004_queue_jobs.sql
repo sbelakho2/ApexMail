@@ -2,6 +2,9 @@
 -- Version: 1.0.2
 -- Adds queue_jobs table used by @apexmail/lib queue implementation
 
+SET lock_timeout = '5s';
+SET statement_timeout = '30s';
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'queue_status') THEN
@@ -29,6 +32,8 @@ CREATE TABLE IF NOT EXISTS queue_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_queue_jobs_dequeue ON queue_jobs (queue, scheduled_at, priority DESC)
+  WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_queue_jobs_dequeue_stable ON queue_jobs (queue, scheduled_at, priority DESC, id)
   WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_queue_jobs_tenant ON queue_jobs (tenant_id, queue)
   WHERE status = 'pending';

@@ -3,6 +3,8 @@
 
 BEGIN;
 
+SELECT pg_advisory_xact_lock(hashtext('billing_atomicity_fixes_v003'));
+
 -- Add status column to stripe_webhook_events if not exists
 -- BILL-001/ATOM-003: Track webhook processing state
 DO $$

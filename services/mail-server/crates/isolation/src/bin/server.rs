@@ -68,9 +68,10 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = isolation.initialize().await {
         error!(error = %e, "Failed to initialize data isolation policies");
     }
-    let encryption = EncryptionService::new(db.clone(), config.security.clone());
+    let security_config = config.security.clone();
+    let encryption = EncryptionService::new(db.clone(), security_config.clone());
     let rate_limit = RateLimitService::new(redis.clone());
-    let audit = AuditService::new(db.clone(), config.security.clone());
+    let audit = AuditService::new(db.clone(), security_config);
 
     let state = Arc::new(AppState {
         tenant,
@@ -118,17 +119,21 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        if let Err(error) = signal::ctrl_c().await {
+            tracing::error!(?error, "Failed to install Ctrl+C handler");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(?error, "Failed to install SIGTERM handler");
+            }
+        }
     };
 
     #[cfg(not(unix))]

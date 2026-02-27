@@ -111,15 +111,21 @@ fn spawn_background_jobs(state: Arc<AppState>, _db: sqlx::PgPool) {
 /// Wait for Ctrl+C or SIGTERM for graceful shutdown
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
+        if let Err(error) = signal::ctrl_c().await {
+            tracing::error!(?error, "Failed to install Ctrl+C handler");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to install signal handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(?error, "Failed to install signal handler");
+            }
+        }
     };
 
     #[cfg(not(unix))]

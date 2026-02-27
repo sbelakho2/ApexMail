@@ -90,16 +90,26 @@ impl WorkspaceRow {
 
 // ── Identifier Validation ──────────────────────────────────
 
-static IDENT_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
+static IDENT_RE: std::sync::LazyLock<Option<regex::Regex>> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").ok());
 
 fn validate_identifier(name: &str) -> bool {
-    IDENT_RE.is_match(name)
+    IDENT_RE
+        .as_ref()
+        .map(|re| re.is_match(name))
+        .unwrap_or(false)
 }
 
 fn sanitize_identifier(id: &str) -> String {
     let s: String = id.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
     if s.len() > 63 { s[..63].to_string() } else { s }
+}
+
+fn validated_identifier(name: &str) -> anyhow::Result<String> {
+    if !validate_identifier(name) {
+        anyhow::bail!("Invalid identifier: {}", name);
+    }
+    Ok(name.to_string())
 }
 
 // ── Tenant Service ─────────────────────────────────────────
@@ -174,13 +184,14 @@ impl TenantService {
 
         let schema_name = if level == IsolationLevel::DedicatedSchema {
             let sn = format!("org_{}", sanitize_identifier(&id));
+            let safe_schema = validated_identifier(&sanitize_identifier(&sn))?;
             sqlx::query(&format!(
                 "CREATE SCHEMA IF NOT EXISTS \"{}\"",
-                sanitize_identifier(&sn)
+                safe_schema
             ))
             .execute(&self.db)
             .await?;
-            Some(sn)
+            Some(safe_schema)
         } else {
             None
         };
@@ -209,7 +220,7 @@ impl TenantService {
         tx.commit().await?;
 
         let org = Organization {
-            id: id.clone(),
+            id,
             name: name.into(),
             slug: slug.into(),
             billing_email: billing_email.into(),
@@ -224,7 +235,7 @@ impl TenantService {
             created_at: now,
             updated_at: now,
         };
-        self.cache_org(&id, org.clone());
+        self.cache_org(&org.id, &org);
         info!(slug = slug, "Organization created");
         Ok(org)
     }
@@ -245,7 +256,7 @@ impl TenantService {
         .ok_or_else(|| anyhow::anyhow!("Organization not found: {}", id))?;
 
         let org = row.into_org()?;
-        self.cache_org(id, org.clone());
+        self.cache_org(id, &org);
         Ok(org)
     }
 
@@ -379,7 +390,7 @@ impl TenantService {
         tx.commit().await?;
 
         let ws = Workspace {
-            id: id.clone(),
+            id,
             organization_id: organization_id.into(),
             name: name.into(),
             slug: slug.into(),
@@ -392,7 +403,7 @@ impl TenantService {
             created_at: now,
             updated_at: now,
         };
-        self.cache_workspace(&id, ws.clone());
+        self.cache_workspace(&ws.id, &ws);
         info!(slug = slug, org_id = organization_id, "Workspace created");
         Ok(ws)
     }
@@ -412,7 +423,7 @@ impl TenantService {
         .ok_or_else(|| anyhow::anyhow!("Workspace not found: {}", id))?;
 
         let ws = row.into_workspace()?;
-        self.cache_workspace(id, ws.clone());
+        self.cache_workspace(id, &ws);
         Ok(ws)
     }
 
@@ -599,7 +610,7 @@ impl TenantService {
         amount: i64,
     ) -> anyhow::Result<()> {
         let ws = self.get_workspace(workspace_id).await?;
-        let mut usage = ws.usage.clone();
+        let mut usage = ws.usage;
 
         match metric {
             "emails_sent_this_month" => usage.emails_sent_this_month += amount,
@@ -643,16 +654,16 @@ impl TenantService {
         Some(entry.value.clone())
     }
 
-    fn cache_org(&self, id: &str, org: Organization) {
+        fn cache_org(&self, id: &str, org: &Organization) {
         self.prune_org_cache();
         self.org_cache
-            .insert(id.to_string(), CacheEntry::new(org));
+            .insert(id.to_string(), CacheEntry::new(org.clone()));
     }
 
-    fn cache_workspace(&self, id: &str, workspace: Workspace) {
+        fn cache_workspace(&self, id: &str, workspace: &Workspace) {
         self.prune_workspace_cache();
         self.workspace_cache
-            .insert(id.to_string(), CacheEntry::new(workspace));
+            .insert(id.to_string(), CacheEntry::new(workspace.clone()));
     }
 
     fn prune_org_cache(&self) {
@@ -671,10 +682,7 @@ impl TenantService {
     // ── Schema Helpers ─────────────────────────────────────
 
     async fn create_workspace_schema(&self, schema_name: &str) -> anyhow::Result<()> {
-        if !validate_identifier(schema_name) {
-            anyhow::bail!("Invalid schema name: {}", schema_name);
-        }
-        let safe = sanitize_identifier(schema_name);
+        let safe = validated_identifier(&sanitize_identifier(schema_name))?;
         sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{}""#, safe))
             .execute(&self.db)
             .await?;

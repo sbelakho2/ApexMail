@@ -175,10 +175,11 @@ export default function AuditLogsPage() {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button type="button" className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
+                    <button aria-label="Configure audit alerts" type="button" className="px-4 py-2 bg-card border border-border rounded-lg text-sm font-medium text-foreground hover:bg-muted/50 hover:border-input shadow-sm transition-all">
                             Configure Alerts
                     </button>
                     <button
+                        aria-label="Export audit logs"
                         onClick={exportLogs}
                         className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md"
                     >

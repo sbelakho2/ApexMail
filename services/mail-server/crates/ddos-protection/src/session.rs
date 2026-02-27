@@ -13,7 +13,7 @@ use crate::RequestContext;
 /// Session tracker for behavioral analysis
 pub struct SessionTracker {
     /// Active sessions
-    sessions: Arc<DashMap<SessionKey, RwLock<Session>>>,
+    sessions: Arc<DashMap<SessionKey, Arc<RwLock<Session>>>>,
     /// Session window duration
     window: Duration,
     /// Maximum sessions to track
@@ -204,7 +204,8 @@ impl SessionTracker {
         
         let session = self.sessions
             .entry(key.clone())
-            .or_insert_with(|| RwLock::new(Session::new(key.clone())));
+            .or_insert_with(|| Arc::new(RwLock::new(Session::new(key.clone()))))
+            .clone();
         
         let mut session_guard = session.write();
         session_guard.record_request(endpoint_hash, false);  // Error recorded separately
@@ -227,7 +228,7 @@ impl SessionTracker {
             api_key_id: ctx.api_key_id.clone(),
         };
         
-        if let Some(session) = self.sessions.get(&key) {
+        if let Some(session) = self.sessions.get(&key).map(|entry| entry.clone()) {
             session.write().error_count += 1;
         }
     }
@@ -239,7 +240,7 @@ impl SessionTracker {
             api_key_id: ctx.api_key_id.clone(),
         };
         
-        if let Some(session) = self.sessions.get(&key) {
+        if let Some(session) = self.sessions.get(&key).map(|entry| entry.clone()) {
             session.write().record_duration(duration_ms);
         }
     }
@@ -252,7 +253,8 @@ impl SessionTracker {
         };
         
         self.sessions.get(&key).map(|s| {
-            let session = s.read();
+            let session = s.clone();
+            let session = session.read();
             SessionInfo {
                 key: key.clone(),
                 request_count: session.request_count,
@@ -271,7 +273,7 @@ impl SessionTracker {
     }
     
     /// Cleanup expired sessions
-    pub fn cleanup(&self, now: Instant) {
+    pub fn cleanup(&self, _now: Instant) {
         // Remove idle sessions
         self.sessions.retain(|_, session| {
             let s = session.read();

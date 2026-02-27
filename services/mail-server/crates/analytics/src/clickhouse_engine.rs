@@ -579,8 +579,11 @@ mod tests {
             query_timeout_secs: 30,
         };
 
-        let engine = ClickHouseEngine::new(config).await.expect("Should init ClickHouse");
-        let health = engine.health_check().await.expect("Health check should pass");
-        assert!(health);
+        let engine = ClickHouseEngine::new(config).await;
+        assert!(engine.is_ok());
+        if let Ok(engine) = engine {
+            let health = engine.health_check().await;
+            assert_eq!(health.ok(), Some(true));
+        }
     }
 }

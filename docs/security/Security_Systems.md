@@ -1,8 +1,8 @@
 # ApexMail Security Systems
 ## Comprehensive Implementation Reference
 
-**Date:** February 26, 2026 (Updated: June 2025)
-**Status:** Implemented & Verified — 811+ tests passing
+**Date:** February 27, 2026
+**Status:** Implemented & verified against current `services/mail-server` workspace test pass
 **Location:** `services/mail-server/crates/`
 **Authors:** Security Architecture Team
 
@@ -12,25 +12,87 @@
 
 ApexMail implements eight dedicated Rust security crates providing defense-in-depth across the entire email infrastructure. Every crate is a zero-dependency-on-runtime, thread-safe library designed for integration into the mail-server binary. Combined, they form an 8-layer security stack protecting against volumetric attacks, injection, intrusion, spam, malware, account takeover, data exfiltration, and known threat actors.
 
-**Recent Enhancements (June 2025):**
-- ✅ Fast-path Aho-Corasick pre-filter for WAF with expanded command injection patterns
-- ✅ JSON/GraphQL structural parsing with MAX_DEPTH=128 DoS protection
-- ✅ ML score caching with concurrent access optimization
-- ✅ JA4-style TLS fingerprinting for bot detection
-- ✅ Background purge task for threat intelligence TTL management
-- ✅ Encrypted archive detection (ZIP/RAR password protection)
+**Recent Enhancements (current branch):**
+- ✅ Shared security event contract in `mail-common` (`SecurityEvent`, `CorrelationContext`, normalized `SecurityAction`/`SecuritySeverity`)
+- ✅ Event-emitting interfaces in **all 8 crates** (`*_with_event` APIs) — `ddos-protection`, `waf-engine`, `ids-engine` natively; `spam-filter`, `sandbox`, `ato-protection`, `dlp-engine`, `threat-intel` via `events` feature flag
+- ✅ WAF canonicalization hardening with Unicode NFKC + confusable folding support
+- ✅ **WAF: NoSQL injection detection** (MongoDB operators, `$where` JS injection, Redis commands, Elasticsearch DSL)
+- ✅ **WAF: SSRF detection** (dangerous schemes, internal IP ranges, cloud metadata endpoints)
+- ✅ **WAF: HTTP request smuggling detection** (CL+TE conflict, duplicate TE, obfuscated TE, CRLF injection)
+- ✅ **WAF: GraphQL depth limit lowered** from 128 → 15 to prevent query complexity DoS
+- ✅ **IDS: 9 new builtin signatures** — Shellshock, HTTP/2 Rapid Reset, ProxyShell, ProxyLogon, AUTH LOGIN brute-force, cloud metadata SSRF, Cobalt Strike C2, SMTP DATA smuggling, SMTP PIPELINING abuse
+- ✅ Spam workflow hardening: reviewer-gated training queue, model snapshots/rollback, and drift monitoring
+- ✅ **Spam: Per-tenant Bayesian isolation** with 60/40 global/tenant blending
+- ✅ **Spam: DMARC policy enforcement** (+2.5 penalty on DMARC fail)
+- ✅ **Spam: Custom phrase blocklists** per deployment
+- ✅ **Spam: Per-class drift tracking** (ham/spam boundary shift detection)
+- ✅ Sandbox dynamic-analysis hook (`DynamicAnalyzer`) with escalation to quarantine/reject
+- ✅ **Sandbox: Comprehensive DynamicAnalyzer documentation** — known limitations for recursive archives and image-based payloads
+- ✅ **ATO: Self-protecting rate limit** (`rate_limit_rps`) on `evaluate()` endpoint
+- ✅ **ATO: Default travel speed lowered** from 900 → 500 km/h
+- ✅ **ATO: Documented limitations** — IP /16 cloud fingerprinting, in-memory lockout_events multi-node gap
+- ✅ **ATO + App Integration:** `RequireCaptcha` escalation is now wired to web/control-plane login routes via mCaptcha widget + server-side token verification
+- ✅ DLP recipient trust tiers and expiring temporary exceptions
+- ✅ **DLP: SSN regex tightened** to dash-only separator to reduce false positives
+- ✅ **DLP: PII documentation** — risk score table, image-based PII gap, phone false-positive caveat
+- ✅ Threat-intel feed trust scoring + monitor/enforce feed modes
+- ✅ **Threat-intel: 3 new default feeds** — Spamhaus DBL, abuse.ch URLhaus, abuse.ch ThreatFox
+- ✅ **Threat-intel: Trust-weighted reputation formula** (`compute_reputation_weighted()`)
+- ✅ **Threat-intel: Memory pressure purge** (`purge_if_pressure()`) at 90% capacity
+- ✅ **DDoS: ML model snapshot persistence** (`snapshot()`/`restore_snapshot()`) for warm-start across restarts
+- ✅ **DDoS: Coordinator retry/backoff + circuit breaker** configuration
 
-| # | System | Crate | Tests | Primary Threat |
-|---|--------|-------|-------|----------------|
-| 1 | DDoS Protection | `ddos-protection` | 520 | Volumetric & application-layer floods |
-| 2 | Web Application Firewall | `waf-engine` | 122 | SQLi, XSS, path traversal, command injection |
-| 3 | Intrusion Detection/Prevention | `ids-engine` | 13 | Network intrusion, port scans, protocol abuse |
-| 4 | Spam & Phishing Filter | `spam-filter` | 23 | Spam, phishing, email fraud |
-| 5 | Attachment Sandbox | `sandbox` | 25 | Malware, macro exploits, dangerous files |
-| 6 | Account Takeover Protection | `ato-protection` | 49 | Credential stuffing, session hijacking |
-| 7 | Data Loss Prevention | `dlp-engine` | 27 | PII leakage, secret exposure, policy violations |
-| 8 | Threat Intelligence | `threat-intel` | 32 | Known malicious IPs, domains, botnets |
-| | **Total** | **8 crates** | **811+** | |
+**Security Audit Fixes (2024):**
+- ✅ WAF: Fixed Unicode panic in `truncate()` — now uses `char_indices()` for safe string slicing
+- ✅ WAF: Fixed SQL comment evasion bypass — added `strip_inline_comments()` preprocessor
+- ✅ WAF: Added DB-specific SQL keywords (`PG_SLEEP`, `DBMS_LOCK`, `UTL_HTTP`, `XOR`, `REGEXP`, `RLIKE`)
+- ✅ DLP: Fixed ReDoS vulnerability in credit card regex — switched to bounded pattern
+- ✅ DLP: Fixed entropy scanner offset tracking for UTF-8 correctness
+- ✅ DLP: Added comprehensive secret prefixes (Stripe, GitLab, npm, Twilio, Sendgrid, JWT)
+- ✅ ATO: Enhanced device fingerprinting — includes TLS fingerprint hash, uses /16 IP prefix
+- ✅ ATO: Added lockout escalation — `RequireCaptcha` action after repeated lockouts
+- ✅ Threat-intel: Added full IPv6 blocklist support (`Ipv6Blocklist`, `UnifiedIpBlocklist`)
+- ✅ Threat-intel: Added CIDR optimization with `optimize()` method for sorted lookups
+- ✅ Sandbox: Enhanced OOXML macro detection — checks vbaProject.bin, ActiveX, external OLE links
+- ✅ Spam: Made URL shortener list configurable via `SpamConfig.url_shorteners`
+- ✅ IDS: Added comprehensive connection tracker cleanup (`cleanup_all()`, `stats()`, `reset()`)
+
+**Security Hardening (February 2026) — All tests green:**
+- ✅ **WAF** — Two-tier command injection: SID 932050 (metacharacters only, score 3) + SID 932100 (metachar + known command, score 5); `dangerous_cmds` expanded with `env`, `xargs`, `awk`, `lua`, `sed`, `tee`, `openssl`, `socat`, `busybox`
+- ✅ **WAF** — TRACE method removed from valid-methods allowlist; now triggers both SID 911100 (unknown method) and SID 911200 (dangerous method)
+- ✅ **WAF** — Post-decode path traversal: `analyze_path_traversal_post_decode()` URL-decodes the path before traversal checks to catch encoded `%2e%2e%2f` bypasses
+- ✅ **WAF** — GraphQL breadth limit: `MAX_FIELD_COUNT = 200` per query; `field_count` tracked in `JsonInspectionResult` to prevent field-explosion DoS
+- ✅ **Sandbox** — Polyglot detection: `detect_polyglot_signatures()` scans first 64 KB for secondary magic bytes (ZIP, OLE2, PE, ELF, PDF, RAR) at non-zero offsets — emits `POLYGLOT_DETECTED` finding (risk 7.0)
+- ✅ **Sandbox** — Encrypted archive detection: checks ZIP general purpose bit flag (bit 0) for encrypted entries — emits `ARCHIVE_ENCRYPTED` finding (risk 7.0)
+- ✅ **IDS** — Binary-safe dual scan: signatures matched against both original raw bytes (preserves binary patterns like NOP sled `0x90`) AND URL/HTML-entity-normalized bytes (catches encoded evasion); results deduplicated by SID
+- ✅ **IDS** — Stale alert-rate eviction: `cleanup()` now removes `alert_counts` entries older than 60 seconds, preventing unbounded map growth
+- ✅ **IDS** — `connection_tracker.reset()` returns the count of cleared entries and emits a `tracing::warn!` audit log entry
+- ✅ **ATO** — Atomic memory ordering: rate-limit counter changed from `Ordering::Relaxed` to `Ordering::Release` (store) / `Ordering::AcqRel` (fetch_add) for correct cross-thread visibility
+- ✅ **ATO** — `evict_stale_rate_limits()`: periodic cleanup of `ip_call_counts` map, preventing unbounded growth under high source-IP churn
+- ✅ **ATO** — Incomplete geo-velocity log: emits `tracing::warn!` when `ip_changed=true` but `geo_velocity_kmh=None` so operators can see skipped checks in the audit trail
+- ✅ **DLP** — Allowlist audit bypass closed: full PII/entropy/policy scan runs even for allowlisted domains; only `action` is forced to `Allow` — findings retained for compliance audit
+- ✅ **DLP** — Phone number risk reduced 3.0 → 1.5 to reduce over-blocking of legitimate business email
+- ✅ **DLP** — Entropy tokenizer splits on `=` to properly separate `KEY=value` credentials; the value token (`wJalrXUtnFEMI/K7MDENG/...`) is then scored independently against the entropy threshold
+- ✅ **DLP** — `looks_like_secret()` false-positive reduction: relies on mixed-case + base64/hex heuristics rather than an inflated threshold, preserving detection of AWS-style keys (entropy ~4.6)
+- ✅ **Threat-Intel** — Domain-walk depth cap: `MAX_DOMAIN_WALK = 3` prevents recursive parent-domain lookups from consuming unbounded CPU on deeply nested hostnames
+- ✅ **Threat-Intel** — Trust-weighted scoring: `check_ip()` / `check_domain()` now call `compute_reputation_weighted()` — low-trust feeds cannot alone trigger a Block verdict
+- ✅ **Threat-Intel** — `feed_trust_score()` defaults to 10.0 for unconfigured feeds (backward-compatible); operators explicitly set `trust_score < 10` to down-weight a feed, preventing silent Block suppression
+- ✅ **Spam** — Bigram tokenization: `tokenize()` now generates both unigrams and adjacent-word bigrams (`word1_word2`), improving classification accuracy on phrase-level spam patterns
+- ✅ **Spam** — Cold-start guard: Bayesian probability is clamped to neutral (0.5) when `model.total_samples() < config.min_training_samples` (default 200), preventing early-lifecycle false positives
+- ✅ **Spam** — `SpamConfig.min_training_samples: u64` field (default 200) — configurable cold-start threshold
+- ✅ **Cross-system** — `SecurityCorrelator` in `mail-common`: ingests `SecurityEvent` from all 8 crates, generates a `CompositeAlert` when ≥ 2 distinct systems fire for the same source IP within a time window; rate-capped at 10 K events/sec; max 100 K tracked IPs; `purge_stale()` for periodic memory reclaim
+
+| # | System | Crate | Validation | Primary Threat |
+|---|--------|-------|------------|----------------|
+| 1 | DDoS Protection | `ddos-protection` | Workspace test suite pass | Volumetric & application-layer floods |
+| 2 | Web Application Firewall | `waf-engine` | Workspace test suite pass | SQLi, XSS, path traversal, command injection |
+| 3 | Intrusion Detection/Prevention | `ids-engine` | Workspace test suite pass | Network intrusion, port scans, protocol abuse |
+| 4 | Spam & Phishing Filter | `spam-filter` | Workspace test suite pass | Spam, phishing, email fraud |
+| 5 | Attachment Sandbox | `sandbox` | Workspace test suite pass | Malware, macro exploits, dangerous files |
+| 6 | Account Takeover Protection | `ato-protection` | Workspace test suite pass | Credential stuffing, session hijacking |
+| 7 | Data Loss Prevention | `dlp-engine` | Workspace test suite pass | PII leakage, secret exposure, policy violations |
+| 8 | Threat Intelligence | `threat-intel` | Workspace test suite pass | Known malicious IPs, domains, botnets |
+| | **Total** | **8 crates** | **Verified in current workspace run** | |
 
 ---
 
@@ -94,7 +156,7 @@ All 8 crates follow consistent patterns:
 - **Pure Rust** — no FFI, no C dependencies, zero `unsafe` blocks
 - **Thread-safe** — all engines use `Arc`, `DashMap`, or `parking_lot::RwLock` for concurrent access
 - **Configurable** — every crate has a `*Config` struct with `Default` implementation and `serde` (de)serialization
-- **Testable** — comprehensive unit tests with realistic payloads; 230 tests total
+- **Testable** — comprehensive unit/integration tests with realistic payloads; validated in the current full workspace run
 - **Error handling** — dedicated `thiserror`-based error enums; `#![deny(clippy::unwrap_used)]` enforced on newer crates
 - **Zero-copy where possible** — string slicing and reference-based analysis to minimize allocations
 
@@ -104,7 +166,7 @@ All 8 crates follow consistent patterns:
 
 **Crate:** `ddos-protection` v0.1.0 — `crates/ddos-protection/`
 **License:** MIT
-**Tests:** 520
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -146,10 +208,10 @@ The `DdosProtector::evaluate()` method implements:
 | `middleware.rs` | `DdosMiddlewareState`, `RequestContextBuilder`, `MiddlewareAction` | HTTP middleware integration; `extract_client_ip()` (X-Real-IP, X-Forwarded-For, CF-Connecting-IP) |
 | `smtp_protection.rs` | `SmtpConnectionProtection`, `SmtpState` (full state machine), `SmtpCommand` | SMTP DDoS: slowloris detection, command rate limiting, recipient throttling, tarpitting |
 | `metrics.rs` | 11 Prometheus metrics | `REQUESTS_TOTAL`, `BLOCKED_IPS`, `ANOMALY_SCORE`, `CHALLENGE_LATENCY`, `ACTIVE_SESSIONS`, etc. |
-| `ml.rs` | `IsolationForest`, `FeatureVector` (10 dimensions) | Online-learning anomaly detection: request_rate, bytes_rate, connection_age, size_variance, iat_mean/variance, endpoint_diversity, error_rate, geo_distance, time_factor |
+| `ml.rs` | `IsolationForest`, `FeatureVector` (10 dimensions), **`ModelSnapshot`** | Online-learning anomaly detection: request_rate, bytes_rate, connection_age, size_variance, iat_mean/variance, endpoint_diversity, error_rate, geo_distance, time_factor. **NEW: Model persistence** via `snapshot()` (serializes trees + sample buffer to JSON bytes) and `restore_snapshot()` (warm-start from persisted data) for zero-cold-start across restarts |
 | `ml_cache.rs` | `MlScoreCache`, `CachedScore`, `CacheStats` | **NEW:** Thread-safe LRU cache for ML anomaly scores. Configurable TTL and capacity. Reduces redundant computations for repeated requests from same IP. Uses `parking_lot::RwLock` for concurrent reads |
 | `challenges.rs` | `ChallengeManager`, `JsChallenge`, `PowChallenge`, `CookieChallenge` | Obfuscated JS, SHA-256 leading-zero-bits PoW (difficulty 24), HMAC-signed cookies (constant-time via `subtle`) |
-| `coordinator.rs` | `ThreatIntelService`, `GCounter`, `PNCounter`, `ORSet<T>` | Redis Streams event propagation; CRDTs for eventually-consistent distributed state |
+| `coordinator.rs` | `ThreatIntelService`, `GCounter`, `PNCounter`, `ORSet<T>`, **`CoordinatorConfig`** | Redis Streams event propagation; CRDTs for eventually-consistent distributed state. **NEW: Retry/backoff config** (`max_retries: 3`, `base_retry_delay: 100ms`) and **circuit breaker** (`circuit_breaker_threshold: 5` failures, `circuit_breaker_recovery: 30s`) to handle upstream Redis outages gracefully |
 
 ### SMTP Protection State Machine
 
@@ -182,7 +244,7 @@ Connected → EHLO/HELO → MAIL FROM → RCPT TO → DATA → Message → QUIT
 
 **Crate:** `waf-engine` v0.1.0 — `crates/waf-engine/`
 **License:** PROPRIETARY
-**Tests:** 122
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -225,12 +287,12 @@ HTTP Request
 | Module | Key Types | Responsibility |
 |--------|-----------|----------------|
 | `lib.rs` | `ParanoiaLevel` (Low/Medium/High/Paranoid), `WafVerdict` (Allow/Monitor/Block), `RuleMatch`, `AttackCategory`, `MatchLocation`, `WafError` | Public API types |
-| `config.rs` | `WafConfig` (16 fields) | Paranoia level, blocking/detection thresholds, max sizes, enable flags per attack type, IP/path allowlists, max decode depth |
+| `config.rs` | `WafConfig` (19 fields) | Paranoia level, blocking/detection thresholds, max sizes, enable flags per attack type (including `enable_nosqli`, `enable_ssrf`, `enable_smuggling`), IP/path allowlists, max decode depth |
 | `engine.rs` | `WafEngine`, `WafDecision` (Allow/Block/Monitor), `ThreatInfo`, `HttpRequest<'a>` | Orchestrator: decode → fast-path → JSON/GraphQL → path traversal → SQLi → XSS → query params → headers → body → protocol → score → decision |
 | `decoder.rs` | `decode_payload()` | Recursive URL-decode, HTML entity decode, Base64 decode |
 | `fast_path.rs` | `FastPathMatcher`, `FastPathResult` | **NEW:** Aho-Corasick pre-filter for O(n) suspicious pattern detection. Patterns include SQL keywords, XSS vectors, path traversal, command injection (`& whoami`, `sudo su -`, `\ncat `, `\ncurl `). Provides early exit for clean payloads |
-| `json_graphql.rs` | `parse_json_body()`, `parse_graphql()`, `extract_graphql_operations()` | **NEW:** JSON/GraphQL structural parsing with **MAX_DEPTH=128** to prevent stack overflow DoS. Extracts `query`/`variables` from JSON, detects GraphQL introspection (`__schema`, `__type`), recognizes `fragment` keyword. Fallback parsing for raw GraphQL queries |
-| `detection.rs` | `analyze_path_traversal()`, `analyze_command_injection()`, `analyze_protocol_anomalies()` | Path traversal (../), shell metacharacters (;, \|, &&, $(), backticks), protocol violation detection (TRACE method, oversized headers) |
+| `json_graphql.rs` | `parse_json_body()`, `parse_graphql()`, `extract_graphql_operations()` | **NEW:** JSON/GraphQL structural parsing with **MAX_DEPTH=15** to prevent query complexity DoS. Extracts `query`/`variables` from JSON, detects GraphQL introspection (`__schema`, `__type`), recognizes `fragment` keyword. Fallback parsing for raw GraphQL queries |
+| `detection.rs` | `analyze_path_traversal()`, `analyze_command_injection()`, `analyze_protocol_anomalies()`, `analyze_nosql_injection()`, `analyze_ssrf()`, `analyze_request_smuggling()` | Path traversal (../), shell metacharacters (;, \|, &&, $(), backticks), protocol violation detection (TRACE method, oversized headers), **NoSQL injection** (MongoDB operators, $where JS, Redis, Elasticsearch), **SSRF** (internal IPs, cloud metadata, dangerous schemes), **HTTP request smuggling** (CL+TE, duplicate TE, obfuscated TE, CRLF) |
 | `sql_analyzer.rs` | `analyze_sqli()` | AST-based tokenizer → SQL token stream → tautology detection (1=1, 'a'='a'), UNION SELECT, stacked queries, blind/time-based injection (SLEEP, BENCHMARK, WAITFOR), comment evasion (UN/\*\*/ION), string termination logic, dangerous functions (LOAD_FILE, INTO OUTFILE). Case-insensitive keyword matching. Handles unterminated quotes (injection breakout) |
 | `xss_analyzer.rs` | `analyze_xss()` | HTML tag detection (\<script\>, \<svg\>, \<img\>), event handler attributes (onerror, onload, onfocus), JavaScript URIs (javascript:), CSS expressions (expression()), data: URIs |
 | `rules.rs` | `WafRule`, `RuleCategory` | OWASP CRS-compatible rule definitions with severity scoring |
@@ -264,10 +326,13 @@ pub struct RuleMatch {
 2. **Tautology detection** — `1=1`, `'a'='a'`, always-true comparisons (`1<2`, `2>1`)
 3. **UNION SELECT detection** — keyword pair scanning
 4. **Stacked queries** — semicolon followed by SQL keyword
-5. **Comment evasion** — inline `/**/` splitting keywords, MySQL conditional comments `/*!`
-6. **Blind injection** — SLEEP, BENCHMARK, WAITFOR keywords
+5. **Comment evasion** — Uses `strip_inline_comments()` to remove `/*...*/` patterns before keyword detection, preventing `UN/**/ION` style bypasses. Handles MySQL conditional comments `/*!`
+6. **Blind injection** — SLEEP, BENCHMARK, WAITFOR, PG_SLEEP (PostgreSQL), DBMS_LOCK (Oracle), UTL_HTTP (Oracle HTTP exfiltration)
 7. **String termination logic** — quote followed by OR/AND
 8. **Dangerous functions** — LOAD_FILE, INTO OUTFILE, INFORMATION_SCHEMA
+9. **DB-specific operators** — XOR, REGEXP, RLIKE (MySQL regex operators used in blind injection)
+
+**Unicode-safe string handling:** The `truncate()` helper uses `char_indices()` to ensure truncation never panics on multi-byte UTF-8 characters.
 
 **Unterminated quote handling:** When a single quote has no closing match (e.g., `' OR 1=1 --`), the tokenizer recognizes this as a string breakout attack and re-parses the content after the quote, enabling tautology and keyword detection.
 
@@ -290,7 +355,7 @@ pub struct RuleMatch {
 
 **Crate:** `ids-engine` v0.1.0 — `crates/ids-engine/`
 **License:** PROPRIETARY
-**Tests:** 13
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -310,10 +375,10 @@ Network-level IDS/IPS with Suricata/ET-compatible signature matching, protocol a
 |--------|-----------|----------------|
 | `lib.rs` | `IdsError` (Signature/Config/Internal) | Error types |
 | `config.rs` | `IdsConfig` (11 fields) | `inline_mode` (IPS vs IDS), `max_connections` (1M), `portscan_threshold` (20), `syn_flood_threshold` (100), `max_payload_inspect` (64KB), enable flags for SMTP/DNS/TLS, `alert_rate_limit` |
-| `engine.rs` | `IdsEngine`, `Alert`, `AlertSeverity` (Info/Low/Medium/High/Critical), `IdsVerdict` (Pass/Alert/Drop/Reject) | Orchestrator: (1) signature scan, (2) protocol analysis, (3) connection tracking anomalies |
-| `signature.rs` | `Signature`, `SignatureSet`, `SignatureAction` (Pass/Alert/Drop/Reject), `SigSeverity`, `builtin_mail_signatures()` | Aho-Corasick multi-pattern matching; builtin signatures for email-specific threats |
-| `protocol_analyzer.rs` | `analyze_smtp()`, `analyze_dns()`, `analyze_tls()` | SMTP: bare LF detection, null byte injection. DNS: oversized responses. TLS: SSLv3 detection |
-| `connection_tracker.rs` | `ConnectionTracker`, `ConnectionAnomaly` (PortScan/SynFlood/ConnectionFlood), `TrackedConnection`, `ConnState` | DashMap-based tracking; port scan detection (unique ports per IP in window), SYN flood (half-open count), connection flood (total per IP) |
+| `engine.rs` | `IdsEngine`, `Alert`, `AlertSeverity` (Info/Low/Medium/High/Critical), `IdsVerdict` (Pass/Alert/Drop/Reject) | Orchestrator: (1) signature scan, (2) protocol analysis, (3) connection tracking anomalies. Includes `inspect_with_event()` for normalized event output |
+| `signature.rs` | `Signature`, `SignatureSet`, `SignatureAction` (Pass/Alert/Drop/Reject), `SigSeverity`, `builtin_mail_signatures()` | Aho-Corasick multi-pattern matching; **~23 builtin signatures** for email-specific threats including: SMTP command injection, open relay, oversized RCPT, directory harvest, phishing lure patterns, XSS-in-email, SQL-in-header, suspicious attachments, invalid MIME boundaries, SMTP auth abuse, oversized commands, binary injection, HELO spoofing, MAIL FROM null-sender. **9 new signatures added:** Shellshock (CVE-2014-6271, SID 2000050), HTTP/2 Rapid Reset (CVE-2023-44487, SID 2000051), ProxyShell (CVE-2021-34473, SID 2000052), ProxyLogon (CVE-2021-26855, SID 2000053), AUTH LOGIN brute-force (SID 2000054), cloud metadata SSRF (SID 2000055), Cobalt Strike C2 beacon (SID 2000056), SMTP DATA smuggling (SID 2000057), SMTP PIPELINING abuse (SID 2000058) |
+| `protocol_analyzer.rs` | `analyze_smtp()`, `analyze_dns()`, `analyze_tls()` | SMTP: bare LF/null-byte plus bare-CR and DATA-terminator-smuggling checks. DNS: oversized responses + compression-pointer sanity checks. TLS: deprecated-version and truncated-record checks |
+| `connection_tracker.rs` | `ConnectionTracker`, `ConnectionAnomaly` (PortScan/SynFlood/ConnectionFlood), `TrackedConnection`, `ConnState`, `TrackerStats` | DashMap-based tracking; port scan detection (unique ports per IP in window), SYN flood (half-open count), connection flood (total per IP). **Periodic cleanup:** `cleanup_all()` removes stale connections + zeroed half-open counts + expired port scan trackers. `stats()` returns memory usage metrics; `reset()` clears all state |
 
 ### Inspection Pipeline
 
@@ -324,10 +389,10 @@ Packet arrives
     │        Pattern match against builtin mail signatures
     │        Returns: Vec<Alert> with severity + action
     │
-    ├─── 2. Protocol Analysis
-    │        SMTP: bare LF, null bytes
-    │        DNS:  oversized responses
-    │        TLS:  deprecated versions (SSLv3)
+   ├─── 2. Protocol Analysis
+   │        SMTP: bare LF/null, bare CR, DATA terminator smuggling
+   │        DNS:  oversized responses + compression-pointer sanity checks
+   │        TLS:  deprecated versions + truncated record mismatch
     │
     └─── 3. Connection Tracking (stateful)
              Port scan: >20 unique ports from same IP in window
@@ -346,7 +411,7 @@ Packet arrives
 
 **Crate:** `spam-filter` v0.1.0 — `crates/spam-filter/`
 **License:** PROPRIETARY
-**Tests:** 23
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -365,12 +430,12 @@ Multi-analyzer spam and phishing detection combining Bayesian classification, he
 | Module | Key Types | Responsibility |
 |--------|-----------|----------------|
 | `lib.rs` | `SpamConfig`, `SpamEngine`, `SpamVerdict`, `SpamError` | Public re-exports |
-| `config.rs` | `SpamConfig` (13 fields) | Thresholds: `ham_threshold` (3.0), `spam_threshold` (6.0), `reject_threshold` (10.0). Weights: `bayesian_weight` (0.3), `header_weight` (0.25), `url_weight` (0.25), `content_weight` (0.2). Enable flags. `max_urls_to_analyze` (50). 24 `dangerous_extensions` |
-| `engine.rs` | `SpamEngine`, `SpamVerdict` (score, classification, bayesian_probability, header/content/url scores), `SpamClass` (Ham/Spam/Reject) | Orchestrator: (1) Bayesian classify, (2) header analysis, (3) content scoring, (4) URL analysis, (5) weighted composite, (6) classify. Also: `train_spam()`, `train_ham()` for online learning |
+| `config.rs` | `SpamConfig` (extended), **`CustomPhraseList`** | Thresholds + analyzer weights + `enable_guarded_training`, `max_pending_training_samples`, `min_samples_for_drift`, `drift_alert_delta`, **`custom_phrase_blocklists`** (`Vec<CustomPhraseList>` — deployment-specific category/phrases/weight tuples for Aho-Corasick matching) |
+| `engine.rs` | `SpamEngine`, `SpamVerdict`, `SpamClass` (Ham/Spam/Reject), `TrainingLabel`, `PendingTrainingSample`, `BayesianSnapshot`, `DriftStatus`, **`PerClassDriftStatus`**, **`DriftDirection`** | Orchestrator: (1) Bayesian classify, (2) header analysis, (3) content scoring, (4) URL analysis, (5) weighted composite, (6) classify. Adds reviewer-gated training queue, snapshot/rollback, drift tracking. **New methods:** `analyze_for_tenant()` (60/40 global/tenant Bayesian blend), `train_tenant_spam()`/`train_tenant_ham()` for per-tenant model isolation, `check_dmarc_policy()` (+2.5 penalty on DMARC fail), `per_class_drift_status()` (separate ham/spam boundary shift detection with `DriftDirection::TowardsSpam`/`TowardsHam`/`Stable`), `analyze_with_event()` (behind `events` feature flag) |
 | `bayesian.rs` | `BayesianClassifier`, `BayesianModel` | Multinomial Naive Bayes with Laplace smoothing; thread-safe via `parking_lot::RwLock`; online incremental learning (`learn_spam()`, `learn_ham()`); log-sum-exp numerically stable classification; model export for persistence |
 | `header_analyzer.rs` | `analyze_headers()`, `EmailHeaders`, `HeaderScore` | SPF/DKIM/DMARC result parsing, from/reply-to domain mismatch, missing Message-ID, suspicious Received chains |
 | `content_scorer.rs` | `score_content()`, `ContentScore` | Aho-Corasick (case-insensitive) matching against 26 spam/phishing phrases: urgency (act now, limited time), financial lures (you have won, wire transfer, Nigerian prince), pharma (viagra, weight loss), phishing (verify your account, click here to login, update your payment), unsubscribe tricks. Also: ALL-CAPS ratio, invisible character detection (zero-width) |
-| `url_analyzer.rs` | `analyze_urls()`, `extract_urls()`, `UrlScore` | URL extraction (http/https), URL shortener detection (bit.ly, tinyurl, t.co, goo.gl, ow.ly, is.gd), IP-address URLs, suspicious TLDs (.tk, .ml, .ga, .cf, .gq, .xyz, .top, .buzz), data: URI schemes, mixed-script/IDN homograph detection, excessive URL count |
+| `url_analyzer.rs` | `analyze_urls()`, `analyze_urls_with_shorteners()`, `extract_urls()`, `UrlScore` | URL extraction (http/https), **configurable** URL shortener detection via `SpamConfig.url_shorteners` (default includes bit.ly, tinyurl, t.co, goo.gl, ow.ly, is.gd + many more), IP-address URLs, suspicious TLDs (.tk, .ml, .ga, .cf, .gq, .xyz, .top, .buzz), data: URI schemes, mixed-script/IDN homograph detection, excessive URL count |
 
 ### Composite Scoring Formula
 
@@ -396,17 +461,24 @@ engine.train_ham("Hi team, please review the quarterly report");
 
 Internally, `learn_spam()` / `learn_ham()` acquire a write lock on the `BayesianModel`, update word frequencies and class counts, then release the lock — allowing concurrent `classify()` reads.
 
+### Guarded Training and Model Governance
+
+- Optional reviewer-gated training workflow (`enable_guarded_training`)
+- Queue/approve/reject training sample lifecycle (`submit_training_sample`, `approve_training_sample`, `reject_training_sample`)
+- In-memory model snapshots with rollback (`create_model_snapshot`, `rollback_to_snapshot`)
+- Rolling drift signal (`drift_status`) using baseline-vs-current Bayesian probability delta
+
 ---
 
 ## 6. System 5: Attachment Sandbox
 
 **Crate:** `sandbox` v0.1.0 — `crates/sandbox/`
 **License:** MIT
-**Tests:** 25
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
-Secure attachment analysis using static file inspection — file magic detection, SHA-256 hashing, extension validation, OLE2/macro detection, encrypted archive detection, and configurable policy engine.
+Secure attachment analysis using static file inspection plus optional dynamic analyzer hooks — file magic detection, SHA-256 hashing, extension validation, OLE2/macro detection, encrypted archive detection, policy evaluation, and behavior-based escalation.
 
 ### Module Map (5 source files)
 
@@ -414,8 +486,8 @@ Secure attachment analysis using static file inspection — file magic detection
 |--------|-----------|----------------|
 | `lib.rs` | `SandboxError` (Io/FileTooLarge/NestingDepthExceeded/PolicyViolation/AnalysisError) | Error types |
 | `config.rs` | `SandboxConfig` (12 fields) | `max_file_size` (25MB), `max_nesting_depth` (3), `max_archive_entries` (1000), 42 `dangerous_extensions`, 14 `blocked_extensions` (.exe, .scr, .bat, .cmd, .com, .pif, .vbs, .cpl, .ps1, .msi, .dll, .hta, .vbe, .wsf), 4 `blocked_mime_types`, `suspicious_threshold` (5.0), `reject_threshold` (10.0), `analysis_timeout_secs` (30) |
-| `engine.rs` | `SandboxEngine`, `SandboxVerdict` (analysis_id, sha256, size, file_type, filename, decision, risk_score, reasons, findings, timestamp), `VerdictFinding` (id, description, risk) | Orchestrator: (1) file size check, (2) static file inspection, (3) policy evaluation, (4) build verdict. Also: `analyze_batch()`, `is_rejected()`, `any_rejected()` |
-| `file_inspector.rs` | `inspect_file()`, `FileInspection`, `FileType`, `is_zip_encrypted()`, `is_rar_encrypted()` | File magic detection (PE/MZ, ELF, PDF, ZIP/PK, OLE2/CFB, HTML), SHA-256 hash computation, extension validation, double extension attack detection (e.g., `invoice.pdf.exe`), OLE2 macro indicators (`VBA`, `AutoOpen`, `Document_Open`), malicious PDF indicators (`/JavaScript`, `/JS`, `/OpenAction`, `/Launch`), **encrypted archive detection** (ZIP password-protected via general purpose bit flag, RAR encrypted headers via flags byte) |
+| `engine.rs` | `SandboxEngine`, `SandboxVerdict` (analysis_id, sha256, size, file_type, filename, decision, risk_score, reasons, findings, timestamp), `VerdictFinding` (id, description, risk), `DynamicAnalyzer`, `DynamicAnalysisFinding`, `DynamicDecision` | Orchestrator: (1) file size check, (2) static file inspection, (3) policy evaluation, (4) optional dynamic analyzer result merge/escalation, (5) build verdict. Also: `analyze_batch()`, `is_rejected()`, `any_rejected()`, `analyze_with_event()` (behind `events` feature flag). **DynamicAnalyzer trait limitations documented**: no recursive archive extraction, no image-based payload analysis, integration guidance for YARA/ClamAV provided in trait-level doc comments |
+| `file_inspector.rs` | `inspect_file()`, `FileInspection`, `FileType`, `is_zip_encrypted()`, `is_rar_encrypted()`, `has_zip_vba_project()`, `has_external_ole_links()` | File magic detection (PE/MZ, ELF, PDF, ZIP/PK, OLE2/CFB, HTML), SHA-256 hash computation, extension validation, double extension attack detection (e.g., `invoice.pdf.exe`), OLE2 macro indicators (`VBA`, `AutoOpen`, `Document_Open`), **enhanced OOXML macro detection** (vbaProject.bin, vbaProjectSignature.bin, xl/word/ppt vbaProject paths, VBA/ directory, \_VBA\_PROJECT\_CUR, activeX controls, oleObject embeds, embeddedHtml), **external OLE link detection** (HTTP targets, TargetMode="External", oleLink, mso-application directives), malicious PDF indicators (`/JavaScript`, `/JS`, `/OpenAction`, `/Launch`), **encrypted archive detection** (ZIP password-protected via general purpose bit flag, RAR encrypted headers via flags byte) |
 | `policy.rs` | `evaluate_policy()`, `PolicyResult`, `PolicyDecision` (Allow/Flag/Reject) | Policy rules: blocked extensions → Reject, blocked MIME types → Reject, oversized files → Reject, executable file types (PE/ELF) → Reject, dangerous extensions → Flag, macros detected → Flag, extension mismatch → Flag, malicious indicators → Flag, **encrypted archives → Flag (ARCHIVE_ENCRYPTED indicator)** |
 
 ### File Type Detection
@@ -446,13 +518,18 @@ Magic bytes → FileType:
 | Malicious PDF indicators | Flag | 5.0 |
 | Double extension attack | Flag | 4.0 |
 
+Dynamic analyzer behavior can escalate decisions:
+- `Allow` keeps policy decision
+- `Flag` upgrades `Allow` → `Quarantine`
+- `Reject` forces final decision to `Reject`
+
 ---
 
 ## 7. System 6: Account Takeover Protection
 
 **Crate:** `ato-protection` v0.1.0 — `crates/ato-protection/`
 **License:** MIT
-**Tests:** 49
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -463,9 +540,9 @@ Account takeover prevention using Haversine impossible-travel detection, device 
 | Module | Key Types | Responsibility |
 |--------|-----------|----------------|
 | `lib.rs` | `AtoError` (SessionNotFound/NoHistory/Internal) | Error types |
-| `config.rs` | `AtoConfig` (11 fields) | `max_travel_speed_kmh` (900.0 — commercial jet), `mfa_threshold` (5.0), `block_threshold` (9.0), `max_failed_attempts` (5), `lockout_duration_secs` (900), `failed_attempt_window_secs` (300), `max_history_per_user` (100), weights: `weight_geo` (1.0), `weight_device` (1.0), `weight_time` (1.0), `weight_failures` (1.0) |
-| `engine.rs` | `AtoEngine`, `AtoVerdict` (risk_score 0–10, action, new_device, impossible_travel, factors), `AtoAction` (Allow/RequireMfa/Block), `RiskFactor` (id, description, risk) | Orchestrator: (1) failed attempts lockout, (2) impossible travel detection, (3) record event + device novelty, (4) TLS fingerprint check, (5) behavioral analysis, (6) cap at 10.0, (7) action decision |
-| `session.rs` | `LoginEvent` (user_id, ip_address, user_agent, lat/lon, timestamp, success), `DeviceFingerprint` (SHA-256 of user_agent + IP /24 prefix), `UserLoginHistory`, `SessionStore` (DashMap-backed, thread-safe) | Per-user login history storage; device fingerprint tracking; failure counting with time window; typical login hour computation |
+| `config.rs` | `AtoConfig` (14 fields) | `max_travel_speed_kmh` (**500.0** — fast private jet; lowered from 900 to reduce Mach-speed gap), `mfa_threshold` (5.0), `block_threshold` (9.0), `max_failed_attempts` (5), `lockout_duration_secs` (900), `failed_attempt_window_secs` (300), `max_history_per_user` (100), **`lockout_escalation_threshold` (3)**, **`lockout_escalation_window_secs` (86400)**, **`rate_limit_rps` (50)** — per-IP self-protecting rate limit on `evaluate()`, weights: `weight_geo` (1.0), `weight_device` (1.0), `weight_time` (1.0), `weight_failures` (1.0). **Known limitations documented in code**: IP /16 prefix can merge unrelated cloud users into one fingerprint; `lockout_events` is in-memory and not shared across nodes |
+| `engine.rs` | `AtoEngine`, `AtoVerdict` (risk_score 0–10, action, new_device, impossible_travel, factors), `AtoAction` (Allow/RequireMfa/Block/**RequireCaptcha**), `RiskFactor` (id, description, risk), `SessionActivityEvent`, `SessionRiskVerdict` | Orchestrator: (1) failed attempts lockout **with escalation tracking**, (2) impossible travel detection, (3) record event + device novelty, (4) TLS fingerprint check, (5) behavioral analysis, (6) cap at 10.0, (7) action decision. **Lockout escalation:** Tracks lockout events per user; ≥3 lockouts in 24h → `RequireCaptcha` (prevents retry-cadence bypass). Adds continuous in-session risk evaluation (`evaluate_session_activity`) |
+| `session.rs` | `LoginEvent` (user_id, ip_address, user_agent, lat/lon, timestamp, success), `DeviceFingerprint` (SHA-256 of user_agent + **TLS fingerprint** + IP **/16** prefix), `UserLoginHistory`, `SessionStore` (DashMap-backed, thread-safe) | Per-user login history storage; **enhanced device fingerprint** includes TLS fingerprint hash when available and uses /16 IP prefix for better user experience across NAT; failure counting with time window; typical login hour computation |
 | `geo.rs` | `GeoPoint` (lat, lon), `haversine_distance()`, `check_impossible_travel()` | Haversine formula (Earth radius 6371 km); returns (is_impossible, required_speed_kmh, distance_km). Zero elapsed time with different locations → immediately impossible |
 | `behavior.rs` | `analyze_behavior()`, `BehaviorScore`, `BehaviorFinding` | Time-of-day anomaly (circular hour distance), low history flag, burst login detection |
 | `tls_fingerprint.rs` | `TlsFingerprint`, `TlsFingerprintTracker`, `extract_fingerprint()` | **NEW:** JA4-style TLS fingerprinting for bot detection. Extracts cipher suites, TLS version, extensions, ALPN protocols into unique fingerprint hash. Tracks fingerprint history per IP for anomaly detection. Correlates with known bot signatures |
@@ -475,16 +552,23 @@ Account takeover prevention using Haversine impossible-travel detection, device 
 ```
 LoginEvent arrives
     │
-    ├─── 1. Failed Attempt Lockout
+    ├─── 0. Per-IP Rate Limit (self-protecting)
+    │        Atomic counter per IP per second
+    │        > rate_limit_rps (50) → immediate BLOCK (RATE_LIMITED)
+    │
+    ├─── 1. Failed Attempt Lockout (with Escalation)
     │        Count failures in window (300s)
-    │        ≥5 failures → risk += 10.0 × weight_failures → BLOCK
+    │        ≥5 failures → risk += 10.0 × weight_failures
+    │        Track lockout event timestamp
+    │        ≥3 lockouts in 24h → REQUIRE_CAPTCHA (escalated)
+    │        Else → BLOCK (timed lockout)
     │
     ├─── 2. Impossible Travel Detection (BEFORE recording event)
     │        Haversine distance from last successful login
-    │        Required speed > 900 km/h → risk += 8.0 × weight_geo
+    │        Required speed > 500 km/h → risk += 8.0 × weight_geo
     │
     ├─── 3. Record Event + Device Novelty
-    │        SHA-256 fingerprint (user_agent + IP/24)
+    │        SHA-256 fingerprint (user_agent + TLS fingerprint + IP/16)
     │        New device → risk += 3.0 × weight_device
     │
     ├─── 4. Behavioral Analysis
@@ -492,9 +576,10 @@ LoginEvent arrives
     │        Low history warning
     │
     └─── 5. Decision
-             risk ≥ 9.0 → BLOCK
-             risk ≥ 5.0 → REQUIRE_MFA
-             else        → ALLOW
+             escalated lockout  → REQUIRE_CAPTCHA
+             risk ≥ 9.0         → BLOCK
+             risk ≥ 5.0         → REQUIRE_MFA
+             else               → ALLOW
 ```
 
 **Critical design note:** Impossible travel detection runs BEFORE `record_login()` to compare against the previous successful login, not the event being recorded.
@@ -515,7 +600,7 @@ If elapsed_secs ≤ 0 and distance > 0 → impossible (infinite speed required)
 
 **Crate:** `dlp-engine` v0.1.0 — `crates/dlp-engine/`
 **License:** MIT
-**Tests:** 27
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -526,10 +611,10 @@ Outbound email content scanning for PII (credit cards, SSNs, phone numbers, emai
 | Module | Key Types | Responsibility |
 |--------|-----------|----------------|
 | `lib.rs` | `DlpError` (PatternError/ScanError/PolicyViolation) | Error types |
-| `config.rs` | `DlpConfig` (12 fields) | Enable flags: `detect_credit_cards`, `detect_ssn`, `detect_phone_numbers`, `detect_email_addresses`, `detect_secrets`. `entropy_threshold` (4.5), `min_entropy_token_length` (20). 10 `confidential_keywords` ("confidential", "internal only", "proprietary", "trade secret", "do not distribute", "restricted", "top secret", "classified", "attorney-client", "privileged"). `quarantine_threshold` (5.0), `block_threshold` (10.0), `max_scan_size` (1MB), `allowlisted_domains` |
-| `engine.rs` | `DlpEngine`, `DlpVerdict` (risk_score, action, pii_findings, entropy_findings, policy_matches, summary), `DlpAction` (Allow/Audit/Quarantine/Block) | Orchestrator: (1) domain allowlist check, (2) PII scan, (3) entropy scan, (4) content policy scan, (5) determine action. Also: `scan_body()` convenience method |
-| `pii.rs` | `scan_pii()`, `PiiMatch` (pii_type, redacted, risk, offset), `PiiType` (CreditCard/Ssn/PhoneNumber/EmailAddress), `luhn_check()` | Credit card: regex `\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b` + Luhn validation (risk 5.0). SSN: `\b\d{3}-\d{2}-\d{4}\b` excluding invalid area numbers 000/666/9xx (risk 7.0). Phone: regex with international formats (risk 2.0). Email: standard pattern (risk 1.0). All matched data is redacted in output |
-| `entropy.rs` | `scan_entropy()`, `shannon_entropy()`, `EntropyFinding`, `looks_like_secret()` | Shannon entropy: $H = -\sum p_i \log_2 p_i$. Tokens ≥20 chars with entropy ≥4.5 → potential secret. `looks_like_secret()` checks for known prefixes: `sk_`, `pk_`, `AKIA`, `ghp_`, `gho_`, `xox`, `sk-`, `rk_`, `whsec_`, plus base64/hex pattern heuristics. Risk: 6.0 for known-prefix secrets, 4.0 for high-entropy tokens |
+| `config.rs` | `DlpConfig` (extended) | Core detectors + thresholds + `allowlisted_domains` plus recipient risk tiers (`trusted_recipient_domains`, `partner_recipient_domains` + multipliers) and expiring temporary exceptions (`DlpTemporaryException`) |
+| `engine.rs` | `DlpEngine`, `DlpVerdict` (risk_score, action, pii_findings, entropy_findings, policy_matches, summary), `DlpAction` (Allow/Audit/Quarantine/Block) | Orchestrator: (1) optional allowlist bypass, (2) PII scan, (3) entropy scan, (4) content policy scan, (5) recipient-domain risk multiplier, (6) threshold action, (7) temporary-exception downgrade-to-audit logic |
+| `pii.rs` | `scan_pii()`, `PiiMatch` (pii_type, redacted, risk, offset), `PiiType` (CreditCard/Ssn/PhoneNumber/EmailAddress), `luhn_check()` | Credit card: **ReDoS-safe** regex `\b(?:\d{4}[- ]?){3}\d{1,7}\b` + Luhn validation (**risk 8.0**). SSN: `\b\d{3}-\d{2}-\d{4}\b` **dash-only** separators, excluding invalid area numbers 000/666/9xx (**risk 9.0**). Phone: regex with international formats (**risk 3.0**). Email: standard pattern (**risk 2.0**). All matched data is redacted in output. **Known limitations documented in code**: no image-based PII detection (OCR not implemented); phone regex may false-positive on order/tracking numbers |
+| `entropy.rs` | `scan_entropy()`, `shannon_entropy()`, `EntropyFinding`, `looks_like_secret()` | Shannon entropy: $H = -\sum p_i \log_2 p_i$. Tokens ≥20 chars with entropy ≥4.5 → potential secret. **UTF-8 correct offset tracking**. `looks_like_secret()` checks for **comprehensive known prefixes**: `sk_`, `pk_`, `AKIA`, `ASIA`, `ABIA`, `ACCA` (AWS), `ghp_`, `gho_`, `ghs_`, `ghr_` (GitHub), `xox` (Slack), `sk-`, `sk_live_`, `sk_test_`, `pk_live_`, `pk_test_`, `rk_`, `whsec_` (Stripe), `glpat-` (GitLab), `npm_`, `AC`/`SK` (Twilio), `SG.` (Sendgrid), `eyJ` (JWT), plus base64/hex pattern heuristics. Risk: 6.0 for known-prefix secrets, 4.0 for high-entropy tokens |
 | `content_policy.rs` | `scan_content_policy()`, `PolicyMatch` | Aho-Corasick case-insensitive keyword matching against configured confidential keywords. Risk: 3.0 per match (deduplicated) |
 
 ### PII Detection — Luhn Algorithm
@@ -560,7 +645,7 @@ Example: `1234 5678 9012 3456` → sum ≠ 0 mod 10 → **not a CC** (no match)
 
 **Crate:** `threat-intel` v0.1.0 — `crates/threat-intel/`
 **License:** MIT
-**Tests:** 32
+**Tests:** See crate suite; validated in current workspace test pass
 
 ### Purpose
 
@@ -571,11 +656,11 @@ Threat intelligence feed ingestion, IP and domain blocklist management with CIDR
 | Module | Key Types | Responsibility |
 |--------|-----------|----------------|
 | `lib.rs` | `ThreatIntelError` (ParseError/FetchError/InvalidIp/InvalidCidr) | Error types |
-| `config.rs` | `ThreatIntelConfig` (9 fields), `FeedSource`, `FeedFormat` | `default_ttl_secs` (86400), `max_ip_entries` (1M), `max_domain_entries` (500K). Thresholds: `block_threshold` (7.0), `flag_threshold` (4.0). Weights: `weight_ip` (1.0), `weight_domain` (1.0). Default feeds: Spamhaus DROP + EDROP. `FeedFormat`: SpamhausDrop, PlainText, CsvIp, JsonIp, DomainList |
-| `engine.rs` | `ThreatIntelEngine`, `ThreatVerdict` (ip_reputation, domain_reputation, action, summary), `ThreatAction` (Allow/Flag/Block), `ThreatIntelStats` | `check_ip()`, `check_domain()`, `check()` (worst-of combined). Also: `purge_expired()`, `stats()` |
-| `ip_blocklist.rs` | `IpBlocklist`, `IpBlockEntry`, `ThreatCategory` (Spam/Malware/Botnet/Scanner/Phishing/Hijacked/Bogon/BadReputation) | DashMap exact IP lookup + Vec CIDR range matching. `add_ip()`, `add_cidr()` parse and store. CIDR: precomputed prefix mask for O(n) range scan. `purge_expired()` removes entries past `expires_at` |
+| `config.rs` | `ThreatIntelConfig` (extended), `FeedSource`, `FeedFormat`, `FeedEnforcementMode` | Core thresholds and limits plus feed trust and policy controls: `min_feed_trust_score`, per-feed `trust_score`, `Monitor`/`Enforce` mode, **`purge_pressure_threshold` (0.9)** — triggers eager TTL purge when cache load exceeds 90%. **5 default feeds** (Spamhaus DROP/EDROP/DBL, abuse.ch URLhaus/ThreatFox) |
+| `engine.rs` | `ThreatIntelEngine`, `ThreatVerdict` (ip_reputation, domain_reputation, action, summary), `ThreatAction` (Allow/Flag/Block), `ThreatIntelStats` | `check_ip()`, `check_domain()`, `check()` (worst-of combined), plus feed-adjusted scoring (`feed_adjusted_score`) so low-trust or monitor feeds can cap `Block` to `Flag`. **New:** `purge_if_pressure()` for memory-pressure-driven TTL purge, `check_with_event()` (behind `events` feature flag) |
+| `ip_blocklist.rs` | `IpBlocklist`, **`Ipv6Blocklist`**, **`UnifiedIpBlocklist`**, `IpBlockEntry`, `ThreatCategory` (Spam/Malware/Botnet/Scanner/Phishing/Hijacked/Bogon/BadReputation) | **Full IPv4 + IPv6 support.** DashMap exact IP lookup + Vec CIDR range matching for both address families. `add_ip()`, `add_cidr()` parse and store. CIDR: precomputed prefix mask with **`optimize()` method** for sorted prefix-length-first lookups. `UnifiedIpBlocklist` provides combined v4+v6 lookup with auto-detection (`lookup_str()` auto-detects address family). `purge_expired()` removes entries past `expires_at` |
 | `domain_blocklist.rs` | `DomainBlocklist`, `DomainBlockEntry` | DashMap string lookup. `lookup()` does exact match first, then walks parent domains for subdomain matching (e.g., `mail.evil.tk` matches `evil.tk`). Case-insensitive. Trailing dot handling. `parse_domain_list()` for bulk import |
-| `reputation.rs` | `ReputationScore` (subject, score 0–10, sources, classification), `SourceScore`, `ReputationClass` (Clean/Suspicious/Malicious) | Composite: 70% worst source + 30% average of all sources. Classification: ≥7.0 Malicious, ≥4.0 Suspicious, <4.0 Clean |
+| `reputation.rs` | `ReputationScore` (subject, score 0–10, sources, classification), `SourceScore`, `ReputationClass` (Clean/Suspicious/Malicious) | **Basic:** `compute_reputation()` — 70% worst source + 30% average. **Trust-weighted:** `compute_reputation_weighted()` — 60% max(score×trust/10) + 40% trust-weighted average, dampening low-trust feed impact. Classification: ≥7.0 Malicious, ≥4.0 Suspicious, <4.0 Clean |
 | `background_task.rs` | `PurgeTaskConfig`, `PurgeStats`, `run_purge_loop()` | **NEW:** Async background task for automatic TTL-based cleanup. Configurable purge intervals. Returns statistics (entries_purged, duration_ms). Graceful shutdown via cancellation token |
 
 ### Threat Categories
@@ -595,6 +680,7 @@ pub enum ThreatCategory {
 
 ### Reputation Scoring
 
+**Basic formula** (`compute_reputation`):
 ```
 composite_score = 0.7 × max(source_scores) + 0.3 × avg(source_scores)
 
@@ -603,14 +689,27 @@ if composite ≥ 4.0  → Suspicious → FLAG
 if composite < 4.0  → Clean → ALLOW
 ```
 
+**Trust-weighted formula** (`compute_reputation_weighted`) — *new*:
+```
+highest_adjusted = max(score_i × trust_i / 10.0)   // max-trust-adjusted score
+trust_weighted_avg = Σ(score_i × trust_i) / Σ(trust_i)  // trust-weighted average
+composite = 0.6 × highest_adjusted + 0.4 × trust_weighted_avg
+```
+This dampens the impact of low-trust feeds while preserving high-trust signal. A score of 9.0 from a trust-5.0 feed contributes less than the same score from a trust-10.0 feed.
+
+**Memory pressure purge** (`purge_if_pressure`): When IP or domain cache load exceeds `purge_pressure_threshold` (default 0.9 = 90%), triggers an eager TTL purge to reclaim memory before capacity is exhausted.
+
 ### Feed Ingestion
 
 Default feeds (configurable):
 
-| Feed | Format | URL |
-|------|--------|-----|
-| Spamhaus DROP | `SpamhausDrop` | `https://www.spamhaus.org/drop/drop.txt` |
-| Spamhaus EDROP | `SpamhausDrop` | `https://www.spamhaus.org/drop/edrop.txt` |
+| Feed | Format | URL | Trust | Mode |
+|------|--------|-----|-------|------|
+| Spamhaus DROP | `SpamhausDrop` | `https://www.spamhaus.org/drop/drop.txt` | 10.0 | Enforce |
+| Spamhaus EDROP | `SpamhausDrop` | `https://www.spamhaus.org/drop/edrop.txt` | 10.0 | Enforce |
+| **Spamhaus DBL** | `DomainList` | `https://www.spamhaus.org/drop/dbl.txt` | **9.0** | **Enforce** |
+| **abuse.ch URLhaus** | `PlainText` | `https://urlhaus.abuse.ch/downloads/text/` | **8.0** | **Enforce** |
+| **abuse.ch ThreatFox** | `PlainText` | `https://threatfox.abuse.ch/downloads/iocs/` | **7.5** | **Monitor** |
 
 Supported formats: plain text (one IP/CIDR per line, `#` comments), Spamhaus DROP (SBL numbers), CSV IP, JSON IP, domain lists.
 
@@ -650,15 +749,38 @@ For an inbound email, the security systems are invoked in sequence:
    └─ If Reject → strip attachment, notify sender
    └─ If Flag → quarantine for review
 
-8. dlp-engine.scan(body, sender_domain)  [outbound only]
+8. dlp-engine.scan(body, recipient_domain)  [outbound only]
    └─ If Block → reject send, notify admin
    └─ If Quarantine → hold for review
    └─ If Audit → log findings, allow
 ```
 
-### Shared Dependencies
+### Normalized Security Event Contract
 
-All 8 crates share these workspace dependencies:
+`mail-common` now provides a shared event schema used by multiple engines:
+
+- `SecurityEvent`
+- `CorrelationContext`
+- `SecuritySystem`, `SecurityAction`, `SecuritySeverity`
+
+Current event-emitting APIs in code:
+
+| Crate | API | Feature Gate |
+|-------|-----|-------------|
+| `ddos-protection` | `DdosProtector::evaluate_with_event()` | Always (native) |
+| `waf-engine` | `WafEngine::inspect_with_event()` | Always (native) |
+| `ids-engine` | `IdsEngine::inspect_with_event()` | Always (native) |
+| `spam-filter` | `SpamEngine::analyze_with_event()` | `--features events` |
+| `sandbox` | `SandboxEngine::analyze_with_event()` | `--features events` |
+| `ato-protection` | `AtoEngine::evaluate_with_event()` | `--features events` |
+| `dlp-engine` | `DlpEngine::scan_with_event()` | `--features events` |
+| `threat-intel` | `ThreatIntelEngine::check_with_event()` | `--features events` |
+
+All 8 APIs return both the engine decision and a normalized `SecurityEvent` payload with `CorrelationContext` metadata. The 5 standalone crates use an **optional** `mail-common` dependency gated behind the `events` feature flag to preserve their zero-dependency standalone nature by default.
+
+### Common Workspace Dependencies
+
+These dependencies are used broadly across the security crates:
 
 | Dependency | Version | Used For |
 |------------|---------|----------|
@@ -677,25 +799,27 @@ All 8 crates share these workspace dependencies:
 
 ## 11. Testing & Quality Assurance
 
-### Test Coverage by Crate
+### Test Coverage by Crate (Current Reality)
 
-| Crate | Tests | Key Test Scenarios |
-|-------|-------|--------------------|
-| `ddos-protection` | 520 | Adaptive rate limiting, bot detection, middleware, SMTP protection, coordinator CRDTs, ML anomaly detection + caching, challenges (PoW difficulty 24), cost limiter, sessions, reputation, integration, **adversarial bypass tests**, **edge case overflow/underflow**, **performance stress tests** |
-| `waf-engine` | 122 | SQL injection: tautology, UNION, stacked, blind, comment evasion. XSS: script, event, JS URI, SVG, CSS expression. **Fast-path pre-filter bypass tests**. **JSON/GraphQL depth limiting (MAX_DEPTH=128)**. **GraphQL introspection/fragment detection**. Command injection: shell metacharacters + `& whoami`, `sudo su`, newline+command patterns. Decoder: URL, HTML, Base64, multi-layer |
-| `ids-engine` | 13 | Engine: clean traffic, basic detection, inline mode. Signatures: matching, no-match, multiple matches. Protocol: SMTP bare LF/null, DNS oversize, TLS SSLv3. Connections: port scan, SYN flood, established state |
-| `spam-filter` | 23 | Bayesian: empty model, basic train+classify, tokenizer. Headers: clean, SPF/DKIM fail, from/reply mismatch, missing ID. Content: clean, spam phrases, phishing, ALL-CAPS, invisible chars. URLs: extraction, shortener, IP URL, suspicious TLD, data URI, mixed scripts. Engine: obvious spam, clean, phishing, class display |
-| `sandbox` | 25 | File inspector: PE, ELF, PDF, ZIP, OLE2, HTML, text, SHA-256, double extension, macro detection, VBA, malicious PDF, **encrypted archive detection (ZIP/RAR password-protected)**. Policy: clean PDF, executable reject, oversized reject, blocked extension, suspicious quarantine. Engine: clean text, executable, double extension, too large, batch, verdict serializable |
-| `ato-protection` | 49 | Geo: Haversine same/NYC-London/antipodal, impossible travel, plausible travel, zero elapsed. Session: fingerprint, new/different device, failure counting, capacity. Behavior: normal/unusual hour, hour distance, low history. **TLS fingerprinting: JA4-style extraction, fingerprint history, bot detection correlation**. Engine: first login, known device, failed lockout, impossible travel, action display |
-| `dlp-engine` | 27 | PII: Luhn valid/invalid, CC detection, SSN detection/invalid, phone, redaction, no false positives. Entropy: Shannon uniform/max, API key, AWS key, normal text, looks-like-secret. Policy: confidential, no matches, empty keywords, risk, deduplication. Engine: clean, CC, SSN block, confidential, allowlist, API key, action display |
-| `threat-intel` | 32 | IP blocklist: parse plain/Spamhaus, exact/CIDR/string lookup, expired, purge, invalid CIDR. Domain: exact, subdomain, case, trailing dot, expired, purge, parse list. Reputation: clean, suspicious, malicious, worst-source emphasis. **Background purge task: TTL expiration, configurable intervals, purge statistics**. Engine: clean IP, blocked IP/CIDR/domain, subdomain, combined, stats |
+The entries below describe coverage focus areas. Exact per-crate counts are intentionally omitted here to avoid drift; the current branch has a green full workspace test run for `services/mail-server`.
+
+| Crate | Validation | Key Test Scenarios |
+|-------|------------|--------------------|
+| `ddos-protection` | Workspace pass | Adaptive rate limiting, bot detection, middleware, SMTP protection, coordinator CRDTs, ML anomaly detection + caching, challenge flows, adversarial/edge/perf suites |
+| `waf-engine` | Workspace pass | SQLi/XSS/path traversal/command injection coverage, fast-path behavior, JSON/GraphQL depth limiting, decoder canonicalization |
+| `ids-engine` | Workspace pass | Signature and protocol analysis (SMTP/DNS/TLS), inline mode behavior, connection anomaly tracking |
+| `spam-filter` | Workspace pass | Bayesian learning + analysis pipeline, header/content/url analyzers, guarded training workflow, snapshot/rollback, drift checks |
+| `sandbox` | Workspace pass | Static inspection/policy decisions, encrypted archive indicators, optional dynamic analyzer escalation path |
+| `ato-protection` | Workspace pass | Impossible travel, device/TLS fingerprints, failure lockout, login and in-session risk actions |
+| `dlp-engine` | Workspace pass | PII + entropy + policy scans, domain allowlist/tiers, temporary exceptions, action thresholds |
+| `threat-intel` | Workspace pass | IP/domain blocklists, feed parsing, trust-adjusted scoring, monitor/enforce behavior, background purge |
 
 ### Running All Security Tests
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 cd services/mail-server
-# Run with all features for full coverage (811+ tests)
+# Run with all features for maximal coverage
 cargo test -p ddos-protection --features full \
            -p waf-engine -p ids-engine -p spam-filter \
            -p sandbox -p ato-protection -p dlp-engine -p threat-intel
@@ -742,14 +866,15 @@ Each security crate should expose:
 ```
 ddos-protection ──► apexmail-rate-limiter
                 ──► fingerprint
+                ──► mail-common
 
-waf-engine      (standalone — no internal deps)
-ids-engine      (standalone — no internal deps)
-spam-filter     (standalone — no internal deps)
-sandbox         (standalone — no internal deps)
-ato-protection  (standalone — no internal deps)
-dlp-engine      (standalone — no internal deps)
-threat-intel    (standalone — no internal deps)
+waf-engine      ──► mail-common
+ids-engine      ──► mail-common
+spam-filter     ──► mail-common (optional, feature = "events")
+sandbox         ──► mail-common (optional, feature = "events")
+ato-protection  ──► mail-common (optional, feature = "events")
+dlp-engine      ──► mail-common (optional, feature = "events")
+threat-intel    ──► mail-common (optional, feature = "events")
 ```
 
 ## Appendix B: File Inventory

@@ -74,10 +74,10 @@ function CustomTooltip({
   return (
     <div className="rounded-lg border border-border bg-card/95 backdrop-blur-xl p-4 shadow-xl">
       <p className="mb-2 text-[13px] font-bold text-foreground uppercase tracking-tight">{label}</p>
-      {payload.map((entry, index) => {
+      {payload.map((entry) => {
         const tone = getTooltipColorClass(String(entry.color ?? ''));
         return (
-        <p key={index} className={cn('text-sm font-medium flex items-center gap-2', tone.text)}>
+        <p key={`${String(entry.name ?? 'series')}-${String(entry.dataKey ?? '')}`} className={cn('text-sm font-medium flex items-center gap-2', tone.text)}>
           <span className={cn('w-2 h-2 rounded-full', tone.dot)} />
           <span>{entry.name}:</span>
           <span className="font-bold apex-metric-number text-foreground">
@@ -384,8 +384,8 @@ export function ApexPieChart({
  }
  labelLine={{ stroke: 'hsl(var(--muted-foreground))' }}
  >
- {dataWithColors.map((entry, index) => (
- <Cell key={`cell-${index}`} fill={entry.color} />
+ {dataWithColors.map((entry) => (
+ <Cell key={`cell-${entry.name}-${entry.value}`} fill={entry.color} />
  ))}
  </Pie>
  <Tooltip content={<CustomTooltip formatter={formatter} />} />

@@ -5,6 +5,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Instant;
 use sysinfo::{ProcessesToUpdate, System};
+use tracing::warn;
 
 use crate::config::Config;
 use crate::types::{ClusterHealth, ComponentHealth, HealthStatus};
@@ -56,7 +57,7 @@ impl HealthCheckService {
 
     /// Run all health checks and produce a cluster health report.
     pub async fn check_all(&self) -> ClusterHealth {
-        let mut components = Vec::new();
+        let mut components = Vec::with_capacity(5);
 
         // 1. Database primary
         components.push(self.check_database().await);
@@ -77,7 +78,9 @@ impl HealthCheckService {
         let overall = Self::compute_overall(&components);
 
         // Record in DB (best effort)
-        let _ = self.record_health_check(&overall, &components).await;
+        if let Err(error) = self.record_health_check(&overall, &components).await {
+            warn!(error = %error, "Failed to persist health check result");
+        }
 
         ClusterHealth {
             overall,

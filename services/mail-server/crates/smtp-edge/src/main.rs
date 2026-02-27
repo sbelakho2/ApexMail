@@ -25,14 +25,15 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 
 /// Default maximum concurrent connections.
-const DEFAULT_MAX_CONNECTIONS: usize = 1024;
-const DEFAULT_CONNECTION_QUEUE_TIMEOUT_SECS: u64 = 5;
-const DEFAULT_MAX_LINE_LENGTH: usize = 1000;
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_SESSION_TIMEOUT_SECS: u64 = 300;
-const DEFAULT_MAX_MESSAGE_BYTES: usize = 25 * 1024 * 1024;
-const DEFAULT_MAX_RECIPIENTS: usize = 100;
 const DEFAULT_HTTP_LISTEN: &str = "127.0.0.1:8080";
+
+fn default_max_connections() -> usize { 1024 }
+fn default_connection_queue_timeout_secs() -> u64 { 5 }
+fn default_max_line_length() -> usize { 1000 }
+fn default_command_timeout_secs() -> u64 { 30 }
+fn default_session_timeout_secs() -> u64 { 300 }
+fn default_max_message_bytes() -> usize { 25 * 1024 * 1024 }
+fn default_max_recipients() -> usize { 100 }
 
 #[derive(Parser)]
 #[command(name = "smtp-edge")]
@@ -67,32 +68,32 @@ struct Cli {
     local_domains: Vec<String>,
 
     /// #163: Maximum concurrent connections
-    #[arg(long, env = "MAX_CONNECTIONS", default_value_t = DEFAULT_MAX_CONNECTIONS)]
-    max_connections: usize,
+    #[arg(long, env = "MAX_CONNECTIONS", default_value_t = default_max_connections())]
+        max_connections: usize,
 
     /// Max wait in seconds for a connection slot before sending 421
-    #[arg(long, env = "SMTP_CONNECTION_QUEUE_TIMEOUT_SECS", default_value_t = DEFAULT_CONNECTION_QUEUE_TIMEOUT_SECS)]
-    connection_queue_timeout_secs: u64,
+    #[arg(long, env = "SMTP_CONNECTION_QUEUE_TIMEOUT_SECS", default_value_t = default_connection_queue_timeout_secs())]
+        connection_queue_timeout_secs: u64,
 
     /// Maximum accepted SMTP line length (including CRLF)
-    #[arg(long, env = "SMTP_MAX_LINE_LENGTH", default_value_t = DEFAULT_MAX_LINE_LENGTH)]
-    max_line_length: usize,
+    #[arg(long, env = "SMTP_MAX_LINE_LENGTH", default_value_t = default_max_line_length())]
+        max_line_length: usize,
 
     /// Maximum wait time for one SMTP command/data line (seconds)
-    #[arg(long, env = "SMTP_COMMAND_TIMEOUT_SECS", default_value_t = DEFAULT_COMMAND_TIMEOUT_SECS)]
-    command_timeout_secs: u64,
+    #[arg(long, env = "SMTP_COMMAND_TIMEOUT_SECS", default_value_t = default_command_timeout_secs())]
+        command_timeout_secs: u64,
 
     /// Maximum total SMTP session duration (seconds)
-    #[arg(long, env = "SMTP_SESSION_TIMEOUT_SECS", default_value_t = DEFAULT_SESSION_TIMEOUT_SECS)]
-    session_timeout_secs: u64,
+    #[arg(long, env = "SMTP_SESSION_TIMEOUT_SECS", default_value_t = default_session_timeout_secs())]
+        session_timeout_secs: u64,
 
     /// Maximum SMTP message size in bytes
-    #[arg(long, env = "SMTP_MAX_MESSAGE_BYTES", default_value_t = DEFAULT_MAX_MESSAGE_BYTES)]
-    max_message_bytes: usize,
+    #[arg(long, env = "SMTP_MAX_MESSAGE_BYTES", default_value_t = default_max_message_bytes())]
+        max_message_bytes: usize,
 
     /// Maximum recipients per message
-    #[arg(long, env = "SMTP_MAX_RECIPIENTS", default_value_t = DEFAULT_MAX_RECIPIENTS)]
-    max_recipients: usize,
+    #[arg(long, env = "SMTP_MAX_RECIPIENTS", default_value_t = default_max_recipients())]
+        max_recipients: usize,
 
     /// HTTP listen address for health/metrics
     #[arg(long, env = "SMTP_EDGE_HTTP_LISTEN", default_value = DEFAULT_HTTP_LISTEN)]
@@ -223,10 +224,12 @@ async fn main() -> Result<()> {
                     Ok(Ok(p)) => p,
                     Ok(Err(_)) | Err(_) => {
                         warn!(peer = %addr, "Connection rejected: max connections/queue timeout reached");
-                        let _ = tokio::io::AsyncWriteExt::write_all(
+                        if let Err(error) = tokio::io::AsyncWriteExt::write_all(
                             &mut socket,
                             b"421 4.7.0 Too many connections, try again later\r\n",
-                        ).await;
+                        ).await {
+                            warn!(peer = %addr, error = %error, "Failed to write SMTP overload response");
+                        }
                         drop(socket);
                         continue;
                     }
@@ -296,14 +299,18 @@ async fn shutdown_signal() {
             }
             Err(e) => {
                 warn!(error = %e, "Failed to install SIGTERM handler; falling back to Ctrl+C");
-                let _ = signal::ctrl_c().await;
+                if let Err(error) = signal::ctrl_c().await {
+                    warn!(error = %error, "Ctrl+C signal handler failed");
+                }
             }
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = signal::ctrl_c().await;
+        if let Err(error) = signal::ctrl_c().await {
+            warn!(error = %error, "Ctrl+C signal handler failed");
+        }
     }
 }
 

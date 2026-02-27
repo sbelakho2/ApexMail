@@ -8,33 +8,33 @@ use std::sync::LazyLock;
 
 // ─── Regex patterns ────────────────────────────────────────────
 
-static BLOCK_TAGS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)</?(p|div|br|h[1-6]|li|tr|table|hr|blockquote)\b[^>]*>").unwrap()
+static BLOCK_TAGS: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"(?i)</?(p|div|br|h[1-6]|li|tr|table|hr|blockquote)\b[^>]*>").ok()
 });
 
 // #202: Use (?is) flags so `.*?` can match across line breaks in multi-line <a> tags
-static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#).unwrap()
+static LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<a\b[^>]*href\s*=\s*["']([^"']*)["'][^>]*>(.*?)</a>"#).ok()
 });
 
-static STYLE_SCRIPT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)(?:<style\b[^>]*>.*?</style>|<script\b[^>]*>.*?</script>)").unwrap()
+static STYLE_SCRIPT_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"(?is)(?:<style\b[^>]*>.*?</style>|<script\b[^>]*>.*?</script>)").ok()
 });
 
-static ALL_TAGS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<[^>]+>").unwrap()
+static ALL_TAGS_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"<[^>]+>").ok()
 });
 
-static MULTI_NEWLINE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\n{3,}").unwrap()
+static MULTI_NEWLINE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"\n{3,}").ok()
 });
 
-static MULTI_SPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[^\S\n]{2,}").unwrap()
+static MULTI_SPACE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"[^\S\n]{2,}").ok()
 });
 
-static HTML_ENTITY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"&([a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);").unwrap()
+static HTML_ENTITY_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"&([a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);").ok()
 });
 
 // ─── Public API ────────────────────────────────────────────────
@@ -44,36 +44,51 @@ pub fn html_to_plaintext(html: &str) -> String {
     let mut text = html.to_string();
 
     // 1. Remove style/script blocks entirely
-    text = STYLE_SCRIPT_RE.replace_all(&text, "").into_owned();
+    if let Some(style_script_re) = STYLE_SCRIPT_RE.as_ref() {
+        text = style_script_re.replace_all(&text, "").into_owned();
+    }
 
     // 2. Convert links to "text (url)" format
-    text = LINK_RE
-        .replace_all(&text, |caps: &regex::Captures| {
-            let url = &caps[1];
-            let label = &caps[2];
-            let label_clean = ALL_TAGS_RE.replace_all(label, "");
-            if label_clean.trim().is_empty() {
-                url.to_string()
-            } else if label_clean.trim() == url {
-                url.to_string()
-            } else {
-                format!("{} ({})", label_clean.trim(), url)
-            }
-        })
-        .into_owned();
+    if let Some(link_re) = LINK_RE.as_ref() {
+        text = link_re
+            .replace_all(&text, |caps: &regex::Captures| {
+                let url = &caps[1];
+                let label = &caps[2];
+                let label_clean = ALL_TAGS_RE
+                    .as_ref()
+                    .map(|re| re.replace_all(label, "").into_owned())
+                    .unwrap_or_else(|| label.to_string());
+                if label_clean.trim().is_empty() {
+                    url.to_string()
+                } else if label_clean.trim() == url {
+                    url.to_string()
+                } else {
+                    format!("{} ({})", label_clean.trim(), url)
+                }
+            })
+            .into_owned();
+    }
 
     // 3. Convert block-level tags to newlines
-    text = BLOCK_TAGS.replace_all(&text, "\n").into_owned();
+    if let Some(block_tags) = BLOCK_TAGS.as_ref() {
+        text = block_tags.replace_all(&text, "\n").into_owned();
+    }
 
     // 4. Strip all remaining HTML tags
-    text = ALL_TAGS_RE.replace_all(&text, "").into_owned();
+    if let Some(all_tags_re) = ALL_TAGS_RE.as_ref() {
+        text = all_tags_re.replace_all(&text, "").into_owned();
+    }
 
     // 5. Decode HTML entities
     text = decode_entities(&text);
 
     // 6. Normalize whitespace
-    text = MULTI_SPACE_RE.replace_all(&text, " ").into_owned();
-    text = MULTI_NEWLINE_RE.replace_all(&text, "\n\n").into_owned();
+    if let Some(multi_space_re) = MULTI_SPACE_RE.as_ref() {
+        text = multi_space_re.replace_all(&text, " ").into_owned();
+    }
+    if let Some(multi_newline_re) = MULTI_NEWLINE_RE.as_ref() {
+        text = multi_newline_re.replace_all(&text, "\n\n").into_owned();
+    }
 
     // 7. Trim lines and overall
     text = text
@@ -87,38 +102,42 @@ pub fn html_to_plaintext(html: &str) -> String {
 
 /// Decode common HTML entities.
 fn decode_entities(text: &str) -> String {
-    HTML_ENTITY_RE
-        .replace_all(text, |caps: &regex::Captures| {
-            let entity = &caps[1];
-            match entity {
-                "amp" => "&".to_string(),
-                "lt" => "<".to_string(),
-                "gt" => ">".to_string(),
-                "quot" => "\"".to_string(),
-                "apos" => "'".to_string(),
-                "nbsp" => " ".to_string(),
-                "mdash" => "—".to_string(),
-                "ndash" => "–".to_string(),
-                "hellip" => "…".to_string(),
-                "copy" => "©".to_string(),
-                "reg" => "®".to_string(),
-                "trade" => "™".to_string(),
-                "laquo" => "«".to_string(),
-                "raquo" => "»".to_string(),
-                s if s.starts_with('#') => {
-                    let code = if s.starts_with("#x") || s.starts_with("#X") {
-                        u32::from_str_radix(&s[2..], 16).ok()
-                    } else {
-                        s[1..].parse::<u32>().ok()
-                    };
-                    code.and_then(char::from_u32)
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| format!("&{};", entity))
+    if let Some(html_entity_re) = HTML_ENTITY_RE.as_ref() {
+        html_entity_re
+            .replace_all(text, |caps: &regex::Captures| {
+                let entity = &caps[1];
+                match entity {
+                    "amp" => "&".to_string(),
+                    "lt" => "<".to_string(),
+                    "gt" => ">".to_string(),
+                    "quot" => "\"".to_string(),
+                    "apos" => "'".to_string(),
+                    "nbsp" => " ".to_string(),
+                    "mdash" => "—".to_string(),
+                    "ndash" => "–".to_string(),
+                    "hellip" => "…".to_string(),
+                    "copy" => "©".to_string(),
+                    "reg" => "®".to_string(),
+                    "trade" => "™".to_string(),
+                    "laquo" => "«".to_string(),
+                    "raquo" => "»".to_string(),
+                    s if s.starts_with('#') => {
+                        let code = if s.starts_with("#x") || s.starts_with("#X") {
+                            u32::from_str_radix(&s[2..], 16).ok()
+                        } else {
+                            s[1..].parse::<u32>().ok()
+                        };
+                        code.and_then(char::from_u32)
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| format!("&{};", entity))
+                    }
+                    _ => format!("&{};", entity),
                 }
-                _ => format!("&{};", entity),
-            }
-        })
-        .into_owned()
+            })
+            .into_owned()
+    } else {
+        text.to_string()
+    }
 }
 
 #[cfg(test)]

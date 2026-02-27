@@ -793,15 +793,16 @@ mod tests {
 
     fn test_state() -> Arc<AppState> {
         let config = Arc::new(Config::from_env());
+        let config_for_services = Arc::clone(&config);
         let pool = test_pool();
         Arc::new(AppState {
-            health: HealthCheckService::new(pool.clone(), config.clone()),
-            failover: FailoverService::new(pool.clone(), config.clone()),
-            backup: BackupService::new(pool.clone(), config.clone()),
-            replication: ReplicationService::new(pool.clone(), config.clone()),
-            multi_region: MultiRegionService::new(pool.clone(), config.clone()),
-            circuit_breaker: CircuitBreakerService::new(config.clone()),
-            chaos: ChaosEngineeringService::new(pool.clone(), config.clone()),
+            health: HealthCheckService::new(pool.clone(), Arc::clone(&config_for_services)),
+            failover: FailoverService::new(pool.clone(), Arc::clone(&config_for_services)),
+            backup: BackupService::new(pool.clone(), Arc::clone(&config_for_services)),
+            replication: ReplicationService::new(pool.clone(), Arc::clone(&config_for_services)),
+            multi_region: MultiRegionService::new(pool.clone(), Arc::clone(&config_for_services)),
+            circuit_breaker: CircuitBreakerService::new(Arc::clone(&config_for_services)),
+            chaos: ChaosEngineeringService::new(pool.clone(), Arc::clone(&config_for_services)),
             config,
         })
     }

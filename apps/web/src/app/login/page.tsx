@@ -3,6 +3,7 @@
 import { Suspense, useEffect } from 'react';
 import Link from 'next/link';
 import { ArrowRight, CheckCircle2 } from '@/components/ui/icons';
+import { MCaptchaWidget } from '@/components/security/mcaptcha-widget';
 import { useLoginController } from './use-login-controller';
 
 /**
@@ -27,6 +28,9 @@ function LoginPageContent() {
     mfaRequired,
     mfaCode,
     setMfaCode,
+    mcaptchaToken,
+    setMcaptchaToken,
+    mcaptchaError,
     rememberMe,
     setRememberMe,
     lockoutMessage,
@@ -233,6 +237,12 @@ function LoginPageContent() {
                 />
               </div>
             ) : null}
+
+            <MCaptchaWidget
+              token={mcaptchaToken}
+              onTokenChange={setMcaptchaToken}
+              error={mcaptchaError}
+            />
 
             <div className="flex items-start gap-2">
               <input

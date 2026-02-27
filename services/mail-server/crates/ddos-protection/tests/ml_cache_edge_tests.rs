@@ -2,6 +2,8 @@
 //!
 //! Tests designed to catch race conditions, memory issues, and boundary cases.
 
+#![cfg(feature = "ml")]
+
 use ddos_protection::ml_cache::{MlScoreCache, MlCacheConfig};
 use std::time::Duration;
 use std::sync::Arc;

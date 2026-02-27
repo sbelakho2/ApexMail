@@ -128,7 +128,7 @@ export class WebhooksRepository {
             [id, tenantId]
         );
 
-        if (!result.ok) throw result.error;
+        if (!result.ok) throw this.wrapQueryError('find webhook by id', result.error);
         return result.value.rows[0] ? this.mapRow(result.value.rows[0]) : null;
     }
 
@@ -141,7 +141,7 @@ export class WebhooksRepository {
             [tenantId, limit, offset]
         );
 
-        if (!result.ok) throw result.error;
+        if (!result.ok) throw this.wrapQueryError('list tenant webhooks', result.error);
         return result.value.rows.map(row => this.mapRow(row));
     }
 
@@ -533,5 +533,9 @@ export class WebhooksRepository {
             createdAt: new Date(row.created_at as string),
             completedAt: row.completed_at ? new Date(row.completed_at as string) : undefined,
         };
+    }
+
+    private wrapQueryError(action: string, cause: Error): Error {
+        return new Error(`Webhook repository failed to ${action}: ${cause.message}`, { cause });
     }
 }

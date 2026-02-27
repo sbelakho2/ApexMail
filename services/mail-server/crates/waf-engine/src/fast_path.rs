@@ -8,16 +8,16 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use std::sync::OnceLock;
 
 /// Keywords that suggest potential SQL injection
-static SQLI_PATTERNS: OnceLock<AhoCorasick> = OnceLock::new();
+static SQLI_PATTERNS: OnceLock<Option<AhoCorasick>> = OnceLock::new();
 
 /// Keywords that suggest potential XSS attacks
-static XSS_PATTERNS: OnceLock<AhoCorasick> = OnceLock::new();
+static XSS_PATTERNS: OnceLock<Option<AhoCorasick>> = OnceLock::new();
 
 /// Keywords that suggest command injection
-static CMDI_PATTERNS: OnceLock<AhoCorasick> = OnceLock::new();
+static CMDI_PATTERNS: OnceLock<Option<AhoCorasick>> = OnceLock::new();
 
 /// Get or initialize the SQLi pattern matcher
-fn sqli_matcher() -> &'static AhoCorasick {
+fn sqli_matcher() -> Option<&'static AhoCorasick> {
     SQLI_PATTERNS.get_or_init(|| {
         let patterns = [
             // SQL keywords
@@ -40,12 +40,12 @@ fn sqli_matcher() -> &'static AhoCorasick {
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
             .build(&patterns)
-            .expect("valid patterns")
-    })
+            .ok()
+    }).as_ref()
 }
 
 /// Get or initialize the XSS pattern matcher
-fn xss_matcher() -> &'static AhoCorasick {
+fn xss_matcher() -> Option<&'static AhoCorasick> {
     XSS_PATTERNS.get_or_init(|| {
         let patterns = [
             // Script tags
@@ -71,12 +71,12 @@ fn xss_matcher() -> &'static AhoCorasick {
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
             .build(&patterns)
-            .expect("valid patterns")
-    })
+            .ok()
+    }).as_ref()
 }
 
 /// Get or initialize the command injection pattern matcher
-fn cmdi_matcher() -> &'static AhoCorasick {
+fn cmdi_matcher() -> Option<&'static AhoCorasick> {
     CMDI_PATTERNS.get_or_init(|| {
         let patterns = [
             // Shell operators
@@ -102,8 +102,8 @@ fn cmdi_matcher() -> &'static AhoCorasick {
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
             .build(&patterns)
-            .expect("valid patterns")
-    })
+            .ok()
+    }).as_ref()
 }
 
 /// Result of a fast-path check
@@ -135,25 +135,25 @@ pub fn fast_path_check(input: &str) -> FastPathResult {
     let lower = input.to_lowercase();
     
     FastPathResult {
-        has_sqli_patterns: sqli_matcher().is_match(&lower),
-        has_xss_patterns: xss_matcher().is_match(&lower),
-        has_cmdi_patterns: cmdi_matcher().is_match(&lower),
+        has_sqli_patterns: sqli_matcher().map(|m| m.is_match(&lower)).unwrap_or(false),
+        has_xss_patterns: xss_matcher().map(|m| m.is_match(&lower)).unwrap_or(false),
+        has_cmdi_patterns: cmdi_matcher().map(|m| m.is_match(&lower)).unwrap_or(false),
     }
 }
 
 /// Quick check for SQLi patterns only
 pub fn fast_path_sqli(input: &str) -> bool {
-    sqli_matcher().is_match(input)
+    sqli_matcher().map(|m| m.is_match(input)).unwrap_or(false)
 }
 
 /// Quick check for XSS patterns only
 pub fn fast_path_xss(input: &str) -> bool {
-    xss_matcher().is_match(input)
+    xss_matcher().map(|m| m.is_match(input)).unwrap_or(false)
 }
 
 /// Quick check for command injection patterns only
 pub fn fast_path_cmdi(input: &str) -> bool {
-    cmdi_matcher().is_match(input)
+    cmdi_matcher().map(|m| m.is_match(input)).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -205,7 +205,7 @@ mod tests {
             "Load the image file",
         ];
         
-        for input in &benign_inputs {
+        for _input in &benign_inputs {
             // Fast path will flag these, but that's OK - we just want to ensure
             // the heavy parser runs on potentially suspicious input. False positives
             // are filtered by the AST parser, not the fast path.

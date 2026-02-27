@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod dynamic_analyzers;
 pub mod file_inspector;
 pub mod policy;
 pub mod engine;

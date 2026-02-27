@@ -97,10 +97,10 @@ export default function InboxPage() {
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <button className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted/50 font-medium text-muted-foreground transition-colors">
+                    <button aria-label="Sync inbox" className="px-4 py-2 bg-card border border-border rounded-lg text-sm hover:bg-muted/50 font-medium text-muted-foreground transition-colors">
                         Sync Inbox
                     </button>
-                    <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
+                    <button aria-label="Configure inbox AI" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
                         Configure AI
                     </button>
                 </div>
@@ -159,6 +159,7 @@ export default function InboxPage() {
                                     onClick={() => { setSelectedMessage(message); markAsRead(message.id); }}
                                 >
                                     <button
+                                        aria-label={message.starred ? `Unstar message from ${message.fromName}` : `Star message from ${message.fromName}`}
                                         onClick={(e) => { e.stopPropagation(); toggleStar(message.id); }}
                                         className={cn('text-lg transition-colors', message.starred ? 'text-warning' : 'text-muted-foreground/30 hover:text-warning/80')}
                                     >
@@ -253,15 +254,15 @@ export default function InboxPage() {
                         {/* Actions */}
                         <div className="flex gap-2">
                             {selectedMessage.classification === 'interested' && (
-                                <button className="flex-1 px-4 py-2 bg-success text-success-foreground rounded-lg hover:bg-success/90 font-medium transition-colors">
+                                <button aria-label="Schedule demo for interested lead" className="flex-1 px-4 py-2 bg-success text-success-foreground rounded-lg hover:bg-success/90 font-medium transition-colors">
                                     Schedule Demo
                                 </button>
                             )}
-                            <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors">
+                            <button aria-label="Reply to this message" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 font-medium transition-colors">
                                 Reply
                             </button>
                             {selectedMessage.leadId && (
-                                <button className="px-4 py-2 bg-muted text-muted-foreground rounded-lg hover:bg-muted/80 font-medium transition-colors">
+                                <button aria-label="View associated lead" className="px-4 py-2 bg-muted text-muted-foreground rounded-lg hover:bg-muted/80 font-medium transition-colors">
                                     View Lead
                                 </button>
                             )}

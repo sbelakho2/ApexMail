@@ -173,9 +173,9 @@ mod billing_tests {
 
         // Verify PAYG calculation
         let (email_cost, api_cost, total) = payg.calculate(5_000, 50_000);
-        assert!(email_cost > 0.0, "should charge for 5k emails");
-        assert_eq!(api_cost, 0.0, "50k API calls should be within free tier");
-        assert!((total - email_cost).abs() < f64::EPSILON);
+        assert!(email_cost > 0, "should charge for 5k emails");
+        assert_eq!(api_cost, 0, "50k API calls should be within free tier");
+        assert_eq!(total, email_cost);
     }
 
     #[test]
@@ -218,7 +218,8 @@ mod devex_tests {
 
     #[test]
     fn test_devex_webhook_sign() {
-        let tester = devex_service::webhook_tester::WebhookTester::new("whsec_test123".into());
+        let tester = devex_service::webhook_tester::WebhookTester::new("whsec_test123".into())
+            .expect("valid webhook secret");
         let payload = devex_service::webhook_tester::WebhookTester::build_test_payload("email.delivered");
         let body = serde_json::to_vec(&payload).unwrap();
 
@@ -345,8 +346,8 @@ mod ops_tests {
         assert!(score.score > 50.0, "good sender should score > 50, got {}", score.score);
     }
 
-    #[test]
-    fn test_ops_warmup() {
+    #[tokio::test]
+    async fn test_ops_warmup() {
         let mgr = ops_service::warmup::IpWarmupManager::new_in_memory();
         let schedule = mgr.create_schedule_sync("192.168.1.1", 100_000, 14);
         assert_eq!(schedule.ip, "192.168.1.1");

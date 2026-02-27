@@ -127,7 +127,7 @@ mod tests {
                 success: true,
                 tls_fingerprint: None,
             };
-            history.record(&event);
+            history.record(event);
         }
         history
     }

@@ -14,8 +14,20 @@ const WEIGHT_CLARITY: f64 = 0.25;
 const WEIGHT_ANTI_SPAM: f64 = 0.20;
 
 /// Optimal subject line length range.
-const OPTIMAL_MIN_LEN: usize = 30;
-const OPTIMAL_MAX_LEN: usize = 60;
+static OPTIMAL_MIN_LEN: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("ANALYTICS_SUBJECT_OPTIMAL_MIN_LEN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(30)
+});
+static OPTIMAL_MAX_LEN: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("ANALYTICS_SUBJECT_OPTIMAL_MAX_LEN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(60)
+});
 
 /// Baseline open rate (industry average ~20%).
 const BASELINE_OPEN_RATE: f64 = 0.20;
@@ -179,12 +191,12 @@ pub fn classify_tokens(tokens: &[String]) -> Vec<TokenAnalysis> {
 
 /// Score based on subject line length.
 pub fn score_length(len: usize) -> f64 {
-    if len >= OPTIMAL_MIN_LEN && len <= OPTIMAL_MAX_LEN {
+    if len >= *OPTIMAL_MIN_LEN && len <= *OPTIMAL_MAX_LEN {
         100.0
-    } else if len < OPTIMAL_MIN_LEN {
-        (len as f64 / OPTIMAL_MIN_LEN as f64) * 100.0
+    } else if len < *OPTIMAL_MIN_LEN {
+        (len as f64 / *OPTIMAL_MIN_LEN as f64) * 100.0
     } else {
-        let excess = len - OPTIMAL_MAX_LEN;
+        let excess = len - *OPTIMAL_MAX_LEN;
         (100.0 - excess as f64 * 2.0).max(20.0)
     }
 }

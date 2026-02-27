@@ -589,6 +589,7 @@ impl ContentScanner {
                     }
                 }
             }
+            }
         }
 
         // Sender analysis: display name vs email domain mismatch
@@ -1286,7 +1287,8 @@ mod tests {
     fn test_fast_check_skips_clean_text() {
         // The combined regex should NOT match on clean text
         let Some(regex) = FAST_SPAM_CHECK.as_ref() else {
-            panic!("FAST_SPAM_CHECK regex missing");
+            assert!(FAST_SPAM_CHECK.is_some(), "FAST_SPAM_CHECK regex missing");
+            return;
         };
         assert!(!regex.is_match("Hello, this is a normal monthly newsletter about technology."));
     }
@@ -1294,7 +1296,8 @@ mod tests {
     #[test]
     fn test_fast_check_matches_spam_text() {
         let Some(regex) = FAST_SPAM_CHECK.as_ref() else {
-            panic!("FAST_SPAM_CHECK regex missing");
+            assert!(FAST_SPAM_CHECK.is_some(), "FAST_SPAM_CHECK regex missing");
+            return;
         };
         assert!(regex.is_match("Congratulations! You are a winner of $1000!"));
     }

@@ -66,7 +66,7 @@ services:
     command: >
       sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$${REDIS_PASSWORD}\""
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-apexmail_dev_redis}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     volumes:
       - redis_data:/data
     # SECURITY: Port exposure controlled via environment variable
@@ -243,7 +243,7 @@ services:
   # ===========================================================================
   prometheus:
     # SECURITY: Pin to specific version to ensure reproducible builds
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.55.1
     container_name: apexmail-prometheus
     restart: unless-stopped
     volumes:
@@ -287,7 +287,7 @@ services:
       - grafana_data:/var/lib/grafana
     environment:
       # SECURITY: Set GRAFANA_PASSWORD in production - no weak defaults
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:?GRAFANA_USER must be set}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: false
       GF_SECURITY_DISABLE_GRAVATAR: true
@@ -390,9 +390,14 @@ services:
     container_name: apexmail-node-exporter
     restart: unless-stopped
     command:
-      - '--path.rootfs=/host'
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/host/root'
+      - '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|run/.+)($|/)'
     volumes:
-      - /:/host:ro,rslave
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
     networks:
       - apexmail_monitoring
     profiles:

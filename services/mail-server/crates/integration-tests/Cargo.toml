@@ -20,6 +20,15 @@ pattern-matcher = { path = "../pattern-matcher" }
 apexmail-rate-limiter = { path = "../rate-limiter" }
 template-renderer = { path = "../template-renderer" }
 
+# Security crates for integration testing
+waf-engine = { path = "../waf-engine" }
+ids-engine = { path = "../ids-engine" }
+spam-filter = { path = "../spam-filter" }
+dlp-engine = { path = "../dlp-engine" }
+sandbox = { path = "../sandbox" }
+ato-protection = { path = "../ato-protection" }
+threat-intel = { path = "../threat-intel" }
+
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
@@ -29,3 +38,5 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 hyper = "1"
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
+dashmap = { workspace = true }

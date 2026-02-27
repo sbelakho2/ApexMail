@@ -53,6 +53,14 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; d
     archived: { label: 'Archived', bg: 'bg-muted/50', text: 'text-muted-foreground', dot: 'bg-muted-foreground/50' },
 };
 
+const CONTENT_FORM_SCHEMA = {
+    minTitleLength: 3,
+    slugPattern: /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
+    minAuthorLength: 2,
+    minExcerptLength: 10,
+    minContentLength: 20,
+};
+
 function ContentPageContent() {
     const dialog = useDialog();
     const searchParams = useSearchParams();
@@ -65,6 +73,7 @@ function ContentPageContent() {
     // Editor state
     const [editingItem, setEditingItem] = useState<ContentItem | null>(null);
     const [isCreating, setIsCreating] = useState(false);
+    const [editorFormError, setEditorFormError] = useState('');
 
     const loadData = useCallback(async () => {
         try {
@@ -372,16 +381,43 @@ function ContentPageContent() {
                                 e.preventDefault();
                                 const form = e.target as HTMLFormElement;
                                 const formData = new FormData(form);
+                                const title = (formData.get('title') as string).trim();
+                                const slug = (formData.get('slug') as string).trim();
+                                const author = (formData.get('author') as string).trim();
+                                const excerpt = (formData.get('excerpt') as string).trim();
+                                const contentBody = (formData.get('content') as string).trim();
+
+                                if (title.length < CONTENT_FORM_SCHEMA.minTitleLength) {
+                                    setEditorFormError(`Title must be at least ${CONTENT_FORM_SCHEMA.minTitleLength} characters.`);
+                                    return;
+                                }
+                                if (!CONTENT_FORM_SCHEMA.slugPattern.test(slug)) {
+                                    setEditorFormError('Slug must be lowercase and use hyphens only.');
+                                    return;
+                                }
+                                if (author.length < CONTENT_FORM_SCHEMA.minAuthorLength) {
+                                    setEditorFormError(`Author must be at least ${CONTENT_FORM_SCHEMA.minAuthorLength} characters.`);
+                                    return;
+                                }
+                                if (excerpt.length < CONTENT_FORM_SCHEMA.minExcerptLength) {
+                                    setEditorFormError(`Excerpt must be at least ${CONTENT_FORM_SCHEMA.minExcerptLength} characters.`);
+                                    return;
+                                }
+                                if (contentBody.length < CONTENT_FORM_SCHEMA.minContentLength) {
+                                    setEditorFormError(`Content must be at least ${CONTENT_FORM_SCHEMA.minContentLength} characters.`);
+                                    return;
+                                }
+                                setEditorFormError('');
                                 
                                 const itemData = {
                                     id: editingItem?.id || `c${Date.now()}`,
-                                    title: formData.get('title') as string,
-                                    slug: formData.get('slug') as string,
+                                    title,
+                                    slug,
                                     type: formData.get('type') as ContentItem['type'],
                                     status: formData.get('status') as ContentItem['status'],
-                                    excerpt: formData.get('excerpt') as string,
-                                    content: formData.get('content') as string,
-                                    author: formData.get('author') as string,
+                                    excerpt,
+                                    content: contentBody,
+                                    author,
                                     category: formData.get('category') as string || undefined,
                                     tags: (formData.get('tags') as string).split(',').map(t => t.trim()).filter(Boolean),
                                     publishedAt: editingItem?.publishedAt,
@@ -403,6 +439,11 @@ function ContentPageContent() {
                                 setIsCreating(false);
                             }}
                         >
+                            {editorFormError ? (
+                                <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+                                    {editorFormError}
+                                </div>
+                            ) : null}
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div className="sm:col-span-2">
                                     <label className="block text-sm font-medium text-muted-foreground mb-1">Title</label>

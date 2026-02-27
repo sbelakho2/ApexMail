@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use moka::sync::Cache;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::time::sleep;
@@ -41,7 +41,7 @@ const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 /// Email processor for sending emails from the queue.
 pub struct EmailProcessor {
     db: PgPool,
-    #[allow(dead_code)]
+    #[allow(unused)]
     redis: RedisPool,
     config: EmailConfig,
     transport: Box<dyn EmailTransport>,
@@ -51,9 +51,9 @@ pub struct EmailProcessor {
 
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
-    #[allow(dead_code)]
+    #[allow(unused)]
     warmup_day_cache: Cache<String, i32>,
-    dkim_keys: Mutex<HashMap<String, DkimConfig>>,
+    dkim_keys: RwLock<HashMap<String, DkimConfig>>,
     domain_cache: Cache<String, Domain>,
 
     // Circuit breakers for SMTP endpoints
@@ -64,7 +64,7 @@ pub struct EmailProcessor {
     error_cooldown_until: AtomicI64,
 
     // Warmup counters (domain_id -> today's send count)
-    warmup_counters: Mutex<HashMap<String, i64>>,
+    warmup_counters: RwLock<HashMap<String, i64>>,
 }
 
 impl EmailProcessor {
@@ -95,7 +95,7 @@ impl EmailProcessor {
                 .max_capacity(1000)
                 .time_to_live(Duration::from_secs(3600))
                 .build(),
-            dkim_keys: Mutex::new(HashMap::new()),
+            dkim_keys: RwLock::new(HashMap::new()),
             domain_cache: Cache::builder()
                 .max_capacity(1000)
                 .time_to_live(Duration::from_secs(300))
@@ -103,7 +103,7 @@ impl EmailProcessor {
             smtp_circuit_breaker,
             recent_outcomes: Mutex::new(Vec::new()),
             error_cooldown_until: AtomicI64::new(0),
-            warmup_counters: Mutex::new(HashMap::new()),
+            warmup_counters: RwLock::new(HashMap::new()),
         })
     }
 
@@ -450,7 +450,7 @@ impl EmailProcessor {
         let limits = WarmupLimits::for_day(domain.warmup_day);
 
         // Get and increment current count
-        let mut counters = self.warmup_counters.lock().unwrap_or_else(|e| e.into_inner());
+        let mut counters = self.warmup_counters.write().unwrap_or_else(|e| e.into_inner());
         let current = counters.entry(job.domain_id.clone()).or_insert(0);
 
         if *current >= limits.daily_limit {
@@ -548,7 +548,7 @@ impl EmailProcessor {
                 private_key: key.clone(),
             }).or_else(|| {
                 // Fallback: check pre-loaded dkim_keys map
-                let dkim_keys = self.dkim_keys.lock().unwrap_or_else(|e| e.into_inner());
+                let dkim_keys = self.dkim_keys.read().unwrap_or_else(|e| e.into_inner());
                 dkim_keys.get(&domain.id).cloned()
             })
         } else {
@@ -819,7 +819,7 @@ impl EmailProcessor {
         .fetch_all(&self.db)
         .await?;
 
-        let mut dkim_keys = self.dkim_keys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dkim_keys = self.dkim_keys.write().unwrap_or_else(|e| e.into_inner());
         dkim_keys.clear();
 
         for (id, domain, selector, key) in keys {

@@ -7,6 +7,7 @@ use ops_service::trust::{TenantMetrics, TrustScorer};
 use ops_service::types::ServiceStatus;
 use ops_service::warmup::IpWarmupManager;
 use rand::Rng;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 #[test]
@@ -98,10 +99,11 @@ fn fuzz_health_check_states() {
     }
 }
 
-#[test]
-fn fuzz_warmup_schedule_valid() {
+#[tokio::test]
+async fn fuzz_warmup_schedule_valid() {
     // Warmup calculations must always produce valid volumes (>= 0).
-    let manager = IpWarmupManager::new_in_memory();
+    let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
+    let manager = IpWarmupManager::new(pool);
     let mut rng = rand::thread_rng();
     for _ in 0..5_000 {
         let ip = format!("192.168.{}.{}", rng.gen_range(0..=255u8), rng.gen_range(1..=255u8));

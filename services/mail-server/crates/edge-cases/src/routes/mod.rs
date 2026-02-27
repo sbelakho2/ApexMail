@@ -72,7 +72,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn require_api_key(
     State(state): State<Arc<AppState>>,
-    mut request: axum::http::Request<axum::body::Body>,
+    request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, StatusCode> {
     let path = request.uri().path();

@@ -612,7 +612,7 @@ async fn encryption_rotate(
 
 #[derive(Deserialize)]
 struct CreatePolicyRequest {
-    #[allow(dead_code)]
+    #[allow(unused)]
     organization_id: String,
     table_name: String,
     fields: Vec<String>,

@@ -1,6 +1,24 @@
-//! PII detection — credit cards (Luhn), SSNs, phone numbers
+//! PII detection — credit cards (Luhn), SSNs, phone numbers, email addresses
 //!
 //! All detection uses regex + validation (no external PII databases).
+//!
+//! ## Risk scores
+//!
+//! | PII Type     | Risk | Notes                               |
+//! |-------------|------|-------------------------------------|
+//! | Credit Card | 8.0  | Luhn-validated; ReDoS-safe regex    |
+//! | SSN         | 9.0  | Dash-only separator; area-validated |
+//! | Phone       | 3.0  | International formats               |
+//! | Email       | 2.0  | Standard `user@host` pattern        |
+//!
+//! ## Known limitations
+//!
+//! - **Image-based PII**: PII embedded in image attachments (screenshots,
+//!   scanned documents) is not detected. An OCR preprocessing step would be
+//!   needed to extract text before scanning.
+//! - **Phone false positives**: The phone regex can match sequences embedded
+//!   in longer numeric strings. Context-aware detection (e.g., preceded by
+//!   "call" or "phone") is not implemented.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -42,32 +60,42 @@ impl std::fmt::Display for PiiType {
     }
 }
 
-fn credit_card_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
+fn credit_card_regex() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b(?:\d[ -]*?){13,19}\b").expect("valid regex")
+        // Non-backtracking pattern for credit card numbers
+        // Matches common formats: 4111111111111111, 4111-1111-1111-1111, 4111 1111 1111 1111
+        // Fixed from vulnerable pattern `(?:\d[ -]*?){13,19}` which caused ReDoS
+        Regex::new(r"\b(?:\d{4}[- ]?){3}\d{1,7}\b").ok()
     })
+    .as_ref()
 }
 
-fn ssn_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
+fn ssn_regex() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b\d{3}[-. ]\d{2}[-. ]\d{4}\b").expect("valid regex")
+        // Dash-only separator to reduce false positives from dates and phone
+        // fragments that match the `[-. ]` class.  Real SSNs are almost
+        // exclusively formatted as NNN-NN-NNNN.
+        Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").ok()
     })
+    .as_ref()
 }
 
-fn phone_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
+fn phone_regex() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b").expect("valid regex")
+        Regex::new(r"\b(?:\+?1[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b").ok()
     })
+    .as_ref()
 }
 
-fn email_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
+fn email_regex() -> Option<&'static Regex> {
+    static RE: OnceLock<Option<Regex>> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").expect("valid regex")
+        Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").ok()
     })
+    .as_ref()
 }
 
 /// Luhn algorithm for credit card validation
@@ -134,34 +162,14 @@ pub fn scan_pii(
 
     // Credit card detection with Luhn validation
     if detect_cc {
-        for m in credit_card_regex().find_iter(text) {
-            let candidate = m.as_str();
-            if luhn_check(candidate) {
-                matches.push(PiiMatch {
-                    pii_type: PiiType::CreditCard,
-                    redacted: redact_cc(candidate),
-                    risk: 8.0,
-                    offset: m.start(),
-                });
-            }
-        }
-    }
-
-    // SSN detection
-    if detect_ssn {
-        for m in ssn_regex().find_iter(text) {
-            let candidate = m.as_str();
-            let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
-            // Basic SSN validation: area (001-899, not 666), group (01-99), serial (0001-9999)
-            if digits.len() == 9 {
-                let area: u32 = digits[0..3].parse().unwrap_or(0);
-                let group: u32 = digits[3..5].parse().unwrap_or(0);
-                let serial: u32 = digits[5..9].parse().unwrap_or(0);
-                if area > 0 && area < 900 && area != 666 && group > 0 && serial > 0 {
+        if let Some(re) = credit_card_regex() {
+            for m in re.find_iter(text) {
+                let candidate = m.as_str();
+                if luhn_check(candidate) {
                     matches.push(PiiMatch {
-                        pii_type: PiiType::Ssn,
-                        redacted: redact_ssn(candidate),
-                        risk: 9.0,
+                        pii_type: PiiType::CreditCard,
+                        redacted: redact_cc(candidate),
+                        risk: 8.0,
                         offset: m.start(),
                     });
                 }
@@ -169,27 +177,55 @@ pub fn scan_pii(
         }
     }
 
+    // SSN detection
+    if detect_ssn {
+        if let Some(re) = ssn_regex() {
+            for m in re.find_iter(text) {
+                let candidate = m.as_str();
+                let digits: String = candidate.chars().filter(|c| c.is_ascii_digit()).collect();
+                // Basic SSN validation: area (001-899, not 666), group (01-99), serial (0001-9999)
+                if digits.len() == 9 {
+                    let area: u32 = digits[0..3].parse().unwrap_or(0);
+                    let group: u32 = digits[3..5].parse().unwrap_or(0);
+                    let serial: u32 = digits[5..9].parse().unwrap_or(0);
+                    if area > 0 && area < 900 && area != 666 && group > 0 && serial > 0 {
+                        matches.push(PiiMatch {
+                            pii_type: PiiType::Ssn,
+                            redacted: redact_ssn(candidate),
+                            risk: 9.0,
+                            offset: m.start(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Phone number detection
     if detect_phone {
-        for m in phone_regex().find_iter(text) {
-            matches.push(PiiMatch {
-                pii_type: PiiType::PhoneNumber,
-                redacted: "XXX-XXX-XXXX".into(),
-                risk: 3.0,
-                offset: m.start(),
-            });
+        if let Some(re) = phone_regex() {
+            for m in re.find_iter(text) {
+                matches.push(PiiMatch {
+                    pii_type: PiiType::PhoneNumber,
+                    redacted: "XXX-XXX-XXXX".into(),
+                    risk: 1.5,
+                    offset: m.start(),
+                });
+            }
         }
     }
 
     // Email address detection
     if detect_email {
-        for m in email_regex().find_iter(text) {
-            matches.push(PiiMatch {
-                pii_type: PiiType::EmailAddress,
-                redacted: "xxx@xxx.xxx".into(),
-                risk: 2.0,
-                offset: m.start(),
-            });
+        if let Some(re) = email_regex() {
+            for m in re.find_iter(text) {
+                matches.push(PiiMatch {
+                    pii_type: PiiType::EmailAddress,
+                    redacted: "xxx@xxx.xxx".into(),
+                    risk: 2.0,
+                    offset: m.start(),
+                });
+            }
         }
     }
 

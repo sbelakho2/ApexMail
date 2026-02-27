@@ -22,22 +22,28 @@ rule_files:
 scrape_configs:
   # API Service metrics
   - job_name: 'apexmail-api'
-    static_configs:
-      - targets: ['api:3000']
+    dns_sd_configs:
+      - names: ['api']
+        type: A
+        port: 3000
     metrics_path: '/metrics'
     scrape_interval: 10s
 
   # Worker metrics
   - job_name: 'apexmail-worker'
-    static_configs:
-      - targets: ['worker:9090']
+    dns_sd_configs:
+      - names: ['worker']
+        type: A
+        port: 9090
     metrics_path: '/metrics'
     scrape_interval: 10s
 
   # Tracking service metrics
   - job_name: 'apexmail-tracking'
-    static_configs:
-      - targets: ['tracking:9092']
+    dns_sd_configs:
+      - names: ['tracking']
+        type: A
+        port: 9092
     metrics_path: '/metrics'
     scrape_interval: 10s
 
@@ -77,5 +83,7 @@ scrape_configs:
 
 alerting:
   alertmanagers:
-    - static_configs:
-        - targets: ['alertmanager:9093']
+    - dns_sd_configs:
+        - names: ['alertmanager']
+          type: A
+          port: 9093

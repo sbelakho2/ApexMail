@@ -32,10 +32,16 @@ enum SqlToken {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SqlKeyword {
     Select, From, Where, And, Or, Union, All, Insert, Update, Delete,
-    Drop, Alter, Create, Table, Into, Values, Set, Exec, Execute,
+    Drop, Alter, Create, Table, Into, Values, Set, Exec,
     Having, Group, Order, By, Like, In, Between, Is, Null, Not,
     Sleep, Benchmark, Waitfor, Delay, If, Case, When, Then, Else,
-    Load, File, Outfile, Dumpfile, Information, Schema,
+    Load, File, Outfile, Dumpfile, Information,
+    // PostgreSQL/database-specific blind injection functions
+    PgSleep,       // pg_sleep() - PostgreSQL
+    DbmsLock,      // dbms_lock.sleep() - Oracle
+    UtlHttp,       // UTL_HTTP.request() - Oracle
+    Xor,           // XOR operator (MySQL boolean injection)
+    Regexp, Rlike, // REGEXP/RLIKE (MySQL pattern matching)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,7 +63,7 @@ enum SqlOp {
 /// Analyze input for SQL injection patterns.
 /// Returns a list of detected threats with severity scores.
 pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(7);
     let lower = input.to_lowercase();
     let tokens = tokenize_sql(&lower);
 
@@ -150,7 +156,7 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 
 /// Tokenize an input string into SQL tokens
 fn tokenize_sql(input: &str) -> Vec<SqlToken> {
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(input.len().min(256));
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
@@ -326,6 +332,13 @@ fn match_keyword(word: &str) -> Option<SqlKeyword> {
         "outfile" => Some(SqlKeyword::Outfile),
         "dumpfile" => Some(SqlKeyword::Dumpfile),
         "information_schema" => Some(SqlKeyword::Information),
+        // Database-specific blind injection functions
+        "pg_sleep" => Some(SqlKeyword::PgSleep),
+        "dbms_lock" => Some(SqlKeyword::DbmsLock),
+        "utl_http" => Some(SqlKeyword::UtlHttp),
+        "xor" => Some(SqlKeyword::Xor),
+        "regexp" => Some(SqlKeyword::Regexp),
+        "rlike" => Some(SqlKeyword::Rlike),
         _ => None,
     }
 }
@@ -444,29 +457,155 @@ fn detect_stacked_queries(tokens: &[SqlToken]) -> bool {
 }
 
 /// Detect inline comment evasion (e.g., UN/**/ION SE/**/LECT)
+/// 
+/// Works by stripping all inline comments and checking if the resulting
+/// string contains SQL keywords, which indicates evasion was attempted.
 fn detect_comment_evasion(input: &str) -> bool {
-    // Check for inline comments between SQL keywords
-    let patterns = [
-        "un/**/ion", "se/**/lect", "or/**/der", "up/**/date",
-        "in/**/sert", "de/**/lete", "dr/**/op",
-    ];
-    for p in &patterns {
-        if input.contains(p) {
-            return true;
-        }
-    }
-    // Check for MySQL conditional comments
+    // Check for MySQL conditional comments (always suspicious)
     if input.contains("/*!") {
         return true;
     }
-    false
+    
+    // If no SQL comment markers, no evasion possible
+    if !input.contains("/*") && !input.contains("--") && !input.contains('#') {
+        return false;
+    }
+    
+    // Strip comments and compare a compacted representation (letters/digits only).
+    // This catches token stitching attacks such as:
+    //   UN--x\nION SE--y\nLECT
+    // where post-strip text effectively becomes UNION SELECT.
+    let collapsed = strip_sql_comments(input);
+
+    let compact = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+
+    let input_compact = compact(input);
+    let collapsed_compact = compact(&collapsed);
+
+    let input_lower = input.to_lowercase();
+    let collapsed_lower = collapsed.to_lowercase();
+
+    // Classic keyword stitching via comments, e.g. UN/**/ION or SE/**/LECT.
+    let dangerous_keywords = [
+        "union", "select", "insert", "update", "delete", "drop",
+        "alter", "create", "exec", "execute", "sleep", "benchmark",
+        "waitfor", "load_file", "outfile", "pg_sleep",
+    ];
+    if dangerous_keywords
+        .iter()
+        .any(|kw| collapsed_lower.contains(kw) && !input_lower.contains(kw))
+    {
+        return true;
+    }
+
+    if input_compact == collapsed_compact {
+        return false;
+    }
+
+    let dangerous_sequences = [
+        "unionselect",
+        "insertinto",
+        "droptable",
+        "truncate",
+        "loadfile",
+        "outfile",
+        "benchmark",
+        "waitfordelay",
+        "pgsleep",
+    ];
+
+    dangerous_sequences.iter().any(|seq| {
+        collapsed_compact.contains(seq) && !input_compact.contains(seq)
+    })
+}
+
+/// Strip SQL comments from input, collapsing adjacent text.
+///
+/// Handles:
+/// - `/* ... */` block comments
+/// - `-- ...` line comments
+/// - `# ...` line comments
+fn strip_sql_comments(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            result.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            result.push(c);
+            i += 1;
+            continue;
+        }
+
+        if !in_single_quote && !in_double_quote {
+            // Block comment: /* ... */
+            if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+                i += 2;
+                while i + 1 < chars.len() {
+                    if chars[i] == '*' && chars[i + 1] == '/' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Line comment: -- ...
+            if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+                i += 2;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Line comment: # ...
+            if c == '#' {
+                i += 1;
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        result.push(c);
+        i += 1;
+    }
+
+    result
 }
 
 /// Detect blind/time-based injection
+/// 
+/// Covers time-based blind injection across multiple database platforms:
+/// - MySQL: SLEEP(), BENCHMARK()
+/// - MSSQL: WAITFOR DELAY
+/// - PostgreSQL: pg_sleep()
+/// - Oracle: dbms_lock.sleep(), UTL_HTTP.request()
 fn detect_blind_injection(tokens: &[SqlToken]) -> bool {
     for token in tokens {
         if matches!(token, SqlToken::Keyword(
-            SqlKeyword::Sleep | SqlKeyword::Benchmark | SqlKeyword::Waitfor
+            SqlKeyword::Sleep | SqlKeyword::Benchmark | SqlKeyword::Waitfor |
+            SqlKeyword::Delay | SqlKeyword::PgSleep | SqlKeyword::DbmsLock |
+            SqlKeyword::UtlHttp
         )) {
             return true;
         }
@@ -508,11 +647,12 @@ fn detect_dangerous_functions(tokens: &[SqlToken]) -> bool {
     false
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
+/// Safely truncate a string at character boundary (not byte offset).
+/// Prevents panic on multi-byte UTF-8 sequences.
+fn truncate(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
+        None => s.to_string(),
     }
 }
 
@@ -580,10 +720,7 @@ mod tests {
 
     #[test]
     fn test_string_tautology_gt() {
-        // Direct test of the string comparison tautology detection.
-        // Input: alice' OR 'z'>'a'-- (post URL-decode of alice'+OR+'z'>'a'--)
         let results = analyze_sqli("alice' OR 'z'>'a'--", MatchLocation::QueryParam("q".into()));
-        eprintln!("string_tautology_gt results: {:?}", results.iter().map(|r| (r.rule_id, r.score, &r.message)).collect::<Vec<_>>());
         assert!(
             results.iter().any(|r| r.rule_id == 942100),
             "String comparison tautology 'z'>'a' must fire rule 942100"
@@ -591,28 +728,24 @@ mod tests {
     }
 
     #[test]
-    fn test_string_tautology_simple() {
-        // Simplest case — just the comparison without extra prefix
-        let results = analyze_sqli("' OR 'z'>'a' --", MatchLocation::QueryParam("q".into()));
-        eprintln!("string_tautology_simple: {:?}", results.iter().map(|r| (r.rule_id, r.score, &r.message)).collect::<Vec<_>>());
-        // Also print tokens for debugging
-        let lower = "' or 'z'>'a' --";
-        let toks = tokenize_sql(lower);
-        eprintln!("tokens: {:?}", toks);
-        assert!(
-            results.iter().any(|r| r.rule_id == 942100),
-            "Simple 'z'>'a' tautology must fire rule 942100"
-        );
-    }
-
-    #[test]
     fn test_string_tautology_neq() {
         let results = analyze_sqli("active' OR 'x'!='y'--", MatchLocation::QueryParam("f".into()));
-        eprintln!("string_tautology_neq results: {:?}", results.iter().map(|r| (r.rule_id, r.score, &r.message)).collect::<Vec<_>>());
         assert!(
             results.iter().any(|r| r.rule_id == 942100),
             "String NEQ tautology 'x'!='y' must fire rule 942100"
         );
+    }
+
+    #[test]
+    fn test_hash_comment_evasion_detected() {
+        let results = analyze_sqli("UN#x\nION SEL#y\nECT 1,2,3", MatchLocation::Body);
+        assert!(results.iter().any(|r| r.rule_id == 942400));
+    }
+
+    #[test]
+    fn test_double_dash_comment_evasion_detected() {
+        let results = analyze_sqli("UN--x\nION SE--y\nLECT 1,2,3", MatchLocation::Body);
+        assert!(results.iter().any(|r| r.rule_id == 942400));
     }
 }
 

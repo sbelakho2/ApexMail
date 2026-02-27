@@ -15,7 +15,7 @@ import { getLogger, type Logger } from '../logger/index.js';
 export interface HttpRequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
   headers?: Record<string, string>;
-  body?: string | Buffer | Record<string, unknown>;
+  body?: Dispatcher.BodyInit | Record<string, unknown>;
   timeout?: number;
   retries?: number;
   retryDelay?: number;
@@ -151,11 +151,21 @@ export class HttpClient {
     return breaker;
   }
 
+  private sanitizeUrlForLogs(inputUrl: string): string {
+    try {
+      const parsed = new URL(inputUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return inputUrl.split('?')[0] ?? inputUrl;
+    }
+  }
+
   async request<T = unknown>(
     url: string,
     options: HttpRequestOptions = {}
   ): Promise<Result<HttpResponse<T>, Error>> {
     const fullUrl = this.baseUrl ? new URL(url, this.baseUrl).toString() : url;
+    const safeLogUrl = this.sanitizeUrlForLogs(fullUrl);
     const parsedUrl = new URL(fullUrl);
     const circuitBreaker = this.getCircuitBreaker(parsedUrl.host);
 
@@ -182,7 +192,7 @@ export class HttpClient {
           ...options.headers,
         };
 
-        let body: string | Buffer | undefined;
+        let body: Dispatcher.BodyInit | undefined;
         if (options.body) {
           if (typeof options.body === 'object' && !Buffer.isBuffer(options.body)) {
             body = JSON.stringify(options.body);
@@ -223,7 +233,7 @@ export class HttpClient {
 
         this.logger.debug('HTTP request completed', {
           method,
-          url: fullUrl,
+          url: safeLogUrl,
           status: response.statusCode,
           latencyMs,
           attempt,
@@ -244,7 +254,7 @@ export class HttpClient {
             continue;
           }
 
-          return Result.err(new Error(`HTTP ${response.statusCode} from ${fullUrl}`));
+          return Result.err(new Error(`HTTP ${response.statusCode} from ${safeLogUrl}`));
         } else {
           circuitBreaker.recordSuccess();
         }

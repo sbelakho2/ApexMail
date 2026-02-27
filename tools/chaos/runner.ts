@@ -16,7 +16,7 @@ const config = {
     port: parseInt(process.env.DB_PORT ?? '5432', 10),
     database: process.env.DB_NAME ?? 'apexmail',
     user: process.env.DB_USER ?? 'apexmail',
-    password: process.env.DB_PASSWORD ?? '',
+    password: process.env.DB_PASSWORD,
   },
   redis: {
     host: process.env.REDIS_HOST ?? 'localhost',

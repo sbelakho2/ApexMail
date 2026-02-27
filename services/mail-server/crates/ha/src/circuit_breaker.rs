@@ -71,7 +71,7 @@ const DEFAULT_CIRCUITS: &[(&str, u32, u32, u64)] = &[
 /// CircuitBreakerService manages multiple named circuits.
 pub struct CircuitBreakerService {
     circuits: Arc<RwLock<HashMap<String, CircuitRuntime>>>,
-    #[allow(dead_code)]
+    #[allow(unused)]
     config: Arc<Config>,
 }
 

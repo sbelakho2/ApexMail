@@ -29,7 +29,6 @@ impl IpWarmupManager {
     }
 
     /// Create an in-memory-only manager for testing.
-    #[cfg(test)]
     pub fn new_in_memory() -> Self {
         Self {
             db: PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
@@ -78,7 +77,6 @@ impl IpWarmupManager {
     }
 
     /// Create a warmup schedule synchronously (for backwards compatibility in tests).
-    #[cfg(test)]
     pub fn create_schedule_sync(
         &self,
         ip: impl Into<String>,
@@ -181,7 +179,6 @@ impl IpWarmupManager {
     }
 
     /// Advance day synchronously (for backwards compatibility in tests).
-    #[cfg(test)]
     pub fn advance_day_sync(&self, ip: &str) -> bool {
         if let Some(mut entry) = self.schedules.get_mut(ip) {
             let s = entry.value_mut();
@@ -226,8 +223,8 @@ impl IpWarmupManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_create_schedule() {
+    #[tokio::test]
+    async fn test_create_schedule() {
         let mgr = IpWarmupManager::new_in_memory();
         let s = mgr.create_schedule_sync("1.2.3.4", 100_000, 14);
         assert_eq!(s.day, 0);
@@ -236,8 +233,8 @@ mod tests {
         assert!(s.current_volume < 100_000);
     }
 
-    #[test]
-    fn test_exponential_ramp() {
+    #[tokio::test]
+    async fn test_exponential_ramp() {
         let mgr = IpWarmupManager::new_in_memory();
         mgr.create_schedule_sync("10.0.0.1", 50_000, 10);
 
@@ -250,8 +247,8 @@ mod tests {
         assert_eq!(v10, 50_000, "final day should reach target");
     }
 
-    #[test]
-    fn test_warmup_complete() {
+    #[tokio::test]
+    async fn test_warmup_complete() {
         let mgr = IpWarmupManager::new_in_memory();
         mgr.create_schedule_sync("10.0.0.2", 10_000, 3);
 

@@ -223,7 +223,7 @@ function ReportsPageContent() {
             </Card>
 
             {loading ? (
-                <div className="grid gap-4 md:grid-cols-4">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24" />)}</div>
+                <div className="grid gap-4 md:grid-cols-4">{Array.from({ length: 4 }, (_, i) => `report-metric-skeleton-${i}`).map((skeletonId) => <Skeleton key={skeletonId} className="h-24" />)}</div>
             ) : stats && (
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                     {[

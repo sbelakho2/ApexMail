@@ -76,7 +76,7 @@ mod waf_pipeline_integration {
         
         // Fast-path intentionally flags input with quotes for deeper inspection
         // This is by design - it's a pre-filter, not a final determination
-        let fast_result = fast_path_check(request_body);
+        let _fast_result = fast_path_check(request_body);
         // The fast path will likely flag this due to quotes in JSON
         // The important thing is that deep inspection clears it
         

@@ -93,7 +93,7 @@ fn validate_email_edge_cases() {
 fn null_byte_detection_and_sanitization() {
     assert!(!apexmail_lib::validation::has_null_bytes("clean"));
     assert!(apexmail_lib::validation::has_null_bytes("has\0null"));
-    assert!(apexmail_lib::validation::has_null_bytes("has\\u0000null"));
+    assert!(!apexmail_lib::validation::has_null_bytes("has\\u0000null"));
     assert_eq!(apexmail_lib::validation::sanitize_string("he\0lo"), "helo");
 }
 

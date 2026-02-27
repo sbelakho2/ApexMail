@@ -238,7 +238,9 @@ async fn main() -> Result<()> {
     let shutdown_timeout = Duration::from_secs(10);
     let join_all = async {
         for handle in handles {
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                warn!(error = %error, "Processor task join failed during shutdown");
+            }
         }
     };
 

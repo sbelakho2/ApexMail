@@ -2,6 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Temporary policy exception for a recipient domain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlpTemporaryException {
+    /// Recipient domain to which exception applies.
+    pub recipient_domain: String,
+    /// Unix timestamp (seconds) when exception expires.
+    pub expires_at_unix: i64,
+    /// Maximum risk score allowed under this exception.
+    pub max_risk_score: f64,
+    /// Human-readable reason or ticket reference.
+    pub reason: String,
+}
+
 /// DLP engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DlpConfig {
@@ -40,6 +53,21 @@ pub struct DlpConfig {
 
     /// Allowlisted recipient domains (exempt from DLP)
     pub allowlisted_domains: Vec<String>,
+
+    /// Trusted recipient domains (reduced risk multiplier)
+    pub trusted_recipient_domains: Vec<String>,
+
+    /// Partner recipient domains (moderate risk multiplier)
+    pub partner_recipient_domains: Vec<String>,
+
+    /// Risk multiplier for trusted recipient domains
+    pub trusted_domain_risk_multiplier: f64,
+
+    /// Risk multiplier for partner recipient domains
+    pub partner_domain_risk_multiplier: f64,
+
+    /// Expiring temporary exceptions
+    pub temporary_exceptions: Vec<DlpTemporaryException>,
 }
 
 impl Default for DlpConfig {
@@ -68,6 +96,11 @@ impl Default for DlpConfig {
             block_threshold: 10.0,
             max_scan_size: 1024 * 1024,
             allowlisted_domains: Vec::new(),
+            trusted_recipient_domains: Vec::new(),
+            partner_recipient_domains: Vec::new(),
+            trusted_domain_risk_multiplier: 0.5,
+            partner_domain_risk_multiplier: 0.75,
+            temporary_exceptions: Vec::new(),
         }
     }
 }

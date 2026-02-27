@@ -13,3 +13,7 @@ hex = "0.4"
 chrono = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+mail-common = { path = "../mail-common", optional = true }
+
+[features]
+events = ["mail-common"]

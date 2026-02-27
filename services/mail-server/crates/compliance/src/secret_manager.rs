@@ -823,7 +823,7 @@ mod tests {
         })
     }
 
-    fn test_manager() -> SecretManager {
+    fn test_manager() -> Option<SecretManager> {
         let _guard = test_runtime().enter();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -834,26 +834,36 @@ mod tests {
             rotation_days: 90,
             max_versions_to_keep: 10,
         };
-        SecretManager::new(pool, config).expect("test secret manager")
+        let manager = SecretManager::new(pool, config);
+        assert!(manager.is_ok(), "test secret manager should initialize");
+        manager.ok()
     }
 
     #[test]
     fn test_derive_key_deterministic() {
-        let k1 = derive_key("same-key").expect("derive key");
-        let k2 = derive_key("same-key").expect("derive key");
-        assert_eq!(k1, k2);
+        let k1 = derive_key("same-key");
+        let k2 = derive_key("same-key");
+        assert!(k1.is_ok() && k2.is_ok(), "derive key should succeed");
+        if let (Ok(k1), Ok(k2)) = (k1, k2) {
+            assert_eq!(k1, k2);
+        }
     }
 
     #[test]
     fn test_derive_key_different_keys() {
-        let k1 = derive_key("key-a").expect("derive key");
-        let k2 = derive_key("key-b").expect("derive key");
-        assert_ne!(k1, k2);
+        let k1 = derive_key("key-a");
+        let k2 = derive_key("key-b");
+        assert!(k1.is_ok() && k2.is_ok(), "derive key should succeed");
+        if let (Ok(k1), Ok(k2)) = (k1, k2) {
+            assert_ne!(k1, k2);
+        }
     }
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let plaintext = "my-secret-api-key-value";
         let encrypted = mgr.encrypt(plaintext).unwrap();
         let decrypted = mgr.decrypt(&encrypted).unwrap();
@@ -862,7 +872,9 @@ mod tests {
 
     #[test]
     fn test_encrypt_produces_different_ciphertext() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let plaintext = "same-value";
         let e1 = mgr.encrypt(plaintext).unwrap();
         let e2 = mgr.encrypt(plaintext).unwrap();
@@ -875,7 +887,9 @@ mod tests {
 
     #[test]
     fn test_decrypt_tampered_data_fails() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let encrypted = mgr.encrypt("secret").unwrap();
         let mut bytes = B64.decode(&encrypted).unwrap();
         // Tamper with ciphertext
@@ -888,7 +902,9 @@ mod tests {
 
     #[test]
     fn test_decrypt_wrong_key_fails() {
-        let mgr1 = test_manager();
+        let Some(mgr1) = test_manager() else {
+            return;
+        };
         let _guard = test_runtime().enter();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -898,7 +914,11 @@ mod tests {
             encryption_key: "different-master-key-for-testing!!".into(),
             rotation_days: 90,
             max_versions_to_keep: 10,
-        }).expect("test secret manager");
+        });
+        assert!(mgr2.is_ok(), "test secret manager should initialize");
+        let Some(mgr2) = mgr2.ok() else {
+            return;
+        };
 
         let encrypted = mgr1.encrypt("secret-data").unwrap();
         assert!(mgr2.decrypt(&encrypted).is_err());
@@ -906,7 +926,9 @@ mod tests {
 
     #[test]
     fn test_decrypt_too_short_fails() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let short = B64.encode(b"short");
         assert!(mgr.decrypt(&short).is_err());
     }
@@ -947,7 +969,9 @@ mod tests {
 
     #[test]
     fn test_encrypt_empty_string() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let encrypted = mgr.encrypt("").unwrap();
         let decrypted = mgr.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, "");
@@ -955,7 +979,9 @@ mod tests {
 
     #[test]
     fn test_encrypt_unicode() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let plaintext = "秘密のキー🔑";
         let encrypted = mgr.encrypt(plaintext).unwrap();
         let decrypted = mgr.decrypt(&encrypted).unwrap();
@@ -964,7 +990,9 @@ mod tests {
 
     #[test]
     fn test_encrypt_large_value() {
-        let mgr = test_manager();
+        let Some(mgr) = test_manager() else {
+            return;
+        };
         let plaintext = "x".repeat(10_000);
         let encrypted = mgr.encrypt(&plaintext).unwrap();
         let decrypted = mgr.decrypt(&encrypted).unwrap();

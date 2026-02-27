@@ -135,6 +135,7 @@ dependencies = [
  "dotenvy",
  "mail-common",
  "moka",
+ "parking_lot",
  "rand 0.8.5",
  "redis",
  "regex",
@@ -476,11 +477,13 @@ dependencies = [
  "chrono",
  "dashmap 6.1.0",
  "hex",
+ "mail-common",
  "parking_lot",
  "serde",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1330,6 +1333,7 @@ dependencies = [
  "fingerprint",
  "hex",
  "hmac",
+ "mail-common",
  "once_cell",
  "parking_lot",
  "prometheus",
@@ -1514,6 +1518,7 @@ dependencies = [
  "aho-corasick",
  "chrono",
  "hex",
+ "mail-common",
  "regex",
  "serde",
  "sha2",
@@ -1904,18 +1909,26 @@ dependencies = [
  "ai-service",
  "apexmail-lib",
  "apexmail-rate-limiter",
+ "ato-protection",
  "billing-service",
  "chrono",
  "compliance",
+ "dlp-engine",
+ "ids-engine",
  "observability-service",
  "ops-service",
  "pattern-matcher",
  "rand 0.8.5",
  "sales-autopilot",
+ "sandbox",
  "serde_json",
+ "spam-filter",
+ "sqlx",
  "template-renderer",
+ "threat-intel",
  "tokio",
  "uuid",
+ "waf-engine",
 ]
 
 [[package]]
@@ -2540,10 +2553,13 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "chrono",
+ "criterion",
  "dashmap 6.1.0",
  "hex",
+ "mail-common",
  "parking_lot",
  "prometheus",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -2594,24 +2610,33 @@ dependencies = [
  "apexmail-lib",
  "apexmail-rate-limiter",
  "api-server",
+ "ato-protection",
  "axum",
  "billing-service",
  "chrono",
  "compliance",
+ "dashmap 6.1.0",
  "devex-service",
+ "dlp-engine",
  "enterprise",
  "http 1.4.0",
  "http-body-util",
  "hyper",
+ "ids-engine",
  "observability-service",
  "ops-service",
  "pattern-matcher",
  "sales-autopilot",
+ "sandbox",
  "serde_json",
+ "spam-filter",
+ "sqlx",
  "template-renderer",
+ "threat-intel",
  "tokio",
  "tower 0.5.3",
  "uuid",
+ "waf-engine",
 ]
 
 [[package]]
@@ -3474,6 +3499,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 name = "ops-service"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "apexmail-db",
  "apexmail-lib",
  "axum",
@@ -4573,8 +4599,10 @@ dependencies = [
 name = "sandbox"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "chrono",
  "hex",
+ "mail-common",
  "serde",
  "serde_json",
  "sha2",
@@ -4946,9 +4974,11 @@ dependencies = [
  "chrono",
  "dashmap 6.1.0",
  "hex",
+ "mail-common",
  "parking_lot",
  "prometheus",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -4957,6 +4987,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -5024,6 +5055,7 @@ dependencies = [
  "memchr",
  "once_cell",
  "percent-encoding",
+ "rustls 0.23.36",
  "serde",
  "serde_json",
  "sha2",
@@ -5034,6 +5066,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5396,12 +5429,15 @@ dependencies = [
  "chrono",
  "dashmap 6.1.0",
  "hex",
+ "mail-common",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6002,7 +6038,9 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "chrono",
+ "criterion",
  "dashmap 6.1.0",
+ "mail-common",
  "parking_lot",
  "prometheus",
  "rand 0.8.5",
@@ -6014,6 +6052,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]

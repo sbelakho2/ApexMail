@@ -277,9 +277,9 @@ pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, ch
         .unwrap_or_else(|| {
             // Fallback: January 1st of the year at midnight
             chrono::NaiveDate::from_ymd_opt(year, 1, 1)
-                .expect("year out of range")
+                .unwrap_or(chrono::NaiveDate::MIN)
                 .and_hms_opt(0, 0, 0)
-                .expect("0:0:0 is always valid")
+                .unwrap_or_else(|| chrono::NaiveDate::MIN.and_time(chrono::NaiveTime::MIN))
         });
 
     let end_year = if valid_quarter == 4 { year + 1 } else { year };
@@ -287,9 +287,9 @@ pub fn quarter_date_range(quarter: i32, year: i32) -> (chrono::DateTime<Utc>, ch
         .and_then(|d| d.and_hms_opt(0, 0, 0))
         .unwrap_or_else(|| {
             chrono::NaiveDate::from_ymd_opt(end_year, 1, 1)
-                .expect("year out of range")
+                .unwrap_or(chrono::NaiveDate::MIN)
                 .and_hms_opt(0, 0, 0)
-                .expect("0:0:0 is always valid")
+                .unwrap_or_else(|| chrono::NaiveDate::MIN.and_time(chrono::NaiveTime::MIN))
         });
 
     (start.and_utc(), end.and_utc())

@@ -7,7 +7,6 @@
 //! - Per-IP connection rate limiting
 //! - Phase-based timeouts
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,11 +27,17 @@ pub enum SmtpState {
     /// MAIL FROM received
     MailFrom,
     /// RCPT TO received (with recipient count)
-    RcptTo { count: u32 },
+    RcptTo {
+        /// Number of accepted RCPT TO commands in current transaction.
+        count: u32,
+    },
     /// DATA command received, waiting for body
     Data,
     /// Receiving message body data
-    DataReceiving { bytes: usize },
+    DataReceiving {
+        /// Number of DATA bytes received so far for the current message.
+        bytes: usize,
+    },
     /// QUIT received
     Quit,
 }

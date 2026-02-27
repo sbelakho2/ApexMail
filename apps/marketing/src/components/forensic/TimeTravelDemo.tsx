@@ -135,7 +135,7 @@ export function TimeTravelDemo() {
                       </li>
                     ))}
                   </ul>
-                  <button className="w-full btn-primary py-3 rounded-md font-medium text-sm transition-colors">
+                  <button aria-label="Get started with ApexMail" className="w-full btn-primary py-3 rounded-md font-medium text-sm transition-colors">
                     Get Started
                   </button>
                 </div>

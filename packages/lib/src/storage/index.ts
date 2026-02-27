@@ -179,9 +179,10 @@ export class LocalStorageProvider implements StorageProvider {
   async getStream(key: string): Promise<Result<Readable, Error>> {
     try {
       const fullPath = this.getFullPath(key);
-      const exists = await this.exists(key);
-      
-      if (!exists) {
+
+      try {
+        await fs.access(fullPath);
+      } catch {
         return Result.err(new Error(`Object not found: ${key}`));
       }
 

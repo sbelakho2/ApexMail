@@ -110,7 +110,6 @@ export default function ControlPlaneDashboard() {
                 setStats(data);
                 setError(null);
             } catch (err) {
-                console.error('Failed to load dashboard stats:', err);
                 setError(err instanceof Error ? err.message : 'Unknown error');
                 // Set empty stats on error for graceful degradation
                 setStats({

@@ -10,6 +10,9 @@
 
 BEGIN;
 
+LOCK TABLE plans IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE billing_audit_log IN ROW EXCLUSIVE MODE;
+
 -- Update Pro plan pricing to $65/mo (6500 cents, 65000 yearly)
 UPDATE plans SET 
   price_monthly = 6500,

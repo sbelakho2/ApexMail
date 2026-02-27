@@ -14,7 +14,15 @@ pub struct JsonInspectionResult {
     pub parsed_ok: bool,
     /// Error message if parsing failed
     pub error: Option<String>,
+    /// Total field count encountered during parsing
+    pub field_count: usize,
 }
+
+/// Maximum number of fields/values across the entire parsed document.
+/// Prevents exponential fan-out from heavily aliased flat queries (breadth attack).
+const MAX_FIELD_COUNT: usize = 5000;
+/// Maximum total parse nodes (objects/arrays/scalars) to prevent parser fan-out DoS.
+const MAX_NODE_COUNT: usize = 20000;
 
 /// A value extracted from JSON with its path
 #[derive(Debug, Clone)]
@@ -28,9 +36,11 @@ pub struct JsonPathValue {
 /// Extract all string values from a JSON payload for inspection.
 /// This allows the WAF to inspect values nested deep in JSON structures.
 pub fn extract_json_values(json: &str) -> JsonInspectionResult {
-    const MAX_DEPTH: usize = 128; // Prevent stack overflow on deeply nested JSON
+    const MAX_DEPTH: usize = 15; // Prevent stack overflow and query-depth DoS on deeply nested JSON
     
     let mut values = Vec::new();
+    let mut field_count: usize = 0;
+    let mut node_count: usize = 0;
     let trimmed = json.trim();
     
     if trimmed.is_empty() {
@@ -38,6 +48,7 @@ pub fn extract_json_values(json: &str) -> JsonInspectionResult {
             string_values: values,
             parsed_ok: true,
             error: None,
+            field_count: 0,
         };
     }
     
@@ -48,7 +59,7 @@ pub fn extract_json_values(json: &str) -> JsonInspectionResult {
     if let Some(first) = chars.first() {
         match first {
             '{' => {
-                let result = parse_object(&chars, &mut pos, "$", 0, MAX_DEPTH);
+                let result = parse_object(&chars, &mut pos, "$", 0, MAX_DEPTH, &mut field_count, &mut node_count);
                 match result {
                     Ok(v) => values.extend(v),
                     Err(e) => {
@@ -56,12 +67,13 @@ pub fn extract_json_values(json: &str) -> JsonInspectionResult {
                             string_values: values,
                             parsed_ok: false,
                             error: Some(e),
+                            field_count,
                         };
                     }
                 }
             }
             '[' => {
-                let result = parse_array(&chars, &mut pos, "$", 0, MAX_DEPTH);
+                let result = parse_array(&chars, &mut pos, "$", 0, MAX_DEPTH, &mut field_count, &mut node_count);
                 match result {
                     Ok(v) => values.extend(v),
                     Err(e) => {
@@ -69,12 +81,14 @@ pub fn extract_json_values(json: &str) -> JsonInspectionResult {
                             string_values: values,
                             parsed_ok: false,
                             error: Some(e),
+                            field_count,
                         };
                     }
                 }
             }
             '"' => {
                 if let Ok(s) = parse_string(&chars, &mut pos) {
+                    field_count += 1;
                     values.push(JsonPathValue { path: "$".into(), value: s });
                 }
             }
@@ -86,6 +100,7 @@ pub fn extract_json_values(json: &str) -> JsonInspectionResult {
         string_values: values,
         parsed_ok: true,
         error: None,
+        field_count,
     }
 }
 
@@ -142,9 +157,16 @@ fn parse_string(chars: &[char], pos: &mut usize) -> Result<String, String> {
     Err("Unterminated string".into())
 }
 
-fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_depth: usize) -> Result<Vec<JsonPathValue>, String> {
+fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_depth: usize, field_count: &mut usize, node_count: &mut usize) -> Result<Vec<JsonPathValue>, String> {
+    *node_count += 1;
+    if *node_count > MAX_NODE_COUNT {
+        return Err("Maximum node count exceeded (complexity limit)".into());
+    }
     if depth > max_depth {
         return Err("Maximum nesting depth exceeded".into());
+    }
+    if *field_count > MAX_FIELD_COUNT {
+        return Err("Maximum field count exceeded (breadth limit)".into());
     }
     
     let mut values = Vec::new();
@@ -171,6 +193,10 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
         }
         let key = parse_string(chars, pos)?;
         let new_path = format!("{}.{}", path, key);
+        *field_count += 1;
+        if *field_count > MAX_FIELD_COUNT {
+            return Err("Maximum field count exceeded (breadth limit)".into());
+        }
         
         skip_whitespace(chars, pos);
         
@@ -183,7 +209,7 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
         skip_whitespace(chars, pos);
         
         // Parse value
-        values.extend(parse_value(chars, pos, &new_path, depth + 1, max_depth)?);
+        values.extend(parse_value(chars, pos, &new_path, depth + 1, max_depth, field_count, node_count)?);
         
         skip_whitespace(chars, pos);
         
@@ -205,9 +231,16 @@ fn parse_object(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_d
     }
 }
 
-fn parse_array(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_depth: usize) -> Result<Vec<JsonPathValue>, String> {
+fn parse_array(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_depth: usize, field_count: &mut usize, node_count: &mut usize) -> Result<Vec<JsonPathValue>, String> {
+    *node_count += 1;
+    if *node_count > MAX_NODE_COUNT {
+        return Err("Maximum node count exceeded (complexity limit)".into());
+    }
     if depth > max_depth {
         return Err("Maximum nesting depth exceeded".into());
+    }
+    if *field_count > MAX_FIELD_COUNT {
+        return Err("Maximum field count exceeded (breadth limit)".into());
     }
     
     let mut values = Vec::new();
@@ -230,7 +263,7 @@ fn parse_array(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
         skip_whitespace(chars, pos);
         
         let new_path = format!("{}[{}]", path, index);
-        values.extend(parse_value(chars, pos, &new_path, depth + 1, max_depth)?);
+        values.extend(parse_value(chars, pos, &new_path, depth + 1, max_depth, field_count, node_count)?);
         index += 1;
         
         skip_whitespace(chars, pos);
@@ -253,9 +286,16 @@ fn parse_array(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
     }
 }
 
-fn parse_value(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_depth: usize) -> Result<Vec<JsonPathValue>, String> {
+fn parse_value(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_depth: usize, field_count: &mut usize, node_count: &mut usize) -> Result<Vec<JsonPathValue>, String> {
+    *node_count += 1;
+    if *node_count > MAX_NODE_COUNT {
+        return Err("Maximum node count exceeded (complexity limit)".into());
+    }
     if depth > max_depth {
         return Err("Maximum nesting depth exceeded".into());
+    }
+    if *field_count > MAX_FIELD_COUNT {
+        return Err("Maximum field count exceeded (breadth limit)".into());
     }
     
     skip_whitespace(chars, pos);
@@ -267,10 +307,11 @@ fn parse_value(chars: &[char], pos: &mut usize, path: &str, depth: usize, max_de
     match chars[*pos] {
         '"' => {
             let s = parse_string(chars, pos)?;
+            *field_count += 1;
             Ok(vec![JsonPathValue { path: path.into(), value: s }])
         }
-        '{' => parse_object(chars, pos, path, depth, max_depth),
-        '[' => parse_array(chars, pos, path, depth, max_depth),
+        '{' => parse_object(chars, pos, path, depth, max_depth, field_count, node_count),
+        '[' => parse_array(chars, pos, path, depth, max_depth, field_count, node_count),
         't' | 'f' => {
             // true or false
             let word: String = chars[*pos..].iter().take(5).collect();
@@ -316,6 +357,12 @@ pub struct GraphQLInspectionResult {
     pub variables: Vec<JsonPathValue>,
     /// Whether this looks like valid GraphQL
     pub looks_like_graphql: bool,
+    /// Estimated number of GraphQL fields in the request
+    pub field_count: usize,
+    /// Maximum observed GraphQL selection-set depth
+    pub max_depth: usize,
+    /// True when field/depth limits are exceeded
+    pub limit_exceeded: bool,
 }
 
 /// A GraphQL argument with its location
@@ -337,6 +384,9 @@ pub fn extract_graphql_values(body: &str) -> GraphQLInspectionResult {
         string_arguments: Vec::new(),
         variables: Vec::new(),
         looks_like_graphql: false,
+        field_count: 0,
+        max_depth: 0,
+        limit_exceeded: false,
     };
     
     let trimmed = body.trim();
@@ -357,6 +407,9 @@ pub fn extract_graphql_values(body: &str) -> GraphQLInspectionResult {
                 result.operation_name = inner.operation_name;
                 result.operation_type = inner.operation_type;
                 result.string_arguments.extend(inner.string_arguments);
+                result.field_count = inner.field_count;
+                result.max_depth = inner.max_depth;
+                result.limit_exceeded = inner.limit_exceeded;
             } else if jpv.path.starts_with("$.variables") {
                 result.variables.push(jpv.clone());
             }
@@ -384,6 +437,9 @@ pub fn extract_graphql_values(body: &str) -> GraphQLInspectionResult {
         result.operation_name = inner.operation_name;
         result.operation_type = inner.operation_type;
         result.string_arguments = inner.string_arguments;
+        result.field_count = inner.field_count;
+        result.max_depth = inner.max_depth;
+        result.limit_exceeded = inner.limit_exceeded;
     }
     
     result
@@ -396,6 +452,9 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
         string_arguments: Vec::new(),
         variables: Vec::new(),
         looks_like_graphql: false,
+        field_count: 0,
+        max_depth: 0,
+        limit_exceeded: false,
     };
     
     let trimmed = query.trim();
@@ -424,7 +483,7 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
     let mut in_string = false;
     let mut string_start = 0;
     let mut current_arg = String::new();
-    let mut current_field = String::new();
+    let current_field = String::new();
     let chars: Vec<char> = trimmed.chars().collect();
     
     let mut i = 0;
@@ -470,8 +529,81 @@ fn parse_graphql_query(query: &str) -> GraphQLInspectionResult {
         }
         i += 1;
     }
+
+    let (field_count, max_depth) = estimate_graphql_complexity(trimmed);
+    result.field_count = field_count;
+    result.max_depth = max_depth;
+    result.limit_exceeded = field_count > MAX_FIELD_COUNT || max_depth > 15;
     
     result
+}
+
+fn estimate_graphql_complexity(query: &str) -> (usize, usize) {
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+    let mut field_count = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut in_arg_list = false;
+    let mut token = String::new();
+
+    let flush_identifier = |tok: &mut String, in_args: bool, in_str: bool, fields: &mut usize| {
+        if in_str || in_args || tok.is_empty() {
+            tok.clear();
+            return;
+        }
+        let is_keyword = matches!(tok.as_str(), "query" | "mutation" | "subscription" | "fragment" | "on");
+        if !is_keyword {
+            *fields += 1;
+        }
+        tok.clear();
+    };
+
+    for c in query.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if c == '\\' {
+                escape = true;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match c {
+            '"' => {
+                flush_identifier(&mut token, in_arg_list, in_string, &mut field_count);
+                in_string = true;
+            }
+            '{' => {
+                flush_identifier(&mut token, in_arg_list, in_string, &mut field_count);
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            '}' => {
+                flush_identifier(&mut token, in_arg_list, in_string, &mut field_count);
+                depth = depth.saturating_sub(1);
+            }
+            '(' => {
+                flush_identifier(&mut token, in_arg_list, in_string, &mut field_count);
+                in_arg_list = true;
+            }
+            ')' => {
+                flush_identifier(&mut token, in_arg_list, in_string, &mut field_count);
+                in_arg_list = false;
+            }
+            c if c.is_alphanumeric() || c == '_' => token.push(c),
+            _ => flush_identifier(&mut token, in_arg_list, in_string, &mut field_count),
+        }
+    }
+    flush_identifier(&mut token, in_arg_list, in_string, &mut field_count);
+
+    (field_count, max_depth)
 }
 
 #[cfg(test)]

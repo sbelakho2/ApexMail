@@ -1,6 +1,6 @@
 //! Reconciliation worker – exact-once event verification, health checks.
 
-use chrono::{TimeDelta, Utc};
+use chrono::{Duration, TimeDelta, Utc};
 use sqlx::PgPool;
 use tracing::warn;
 

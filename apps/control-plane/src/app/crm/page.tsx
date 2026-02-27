@@ -168,10 +168,10 @@ export default function CRMPipelinePage() {
                     </p>
                 </div>
                 <div className="flex gap-3">
-                    <button type="button" className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted/50 shadow-sm transition-colors">
+                    <button aria-label="Export CRM leads as CSV" type="button" className="px-4 py-2 bg-card border border-border text-foreground font-medium rounded-lg text-sm hover:bg-muted/50 shadow-sm transition-colors">
                         Export CSV
                     </button>
-                    <button type="button" className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
+                    <button aria-label="Add lead" type="button" className="px-4 py-2 bg-primary text-primary-foreground font-medium rounded-lg text-sm hover:opacity-90 shadow-sm transition-colors">
                         + Add Lead
                     </button>
                 </div>
@@ -323,13 +323,13 @@ export default function CRMPipelinePage() {
                         </div>
 
                         <div className="flex gap-3">
-                            <button type="button" className="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 shadow-md transition-all hover:shadow-lg">
+                            <button aria-label="Add selected lead to campaign" type="button" className="flex-1 px-4 py-2.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 shadow-md transition-all hover:shadow-lg">
                                 Add to Campaign
                             </button>
-                            <button type="button" className="px-4 py-2.5 bg-card border border-border text-foreground rounded-xl font-medium hover:bg-muted shadow-sm">
+                            <button aria-label="Edit selected lead" type="button" className="px-4 py-2.5 bg-card border border-border text-foreground rounded-xl font-medium hover:bg-muted shadow-sm">
                                 Edit
                             </button>
-                            <button type="button" className="px-4 py-2.5 bg-card border border-destructive/20 text-destructive rounded-xl font-medium hover:bg-destructive/10 shadow-sm">
+                            <button aria-label="Delete selected lead" type="button" className="px-4 py-2.5 bg-card border border-destructive/20 text-destructive rounded-xl font-medium hover:bg-destructive/10 shadow-sm">
                                 Delete
                             </button>
                         </div>

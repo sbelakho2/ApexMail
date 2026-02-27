@@ -56,7 +56,8 @@ docs/
 │   ├── compliance.md               ✅
 │   ├── data-protection.md          ✅
 │   ├── email-authentication.md     ✅ (NEW)
-│   └── advanced-analytics.md       ✅ (NEW)
+│   ├── advanced-analytics.md       ✅ (NEW)
+│   └── mcaptcha-login.md           ✅ (NEW)
 └── user-guide/            # User Documentation
     ├── getting-started.md          ✅
     └── inbox-placement-testing.md  ✅ (NEW)
@@ -118,6 +119,10 @@ docs/
   - Account Takeover Protection (ato-protection) — Haversine impossible travel, device fingerprinting
   - Data Loss Prevention (dlp-engine) — PII/Luhn, Shannon entropy, content policy
   - Threat Intelligence (threat-intel) — IP/domain blocklists, CIDR, reputation scoring
+- [Login mCaptcha Protection](security/mcaptcha-login.md) (NEW)
+  - Web + control-plane login widget wiring
+  - Server-side verification and error semantics
+  - Environment variable matrix and smoke checklist
 
 ### Operations
 
@@ -135,7 +140,7 @@ docs/
 
 - Documentation Version: 1.0.0
 - ApexMail Version: 1.0.0
-- Last Updated: 2026-02-06
+- Last Updated: 2026-02-27
 
 ---
 

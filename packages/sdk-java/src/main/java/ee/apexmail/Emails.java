@@ -17,6 +17,41 @@ public final class Emails {
         this.client = client;
     }
 
+    public record SendRequest(
+        Object from,
+        Object to,
+        String subject,
+        String html,
+        String text,
+        String templateId,
+        Object cc,
+        Object bcc,
+        String idempotencyKey
+    ) {
+        Map<String, Object> toMap() {
+            Map<String, Object> body = new HashMap<>();
+            body.put("from", from);
+            body.put("to", to);
+            body.put("subject", subject);
+            if (html != null) {
+                body.put("html", html);
+            }
+            if (text != null) {
+                body.put("text", text);
+            }
+            if (templateId != null) {
+                body.put("templateId", templateId);
+            }
+            if (cc != null) {
+                body.put("cc", cc);
+            }
+            if (bcc != null) {
+                body.put("bcc", bcc);
+            }
+            return body;
+        }
+    }
+
     /**
      * Send a single email.
      *
@@ -26,10 +61,33 @@ public final class Emails {
      * @param params  Email parameters
      * @return API response including {@code id} of the queued message
      */
+    public SendResponse send(SendRequest params) {
+        if (params == null) {
+            throw new IllegalArgumentException("params must not be null");
+        }
+        Map<String, Object> body = params.toMap();
+        validateSendParams(body);
+        return client.request("POST", "/v1/messages", body, SendResponse.class, params.idempotencyKey());
+    }
+
     public SendResponse send(Map<String, Object> params) {
         if (params == null) {
             throw new IllegalArgumentException("params must not be null");
         }
+        return send(new SendRequest(
+            params.get("from"),
+            params.get("to"),
+            (String) params.get("subject"),
+            (String) params.get("html"),
+            (String) params.get("text"),
+            (String) params.get("templateId"),
+            params.get("cc"),
+            params.get("bcc"),
+            (String) params.get("idempotencyKey")
+        ));
+    }
+
+    private static void validateSendParams(Map<String, Object> params) {
         if (!params.containsKey("from")) {
             throw new IllegalArgumentException("from is required");
         }
@@ -51,10 +109,6 @@ public final class Emails {
         if (params.containsKey("bcc")) {
             validateRecipients(params.get("bcc"), "bcc");
         }
-
-        Map<String, Object> body = new HashMap<>(params);
-        String idempotencyKey = (String) body.remove("idempotencyKey");
-        return client.request("POST", "/v1/messages", body, SendResponse.class, idempotencyKey);
     }
 
     /**
@@ -149,7 +203,10 @@ public final class Emails {
     private static String extractEmail(Object value) {
         if (value instanceof Map<?, ?> map) {
             Object email = map.get("email");
-            return email == null ? null : String.valueOf(email);
+            if (email == null || String.valueOf(email).isBlank()) {
+                throw new IllegalArgumentException("Recipient object must include a non-empty 'email' field");
+            }
+            return String.valueOf(email);
         }
         return value == null ? null : String.valueOf(value);
     }

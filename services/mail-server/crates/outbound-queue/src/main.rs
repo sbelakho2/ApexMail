@@ -13,7 +13,7 @@ use anyhow::Result;
 use clap::Parser;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use mail_proto::generated::outbound_service_server::OutboundServiceServer;
@@ -129,7 +129,9 @@ async fn main() -> Result<()> {
         .serve_with_shutdown(addr, async {
             tokio::signal::ctrl_c().await.ok();
             info!("Shutdown signal received");
-            let _ = shutdown_tx.send(()).await;
+            if let Err(error) = shutdown_tx.send(()).await {
+                warn!(error = %error, "Failed to send shutdown signal to queue processor");
+            }
         })
         .await?;
     

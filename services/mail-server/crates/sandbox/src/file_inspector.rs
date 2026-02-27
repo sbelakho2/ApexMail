@@ -173,6 +173,48 @@ pub fn detect_file_type(data: &[u8]) -> FileType {
     }
 }
 
+/// Scan for secondary magic signatures at non-zero offsets (polyglot detection).
+///
+/// A polyglot file is valid as type A from offset 0 but also contains a type B
+/// magic at a later offset. Attackers use this to bypass type-based filters
+/// (e.g., a file that identifies as PDF but contains an embedded ZIP with malware).
+///
+/// Returns a vec of secondary file types found at non-zero offsets.
+pub fn detect_polyglot_signatures(data: &[u8]) -> Vec<(FileType, usize)> {
+    let mut secondary = Vec::with_capacity(6);
+    if data.len() < 8 {
+        return secondary;
+    }
+    let primary = detect_file_type(data);
+    // Only scan a reasonable prefix (first 64KB) to avoid DOS on huge files
+    let scan_limit = data.len().min(65536);
+
+    // Signatures to look for at non-zero offsets
+    let signatures: &[(&[u8], FileType)] = &[
+        (b"\x50\x4B\x03\x04", FileType::Zip),
+        (b"\xD0\xCF\x11\xE0", FileType::Ole2),
+        (b"\x4D\x5A", FileType::PeExe),
+        (b"\x7F\x45\x4C\x46", FileType::Elf),
+        (b"%PDF", FileType::Pdf),
+        (b"\x52\x61\x72\x21", FileType::Rar),
+    ];
+
+    for &(magic, file_type) in signatures {
+        if file_type == primary {
+            continue; // Skip the primary type
+        }
+        // Search from offset 1 onward
+        for offset in 1..scan_limit.saturating_sub(magic.len()) {
+            if data[offset..].starts_with(magic) {
+                secondary.push((file_type, offset));
+                break; // One match per type is sufficient
+            }
+        }
+    }
+
+    secondary
+}
+
 /// Compute SHA-256 hash of data
 pub fn compute_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -185,7 +227,7 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
     let file_type = detect_file_type(data);
     let sha256 = compute_sha256(data);
     let size = data.len() as u64;
-    let mut findings = Vec::new();
+    let mut findings = Vec::with_capacity(16);
     let mut risk_score = 0.0;
 
     // Extract extension
@@ -257,6 +299,25 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         _ => {}
     }
 
+    // Polyglot detection: scan for secondary magic signatures at non-zero offsets
+    let polyglot_sigs = detect_polyglot_signatures(data);
+    if !polyglot_sigs.is_empty() {
+        let types_desc: Vec<String> = polyglot_sigs
+            .iter()
+            .map(|(ft, off)| format!("{} at offset {}", ft, off))
+            .collect();
+        findings.push(InspectionFinding {
+            id: "POLYGLOT_DETECTED",
+            description: format!(
+                "Polyglot file: primary type {} but also contains: {}",
+                file_type,
+                types_desc.join(", ")
+            ),
+            risk: 7.0,
+        });
+        risk_score += 7.0;
+    }
+
     // OLE2: Check for VBA macro indicators
     if file_type == FileType::Ole2 {
         if has_vba_indicators(data) {
@@ -286,10 +347,20 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         if has_zip_vba_project(data) {
             findings.push(InspectionFinding {
                 id: "OOXML_VBA_BIN",
-                description: "vbaProject.bin found in Office document".into(),
+                description: "vbaProject.bin or VBA/ActiveX content found in Office document".into(),
                 risk: 6.0,
             });
             risk_score += 6.0;
+        }
+        
+        // Check for external OLE links (remote payload injection)
+        if has_external_ole_links(data) {
+            findings.push(InspectionFinding {
+                id: "OOXML_EXTERNAL_OLE",
+                description: "External OLE/relationship links detected (potential remote payload)".into(),
+                risk: 5.0,
+            });
+            risk_score += 5.0;
         }
         
         // Check for encrypted/password-protected ZIP
@@ -476,10 +547,49 @@ fn has_vba_indicators(data: &[u8]) -> bool {
     false
 }
 
-/// Check for vbaProject.bin inside a ZIP file (OOXML)
+/// Check for vbaProject.bin and other VBA/ActiveX indicators inside a ZIP file (OOXML)
 fn has_zip_vba_project(data: &[u8]) -> bool {
-    // Simple heuristic: look for the filename in the ZIP central directory
-    data.windows(14).any(|w| w == b"vbaProject.bin")
+    // Look for any of these indicators in the ZIP contents
+    const VBA_INDICATORS: &[&[u8]] = &[
+        b"vbaProject.bin",          // Main VBA project binary
+        b"vbaProjectSignature.bin", // VBA project signature
+        b"xl/vbaProject",           // Excel VBA project path
+        b"word/vbaProject",         // Word VBA project path  
+        b"ppt/vbaProject",          // PowerPoint VBA project path
+        b"VBA/",                    // VBA directory
+        b"_VBA_PROJECT_CUR",        // VBA stream marker
+        b"activeX",                 // ActiveX controls (can execute code)
+        b"oleObject",               // OLE objects (can embed executables)
+        b"embeddedHtml",            // Embedded HTML (can contain scripts)
+    ];
+    
+    for indicator in VBA_INDICATORS {
+        if data.windows(indicator.len()).any(|w| w.eq_ignore_ascii_case(indicator)) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+/// Check for external OLE links in OOXML that may pull remote payloads
+pub fn has_external_ole_links(data: &[u8]) -> bool {
+    // Look for relationship targets pointing to external resources
+    const EXTERNAL_INDICATORS: &[&[u8]] = &[
+        b"Target=\"http",           // External HTTP link
+        b"Target=\"https",          // External HTTPS link
+        b"TargetMode=\"External\"", // Explicit external target mode
+        b"oleLink",                 // OLE link reference
+        b"mso-application:",        // MS Office application directive
+    ];
+    
+    for indicator in EXTERNAL_INDICATORS {
+        if data.windows(indicator.len()).any(|w| w.eq_ignore_ascii_case(indicator)) {
+            return true;
+        }
+    }
+    
+    false
 }
 
 /// Check if a ZIP file is password-protected/encrypted.
@@ -798,5 +908,57 @@ mod tests {
         data.extend_from_slice(b"\x00\x00\x00Attribute VB_Name\x00\x00");
         let result = inspect_file(&data, Some("macro.doc"));
         assert!(result.findings.iter().any(|f| f.id == "OLE2_VBA_MACROS"));
+    }
+
+    #[test]
+    fn test_polyglot_pdf_zip() {
+        // A PDF file with an embedded ZIP signature at offset 32
+        let mut data = b"%PDF-1.4\n1 0 obj\n<< /Type >>\n".to_vec();
+        // Pad to offset 32
+        while data.len() < 32 {
+            data.push(b' ');
+        }
+        // Embed a ZIP signature
+        data.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]);
+        data.extend_from_slice(b"\nendobj\n");
+
+        let result = inspect_file(&data, Some("invoice.pdf"));
+        assert_eq!(result.file_type, FileType::Pdf);
+        assert!(
+            result.findings.iter().any(|f| f.id == "POLYGLOT_DETECTED"),
+            "Should detect polyglot PDF+ZIP: {:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn test_polyglot_detection_no_false_positive() {
+        // A normal PDF without embedded signatures should NOT trigger polyglot
+        let data = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        let sigs = detect_polyglot_signatures(data);
+        assert!(sigs.is_empty(), "Clean PDF should not trigger polyglot: {:?}", sigs);
+    }
+
+    #[test]
+    fn test_encrypted_archive_uninspectable_risk() {
+        // ZIP local file header: signature (4) + version needed (2) + bit flag (2) + ...
+        // Initialize with enough bytes so indices 6 and 7 exist.
+        let mut data = vec![
+            0x50, 0x4B, 0x03, 0x04, // ZIP signature
+            0x14, 0x00,             // version needed
+            0x00, 0x00,             // general purpose bit flag (will patch below)
+        ];
+        // Set general purpose bit flag bit 0 (encrypted)
+        data[6] = 0x01;
+        data[7] = 0x00;
+        // Pad out
+        data.extend_from_slice(&[0x00; 30]);
+        let result = inspect_file(&data, Some("secrets.zip"));
+        assert!(
+            result.findings.iter().any(|f| f.id == "ARCHIVE_ENCRYPTED"),
+            "Encrypted ZIP should be flagged: {:?}",
+            result.findings
+        );
+        assert!(result.risk_score >= 7.0);
     }
 }

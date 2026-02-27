@@ -17,6 +17,13 @@ chrono.workspace = true
 uuid.workspace = true
 config.workspace = true
 dotenvy.workspace = true
+# Concurrent hash map for high-throughput security event correlation
+dashmap = "6.1"
+# Better atomics for rate limiting
+parking_lot = "0.12"
+# HMAC for event signing
+hmac = "0.12"
+sha2 = "0.10"
 # Optional — enabled by crates that pull in sqlx
 sqlx = { workspace = true, optional = true }
 

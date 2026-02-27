@@ -266,6 +266,11 @@ See `.env.example` for all available configuration options.
 | `DATABASE_URL` | PostgreSQL connection string | Yes |
 | `REDIS_URL` | Redis connection string | Yes |
 | `JWT_SECRET` | Secret for JWT signing (32+ chars) | Yes |
+| `MCAPTCHA_ENABLED` | Enable server-side login CAPTCHA verification (`true`/`false`) | No |
+| `MCAPTCHA_SITE_KEY` | mCaptcha site key for verification API | When enabled |
+| `MCAPTCHA_SECRET` | mCaptcha secret for verification API | When enabled |
+| `NEXT_PUBLIC_MCAPTCHA_ENABLED` | Enable login widget rendering in frontend apps | Should match server |
+| `NEXT_PUBLIC_MCAPTCHA_WIDGET_URL` | mCaptcha widget URL to embed in login pages | When frontend enabled |
 | `TRACKING_ENCRYPTION_KEY` | 128-bit key for tracking IDs | Yes |
 | `TRACKING_SIGNATURE_KEY` | 256-bit key for signatures | Yes |
 | `S3_ENDPOINT` | S3-compatible storage endpoint | Yes |
@@ -294,6 +299,7 @@ Kubernetes deployment documentation is planned for a future release. For now, us
 - Rate limiting is applied per tenant
 - DKIM signing for all outbound email
 - SPF/DMARC validation for inbound email
+- Optional mCaptcha protection on login routes for both web and control-plane apps (see `docs/security/mcaptcha-login.md`)
 
 ## License
 

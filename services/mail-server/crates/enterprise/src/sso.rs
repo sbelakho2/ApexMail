@@ -79,8 +79,7 @@ impl SSOService {
         )
         .bind(domain)
         .fetch_optional(&self.db)
-        let expires_at = Utc::now()
-            + TimeDelta::try_hours(session_hours as i64).unwrap_or(TimeDelta::zero());
+        .await
         .map_err(|e| format!("Get config by domain: {e}"))
     }
 

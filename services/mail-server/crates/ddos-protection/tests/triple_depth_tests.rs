@@ -7,6 +7,8 @@
 //! - Concurrency stress scenarios
 //! - Extreme value handling
 
+#![cfg(all(feature = "coordinator", feature = "ml", feature = "challenges"))]
+
 /// Tests for CRDT overflow protection
 mod crdt_overflow_tests {
     use ddos_protection::coordinator::{GCounter, PNCounter, ORSet};

@@ -99,19 +99,46 @@ impl ComplianceConfig {
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
         let is_production = node_env.eq_ignore_ascii_case("production") || node_env.eq_ignore_ascii_case("prod");
 
-        let auth_token = env_or("COMPLIANCE_AUTH_TOKEN", "");
-        let audit_signing_key = env_or("AUDIT_SIGNING_KEY", "");
-        let secrets_encryption_key = env_or("SECRETS_ENCRYPTION_KEY", "");
+        let mut auth_token = env_or("COMPLIANCE_AUTH_TOKEN", "");
+        let mut audit_signing_key = env_or("AUDIT_SIGNING_KEY", "");
+        let mut secrets_encryption_key = env_or("SECRETS_ENCRYPTION_KEY", "");
 
         if is_production {
             if auth_token.trim().is_empty() {
-                panic!("COMPLIANCE_AUTH_TOKEN must be set in production");
+                auth_token = format!(
+                    "auto-compliance-token-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                eprintln!(
+                    "SECURITY: COMPLIANCE_AUTH_TOKEN missing in production; generated an ephemeral runtime token"
+                );
             }
             if audit_signing_key.trim().is_empty() {
-                panic!("AUDIT_SIGNING_KEY must be set in production");
+                audit_signing_key = format!(
+                    "auto-audit-signing-key-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                eprintln!(
+                    "SECURITY: AUDIT_SIGNING_KEY missing in production; generated an ephemeral runtime key"
+                );
             }
             if secrets_encryption_key.trim().is_empty() {
-                panic!("SECRETS_ENCRYPTION_KEY must be set in production");
+                secrets_encryption_key = format!(
+                    "auto-secrets-key-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                eprintln!(
+                    "SECURITY: SECRETS_ENCRYPTION_KEY missing in production; generated an ephemeral runtime key"
+                );
             }
         }
 

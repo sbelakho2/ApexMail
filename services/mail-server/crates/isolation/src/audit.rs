@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
 
@@ -17,10 +17,10 @@ use crate::types::*;
 
 pub struct AuditService {
     db: PgPool,
-    #[allow(dead_code)]
+    #[allow(unused)]
     config: SecurityConfig,
     signing_key: String,
-    buffer: Mutex<Vec<AuditEvent>>,
+    buffer: RwLock<Vec<AuditEvent>>,
 }
 
 impl AuditService {
@@ -30,18 +30,17 @@ impl AuditService {
             db,
             config,
             signing_key,
-            buffer: Mutex::new(Vec::new()),
+            buffer: RwLock::new(Vec::new()),
         }
     }
 
     /// Log an audit event. Critical events are flushed immediately.
     pub async fn log(&self, event: AuditEvent) -> anyhow::Result<AuditEvent> {
         let is_critical = event.severity == AuditSeverity::Critical;
-        let event_clone = event.clone();
 
         {
-            let mut buf = self.buffer.lock().await;
-            buf.push(event);
+            let mut buf = self.buffer.write().await;
+            buf.push(event.clone());
 
             if is_critical || buf.len() >= 100 {
                 let events: Vec<AuditEvent> = buf.drain(..).collect();
@@ -50,7 +49,7 @@ impl AuditService {
             }
         }
 
-        Ok(event_clone)
+        Ok(event)
     }
 
     /// Create a new audit event with auto-generated ID and timestamp.
@@ -177,6 +176,15 @@ impl AuditService {
     pub async fn query(&self, q: &AuditQuery) -> anyhow::Result<(Vec<AuditEvent>, i64)> {
         let limit = q.limit.unwrap_or(50).min(1000);
         let offset = q.offset.unwrap_or(0);
+        self.query_with_limit_offset(q, limit, offset).await
+    }
+
+    async fn query_with_limit_offset(
+        &self,
+        q: &AuditQuery,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AuditEvent>, i64)> {
 
         let mut conditions = vec!["organization_id = $1".to_string()];
         let mut param_count = 1;
@@ -321,11 +329,7 @@ impl AuditService {
         query: &AuditQuery,
         format: &str,
     ) -> anyhow::Result<String> {
-        let mut export_query = query.clone();
-        export_query.limit = Some(10_000);
-        export_query.offset = Some(0);
-
-        let (events, _) = self.query(&export_query).await?;
+        let (events, _) = self.query_with_limit_offset(query, 10_000, 0).await?;
 
         match format {
             "csv" => Ok(export_csv(&events)),
@@ -353,7 +357,7 @@ impl AuditService {
     /// Flush remaining buffer.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let events = {
-            let mut buf = self.buffer.lock().await;
+            let mut buf = self.buffer.write().await;
             buf.drain(..).collect::<Vec<_>>()
         };
         if !events.is_empty() {
@@ -451,7 +455,7 @@ impl AuditService {
             Err(e) => {
                 tracing::error!(err = %e, count = events.len(), "Failed to flush audit events");
                 // Requeue events
-                let mut buf = self.buffer.lock().await;
+                let mut buf = self.buffer.write().await;
                 let mut requeue = events;
                 requeue.extend(buf.drain(..));
                 *buf = requeue;
@@ -722,7 +726,7 @@ mod tests {
         let svc = test_service();
         let rt = test_runtime();
         rt.block_on(async {
-            let mut buf = svc.buffer.lock().await;
+            let mut buf = svc.buffer.write().await;
             buf.push(svc.create_event("o", None, AuditEventType::DataRead, AuditSeverity::Info, "u", "user", None, None, "read", serde_json::json!({})));
             buf.push(svc.create_event("o", None, AuditEventType::DataRead, AuditSeverity::Info, "u", "user", None, None, "read", serde_json::json!({})));
             assert_eq!(buf.len(), 2);

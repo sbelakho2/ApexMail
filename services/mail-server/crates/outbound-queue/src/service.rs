@@ -136,7 +136,7 @@ impl OutboundService for OutboundServiceImpl {
                     RecipientResult {
                         email: email.clone(),
                         accepted: false, // Not yet delivered
-                        error: String::new(),
+                        error: String::default(),
                     }
                 }).collect();
                 
@@ -144,7 +144,7 @@ impl OutboundService for OutboundServiceImpl {
                     email_id: id.to_string(),
                     message_id: format!("<{}@apexmail.ee>", id),
                     success: true, // Queued successfully
-                    error: String::new(),
+                    error: String::default(),
                     recipients,
                 }))
             }

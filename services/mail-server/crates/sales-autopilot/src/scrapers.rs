@@ -9,7 +9,7 @@ use url::Url;
 /// without a browser.
 #[derive(Debug, Clone)]
 pub struct WebScraper {
-    email_re: Regex,
+    email_re: Option<Regex>,
 }
 
 impl Default for WebScraper {
@@ -25,7 +25,7 @@ impl WebScraper {
             email_re: Regex::new(
                 r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
             )
-            .expect("email regex"),
+            .ok(),
         }
     }
 
@@ -33,9 +33,9 @@ impl WebScraper {
     pub fn extract_emails_from_text(&self, text: &str) -> Vec<String> {
         let mut emails: Vec<String> = self
             .email_re
-            .find_iter(text)
-            .map(|m| m.as_str().to_lowercase())
-            .collect();
+            .as_ref()
+            .map(|re| re.find_iter(text).map(|m| m.as_str().to_lowercase()).collect())
+            .unwrap_or_default();
         emails.sort();
         emails.dedup();
         emails
@@ -75,7 +75,8 @@ impl WebScraper {
         let mut group_matches = false;
         let mut group_has_rules = false;
         let mut saw_group = false;
-        let mut allowed = true;
+        let mut best_match_len = 0usize;
+        let mut best_is_allow = true;
 
         for line in robots_txt.lines() {
             let line = line.trim();
@@ -104,14 +105,22 @@ impl WebScraper {
             if let Some(disallowed) = line.strip_prefix("Disallow:") {
                 let disallowed = disallowed.trim();
                 if !disallowed.is_empty() && path.starts_with(disallowed) {
-                    allowed = false;
+                    let len = disallowed.len();
+                    if len >= best_match_len {
+                        best_match_len = len;
+                        best_is_allow = false;
+                    }
                 }
             }
 
             if let Some(allowed_path) = line.strip_prefix("Allow:") {
                 let allowed_path = allowed_path.trim();
                 if !allowed_path.is_empty() && path.starts_with(allowed_path) {
-                    allowed = true;
+                    let len = allowed_path.len();
+                    if len >= best_match_len {
+                        best_match_len = len;
+                        best_is_allow = true;
+                    }
                 }
             }
         }
@@ -120,7 +129,7 @@ impl WebScraper {
             return true;
         }
 
-        allowed
+        best_is_allow
     }
 }
 

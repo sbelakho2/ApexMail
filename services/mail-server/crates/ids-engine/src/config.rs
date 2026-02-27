@@ -35,7 +35,7 @@ impl Default for IdsConfig {
             inline_mode: false,
             max_connections: 1_000_000,
             connection_timeout_secs: 300,
-            portscan_threshold: 20,
+            portscan_threshold: 10,
             portscan_window_secs: 60,
             syn_flood_threshold: 100,
             max_payload_inspect: 65536,

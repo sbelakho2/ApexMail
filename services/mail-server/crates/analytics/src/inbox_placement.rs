@@ -188,7 +188,7 @@ pub fn generate_recommendations(
     overall_rate: f64,
     providers: &[ProviderPlacement],
 ) -> Vec<String> {
-    let mut recs = Vec::new();
+    let mut recs = Vec::with_capacity(providers.len().saturating_add(3));
 
     if overall_rate < 0.90 {
         recs.push("Overall inbox placement is below 90%. Review authentication (SPF/DKIM/DMARC) settings.".into());

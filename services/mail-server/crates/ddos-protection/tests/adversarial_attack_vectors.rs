@@ -12,6 +12,8 @@
 //! 9. Multi-Vector Combined Attacks - Layered attack strategies
 //! 10. Adversarial ML Inputs - Inputs designed to fool ML models
 
+#![cfg(feature = "ml")]
+
 use ddos_protection::adaptive::{AdaptiveConfig, AdaptiveRateLimiter, TrafficObservation};
 use ddos_protection::bot_detection::SessionBehavior;
 use ddos_protection::cost_based::{CostBasedLimiter, CostLimiterConfig, RequestCost};

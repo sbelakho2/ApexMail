@@ -156,7 +156,7 @@ export class SlaCreditsService {
     try {
       features = JSON.parse(row.features || '{}') as Record<string, unknown>;
     } catch {
-      console.warn(`[SlaCredits] Failed to parse plan features for tenant ${tenantId}`);
+      logger.warn('Failed to parse plan features for tenant', { tenantId });
       return Result.ok(null);
     }
     

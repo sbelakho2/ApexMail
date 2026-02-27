@@ -49,7 +49,7 @@ pub struct InboundServer {
     /// Per‑IP connection counter.
     connections: Arc<DashMap<IpAddr, u32>>,
     /// Rate limiter per IP (token bucket).
-    #[allow(dead_code)]
+    #[allow(unused)]
     ip_limiters: Arc<DashMap<IpAddr, Arc<RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>>>,
     shutdown: Arc<Notify>,
 }
@@ -592,7 +592,7 @@ mod tests {
     fn test_session_context_defaults() {
         let ctx = SessionContext {
             id: "test".into(),
-            client_ip: "127.0.0.1".parse().unwrap(),
+            client_ip: std::net::IpAddr::from([127, 0, 0, 1]),
             authenticated: false,
             tenant_id: None,
             message_count: 0,

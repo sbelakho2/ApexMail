@@ -56,7 +56,7 @@ impl SpfRecord {
         let parts: Vec<&str> = txt.split_whitespace().collect();
         let version = "spf1".to_string();
 
-        let mut mechanisms = Vec::new();
+        let mut mechanisms = Vec::with_capacity(parts.len().saturating_sub(1));
         let mut all_qualifier = None;
 
         for part in &parts[1..] {
@@ -119,9 +119,9 @@ impl DkimRecord {
         let mut version = None;
         let mut key_type = "rsa".to_string();
         let mut public_key = String::new();
-        let mut hash_algorithms = Vec::new();
+        let mut hash_algorithms = Vec::with_capacity(parts.len());
         let mut service_type = None;
-        let mut flags = Vec::new();
+        let mut flags = Vec::with_capacity(parts.len());
 
         for part in &parts {
             if let Some((k, v)) = part.split_once('=') {
@@ -202,8 +202,8 @@ impl DmarcPolicy {
         let mut policy = "none".to_string();
         let mut subdomain_policy = None;
         let mut pct = 100u8;
-        let mut rua = Vec::new();
-        let mut ruf = Vec::new();
+        let mut rua = Vec::with_capacity(parts.len());
+        let mut ruf = Vec::with_capacity(parts.len());
         let mut adkim = 'r';
         let mut aspf = 'r';
 
@@ -316,17 +316,19 @@ mod tests {
 
     #[test]
     fn test_spf_parse_basic() {
-        let spf = SpfRecord::parse("v=spf1 include:_spf.google.com ~all").unwrap();
-        assert_eq!(spf.version, "spf1");
-        assert!(spf.mechanisms.contains(&"include:_spf.google.com".to_string()));
-        assert!(spf.is_soft_fail());
-        assert!(!spf.is_hard_fail());
+        let spf = SpfRecord::parse("v=spf1 include:_spf.google.com ~all");
+        assert_eq!(spf.as_ref().map(|record| record.version.as_str()), Some("spf1"));
+        assert!(spf
+            .as_ref()
+            .is_some_and(|record| record.mechanisms.contains(&"include:_spf.google.com".to_string())));
+        assert!(spf.as_ref().is_some_and(SpfRecord::is_soft_fail));
+        assert!(spf.as_ref().is_some_and(|record| !record.is_hard_fail()));
     }
 
     #[test]
     fn test_spf_parse_hard_fail() {
-        let spf = SpfRecord::parse("v=spf1 ip4:192.168.1.0/24 -all").unwrap();
-        assert!(spf.is_hard_fail());
+        let spf = SpfRecord::parse("v=spf1 ip4:192.168.1.0/24 -all");
+        assert!(spf.as_ref().is_some_and(SpfRecord::is_hard_fail));
     }
 
     #[test]
@@ -338,11 +340,11 @@ mod tests {
 
     #[test]
     fn test_dkim_parse() {
-        let dkim = DkimRecord::parse("v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQ==").unwrap();
-        assert_eq!(dkim.version, Some("DKIM1".into()));
-        assert_eq!(dkim.key_type, "rsa");
-        assert!(!dkim.public_key.is_empty());
-        assert!(!dkim.is_revoked());
+        let dkim = DkimRecord::parse("v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQ==");
+        assert_eq!(dkim.as_ref().and_then(|record| record.version.clone()), Some("DKIM1".into()));
+        assert_eq!(dkim.as_ref().map(|record| record.key_type.as_str()), Some("rsa"));
+        assert!(dkim.as_ref().is_some_and(|record| !record.public_key.is_empty()));
+        assert!(dkim.as_ref().is_some_and(|record| !record.is_revoked()));
     }
 
     #[test]
@@ -352,37 +354,49 @@ mod tests {
 
     #[test]
     fn test_dkim_revoked() {
-        let mut dkim = DkimRecord::parse("v=DKIM1; k=rsa; t=y; p=AAAA").unwrap();
-        assert!(dkim.is_revoked()); // has "y" flag
-        dkim.flags.clear();
-        dkim.public_key.clear();
-        assert!(dkim.is_revoked()); // empty key
+        let mut dkim = DkimRecord::parse("v=DKIM1; k=rsa; t=y; p=AAAA");
+        assert!(dkim.as_ref().is_some_and(|record| !record.is_revoked())); // t=y is testing mode, not revocation
+        assert!(dkim.as_ref().is_some_and(DkimRecord::is_testing));
+        if let Some(ref mut record) = dkim {
+            record.flags.clear();
+            record.public_key.clear();
+        }
+        assert!(dkim.as_ref().is_some_and(DkimRecord::is_revoked)); // empty key
     }
 
     // ── DMARC ────────────────────────────────────────────────────────
 
     #[test]
     fn test_dmarc_parse_reject() {
-        let dmarc = DmarcPolicy::parse("v=DMARC1; p=reject; rua=mailto:dmarc@example.com; pct=100").unwrap();
-        assert!(dmarc.is_reject());
-        assert_eq!(dmarc.pct, 100);
-        assert_eq!(dmarc.rua, vec!["mailto:dmarc@example.com"]);
-        assert_eq!(dmarc.adkim, 'r');
+        let dmarc = DmarcPolicy::parse("v=DMARC1; p=reject; rua=mailto:dmarc@example.com; pct=100");
+        assert!(dmarc.as_ref().is_some_and(DmarcPolicy::is_reject));
+        assert_eq!(dmarc.as_ref().map(|policy| policy.pct), Some(100));
+        assert_eq!(
+            dmarc.as_ref().map(|policy| policy.rua.clone()),
+            Some(vec!["mailto:dmarc@example.com".to_string()])
+        );
+        assert_eq!(dmarc.as_ref().map(|policy| policy.adkim), Some('r'));
     }
 
     #[test]
     fn test_dmarc_parse_quarantine_with_subdomain() {
-        let dmarc = DmarcPolicy::parse("v=DMARC1; p=quarantine; sp=reject; adkim=s").unwrap();
-        assert!(dmarc.is_quarantine());
-        assert_eq!(dmarc.effective_subdomain_policy(), "reject");
-        assert_eq!(dmarc.adkim, 's');
+        let dmarc = DmarcPolicy::parse("v=DMARC1; p=quarantine; sp=reject; adkim=s");
+        assert!(dmarc.as_ref().is_some_and(DmarcPolicy::is_quarantine));
+        assert_eq!(
+            dmarc.as_ref().map(|policy| policy.effective_subdomain_policy()),
+            Some("reject")
+        );
+        assert_eq!(dmarc.as_ref().map(|policy| policy.adkim), Some('s'));
     }
 
     #[test]
     fn test_dmarc_parse_none() {
-        let dmarc = DmarcPolicy::parse("v=DMARC1; p=none").unwrap();
-        assert!(dmarc.is_none_policy());
-        assert_eq!(dmarc.effective_subdomain_policy(), "none");
+        let dmarc = DmarcPolicy::parse("v=DMARC1; p=none");
+        assert!(dmarc.as_ref().is_some_and(DmarcPolicy::is_none_policy));
+        assert_eq!(
+            dmarc.as_ref().map(|policy| policy.effective_subdomain_policy()),
+            Some("none")
+        );
     }
 
     #[test]
@@ -409,9 +423,17 @@ mod tests {
     #[test]
     fn test_mx_serialization() {
         let mx = MxRecord::new(10, "mx.example.com");
-        let json = serde_json::to_string(&mx).unwrap();
-        let parsed: MxRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.priority, 10);
-        assert_eq!(parsed.exchange, "mx.example.com");
+        let json = serde_json::to_string(&mx);
+        assert!(json.is_ok());
+        let parsed: Result<MxRecord, _> = json
+            .as_ref()
+            .ok()
+            .map(|value| serde_json::from_str(value))
+            .unwrap_or_else(|| Err(serde_json::Error::io(std::io::Error::other("serialize failed"))));
+        assert!(parsed.is_ok());
+        if let Ok(record) = parsed {
+            assert_eq!(record.priority, 10);
+            assert_eq!(record.exchange, "mx.example.com");
+        }
     }
 }

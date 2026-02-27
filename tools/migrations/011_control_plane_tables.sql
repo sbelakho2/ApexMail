@@ -11,7 +11,7 @@
 -- SECRETS / CREDENTIALS VAULT
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS secrets (
-    id              VARCHAR(64)  PRIMARY KEY DEFAULT 'secret-' || gen_random_uuid()::text,
+    id              VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
     name            VARCHAR(255) NOT NULL UNIQUE,
     type            VARCHAR(50)  NOT NULL,  -- api_key, database, oauth, certificate, encryption
     description     TEXT         NOT NULL DEFAULT '',
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_secrets_status ON secrets(status);
 -- FEATURE FLAGS
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS feature_flags (
-    id          VARCHAR(64)  PRIMARY KEY DEFAULT 'f-' || gen_random_uuid()::text,
+    id          VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
     key         VARCHAR(255) NOT NULL UNIQUE,
     name        VARCHAR(255) NOT NULL,
     description TEXT         NOT NULL DEFAULT '',
@@ -49,8 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_feature_flags_category ON feature_flags(category)
 CREATE INDEX IF NOT EXISTS idx_feature_flags_key ON feature_flags(key);
 
 CREATE TABLE IF NOT EXISTS feature_flag_overrides (
-    id         VARCHAR(64)  PRIMARY KEY DEFAULT 'ffo-' || gen_random_uuid()::text,
-    tenant_id  VARCHAR(64)  NOT NULL,
+    id         VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
+    tenant_id  VARCHAR(26)  NOT NULL,
     tenant_name VARCHAR(255),
     flag_key   VARCHAR(255) NOT NULL REFERENCES feature_flags(key) ON DELETE CASCADE,
     value      BOOLEAN      NOT NULL,
@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_feature_flag_overrides_flag ON feature_flag_overr
 -- CONTENT / CMS
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS content_items (
-    id             VARCHAR(64)  PRIMARY KEY DEFAULT 'c-' || gen_random_uuid()::text,
+    id             VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
     title          VARCHAR(500) NOT NULL,
     slug           VARCHAR(500) NOT NULL UNIQUE,
     type           VARCHAR(50)  NOT NULL DEFAULT 'blog',  -- blog, changelog, docs
@@ -91,7 +91,7 @@ CREATE INDEX IF NOT EXISTS idx_content_items_slug ON content_items(slug);
 -- CALENDAR EVENTS (for sales / demos)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS calendar_events (
-    id           VARCHAR(64)  PRIMARY KEY DEFAULT 'evt-' || gen_random_uuid()::text,
+    id           VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
     title        VARCHAR(500) NOT NULL,
     lead_name    VARCHAR(255),
     lead_email   VARCHAR(255),
@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_ti
 CREATE INDEX IF NOT EXISTS idx_calendar_events_status ON calendar_events(status);
 
 CREATE TABLE IF NOT EXISTS availability_slots (
-    id          VARCHAR(64) PRIMARY KEY DEFAULT 'avail-' || gen_random_uuid()::text,
+    id          VARCHAR(26) PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
     day_of_week INTEGER     NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
     start_time  VARCHAR(5)  NOT NULL,  -- HH:MM
     end_time    VARCHAR(5)  NOT NULL,  -- HH:MM
@@ -124,10 +124,10 @@ CREATE TABLE IF NOT EXISTS availability_slots (
 -- SUPPORT TICKETS
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS support_tickets (
-    id          VARCHAR(64)  PRIMARY KEY DEFAULT 'ticket-' || gen_random_uuid()::text,
+    id          VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
     subject     VARCHAR(500) NOT NULL,
     description TEXT         NOT NULL DEFAULT '',
-    tenant_id   VARCHAR(64),
+    tenant_id   VARCHAR(26),
     tenant_name VARCHAR(255),
     tenant_email VARCHAR(255),
     status      VARCHAR(30)  NOT NULL DEFAULT 'open',  -- open, in_progress, waiting_on_customer, resolved, closed
@@ -144,8 +144,8 @@ CREATE INDEX IF NOT EXISTS idx_support_tickets_priority ON support_tickets(prior
 CREATE INDEX IF NOT EXISTS idx_support_tickets_tenant ON support_tickets(tenant_id);
 
 CREATE TABLE IF NOT EXISTS support_ticket_messages (
-    id          VARCHAR(64)  PRIMARY KEY DEFAULT 'stm-' || gen_random_uuid()::text,
-    ticket_id   VARCHAR(64)  NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+    id          VARCHAR(26)  PRIMARY KEY DEFAULT SUBSTRING(REPLACE(gen_random_uuid()::text, '-', '') FROM 1 FOR 26),
+    ticket_id   VARCHAR(26)  NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
     content     TEXT         NOT NULL,
     author      VARCHAR(255) NOT NULL,
     author_type VARCHAR(20)  NOT NULL DEFAULT 'customer',  -- customer, support

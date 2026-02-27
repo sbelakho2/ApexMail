@@ -15,45 +15,14 @@
  */
 
 import { describe, test, expect } from 'vitest';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
-
-// Base paths
-const APPS_DIR = path.join(__dirname, '../../../..', 'apps');
-const PACKAGES_DIR = path.join(__dirname, '../../../..', 'packages');
-
-// Helper to read file safely
-function readFileSafe(filePath: string): string | null {
-  try {
-    if (fs.existsSync(filePath)) {
-      return fs.readFileSync(filePath, 'utf-8');
-    }
-  } catch {
-    // ignore
-  }
-  return null;
-}
-
-// Helper to check all files in a directory
-function checkAllFiles(dir: string, check: (content: string, filePath: string) => string[]): string[] {
-  const issues: string[] = [];
-  if (!fs.existsSync(dir)) return issues;
-  
-  const files = fs.readdirSync(dir);
-  for (const file of files) {
-    const filePath = path.join(dir, file);
-    const stat = fs.statSync(filePath);
-    if (stat.isFile() && file.endsWith('.ts')) {
-      const content = readFileSafe(filePath);
-      if (content) {
-        issues.push(...check(content, filePath));
-      }
-    } else if (stat.isDirectory()) {
-      issues.push(...checkAllFiles(filePath, check));
-    }
-  }
-  return issues;
-}
+import {
+  APPS_DIR,
+  PACKAGES_DIR,
+  report,
+  readFileSafe,
+  checkAllFiles,
+} from './bug-detection-helpers';
 
 // ============================================================
 // PHASE 1-3: Core Infrastructure Bug Detection
@@ -96,8 +65,8 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
       
       // Report findings but don't fail - this is diagnostic
       if (issues.length > 0) {
-        console.warn('Potential division by zero issues found:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Potential division by zero issues found:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       // The test passes if we successfully analyzed the files
@@ -117,7 +86,7 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
           const hasGuard = content.match(/daysInPeriod\s*(>|>=|!==?)\s*0|if\s*\(\s*daysInPeriod/i);
           
           if (!hasGuard) {
-            console.warn('WARNING: proration.ts divides by daysInPeriod without explicit zero check');
+            report('WARNING: proration.ts divides by daysInPeriod without explicit zero check');
           }
         }
       }
@@ -138,7 +107,7 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
           const hasGuard = content.match(/Limit\s*(>|===?|!==?)\s*0|\|\|\s*\d+|Limit\s*\?\?/);
           
           if (!hasGuard) {
-            console.warn('WARNING: usage-alerts.ts may divide by limit without zero check');
+            report('WARNING: usage-alerts.ts may divide by limit without zero check');
           }
         }
       }
@@ -183,10 +152,10 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Potential unsafe database result access:');
-        issues.slice(0, 10).forEach(issue => console.warn(`  - ${issue}`));
+        report('Potential unsafe database result access:');
+        issues.slice(0, 10).forEach(issue => report(`  - ${issue}`));
         if (issues.length > 10) {
-          console.warn(`  ... and ${issues.length - 10} more`);
+          report(`  ... and ${issues.length - 10} more`);
         }
       }
       
@@ -212,8 +181,8 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Potential unsafe deep property access:');
-        issues.slice(0, 5).forEach(issue => console.warn(`  - ${issue}`));
+        report('Potential unsafe deep property access:');
+        issues.slice(0, 5).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -236,8 +205,7 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
           
           lines.forEach((line, idx) => {
             // Look for x && y || z without parentheses (potential precedence bug)
-            // eslint-disable-next-line no-useless-escape
-            if (line.match(/\w+\s*&&\s*\w+[\.\[]?\w*\s*\|\|\s*\w+/) && !line.match(/\([^)]*&&[^)]*\)/)) {
+            if (line.match(/\w+\s*&&\s*\w+[.[\]]?\w*\s*\|\|\s*\w+/) && !line.match(/\([^)]*&&[^)]*\)/)) {
               problems.push(`${path.basename(filePath)}:${idx + 1} - Potential operator precedence issue: ${line.trim().substring(0, 60)}`);
             }
           });
@@ -248,8 +216,8 @@ describe('Phase 1-3: Core Infrastructure Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Potential operator precedence issues:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Potential operator precedence issues:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -278,7 +246,7 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
           const hasAtomicCte = content.match(/WITH\s+\w+\s+AS\s*\(\s*UPDATE/i);
           
           if (!hasForUpdate && !hasAtomicCte) {
-            console.warn('WARNING: wallet.ts has SELECT...UPDATE pattern without FOR UPDATE or atomic CTE');
+            report('WARNING: wallet.ts has SELECT...UPDATE pattern without FOR UPDATE or atomic CTE');
           }
         }
         
@@ -290,7 +258,7 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
           // These should be atomic
           const hasAtomicUpdate = content.match(/UPDATE\s+\w+\s+SET[^;]+WHERE[^;]+status\s*=\s*['"]pending['"]/i);
           if (!hasAtomicUpdate) {
-            console.warn('WARNING: Reservation capture/release may have race condition');
+            report('WARNING: Reservation capture/release may have race condition');
           }
         }
       }
@@ -310,7 +278,7 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
         const isAtomic = hasSkipLocked || hasAtomicClaim;
         
         if (!isAtomic) {
-          console.warn('WARNING: Job processor may not be using atomic job claiming');
+          report('WARNING: Job processor may not be using atomic job claiming');
         }
         
         expect(isAtomic).toBeTruthy();
@@ -344,7 +312,7 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
       }
       
       if (foundIdempotency && !hasProperNX) {
-        console.warn('WARNING: Idempotency implementation may not be using atomic NX operations');
+        report('WARNING: Idempotency implementation may not be using atomic NX operations');
       }
       
       expect(true).toBe(true);
@@ -359,8 +327,7 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
         const problems: string[] = [];
         
         // Find email validation regex
-        // eslint-disable-next-line no-useless-escape
-        const emailRegexes = content.match(/email.*regex|z\.string\(\)\.email\(\)|\/[^\/]+@[^\/]+\//gi);
+        const emailRegexes = content.match(/email.*regex|z\.string\(\)\.email\(\)|\/[^/]+@[^/]+\//gi);
         
         if (emailRegexes) {
           // Check if schema or validation
@@ -376,8 +343,8 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Email validation concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Email validation concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -401,8 +368,8 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Template rendering concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Template rendering concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -443,8 +410,8 @@ describe('Phase 4-6: Email Processing Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Potential missing error handling:');
-        issues.slice(0, 5).forEach(issue => console.warn(`  - ${issue}`));
+        report('Potential missing error handling:');
+        issues.slice(0, 5).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -523,8 +490,8 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Potential SQL injection vulnerabilities:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Potential SQL injection vulnerabilities:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       // Filter out known safe patterns (schema names for DDL, which can't be parameterized)
@@ -578,8 +545,8 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('SQL parameter count mismatches:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('SQL parameter count mismatches:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -610,8 +577,8 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Input validation concerns:');
-        issues.slice(0, 10).forEach(issue => console.warn(`  - ${issue}`));
+        report('Input validation concerns:');
+        issues.slice(0, 10).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -637,8 +604,8 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Numeric validation concerns:');
-        issues.slice(0, 5).forEach(issue => console.warn(`  - ${issue}`));
+        report('Numeric validation concerns:');
+        issues.slice(0, 5).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -651,8 +618,7 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
         const problems: string[] = [];
         
         // Find domain regex patterns
-        // eslint-disable-next-line no-useless-escape
-        const domainRegexes = content.matchAll(/domain.*regex\s*\(\s*\/([^\/]+)\//gi);
+        const domainRegexes = content.matchAll(/domain.*regex\s*\(\s*\/([^/]+)\//gi);
         
         for (const match of domainRegexes) {
           const regex = match[1];
@@ -666,8 +632,8 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Domain validation concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Domain validation concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -698,7 +664,7 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
       }
       
       if (foundApiKeyCompare && !hasTimingSafe) {
-        console.warn('WARNING: API key comparison may not be timing-safe');
+        report('WARNING: API key comparison may not be timing-safe');
       }
       
       expect(true).toBe(true);
@@ -716,7 +682,7 @@ describe('Phase 7-9: Security & Compliance Bug Detection', () => {
           // Should use HMAC-SHA256
           const usesHmac = content.match(/hmac|sha256|createHmac/i);
           if (content.includes('webhook') && !usesHmac) {
-            console.warn(`WARNING: ${path.basename(file)} may not use HMAC for webhook signatures`);
+            report(`WARNING: ${path.basename(file)} may not use HMAC for webhook signatures`);
           }
         }
       }
@@ -765,8 +731,8 @@ describe('Phase 10-12: Operations & DX Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Transaction safety concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Transaction safety concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -804,8 +770,8 @@ describe('Phase 10-12: Operations & DX Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Cache invalidation order concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Cache invalidation order concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -849,8 +815,8 @@ describe('Phase 10-12: Operations & DX Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Timezone handling concerns:');
-        issues.slice(0, 5).forEach(issue => console.warn(`  - ${issue}`));
+        report('Timezone handling concerns:');
+        issues.slice(0, 5).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -864,7 +830,7 @@ describe('Phase 10-12: Operations & DX Bug Detection', () => {
         // Check for year extraction
         if (content.match(/getFullYear\(\)/)) {
           if (!content.match(/getUTCFullYear\(\)/)) {
-            console.warn('WARNING: Invoice year may use local time instead of UTC');
+            report('WARNING: Invoice year may use local time instead of UTC');
           }
         }
       }
@@ -881,8 +847,7 @@ describe('Phase 10-12: Operations & DX Bug Detection', () => {
         const problems: string[] = [];
         
         // Look for floating point money operations
-        // eslint-disable-next-line no-useless-escape
-        const floatMoney = content.match(/price\s*[*\/]\s*\d+\.\d+|amount\s*[*\/]\s*\d+\.\d+|\.\d+\s*\*\s*(price|amount|cost)/gi);
+        const floatMoney = content.match(/price\s*[*/]\s*\d+\.\d+|amount\s*[*/]\s*\d+\.\d+|\.\d+\s*\*\s*(price|amount|cost)/gi);
         
         if (floatMoney) {
           floatMoney.forEach(match => {
@@ -901,8 +866,8 @@ describe('Phase 10-12: Operations & DX Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Floating point money concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Floating point money concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -942,8 +907,8 @@ describe('Phase 13-15: HA & Isolation Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Circuit breaker concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Circuit breaker concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -978,8 +943,8 @@ describe('Phase 13-15: HA & Isolation Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Rate limiter concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Rate limiter concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -995,7 +960,7 @@ describe('Phase 13-15: HA & Isolation Bug Detection', () => {
         const hasIncr = content.match(/incr|incrby/i);
         
         if (hasIncr && !hasAtomic) {
-          console.warn('WARNING: Rate limiter may not be atomic');
+          report('WARNING: Rate limiter may not be atomic');
         }
       }
       
@@ -1032,8 +997,8 @@ describe('Phase 13-15: HA & Isolation Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Tenant isolation concerns:');
-        issues.slice(0, 10).forEach(issue => console.warn(`  - ${issue}`));
+        report('Tenant isolation concerns:');
+        issues.slice(0, 10).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1071,8 +1036,8 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Internationalization concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Internationalization concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1102,8 +1067,8 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('Attachment handling concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Attachment handling concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1117,7 +1082,7 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
         const hasVirusScan = content.match(/virus|scan|clamav|malware/i);
         
         if (!hasVirusScan) {
-          console.warn('WARNING: Attachment service may not include virus scanning');
+          report('WARNING: Attachment service may not include virus scanning');
         }
       }
       
@@ -1153,8 +1118,8 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
       });
       
       if (issues.length > 0) {
-        console.warn('SSO security concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('SSO security concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1194,8 +1159,8 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Array bounds concerns:');
-        issues.slice(0, 5).forEach(issue => console.warn(`  - ${issue}`));
+        report('Array bounds concerns:');
+        issues.slice(0, 5).forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1236,8 +1201,8 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Loop termination concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Loop termination concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1272,8 +1237,8 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
       }
       
       if (issues.length > 0) {
-        console.warn('Memory safety concerns:');
-        issues.forEach(issue => console.warn(`  - ${issue}`));
+        report('Memory safety concerns:');
+        issues.forEach(issue => report(`  - ${issue}`));
       }
       
       expect(true).toBe(true);
@@ -1286,21 +1251,21 @@ describe('Phase 16-18: Edge Cases & Enterprise Bug Detection', () => {
 // ============================================================
 describe('Bug Detection Summary', () => {
   test('summary of all detected issues', () => {
-    console.log('\n====================================');
-    console.log('Bug Detection Analysis Complete');
-    console.log('====================================');
-    console.log('This test suite analyzed the codebase for:');
-    console.log('- Division by zero vulnerabilities');
-    console.log('- Race conditions in concurrent operations');
-    console.log('- Missing null/undefined checks');
-    console.log('- SQL injection vulnerabilities');
-    console.log('- Input validation gaps');
-    console.log('- Transaction safety issues');
-    console.log('- Date/time handling problems');
-    console.log('- Floating point money calculations');
-    console.log('- Off-by-one errors');
-    console.log('- Memory safety issues');
-    console.log('====================================\n');
+    report('\n====================================');
+    report('Bug Detection Analysis Complete');
+    report('====================================');
+    report('This test suite analyzed the codebase for:');
+    report('- Division by zero vulnerabilities');
+    report('- Race conditions in concurrent operations');
+    report('- Missing null/undefined checks');
+    report('- SQL injection vulnerabilities');
+    report('- Input validation gaps');
+    report('- Transaction safety issues');
+    report('- Date/time handling problems');
+    report('- Floating point money calculations');
+    report('- Off-by-one errors');
+    report('- Memory safety issues');
+    report('====================================\n');
     
     expect(true).toBe(true);
   });

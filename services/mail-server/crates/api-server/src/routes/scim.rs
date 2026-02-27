@@ -653,7 +653,7 @@ struct GroupScimRow {
     id: Uuid,
     scim_id: String,
     display_name: String,
-    #[allow(dead_code)]
+    #[allow(unused)]
     created_at: chrono::DateTime<Utc>,
 }
 

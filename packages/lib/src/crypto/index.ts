@@ -127,16 +127,28 @@ export function verifyHMAC(
   options: HMACOptions = {}
 ): boolean {
   const expected = signHMAC(payload, secret, options);
+
+  if (!/^[a-f0-9]+$/i.test(expected) || !/^[a-f0-9]+$/i.test(signature)) {
+    return false;
+  }
   
   if (expected.length !== signature.length) {
     return false;
   }
 
+  if (expected.length % 2 !== 0 || signature.length % 2 !== 0) {
+    return false;
+  }
+
+  const expectedBuffer = Buffer.from(expected, 'hex');
+  const signatureBuffer = Buffer.from(signature, 'hex');
+
+  if (expectedBuffer.length !== signatureBuffer.length) {
+    return false;
+  }
+
   try {
-    return timingSafeEqual(
-      Buffer.from(expected, 'hex'),
-      Buffer.from(signature, 'hex')
-    );
+    return timingSafeEqual(expectedBuffer, signatureBuffer);
   } catch {
     return false;
   }

@@ -10,6 +10,10 @@ import * as path from 'node:path';
 
 const APPS_DIR = path.join(__dirname, '../../../..', 'apps');
 
+function report(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
 // Helper to safely read and analyze source code
 function readSource(filePath: string): string | null {
   try {
@@ -97,7 +101,7 @@ describe('Phase 1-3: Core Infrastructure Deep Bug Detection', () => {
           // Check for pool size configuration
           const hasPoolConfig = content.match(/max.*pool|pool.*max|connectionLimit|maxConnections/i);
           if (!hasPoolConfig) {
-            console.warn(`${path.basename(configPath)} may not configure connection pool limits`);
+            report(`${path.basename(configPath)} may not configure connection pool limits`);
           }
         }
       }
@@ -271,7 +275,7 @@ describe('Phase 7-9: Security Deep Bug Detection', () => {
             // Should NOT use plain MD5/SHA for passwords
             if (content.match(/md5|sha1|sha256/i) && content.match(/password/i)) {
               if (!content.match(/hmac/i)) {
-                console.warn(`${file} may use weak hash for passwords`);
+                report(`${file} may use weak hash for passwords`);
               }
             }
           }
@@ -408,7 +412,7 @@ describe('Phase 10-12: Operations Deep Bug Detection', () => {
                   for (const stmt of logStatements) {
                     for (const pattern of sensitivePatterns) {
                       if (new RegExp(pattern, 'i').test(stmt)) {
-                        console.warn(`${file} may log sensitive data: ${pattern}`);
+                        report(`${file} may log sensitive data: ${pattern}`);
                       }
                     }
                   }
@@ -624,7 +628,7 @@ describe('Critical Runtime Bug Detection', () => {
                 // Check surrounding lines for guard
                 const context = lines.slice(Math.max(0, idx - 3), idx).join('\n');
                 if (!context.match(/length|if|\.rows/)) {
-                  console.warn(`${file}:${idx + 1} - Potential unsafe array access: ${line.trim().substring(0, 60)}`);
+                  report(`${file}:${idx + 1} - Potential unsafe array access: ${line.trim().substring(0, 60)}`);
                 }
               }
             });
@@ -652,7 +656,7 @@ describe('Critical Runtime Bug Detection', () => {
                   if (line.match(/\w+\.(toLowerCase|toUpperCase|trim|split|replace)\s*\(/) && 
                       !line.match(/\?\.|String\(|toString\(\)/)) {
                     // Might be unsafe
-                    console.warn(`${file}:${idx + 1} - Potential null string method: ${line.trim().substring(0, 50)}`);
+                    report(`${file}:${idx + 1} - Potential null string method: ${line.trim().substring(0, 50)}`);
                   }
                 });
               }

@@ -123,7 +123,7 @@ static BOT_IP_CIDRS: &[&str] = &[
 
 /// Pre-compiled bot-detector state, constructed once at startup.
 pub struct BotDetector {
-    ua_ac: AhoCorasick,
+    ua_ac: Option<AhoCorasick>,
     ip_ranges: Vec<IpNetwork>,
 }
 
@@ -135,7 +135,7 @@ impl BotDetector {
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostFirst)
             .build(BOT_UA_PATTERNS)
-            .expect("BotDetector: AhoCorasick construction should never fail on static patterns");
+            .ok();
 
         let ip_ranges = BOT_IP_CIDRS
             .iter()
@@ -158,7 +158,7 @@ impl BotDetector {
                 if ua.len() < 8 {
                     return true;
                 }
-                self.ua_ac.is_match(ua)
+                self.ua_ac.as_ref().map(|ac| ac.is_match(ua)).unwrap_or(false)
             }
         }
     }

@@ -29,11 +29,11 @@ static TLSA_CACHE: LazyLock<Cache<String, Vec<TlsaRecord>>> = LazyLock::new(|| {
         .build()
 });
 
-static DOH_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+static DOH_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .expect("DoH HTTP client")
+    .ok()
 });
 
 fn tlsa_cache_ttl_secs() -> u64 {
@@ -124,7 +124,11 @@ pub async fn verify_dane(domain: &str, port: u16, protocol: &str) -> DaneVerific
         return result;
     }
 
-    let client = &*DOH_CLIENT;
+    let Some(client) = DOH_CLIENT.as_ref() else {
+        result.errors.push("DoH HTTP client unavailable".into());
+        result.recommendations.push("Ensure DANE client configuration is valid".into());
+        return result;
+    };
 
     // #132: Try multiple DoH providers with fallback
     let mut doh_body: Option<serde_json::Value> = None;

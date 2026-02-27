@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, timeout};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{debug, info, warn};
-use hickory_resolver::config::{NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig, ResolverOpts};
+use trust_dns_resolver::config::{NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig, ResolverOpts};
 use mail_auth::{AuthenticatedMessage, DkimResult, Resolver, SpfResult};
 use mail_parser::{Address, MessageParser};
 use mail_proto::generated::{
@@ -102,16 +102,16 @@ pub struct SmtpMetricsSnapshot {
     pub deliveries_oversized: u64,
 }
 
-static COMMAND_RATE_TRACKER: LazyLock<tokio::sync::Mutex<HashMap<IpAddr, VecDeque<Instant>>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+static COMMAND_RATE_TRACKER: LazyLock<tokio::sync::RwLock<HashMap<IpAddr, VecDeque<Instant>>>> =
+    LazyLock::new(|| tokio::sync::RwLock::new(HashMap::new()));
 
 struct DnsCircuitState {
     consecutive_failures: u32,
     open_until: Option<Instant>,
 }
 
-static DNS_CIRCUIT: LazyLock<tokio::sync::Mutex<DnsCircuitState>> = LazyLock::new(|| {
-    tokio::sync::Mutex::new(DnsCircuitState {
+static DNS_CIRCUIT: LazyLock<tokio::sync::RwLock<DnsCircuitState>> = LazyLock::new(|| {
+    tokio::sync::RwLock::new(DnsCircuitState {
         consecutive_failures: 0,
         open_until: None,
     })
@@ -125,6 +125,7 @@ pub struct SmtpConfig {
     pub enable_starttls: bool,
     pub tls_acceptor: Option<TlsAcceptor>,
     /// Domains this server accepts mail for
+    #[allow(dead_code)]
     pub local_domains: Vec<String>,
     /// Lowercased local domains for fast lookup
     pub local_domains_lower: HashSet<String>,
@@ -261,6 +262,7 @@ enum ReadLineBytesStatus {
 }
 
 impl SessionStream {
+    #[allow(dead_code)]
     async fn with_stream<T, FPlain, FTls, FutPlain, FutTls>(
         &mut self,
         plain_op: FPlain,
@@ -280,19 +282,19 @@ impl SessionStream {
     }
 
     async fn read_u8(&mut self) -> Result<u8> {
-        self.with_stream(
-            |stream| async move { stream.read_u8().await.map_err(Into::into) },
-            |stream| async move { stream.read_u8().await.map_err(Into::into) },
-        )
-        .await
+        match self {
+            SessionStream::Plain(stream) => stream.read_u8().await.map_err(Into::into),
+            SessionStream::Tls(stream) => stream.read_u8().await.map_err(Into::into),
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
     }
 
     async fn read_chunk(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.with_stream(
-            |stream| async move { stream.read(buf).await.map_err(Into::into) },
-            |stream| async move { stream.read(buf).await.map_err(Into::into) },
-        )
-        .await
+        match self {
+            SessionStream::Plain(stream) => stream.read(buf).await.map_err(Into::into),
+            SessionStream::Tls(stream) => stream.read(buf).await.map_err(Into::into),
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
     }
 
     async fn drain_until_newline(&mut self) -> Result<()> {
@@ -383,19 +385,19 @@ impl SessionStream {
     }
 
     async fn write_all(&mut self, data: &[u8]) -> Result<()> {
-        self.with_stream(
-            |stream| async move { stream.write_all(data).await.map_err(Into::into) },
-            |stream| async move { stream.write_all(data).await.map_err(Into::into) },
-        )
-        .await
+        match self {
+            SessionStream::Plain(stream) => stream.write_all(data).await.map_err(Into::into),
+            SessionStream::Tls(stream) => stream.write_all(data).await.map_err(Into::into),
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
     }
 
     async fn flush(&mut self) -> Result<()> {
-        self.with_stream(
-            |stream| async move { stream.flush().await.map_err(Into::into) },
-            |stream| async move { stream.flush().await.map_err(Into::into) },
-        )
-        .await
+        match self {
+            SessionStream::Plain(stream) => stream.flush().await.map_err(Into::into),
+            SessionStream::Tls(stream) => stream.flush().await.map_err(Into::into),
+            SessionStream::Invalid => Err(anyhow::anyhow!("Invalid session stream state")),
+        }
     }
 }
 
@@ -721,10 +723,8 @@ async fn handle_command_mode(
                     Ok(s) => s,
                     Err(e) => {
                         warn!(peer = %peer, error = %e, "STARTTLS handshake failed");
-                        *stream = SessionStream::Plain(BufStream::new(tcp_stream));
-                        stream.write_all(b"454 4.7.0 TLS handshake failed\r\n").await?;
-                        stream.flush().await?;
-                        return Ok(true);
+                        *stream = SessionStream::Invalid;
+                        return Ok(false);
                     }
                 };
                 *stream = SessionStream::Tls(BufStream::new(tls_stream));
@@ -764,7 +764,7 @@ async fn allow_command_from_peer(peer_ip: IpAddr) -> bool {
     let now = Instant::now();
     let window_start = now - COMMAND_RATE_WINDOW;
 
-    let mut tracker = COMMAND_RATE_TRACKER.lock().await;
+    let mut tracker = COMMAND_RATE_TRACKER.write().await;
     let entries = tracker.entry(peer_ip).or_insert_with(VecDeque::new);
 
     while let Some(front) = entries.front() {
@@ -822,7 +822,7 @@ fn build_dns_resolver() -> Result<Resolver, anyhow::Error> {
 }
 
 async fn dns_circuit_allows_queries() -> bool {
-    let mut state = DNS_CIRCUIT.lock().await;
+    let mut state = DNS_CIRCUIT.write().await;
     if let Some(until) = state.open_until {
         if Instant::now() < until {
             return false;
@@ -834,7 +834,7 @@ async fn dns_circuit_allows_queries() -> bool {
 }
 
 async fn dns_circuit_record(success: bool) {
-    let mut state = DNS_CIRCUIT.lock().await;
+    let mut state = DNS_CIRCUIT.write().await;
     if success {
         state.consecutive_failures = 0;
         state.open_until = None;
@@ -869,100 +869,93 @@ async fn handle_command(
     }
     
     if cmd.eq_ignore_ascii_case("HELO") {
-            if args.is_empty() {
-                return "501 5.5.4 HELO requires domain argument\r\n".to_string();
-            }
-            state.helo = Some(args.to_string());
-            state.needs_helo = false;
-            format!("250 {} Hello {}\r\n", config.hostname, args)
+        if args.is_empty() {
+            return "501 5.5.4 HELO requires domain argument\r\n".to_string();
         }
+        state.helo = Some(args.to_string());
+        state.needs_helo = false;
+        format!("250 {} Hello {}\r\n", config.hostname, args)
     } else if cmd.eq_ignore_ascii_case("EHLO") {
-            if args.is_empty() {
-                return "501 5.5.4 EHLO requires domain argument\r\n".to_string();
-            }
-            state.helo = Some(args.to_string());
-            state.needs_helo = false;
-            let mut response = String::with_capacity(128);
-            let _ = write!(
-                &mut response,
-                "250-{} Hello {}\r\n250-SIZE {}\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n",
-                config.hostname,
-                args,
-                config.max_message_size
-            );
-
-            response.push_str("250-SMTPUTF8\r\n");
-
-            if config.enable_starttls {
-                response.push_str("250-STARTTLS\r\n");
-            }
-
-            response.push_str("250 HELP\r\n");
-            response
+        if args.is_empty() {
+            return "501 5.5.4 EHLO requires domain argument\r\n".to_string();
         }
+        state.helo = Some(args.to_string());
+        state.needs_helo = false;
+        let mut response = String::with_capacity(128);
+        if let Err(error) = write!(
+            &mut response,
+            "250-{} Hello {}\r\n250-SIZE {}\r\n250-8BITMIME\r\n250-ENHANCEDSTATUSCODES\r\n",
+            config.hostname,
+            args,
+            config.max_message_size
+        ) {
+            tracing::warn!(error = %error, "Failed to format EHLO response");
+        }
+
+        response.push_str("250-SMTPUTF8\r\n");
+
+        if config.enable_starttls {
+            response.push_str("250-STARTTLS\r\n");
+        }
+
+        response.push_str("250 HELP\r\n");
+        response
     } else if cmd.eq_ignore_ascii_case("MAIL") {
-            if state.helo.is_none() {
-                return "503 5.5.1 EHLO/HELO first\r\n".to_string();
-            }
-            
-            // Parse MAIL FROM:<address>
-            let from = parse_mail_from(args);
-            match from {
-                Some(addr) => {
-                    if let Some(size) = extract_size_param(args) {
-                        if size > config.max_message_size as u64 {
-                            return "552 5.3.4 Message size exceeds fixed maximum message size\r\n"
-                                .to_string();
-                        }
+        if state.helo.is_none() {
+            return "503 5.5.1 EHLO/HELO first\r\n".to_string();
+        }
+
+        let from = parse_mail_from(args);
+        match from {
+            Some(addr) => {
+                if let Some(size) = extract_size_param(args) {
+                    if size > config.max_message_size as u64 {
+                        return "552 5.3.4 Message size exceeds fixed maximum message size\r\n"
+                            .to_string();
                     }
-                    state.mail_from = Some(addr);
-                    state.rcpt_to.clear();
-                    "250 2.1.0 Sender OK\r\n".to_string()
                 }
-                None => "501 5.1.7 Syntax error in MAIL FROM\r\n".to_string(),
+                state.mail_from = Some(addr);
+                state.rcpt_to.clear();
+                "250 2.1.0 Sender OK\r\n".to_string()
             }
+            None => "501 5.1.7 Syntax error in MAIL FROM\r\n".to_string(),
         }
     } else if cmd.eq_ignore_ascii_case("RCPT") {
-            if state.mail_from.is_none() {
-                return "503 5.5.1 MAIL first\r\n".to_string();
-            }
-            
-            if state.rcpt_to.len() >= config.max_recipients {
-                return "452 4.5.3 Too many recipients\r\n".to_string();
-            }
-            
-            // Parse RCPT TO:<address>
-            let to = parse_rcpt_to(args);
-            match to {
-                Some(addr) => {
-                    // Check if we accept mail for this domain
-                    if is_local_domain(&addr, config) {
-                        state.rcpt_to.push(addr);
-                        "250 2.1.5 Recipient OK\r\n".to_string()
-                    } else {
-                        "550 5.1.1 User not local; we do not relay\r\n".to_string()
-                    }
+        if state.mail_from.is_none() {
+            return "503 5.5.1 MAIL first\r\n".to_string();
+        }
+
+        if state.rcpt_to.len() >= config.max_recipients {
+            return "452 4.5.3 Too many recipients\r\n".to_string();
+        }
+
+        let to = parse_rcpt_to(args);
+        match to {
+            Some(addr) => {
+                if is_local_domain(&addr, config) {
+                    state.rcpt_to.push(addr);
+                    "250 2.1.5 Recipient OK\r\n".to_string()
+                } else {
+                    "550 5.1.1 User not local; we do not relay\r\n".to_string()
                 }
-                None => "501 5.1.3 Syntax error in RCPT TO\r\n".to_string(),
             }
+            None => "501 5.1.3 Syntax error in RCPT TO\r\n".to_string(),
         }
     } else if cmd.eq_ignore_ascii_case("DATA") {
-            if state.rcpt_to.is_empty() {
-                return "503 5.5.1 RCPT first\r\n".to_string();
-            }
-            
-            state.data_mode = true;
-            reset_data_buffer(&mut state.data_buffer);
-            state.data_too_large = false;
-            "354 Start mail input; end with <CRLF>.<CRLF>\r\n".to_string()
+        if state.rcpt_to.is_empty() {
+            return "503 5.5.1 RCPT first\r\n".to_string();
         }
+
+        state.data_mode = true;
+        reset_data_buffer(&mut state.data_buffer);
+        state.data_too_large = false;
+        "354 Start mail input; end with <CRLF>.<CRLF>\r\n".to_string()
     } else if cmd.eq_ignore_ascii_case("RSET") {
-            state.mail_from = None;
-            state.rcpt_to.clear();
-            reset_data_buffer(&mut state.data_buffer);
-            state.data_too_large = false;
-            "250 2.0.0 OK\r\n".to_string()
-        }
+        state.mail_from = None;
+        state.rcpt_to.clear();
+        reset_data_buffer(&mut state.data_buffer);
+        state.data_too_large = false;
+        "250 2.0.0 OK\r\n".to_string()
     } else if cmd.eq_ignore_ascii_case("NOOP") {
         "250 2.0.0 OK\r\n".to_string()
     } else if cmd.eq_ignore_ascii_case("QUIT") {
@@ -1099,7 +1092,7 @@ async fn process_message(
             "temperror".to_string()
         } else if !from_domain.is_empty() {
             let Some(resolver) = resolver else {
-                return ("temperror".to_string(), true);
+                return "temperror".to_string();
             };
             let result = resolver
                 .verify_spf_sender(peer_ip, helo_domain, &from_domain, from_addr)
@@ -1130,7 +1123,7 @@ async fn process_message(
             "temperror".to_string()
         } else {
             let Some(resolver) = resolver else {
-                return ("temperror".to_string(), pass_domains, true);
+                return "temperror".to_string();
             };
             match AuthenticatedMessage::parse(message_data) {
                 Some(authenticated_msg) => {
@@ -1309,6 +1302,7 @@ async fn process_message(
     let store_tasks = state.rcpt_to.iter().cloned().map(|recipient| {
         let mut recipient_client = client.clone();
         let payload = final_message.clone();
+        let custom_flags = custom_flags.clone();
         async move {
             let request = StoreMessageRequest {
                 account_id: recipient.clone(),
@@ -1393,6 +1387,7 @@ fn extract_header_from_domain(message_data: &[u8]) -> String {
         .to_lowercase()
 }
 
+#[allow(dead_code)]
 fn domains_align(header_domain: &str, auth_domain: &str) -> bool {
     if header_domain.is_empty() || auth_domain.is_empty() {
         return false;
@@ -1409,10 +1404,12 @@ fn domains_align(header_domain: &str, auth_domain: &str) -> bool {
     header_org.is_some() && header_org == auth_org
 }
 
+#[allow(dead_code)]
 fn canonical_domain(domain: &str) -> String {
     domain.trim_end_matches('.').to_lowercase()
 }
 
+#[allow(dead_code)]
 fn organizational_domain(domain: &str) -> Option<String> {
     let labels: Vec<&str> = domain.split('.').filter(|label| !label.is_empty()).collect();
     if labels.len() < 2 {
@@ -1513,6 +1510,7 @@ struct DmarcRecord {
 
 struct DmarcPolicyResult {
     policy: String,
+    #[allow(dead_code)]
     record_domain: String,
 }
 
@@ -1523,24 +1521,4 @@ impl DmarcPolicyResult {
             record_domain: domain,
         }
     }
-}
-    None
-}
-    let qname = format!("_dmarc.{domain}");
-    let raw = resolver.txt_raw_lookup(&qname).await.ok()?;
-    let txt = String::from_utf8_lossy(&raw).to_lowercase();
-    if txt.starts_with("v=dmarc1") {
-        // Extract p= tag
-        for part in txt.split(';') {
-            let part = part.trim();
-            if part.starts_with("p=") {
-                let value = part[2..].trim();
-                match value {
-                    "reject" | "quarantine" | "none" => return Some(value.to_string()),
-                    _ => return Some("none".to_string()),
-                }
-            }
-        }
-    }
-    None
 }

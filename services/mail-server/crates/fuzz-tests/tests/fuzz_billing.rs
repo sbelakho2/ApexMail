@@ -16,20 +16,20 @@ fn fuzz_payg_cost_never_negative() {
         let api_calls: u64 = rng.gen_range(0..50_000_000);
         let (email_cost, api_cost, total) = pricing.calculate(emails, api_calls);
         assert!(
-            email_cost >= 0.0,
+            email_cost >= 0,
             "Email cost negative for emails={emails}: {email_cost}"
         );
         assert!(
-            api_cost >= 0.0,
+            api_cost >= 0,
             "API cost negative for api_calls={api_calls}: {api_cost}"
         );
         assert!(
-            total >= 0.0,
+            total >= 0,
             "Total negative for emails={emails}, api={api_calls}: {total}"
         );
-        // Total should equal or exceed sum of parts (rounding may cause tiny diffs)
+        // Total must equal sum of parts for integer cents.
         assert!(
-            (total - (email_cost + api_cost)).abs() < 1.0,
+            total == email_cost + api_cost,
             "Total {total} != email {email_cost} + api {api_cost}"
         );
     }

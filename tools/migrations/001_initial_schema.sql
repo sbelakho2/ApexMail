@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS domains (
     accepts_inbound BOOLEAN NOT NULL DEFAULT false,
     dkim_selector VARCHAR(100),
     dkim_public_key TEXT,
-    dkim_private_key TEXT,
+    dkim_private_key_encrypted TEXT,
     spf_configured BOOLEAN NOT NULL DEFAULT false,
     dmarc_configured BOOLEAN NOT NULL DEFAULT false,
     dns_last_checked_at TIMESTAMPTZ,

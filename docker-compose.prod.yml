@@ -61,6 +61,7 @@ services:
   certbot:
     image: certbot/certbot:v2.11.0
     restart: unless-stopped
+    user: "1000:1000"
     volumes:
       - certbot_webroot:/var/www/certbot
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/letsencrypt:rw

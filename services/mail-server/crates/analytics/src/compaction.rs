@@ -14,7 +14,7 @@ pub struct CompactionWorker {
     config: CompactionConfig,
     storage_path: String,
     /// #201: Stores the unique owner value for the distributed lock.
-    lock_owner: tokio::sync::Mutex<Option<String>>,
+    lock_owner: tokio::sync::RwLock<Option<String>>,
 }
 
 impl CompactionWorker {
@@ -29,7 +29,7 @@ impl CompactionWorker {
             redis,
             config,
             storage_path,
-            lock_owner: tokio::sync::Mutex::new(None),
+            lock_owner: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -42,7 +42,7 @@ impl CompactionWorker {
                 rows_migrated: 0,
                 rows_deleted: 0,
                 bytes_written: 0,
-                checksum: String::new(),
+                checksum: "skipped-lock-held".to_string(),
                 completed: false,
             });
         }
@@ -65,16 +65,20 @@ impl CompactionWorker {
         let mut hasher = Sha256::new();
 
         loop {
-            let rows = sqlx::query_as::<_, EventRow>(
-                "SELECT id, tenant_id, message_id, event_type, recipient, timestamp, \
-                 metadata, ip_address, user_agent, link_id, bounce_type, bounce_subtype, \
-                 provider, region, campaign_id \
-                 FROM events WHERE timestamp < $1 ORDER BY timestamp LIMIT $2",
+            let rows = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                sqlx::query_as::<_, EventRow>(
+                    "SELECT id, tenant_id, message_id, event_type, recipient, timestamp, \
+                     metadata, ip_address, user_agent, link_id, bounce_type, bounce_subtype, \
+                     provider, region, campaign_id \
+                     FROM events WHERE timestamp < $1 ORDER BY timestamp LIMIT $2",
+                )
+                .bind(cutoff)
+                .bind(batch_size)
+                .fetch_all(&self.pool),
             )
-            .bind(cutoff)
-            .bind(batch_size)
-            .fetch_all(&self.pool)
-            .await?;
+            .await
+            .map_err(|_| anyhow::anyhow!("Timed out fetching compaction batch"))??;
 
             if rows.is_empty() {
                 break;
@@ -121,7 +125,7 @@ impl CompactionWorker {
     /// Serialize batch of events to JSONL and write to storage path.
     /// #182: Use tokio::task::spawn_blocking to avoid blocking the Tokio runtime.
     async fn write_jsonl_batch(&self, rows: &[EventRow]) -> anyhow::Result<(u64, Vec<u8>)> {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(rows.len().saturating_mul(256));
         for row in rows {
             let line = serde_json::to_vec(row)?;
             buf.extend_from_slice(&line);
@@ -187,14 +191,14 @@ impl CompactionWorker {
             .await?;
         if result.is_some() {
             // Store owner so release_lock can verify
-            self.lock_owner.lock().await.replace(owner);
+            self.lock_owner.write().await.replace(owner);
         }
         Ok(result.is_some())
     }
 
     /// Release lock only if we still own it (compare-and-delete via Lua script).
     async fn release_lock(&self, key: &str) -> anyhow::Result<()> {
-        let owner = self.lock_owner.lock().await.take();
+        let owner = self.lock_owner.write().await.take();
         let owner = match owner {
             Some(o) => o,
             None => return Ok(()), // We never acquired the lock

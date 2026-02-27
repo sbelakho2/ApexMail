@@ -97,12 +97,13 @@ async fn get_usage(
     Query(q): Query<TenantQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = chrono::Utc::now();
-    let period_start = now
+    let month_start_date = now
         .date_naive()
         .with_day(1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .map(|dt| dt.and_utc())
-        .unwrap_or_else(|| now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc());
+        .unwrap_or(now.date_naive());
+    let period_start = month_start_date
+        .and_time(chrono::NaiveTime::MIN)
+        .and_utc();
     let period_end = period_start + chrono::Months::new(1);
     let summary = usage::get_usage(&state.db, q.tenant_id, period_start, period_end).await?;
     Ok(Json(summary))

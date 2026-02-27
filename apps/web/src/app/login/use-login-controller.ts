@@ -8,6 +8,11 @@ interface AuthErrorShape {
   errorCode?: string;
 }
 
+const LOGIN_VALIDATION_SCHEMA = {
+  emailPattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+  minPasswordLength: 8,
+};
+
 export function useLoginController() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -20,6 +25,8 @@ export function useLoginController() {
   const [retryAfterSeconds, setRetryAfterSeconds] = useState(0);
   const [mfaRequired, setMfaRequired] = useState(false);
   const [mfaCode, setMfaCode] = useState('');
+  const [mcaptchaToken, setMcaptchaToken] = useState('');
+  const [mcaptchaError, setMcaptchaError] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [lockoutMessage, setLockoutMessage] = useState('');
   const [csrfToken, setCsrfToken] = useState<string | null>(null);
@@ -40,14 +47,22 @@ export function useLoginController() {
 
   const validateEmail = (value: string) => {
     if (!value.trim()) return 'Email is required';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'Enter a valid email address';
+    if (!LOGIN_VALIDATION_SCHEMA.emailPattern.test(value)) return 'Enter a valid email address';
     return '';
   };
 
   const validatePassword = (value: string) => {
     if (!value.trim()) return 'Password is required';
-    if (value.length < 8) return 'Password must be at least 8 characters';
+    if (value.length < LOGIN_VALIDATION_SCHEMA.minPasswordLength) {
+      return `Password must be at least ${LOGIN_VALIDATION_SCHEMA.minPasswordLength} characters`;
+    }
     return '';
+  };
+
+  const validateLoginForm = (candidateEmail: string, candidatePassword: string) => {
+    const nextEmailError = validateEmail(candidateEmail);
+    const nextPasswordError = validatePassword(candidatePassword);
+    return { nextEmailError, nextPasswordError };
   };
 
   const getNetworkClass = () => {
@@ -87,6 +102,18 @@ export function useLoginController() {
 
     if (data.errorCode === 'MFA_REQUIRED') {
       return { key: 'auth.error.mfa_required', message: 'Additional verification required. Enter your MFA code.' };
+    }
+
+    if (data.errorCode === 'MCAPTCHA_REQUIRED') {
+      return { key: 'auth.error.mcaptcha_required', message: 'Complete the CAPTCHA challenge and try again.' };
+    }
+
+    if (data.errorCode === 'MCAPTCHA_INVALID') {
+      return { key: 'auth.error.mcaptcha_invalid', message: 'CAPTCHA verification failed. Please retry.' };
+    }
+
+    if (data.errorCode === 'MCAPTCHA_UNAVAILABLE') {
+      return { key: 'auth.error.mcaptcha_unavailable', message: 'CAPTCHA verification is temporarily unavailable. Please try again.' };
     }
 
     if (status === 401 || status === 400 || data.errorCode === 'INVALID_CREDENTIALS') {
@@ -164,6 +191,7 @@ export function useLoginController() {
     setError('');
     setAuthErrorKey('');
     setLockoutMessage('');
+    setMcaptchaError('');
 
     if (!online) {
       setError('You appear to be offline. Reconnect and try again.');
@@ -189,8 +217,14 @@ export function useLoginController() {
       return;
     }
 
-    const nextEmailError = validateEmail(email);
-    const nextPasswordError = validatePassword(password);
+    if (process.env.NEXT_PUBLIC_MCAPTCHA_ENABLED === 'true' && !mcaptchaToken.trim()) {
+      setMcaptchaError('Complete the CAPTCHA challenge before signing in.');
+      setAuthErrorKey('auth.error.mcaptcha_required');
+      setIsLoading(false);
+      return;
+    }
+
+    const { nextEmailError, nextPasswordError } = validateLoginForm(email, password);
     setEmailError(nextEmailError);
     setPasswordError(nextPasswordError);
     if (nextEmailError || nextPasswordError) {
@@ -206,7 +240,7 @@ export function useLoginController() {
           'Content-Type': 'application/json',
           'X-CSRF-Token': csrfToken,
         },
-        body: JSON.stringify({ email, password, mfaCode: mfaCode || undefined, rememberMe }),
+        body: JSON.stringify({ email, password, mfaCode: mfaCode || undefined, rememberMe, mcaptchaToken: mcaptchaToken || undefined }),
         credentials: 'include',
       });
 
@@ -236,6 +270,11 @@ export function useLoginController() {
 
       if (!response.ok) {
         const mapped = mapAuthError(response.status, data || {});
+
+        if (data?.errorCode === 'MCAPTCHA_REQUIRED' || data?.errorCode === 'MCAPTCHA_INVALID' || data?.errorCode === 'MCAPTCHA_UNAVAILABLE') {
+          setMcaptchaError(mapped.message);
+          setMcaptchaToken('');
+        }
 
         if (mapped.key === 'auth.error.locked') {
           setLockoutMessage(mapped.message);
@@ -270,6 +309,10 @@ export function useLoginController() {
     mfaRequired,
     mfaCode,
     setMfaCode,
+    mcaptchaToken,
+    setMcaptchaToken,
+    mcaptchaError,
+    setMcaptchaError,
     rememberMe,
     setRememberMe,
     lockoutMessage,
@@ -289,6 +332,7 @@ export function useLoginController() {
     ssoLoading,
     setSsoLoading,
     failedAttempts,
+    setRetryAfterSeconds,
     returnTo,
     loadCsrfToken,
     handleSubmit,

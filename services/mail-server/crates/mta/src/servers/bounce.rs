@@ -18,9 +18,8 @@ use uuid::Uuid;
 use crate::config::BounceConfig;
 
 // #142: Pre-compiled regex for RFC 3463 enhanced status codes
-static BOUNCE_STATUS_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"[45]\.[0-9]{1,3}\.[0-9]{1,3}").unwrap()
-});
+static BOUNCE_STATUS_RE: LazyLock<Option<regex::Regex>> =
+    LazyLock::new(|| regex::Regex::new(r"[45]\.[0-9]{1,3}\.[0-9]{1,3}").ok());
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -427,17 +426,21 @@ fn extract_status_code(message: &str) -> String {
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
         if trimmed.starts_with("status:") || trimmed.starts_with("diagnostic-code:") {
-            if let Some(m) = BOUNCE_STATUS_RE.find(line) {
-                return m.as_str().to_string();
+            if let Some(re) = &*BOUNCE_STATUS_RE {
+                if let Some(m) = re.find(line) {
+                    return m.as_str().to_string();
+                }
             }
         }
     }
     // Fallback: check lines starting with 3-digit SMTP reply codes
-    for line in message.lines() {
-        let trimmed = line.trim();
-        if trimmed.len() >= 3 && trimmed.as_bytes()[..3].iter().all(|b| b.is_ascii_digit()) {
-            if let Some(m) = BOUNCE_STATUS_RE.find(trimmed) {
-                return m.as_str().to_string();
+    if let Some(re) = &*BOUNCE_STATUS_RE {
+        for line in message.lines() {
+            let trimmed = line.trim();
+            if let Some(m) = re.find(trimmed) {
+                if m.start() == 0 {
+                    return m.as_str().to_string();
+                }
             }
         }
     }
@@ -543,8 +546,7 @@ mod tests {
             "bounces+msg123=example.com=user@bounces.apexmail.ee",
             "bounces.apexmail.ee",
         );
-        assert!(result.is_some());
-        let (mid, recip) = result.unwrap();
+        let (mid, recip) = result.expect("expected valid VERP address");
         assert_eq!(mid, "msg123");
         assert_eq!(recip, "user@example.com");
     }

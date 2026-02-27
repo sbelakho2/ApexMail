@@ -40,7 +40,7 @@ pub struct PolicyResult {
 
 /// Evaluate an attachment against the security policy
 pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> PolicyResult {
-    let mut reasons = Vec::new();
+    let mut reasons = Vec::with_capacity(6);
     let mut risk_score = inspection.risk_score;
     let mut force_reject = false;
 

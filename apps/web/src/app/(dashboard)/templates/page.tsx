@@ -217,7 +217,7 @@ export default function TemplatesPage() {
                                 <Skeleton className="h-24 w-full" />
                             </div>
                             <div className="space-y-3">
-                                {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}
+                                {Array.from({ length: 5 }, (_, i) => `templates-skeleton-${i}`).map((skeletonId) => <Skeleton key={skeletonId} className="h-14 w-full" />)}
                             </div>
                         </div>
                     ) : filtered.length === 0 ? (

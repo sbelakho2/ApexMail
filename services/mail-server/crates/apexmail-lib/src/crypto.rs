@@ -10,14 +10,26 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Create an HMAC-SHA256 signature and return as hex.
 pub fn create_hmac_signature(key: &[u8], data: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = match HmacSha256::new_from_slice(key) {
+        Ok(mac) => mac,
+        Err(error) => {
+            tracing::error!(?error, "Failed to initialize HMAC-SHA256");
+            return String::new();
+        }
+    };
     mac.update(data);
     hex::encode(mac.finalize().into_bytes())
 }
 
 /// Create HMAC-SHA256 and return as base64.
 pub fn create_hmac_signature_base64(key: &[u8], data: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = match HmacSha256::new_from_slice(key) {
+        Ok(mac) => mac,
+        Err(error) => {
+            tracing::error!(?error, "Failed to initialize HMAC-SHA256");
+            return String::new();
+        }
+    };
     mac.update(data);
     BASE64.encode(mac.finalize().into_bytes())
 }

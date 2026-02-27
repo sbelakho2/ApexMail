@@ -92,8 +92,17 @@ export interface EventStats {
 export class EventsRepository {
   constructor(private readonly db: DatabasePool) {}
 
+  private isValidEmailAddress(email: string): boolean {
+    const normalized = email.toLowerCase().trim();
+    const atIndex = normalized.lastIndexOf('@');
+    return atIndex > 0 && atIndex < normalized.length - 1;
+  }
+
   private hashEmail(email: string): string {
     const normalizedEmail = email.toLowerCase().trim();
+    if (!this.isValidEmailAddress(normalizedEmail)) {
+      return createHash('sha256').update('invalid-email').digest('hex');
+    }
     return createHash('sha256').update(normalizedEmail).digest('hex');
   }
 

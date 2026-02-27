@@ -317,10 +317,12 @@ export function InteractiveConsole() {
                     <strong className="text-surface-900 text-xs mr-2">Subject:</strong> {requestBody.subject}
                   </div>
                 </div>
-                {/* XSS Protection: HTML is sanitized with DOMPurify before rendering */}
-                <div
-                  className="p-6 text-surface-900"
-                  dangerouslySetInnerHTML={{ __html: sanitizeHtml(requestBody.html) }}
+                {/* XSS Protection: render sanitized HTML in a sandboxed iframe */}
+                <iframe
+                  className="w-full min-h-[220px] border-0 p-0"
+                  sandbox=""
+                  srcDoc={sanitizeHtml(requestBody.html)}
+                  title="Email preview"
                 />
               </div>
             </div>

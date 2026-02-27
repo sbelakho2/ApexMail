@@ -15,8 +15,8 @@ services:
       - "127.0.0.1:50052:50052"  # gRPC
     environment:
       - RUST_LOG=info
-      - FROM_DOMAIN=apexmail.ee
-      - DKIM_SELECTOR=apexmail2026
+      - FROM_DOMAIN=${MAIL_FROM_DOMAIN:-apexmail.ee}
+      - DKIM_SELECTOR=${MAIL_DKIM_SELECTOR:-apexmail2026}
       - DKIM_KEY_PATH=/etc/apexmail/dkim/private.pem
     entrypoint:
       - /bin/sh
@@ -64,7 +64,7 @@ services:
       - "${SMTP_EDGE_BIND:-127.0.0.1}:25:25"     # SMTP
     environment:
       - RUST_LOG=info
-      - HOSTNAME=mail.apexmail.ee
+      - HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
       - MAILSTORE_URL=http://mailstore:50051
     entrypoint:
       - /bin/sh
@@ -115,7 +115,7 @@ services:
       - "${SMTP_SUBMISSION_BIND:-127.0.0.1}:465:465"   # SMTPS (TLS)
     environment:
       - RUST_LOG=info
-      - HOSTNAME=mail.apexmail.ee
+      - HOSTNAME=${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
       - OUTBOUND_URL=http://outbound-queue:50052
       - REQUIRE_AUTH=true
       - ENABLE_STARTTLS=true

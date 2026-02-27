@@ -33,21 +33,21 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone)]
 pub struct RedisConfig {
     pub url: String,
-    #[allow(dead_code)] // key_prefix used in processor; flagged only because binary target sees no external consumer
+    #[allow(unused)] // key_prefix used in processor; flagged only because binary target sees no external consumer
     pub key_prefix: String,
     pub pool_size: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct TrackingConfig {
-    #[allow(dead_code)] // base_url used for outbound link generation, not yet wired
+    #[allow(unused)] // base_url used for outbound link generation, not yet wired
     pub base_url: String,
     pub pixel_path: String,
     pub click_path: String,
     pub unsubscribe_path: String,
     pub preferences_path: String,
     pub fallback_url: String,
-    #[allow(dead_code)] // confirmation_url used by unsubscribe confirmation page, not yet wired
+    #[allow(unused)] // confirmation_url used by unsubscribe confirmation page, not yet wired
     pub confirmation_url: String,
     pub redirect_status: u16,
     pub trusted_proxies: Vec<IpNetwork>,

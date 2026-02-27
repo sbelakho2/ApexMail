@@ -12,7 +12,13 @@ use crate::types::*;
 
 /// Max cache entries.
 const REPLY_CACHE_MAX: u64 = 50_000;
-const REPLY_CACHE_TTL_SECS: u64 = 3600;
+static REPLY_CACHE_TTL_SECS: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var("ANALYTICS_REPLY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3600)
+});
 
 /// Auto-reply detection patterns.
 static AUTO_REPLY_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -98,7 +104,7 @@ impl ReplyTrackingService {
     pub fn new(pool: PgPool) -> Self {
         let cache = Cache::builder()
             .max_capacity(REPLY_CACHE_MAX)
-            .time_to_live(Duration::from_secs(REPLY_CACHE_TTL_SECS))
+            .time_to_live(Duration::from_secs(*REPLY_CACHE_TTL_SECS))
             .build();
         Self { pool, cache }
     }

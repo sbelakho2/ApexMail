@@ -1,5 +1,7 @@
 # Security & Compliance
 
+
+
 Comprehensive security documentation for ApexMail.
 
 ## Security Overview
@@ -46,7 +48,7 @@ Response:
 {
   "requestId": "gdpr_req_abc123",
   "status": "processing",
-  "estimatedCompletion": "2024-01-16T12:00:00Z",
+  "estimatedCompletion": "2026-03-01T12:00:00Z",
   "downloadUrl": null
 }
 ```
@@ -89,7 +91,7 @@ Consent records are append-only and tamper-evident — revocations create new en
 
 ### SOC 2 Type II
 
-ApexMail security controls aligned with SOC 2 Trust Service Criteria:
+ApexMail security controls are designed to align with SOC 2 Trust Service Criteria:
 
 | Category | Controls |
 |----------|----------|
@@ -159,7 +161,7 @@ Sensitive fields (email addresses, names, custom metadata) are individually encr
 
 ### Data in Transit
 
-- **TLS 1.2+** for all connections
+- **TLS 1.2+** baseline
 - **TLS 1.3** preferred where supported
 - **HSTS** enabled
 
@@ -222,7 +224,7 @@ Security events are retained long-term in tamper-proof storage. Access logs and 
 
 ### Vulnerability Response
 
-Vulnerabilities are triaged by severity and addressed promptly. Critical issues receive emergency remediation priority.
+Vulnerabilities are triaged by severity and remediated under incident response SLAs. Critical issues receive emergency remediation priority.
 
 ### Responsible Disclosure
 

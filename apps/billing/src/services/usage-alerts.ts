@@ -277,7 +277,10 @@ export class UsageAlertsService {
       [tenantId, emailPayload, webhookPayload, shouldEmail, shouldWebhook]
     );
     } catch (error) {
-      console.error(`[UsageAlerts] Failed to send alert for tenant ${tenantId}:`, error);
+      logger.error('Failed to send usage alert notification', {
+        tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // Don't throw - alert failures shouldn't block other processing
     }
   }
@@ -294,9 +297,9 @@ export class UsageAlertsService {
     let offset = 0;
     let totalChecked = 0;
     let totalAlerts = 0;
+    let hasMore = true;
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    while (hasMore) {
       const tenantsResult = await this.db.query<{ id: string }>(
         `SELECT DISTINCT tenant_id as id FROM usage_alert_configs 
          WHERE enabled = true 
@@ -308,7 +311,10 @@ export class UsageAlertsService {
       if (!tenantsResult.ok) return Result.err(tenantsResult.error);
 
       const rows = tenantsResult.value.rows;
-      if (rows.length === 0) break;
+      if (rows.length === 0) {
+        hasMore = false;
+        continue;
+      }
 
       for (const row of rows) {
         const result = await this.checkAndAlert(row.id);
@@ -318,8 +324,11 @@ export class UsageAlertsService {
         totalChecked++;
       }
 
-      if (rows.length < BATCH_SIZE) break;
-      offset += BATCH_SIZE;
+      if (rows.length < BATCH_SIZE) {
+        hasMore = false;
+      } else {
+        offset += BATCH_SIZE;
+      }
     }
 
     return Result.ok({

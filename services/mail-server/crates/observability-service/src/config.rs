@@ -103,7 +103,7 @@ impl Default for ObservabilityConfig {
             db_port: 5432,
             database: "apexmail".into(),
             db_user: "apexmail".into(),
-            db_password: String::new(),
+            db_password: "change-me".into(),
             db_pool_max: 20,
 
             redis_host: "localhost".into(),
@@ -154,9 +154,9 @@ impl Default for ObservabilityConfig {
             alerting: AlertConfig {
                 enabled: false,
                 webhook_urls: Vec::new(),
-                slack_webhook: String::new(),
-                pagerduty_key: String::new(),
-                opsgenie_key: String::new(),
+                slack_webhook: "disabled".into(),
+                pagerduty_key: "disabled".into(),
+                opsgenie_key: "disabled".into(),
                 email_recipients: Vec::new(),
                 cooldown_minutes: 15,
             },
@@ -324,14 +324,22 @@ mod tests {
     #[test]
     fn test_config_serialization_roundtrip() {
         let cfg = ObservabilityConfig::default();
-        let json = serde_json::to_string(&cfg).expect("serialize");
-        let deserialized: ObservabilityConfig =
-            serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(deserialized.port, cfg.port);
-        assert_eq!(deserialized.tracing.sample_rate, cfg.tracing.sample_rate);
+        let json = serde_json::to_string(&cfg);
+        assert!(json.is_ok());
+        let deserialized: Option<ObservabilityConfig> =
+            json.ok().and_then(|value| serde_json::from_str(&value).ok());
+        assert_eq!(deserialized.as_ref().map(|value| value.port), Some(cfg.port));
         assert_eq!(
-            deserialized.logging.sensitive_fields,
-            cfg.logging.sensitive_fields
+            deserialized
+                .as_ref()
+                .map(|value| value.tracing.sample_rate),
+            Some(cfg.tracing.sample_rate)
+        );
+        assert_eq!(
+            deserialized
+                .as_ref()
+                .map(|value| value.logging.sensitive_fields.clone()),
+            Some(cfg.logging.sensitive_fields.clone())
         );
     }
 }

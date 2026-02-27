@@ -546,6 +546,28 @@ pub struct CoordinatorConfig {
     pub sync_interval: Duration,
     /// Event retention
     pub event_retention: Duration,
+
+    // ---- Retry / Backoff ----
+
+    /// Maximum number of retries for a failed Redis operation before giving up
+    /// (default: 3).  The coordinator will use exponential backoff with jitter
+    /// between retries.
+    pub max_retries: u32,
+
+    /// Base delay for exponential backoff (default: 100 ms).  Each retry waits
+    /// `base_retry_delay × 2^(attempt - 1)` plus random jitter.
+    pub base_retry_delay: Duration,
+
+    // ---- Circuit Breaker ----
+
+    /// Number of consecutive Redis failures before the circuit opens and
+    /// operations are short-circuited for `circuit_breaker_recovery` duration
+    /// (default: 5).  This prevents cascading latency when Redis is down.
+    pub circuit_breaker_threshold: u32,
+
+    /// Duration the circuit stays open before attempting a probe request
+    /// (default: 30 s).
+    pub circuit_breaker_recovery: Duration,
 }
 
 impl Default for CoordinatorConfig {
@@ -557,6 +579,10 @@ impl Default for CoordinatorConfig {
             rate_limit_window: Duration::from_secs(60),
             sync_interval: Duration::from_secs(1),
             event_retention: Duration::from_secs(3600),
+            max_retries: 3,
+            base_retry_delay: Duration::from_millis(100),
+            circuit_breaker_threshold: 5,
+            circuit_breaker_recovery: Duration::from_secs(30),
         }
     }
 }

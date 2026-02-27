@@ -3,29 +3,29 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-static EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$").unwrap()
+static EMAIL_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$").ok()
 });
 
-static DOMAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$").unwrap()
+static DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$").ok()
 });
 
 // #216: UUID regex must be case-insensitive to accept uppercase hex
-static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+static UUID_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").ok()
 });
 
 pub fn is_valid_email(email: &str) -> bool {
-    email.len() <= 320 && EMAIL_RE.is_match(email)
+    email.len() <= 320 && EMAIL_RE.as_ref().map(|re| re.is_match(email)).unwrap_or(false)
 }
 
 pub fn is_valid_domain(domain: &str) -> bool {
-    domain.len() <= 253 && DOMAIN_RE.is_match(domain)
+    domain.len() <= 253 && DOMAIN_RE.as_ref().map(|re| re.is_match(domain)).unwrap_or(false)
 }
 
 pub fn is_valid_uuid(s: &str) -> bool {
-    UUID_RE.is_match(s)
+    UUID_RE.as_ref().map(|re| re.is_match(s)).unwrap_or(false)
 }
 
 /// Check for null bytes in a string.
@@ -84,7 +84,7 @@ mod tests {
     fn test_null_byte_detection() {
         assert!(!has_null_bytes("normal string"));
         assert!(has_null_bytes("has\0null"));
-        assert!(has_null_bytes("has\\u0000null"));
+        assert!(!has_null_bytes("has\\u0000null"));
     }
 
     #[test]

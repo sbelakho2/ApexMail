@@ -157,6 +157,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PoolingStrategy;
 
     #[test]
     fn test_l2_normalize() {

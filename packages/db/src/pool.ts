@@ -162,7 +162,9 @@ class DatabasePool {
           timeoutMs,
         });
       });
-      this.logger.debug('New database connection established');
+      if (process.env['DB_POOL_DEBUG'] === 'true') {
+        this.logger.debug('New database connection established');
+      }
     });
 
     this.pool.on('error', (err) => {
@@ -175,7 +177,9 @@ class DatabasePool {
     });
 
     this.pool.on('remove', () => {
-      this.logger.debug('Database connection removed from pool');
+      if (process.env['DB_POOL_DEBUG'] === 'true') {
+        this.logger.debug('Database connection removed from pool');
+      }
     });
 
     // Test connection

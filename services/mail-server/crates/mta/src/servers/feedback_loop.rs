@@ -30,11 +30,11 @@ static FBL_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
 });
 
 // #147: Shared HTTP client with timeout – avoids Client::new() fallback without timeout
-static FBL_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+static FBL_CLIENT: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .expect("FBL HTTP client")
+    .ok()
 });
 
 // ── types ──────────────────────────────────────────────────────────────────────
@@ -488,17 +488,27 @@ impl FeedbackLoopServer {
         });
 
         // #147: Use shared client with guaranteed timeout
-        let client = &*FBL_CLIENT;
+        let Some(client) = FBL_CLIENT.as_ref() else {
+            error!("FBL HTTP client unavailable; skipping complaint rate webhooks");
+            return;
+        };
 
         for (webhook_id, url, secret) in webhooks {
             // Compute HMAC signature
             type HmacSha256 = Hmac<Sha256>;
             let payload_str = serde_json::to_string(&payload).unwrap_or_default();
             let signature = if !secret.is_empty() {
-                let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-                mac.update(payload_str.as_bytes());
-                let result = mac.finalize();
-                hex::encode(result.into_bytes())
+                match HmacSha256::new_from_slice(secret.as_bytes()) {
+                    Ok(mut mac) => {
+                        mac.update(payload_str.as_bytes());
+                        let result = mac.finalize();
+                        hex::encode(result.into_bytes())
+                    }
+                    Err(e) => {
+                        error!(error = %e, webhook_id = %webhook_id, "Invalid webhook secret for HMAC; sending unsigned alert");
+                        String::new()
+                    }
+                }
             } else {
                 String::new()
             };

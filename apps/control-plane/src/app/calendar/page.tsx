@@ -4,6 +4,19 @@ import { useState, useEffect, useRef } from 'react';
 import { formatDate, formatTime, getLocalTimeZone, cn, getStatusChipClasses } from '../../lib/utils';
 import { PageEmptyState, PageErrorState, PageLoadingState } from '../../components/ui/async-state';
 import { Button } from '../../components/ui/button';
+import {
+    AvailabilitySlot,
+    CALENDAR_TABS,
+    CalendarEvent,
+    DAYS,
+    EVENT_TYPE_CONFIG,
+    getAvailabilityConflicts,
+    getCalendarStats,
+    getFilteredEvents,
+    isValidMeetingLink,
+    splitCalendarEvents,
+    STATUS_CONFIG,
+} from './calendar-utils';
 
 /**
  * Demo Calendar - Schedule discovery calls and demos with interested leads
@@ -14,51 +27,6 @@ import { Button } from '../../components/ui/button';
  * - Manage calendar connections
  * - Track demo outcomes
  */
-
-interface CalendarEvent {
-    id: string;
-    title: string;
-    leadName: string;
-    leadEmail: string;
-    leadCompany: string;
-    type: 'discovery' | 'demo' | 'follow_up';
-    status: 'scheduled' | 'completed' | 'no_show' | 'rescheduled' | 'cancelled';
-    startTime: string;
-    endTime: string;
-    notes: string;
-    outcome?: 'qualified' | 'not_qualified' | 'needs_follow_up' | 'closed_won' | 'closed_lost';
-    meetingLink: string;
-    createdAt?: string;
-    updatedAt?: string;
-    createdBy?: string;
-    noShowReason?: string;
-}
-
-interface AvailabilitySlot {
-    id: string;
-    dayOfWeek: number;
-    startTime: string;
-    endTime: string;
-    enabled: boolean;
-}
-
-const EVENT_TYPE_CONFIG: Record<string, { label: string; color: string; icon: string }> = {
-    discovery: { label: 'Discovery Call', color: 'bg-info/10 text-info', icon: 'Discovery' },
-    demo: { label: 'Product Demo', color: 'bg-primary/10 text-primary', icon: 'Demo' },
-    follow_up: { label: 'Follow-up', color: 'bg-success/10 text-success', icon: 'Follow-up' },
-};
-
-const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
-    scheduled: { label: 'Scheduled', color: 'text-primary' },
-    completed: { label: 'Completed', color: 'text-success' },
-    no_show: { label: 'No Show', color: 'text-destructive' },
-    rescheduled: { label: 'Rescheduled', color: 'text-warning' },
-    cancelled: { label: 'Cancelled', color: 'text-muted-foreground' },
-};
-
-const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-
 
 export default function CalendarPage() {
     const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -197,38 +165,10 @@ export default function CalendarPage() {
         return formatTime(iso);
     }
 
-    function toMinutes(value: string): number {
-        const [hours, minutes] = value.split(':').map(Number);
-        return (hours * 60) + minutes;
-    }
+    const filteredEvents = getFilteredEvents(events, statusFilter, eventSearch);
+    const { upcomingEvents, pastEvents } = splitCalendarEvents(filteredEvents, now);
 
-    const filteredEvents = events.filter((event) => {
-        const matchesStatus = statusFilter === 'all' ? true : event.status === statusFilter;
-        const query = eventSearch.trim().toLowerCase();
-        const matchesSearch = !query
-            ? true
-            : event.title.toLowerCase().includes(query) || event.leadName.toLowerCase().includes(query) || event.leadCompany.toLowerCase().includes(query);
-        return matchesStatus && matchesSearch;
-    });
-
-    const upcomingEvents = filteredEvents.filter(e => new Date(e.startTime) > now && e.status === 'scheduled');
-    const pastEvents = filteredEvents.filter(e => new Date(e.startTime) <= now || e.status !== 'scheduled');
-
-    const availabilityConflicts = availability.reduce<string[]>((acc, slot) => {
-        if (!slot.enabled) return acc;
-        const sameDaySlots = availability.filter(other => other.id !== slot.id && other.dayOfWeek === slot.dayOfWeek && other.enabled);
-        const slotStart = toMinutes(slot.startTime);
-        const slotEnd = toMinutes(slot.endTime);
-        const hasOverlap = sameDaySlots.some(other => {
-            const otherStart = toMinutes(other.startTime);
-            const otherEnd = toMinutes(other.endTime);
-            return slotStart < otherEnd && otherStart < slotEnd;
-        });
-        if (hasOverlap) {
-            acc.push(`${DAYS[slot.dayOfWeek]} ${slot.startTime}-${slot.endTime}`);
-        }
-        return acc;
-    }, []);
+    const availabilityConflicts = getAvailabilityConflicts(availability);
 
     useEffect(() => {
         if (!selectedEvent) return;
@@ -281,11 +221,7 @@ export default function CalendarPage() {
         }
     }
 
-    // Stats
-    const scheduledCount = events.filter(e => e.status === 'scheduled').length;
-    const completedCount = events.filter(e => e.status === 'completed').length;
-    const noShowCount = events.filter(e => e.status === 'no_show').length;
-    const showRate = completedCount > 0 ? ((completedCount / (completedCount + noShowCount)) * 100).toFixed(0) : 'N/A';
+    const { scheduledCount, completedCount, noShowCount, showRate } = getCalendarStats(events);
 
     if (loading) {
         return <PageLoadingState label="Loading calendar..." />;
@@ -352,11 +288,14 @@ export default function CalendarPage() {
             {/* Tabs */}
             <div className="border-b border-border mb-6 overflow-x-auto">
                 <nav className="flex gap-4 min-w-max">
-                    {[
-                        { key: 'upcoming', label: `Upcoming (${upcomingEvents.length})` },
-                        { key: 'past', label: `Past (${pastEvents.length})` },
-                        { key: 'availability', label: 'Availability' },
-                    ].map(tab => (
+                    {CALENDAR_TABS.map((tab) => {
+                        const label = tab.key === 'upcoming'
+                            ? `${tab.label} (${upcomingEvents.length})`
+                            : tab.key === 'past'
+                                ? `${tab.label} (${pastEvents.length})`
+                                : tab.label;
+
+                        return (
                         <button
                             key={tab.key}
                             onClick={() => setActiveTab(tab.key as typeof activeTab)}
@@ -367,9 +306,10 @@ export default function CalendarPage() {
                                     : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
                             )}
                         >
-                            {tab.label}
+                            {label}
                         </button>
-                    ))}
+                        );
+                    })}
                 </nav>
             </div>
 
@@ -530,7 +470,7 @@ export default function CalendarPage() {
                                                 {slot.startTime} - {slot.endTime}
                                             </button>
                                         ))}
-                                        <button type="button" className="px-3 py-1.5 border border-dashed border-border rounded text-sm text-muted-foreground hover:border-foreground hover:text-foreground">
+                                        <button aria-label={`Add availability slot for ${DAYS[day]}`} type="button" className="px-3 py-1.5 border border-dashed border-border rounded text-sm text-muted-foreground hover:border-foreground hover:text-foreground">
                                             + Add
                                         </button>
                                     </div>

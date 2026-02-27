@@ -4,9 +4,12 @@
  */
 
 import { Result } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
 import { randomBytes } from 'node:crypto';
 import { COMPANY_INFO } from '../config.js';
+
+const logger = createLogger();
 
 // BUG-004 FIX: Helper for generating random hex strings
 function generateRandomHex(bytes: number): string {
@@ -58,6 +61,31 @@ export interface BillingAddress {
   country: string;
   email: string;
 }
+
+type InvoiceRow = {
+  id: string;
+  tenant_id: string;
+  stripe_invoice_id: string | null;
+  invoice_number: string;
+  status: Invoice['status'];
+  currency: string;
+  subtotal: number;
+  vat_total: number;
+  total: number;
+  line_items: string;
+  billing_address: string;
+  issued_at: Date;
+  due_at: Date;
+  paid_at: Date | null;
+  period_start: Date;
+  period_end: Date;
+  purchase_order_number: string | null;
+  notes: string | null;
+  pdf_url: string | null;
+  xml_url: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
 
 const ESTONIA_VAT_RATE = 22; // 22% VAT for Estonian companies
 const EU_COUNTRIES = [
@@ -607,30 +635,7 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
    * Get invoice by ID
    */
   async getInvoice(invoiceId: string): Promise<Result<Invoice | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      stripe_invoice_id: string | null;
-      invoice_number: string;
-      status: Invoice['status'];
-      currency: string;
-      subtotal: number;
-      vat_total: number;
-      total: number;
-      line_items: string;
-      billing_address: string;
-      issued_at: Date;
-      due_at: Date;
-      paid_at: Date | null;
-      period_start: Date;
-      period_end: Date;
-      purchase_order_number: string | null;
-      notes: string | null;
-      pdf_url: string | null;
-      xml_url: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<InvoiceRow>(
       `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
               subtotal, vat_total, total, line_items, billing_address,
               issued_at, due_at, paid_at, period_start, period_end,
@@ -644,33 +649,85 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);
 
-    // Safe JSON parsing to prevent crashes from corrupted data
-    let lineItems: InvoiceLineItem[] = [];
-    let billingAddress: BillingAddress = { 
-      companyName: '', 
-      vatNumber: null, 
-      addressLine1: '', 
-      addressLine2: null, 
-      city: '', 
-      state: null, 
-      postalCode: '', 
-      country: '', 
-      email: '' 
-    };
-    
-    try {
-      lineItems = JSON.parse(row.line_items || '[]');
-    } catch {
-      console.warn(`[Invoices] Failed to parse line_items for invoice ${row.id}`);
-    }
-    
-    try {
-      billingAddress = JSON.parse(row.billing_address || '{}');
-    } catch {
-      console.warn(`[Invoices] Failed to parse billing_address for invoice ${row.id}`);
-    }
+    return Result.ok(this.mapInvoiceRow(row));
+  }
+
+  /**
+   * List invoices for tenant
+   */
+  async listInvoices(
+    tenantId: string,
+    options?: { limit?: number; offset?: number }
+  ): Promise<Result<{ invoices: Invoice[]; totalCount: number }, Error>> {
+    const limit = options?.limit ?? 50;
+    const offset = options?.offset ?? 0;
+
+    const totalCountResult = await this.db.query<{ total_count: string }>(
+      `SELECT COUNT(*)::text AS total_count FROM invoices WHERE tenant_id = $1`,
+      [tenantId]
+    );
+
+    if (!totalCountResult.ok) return Result.err(totalCountResult.error);
+
+    const result = await this.db.query<InvoiceRow>(
+      `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
+              subtotal, vat_total, total, line_items, billing_address,
+              issued_at, due_at, paid_at, period_start, period_end,
+              purchase_order_number, notes, pdf_url, xml_url, created_at, updated_at
+       FROM invoices 
+       WHERE tenant_id = $1
+       ORDER BY issued_at DESC
+       LIMIT $2 OFFSET $3`,
+      [tenantId, limit, offset]
+    );
+
+    if (!result.ok) return Result.err(result.error);
+
+    const invoices = result.value.rows.map(row => this.mapInvoiceRow(row));
 
     return Result.ok({
+      invoices,
+      totalCount: parseInt(totalCountResult.value.rows[0]?.total_count ?? '0', 10),
+    });
+  }
+
+  private emptyBillingAddress(): BillingAddress {
+    return {
+      companyName: '',
+      vatNumber: null,
+      addressLine1: '',
+      addressLine2: null,
+      city: '',
+      state: null,
+      postalCode: '',
+      country: '',
+      email: '',
+    };
+  }
+
+  private parseLineItems(raw: string, invoiceId: string): InvoiceLineItem[] {
+    try {
+      return JSON.parse(raw || '[]') as InvoiceLineItem[];
+    } catch {
+      logger.warn('Failed to parse invoice line items', { invoiceId });
+      return [];
+    }
+  }
+
+  private parseBillingAddress(raw: string, invoiceId: string): BillingAddress {
+    try {
+      return JSON.parse(raw || '{}') as BillingAddress;
+    } catch {
+      logger.warn('Failed to parse invoice billing address', { invoiceId });
+      return this.emptyBillingAddress();
+    }
+  }
+
+  private mapInvoiceRow(row: InvoiceRow): Invoice {
+    const lineItems = this.parseLineItems(row.line_items, row.id);
+    const billingAddress = this.parseBillingAddress(row.billing_address, row.id);
+
+    return {
       id: row.id,
       tenantId: row.tenant_id,
       stripeInvoiceId: row.stripe_invoice_id,
@@ -693,111 +750,7 @@ ${invoice.lineItems.map((item, index) => `      <ItemEntry>
       xmlUrl: row.xml_url,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-    });
-  }
-
-  /**
-   * List invoices for tenant
-   */
-  async listInvoices(
-    tenantId: string,
-    options?: { limit?: number; offset?: number }
-  ): Promise<Result<{ invoices: Invoice[]; totalCount: number }, Error>> {
-    const limit = options?.limit ?? 50;
-    const offset = options?.offset ?? 0;
-
-    const totalCountResult = await this.db.query<{ total_count: string }>(
-      `SELECT COUNT(*)::text AS total_count FROM invoices WHERE tenant_id = $1`,
-      [tenantId]
-    );
-
-    if (!totalCountResult.ok) return Result.err(totalCountResult.error);
-
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      stripe_invoice_id: string | null;
-      invoice_number: string;
-      status: Invoice['status'];
-      currency: string;
-      subtotal: number;
-      vat_total: number;
-      total: number;
-      line_items: string;
-      billing_address: string;
-      issued_at: Date;
-      due_at: Date;
-      paid_at: Date | null;
-      period_start: Date;
-      period_end: Date;
-      purchase_order_number: string | null;
-      notes: string | null;
-      pdf_url: string | null;
-      xml_url: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
-      `SELECT id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
-              subtotal, vat_total, total, line_items, billing_address,
-              issued_at, due_at, paid_at, period_start, period_end,
-              purchase_order_number, notes, pdf_url, xml_url, created_at, updated_at
-       FROM invoices 
-       WHERE tenant_id = $1
-       ORDER BY issued_at DESC
-       LIMIT $2 OFFSET $3`,
-      [tenantId, limit, offset]
-    );
-
-    if (!result.ok) return Result.err(result.error);
-
-    const invoices = result.value.rows.map(row => {
-      // Safe JSON parsing to prevent crashes
-      let lineItems: InvoiceLineItem[] = [];
-      let billingAddress: BillingAddress = { 
-        companyName: '', 
-        vatNumber: null, 
-        addressLine1: '', 
-        addressLine2: null, 
-        city: '', 
-        state: null, 
-        postalCode: '', 
-        country: '', 
-        email: '' 
-      };
-      
-      try { lineItems = JSON.parse(row.line_items || '[]'); } catch { /* use default */ }
-      try { billingAddress = JSON.parse(row.billing_address || '{}'); } catch { /* use default */ }
-      
-      return {
-        id: row.id,
-        tenantId: row.tenant_id,
-        stripeInvoiceId: row.stripe_invoice_id,
-        invoiceNumber: row.invoice_number,
-        status: row.status,
-        currency: row.currency,
-        subtotal: row.subtotal,
-        vatTotal: row.vat_total,
-        total: row.total,
-        lineItems,
-        billingAddress,
-        issuedAt: row.issued_at,
-        dueAt: row.due_at,
-        paidAt: row.paid_at,
-        periodStart: row.period_start,
-        periodEnd: row.period_end,
-        purchaseOrderNumber: row.purchase_order_number,
-        notes: row.notes,
-        pdfUrl: row.pdf_url,
-        xmlUrl: row.xml_url,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      };
-    });
-
-    return Result.ok({
-      invoices,
-      totalCount: parseInt(totalCountResult.value.rows[0]?.total_count ?? '0', 10),
-    });
+    };
   }
 
   private escapeXml(str: string): string {

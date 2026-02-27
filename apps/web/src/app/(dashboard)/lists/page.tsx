@@ -59,7 +59,7 @@ export default function ListsPage() {
                 </CardHeader>
                 <CardContent>
                     {loading ? (
-                        <div className="space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14 w-full" />)}</div>
+                        <div className="space-y-3">{Array.from({ length: 3 }, (_, i) => `lists-skeleton-${i}`).map((skeletonId) => <Skeleton key={skeletonId} className="h-14 w-full" />)}</div>
                     ) : filtered.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-16">
                             <Users className="h-10 w-10 text-muted-foreground mb-4" />

@@ -81,11 +81,11 @@ export function AutoDPA() {
 
  {/* Actions */}
  <div className="flex gap-4">
- <button className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors flex items-center justify-center">
+ <button aria-label="Download DPA PDF" className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-primary-600 rounded-md hover:bg-primary-700 transition-colors flex items-center justify-center">
  <Download className="w-4 h-4 mr-2" />
  Download PDF
  </button>
- <button className="flex-1 py-2.5 px-4 text-sm font-semibold text-surface-700 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors">
+ <button aria-label="Send DPA for signature" className="flex-1 py-2.5 px-4 text-sm font-semibold text-surface-700 bg-white border border-surface-200 rounded-md hover:bg-surface-50 transition-colors">
  Send for Signature
  </button>
  </div>

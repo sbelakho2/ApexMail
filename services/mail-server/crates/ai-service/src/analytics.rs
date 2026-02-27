@@ -144,7 +144,7 @@ impl AnalyticsPredictor {
                         (score - *a).abs().partial_cmp(&(score - *b).abs()).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(idx, _)| idx)
-                    .unwrap();
+                    .unwrap_or(0);
                 if assignments[i] != best {
                     assignments[i] = best;
                     changed = true;

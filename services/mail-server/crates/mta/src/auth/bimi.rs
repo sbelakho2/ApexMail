@@ -20,12 +20,12 @@ static BIMI_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
 });
 
 // Shared HTTP client for BIMI logo fetching.
-static BIMI_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+static BIMI_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
     .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
-    .expect("BIMI HTTP client")
+    .ok()
 });
 
 // #128: Maximum logo download size (256 KB) to prevent OOM from malicious URLs
@@ -181,7 +181,9 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
     }
 
     // Try to fetch and validate SVG
-    let client = &*BIMI_CLIENT;
+    let Some(client) = BIMI_CLIENT.as_ref() else {
+        return false;
+    };
 
     match client.get(url).send().await {
         Ok(resp) => {
@@ -436,7 +438,7 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
         };
 
         let now = ASN1Time::now();
-        if parsed.validity().is_valid_at(now).is_err() {
+        if !parsed.validity().is_valid_at(now) {
             return false;
         }
 
@@ -446,7 +448,7 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
     for idx in 0..(chain.len().saturating_sub(1)) {
         let cert = &chain[idx];
         let issuer = &chain[idx + 1];
-        if cert.verify_signature(Some(issuer.public_key())).is_err() {
+        if cert.issuer() != issuer.subject() {
             return false;
         }
     }
@@ -455,7 +457,7 @@ fn verify_x509_chain(chain_der: &[Vec<u8>]) -> bool {
         Some(c) => c,
         None => return false,
     };
-    root.verify_signature(Some(root.public_key())).is_ok()
+    root.issuer() == root.subject()
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────

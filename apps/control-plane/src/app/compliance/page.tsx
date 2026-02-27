@@ -256,7 +256,7 @@ export default function CompliancePage() {
                                         <span>{new Date(alert.timestamp).toLocaleString()}</span>
                                     </div>
                                 </div>
-                                <button type="button" className="text-sm font-medium text-primary hover:text-primary/80 whitespace-nowrap">
+                                <button aria-label={`Investigate compliance alert: ${alert.message}`} type="button" className="text-sm font-medium text-primary hover:text-primary/80 whitespace-nowrap">
                                     Investigate
                                 </button>
                             </div>

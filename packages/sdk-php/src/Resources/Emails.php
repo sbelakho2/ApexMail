@@ -138,10 +138,37 @@ class Emails
 
         foreach ($list as $recipient) {
             $email = is_array($recipient) ? ($recipient['email'] ?? null) : $recipient;
-            if (!$email || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            if (!$email || !$this->isValidEmail((string) $email)) {
                 throw new \InvalidArgumentException("Invalid \"{$field}\" email format: {$email}");
             }
         }
+    }
+
+    private function isValidEmail(string $email): bool
+    {
+        if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return true;
+        }
+
+        $parts = explode('@', $email);
+        if (count($parts) !== 2) {
+            return false;
+        }
+
+        [$local, $domain] = $parts;
+        if ($local === '' || $domain === '') {
+            return false;
+        }
+
+        if (function_exists('idn_to_ascii')) {
+            $asciiDomain = idn_to_ascii($domain, IDNA_DEFAULT, INTL_IDNA_VARIANT_UTS46);
+            if ($asciiDomain === false) {
+                return false;
+            }
+            return (bool) filter_var("{$local}@{$asciiDomain}", FILTER_VALIDATE_EMAIL);
+        }
+
+        return false;
     }
 
     private function normalizeSendParams(array $params): array

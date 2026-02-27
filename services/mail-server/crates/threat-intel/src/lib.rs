@@ -25,8 +25,10 @@ pub mod domain_blocklist;
 pub mod reputation;
 pub mod engine;
 pub mod background_task;
+pub mod stix_taxii;
 
 pub use engine::ThreatIntelEngine;
+pub use ip_blocklist::{IpBlocklist, Ipv6Blocklist, UnifiedIpBlocklist, IpBlockEntry, ThreatCategory};
 
 use thiserror::Error;
 

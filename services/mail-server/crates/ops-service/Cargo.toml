@@ -37,6 +37,7 @@ tracing-subscriber.workspace = true
 
 # Errors
 thiserror.workspace = true
+anyhow.workspace = true
 
 # Concurrent data structures
 dashmap.workspace = true

@@ -672,8 +672,8 @@ function ActionsTab({ actions }: { actions: ActionEntry[] }) {
                 <p className="text-muted-foreground py-8 text-center">No actions recorded yet.</p>
             ) : (
                 <div className="space-y-2">
-                    {actions.map((a, i) => (
-                        <div key={i} className="apex-card px-4 py-3 flex items-start gap-3">
+                    {actions.map((a) => (
+                        <div key={`${a.action}-${a.performedAt}`} className="apex-card px-4 py-3 flex items-start gap-3">
                             <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded shrink-0 mt-0.5">{a.action}</span>
                             <div className="flex-1 min-w-0">
                                 <p className="text-sm">{a.detail}</p>

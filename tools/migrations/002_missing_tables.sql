@@ -64,8 +64,18 @@ CREATE INDEX idx_webhook_deliveries_created ON webhook_deliveries(created_at DES
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_count INTEGER DEFAULT 0;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS last_reply_at TIMESTAMPTZ;
 
+-- Backfill legacy rows
+UPDATE messages
+SET reply_count = 0
+WHERE reply_count IS NULL;
+
 -- User ID column (referenced in MessagesRepository)
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS user_id VARCHAR(26);
+
+-- Explicitly normalize legacy empty-string user ids
+UPDATE messages
+SET user_id = NULL
+WHERE user_id = '';
 
 -- =============================================================================
 -- ADD MISSING COLUMNS TO INBOUND MESSAGES TABLE
@@ -88,6 +98,7 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS metadata JSONB;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup ON events(deduplication_key) 
     WHERE deduplication_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_dedup_lookup ON events(deduplication_key);
 
 -- =============================================================================
 -- IP POOLS FOR WARMUP

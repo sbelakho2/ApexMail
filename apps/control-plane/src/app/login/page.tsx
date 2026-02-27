@@ -3,6 +3,13 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Shield, ArrowRight, AlertTriangle, Lock } from '../../components/ui/icons';
+import { MCaptchaWidget } from '../../components/security/mcaptcha-widget';
+
+const CONTROL_PLANE_LOGIN_SCHEMA = {
+    emailPattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+    minPasswordLength: 8,
+    mfaPattern: /^\d{6}$/,
+};
 
 /**
  * Control Plane Login Page
@@ -24,6 +31,8 @@ export default function ControlPlaneLogin() {
     const [password, setPassword] = useState('');
     const [mfaCode, setMfaCode] = useState('');
     const [showMfa, setShowMfa] = useState(false);
+    const [mcaptchaToken, setMcaptchaToken] = useState('');
+    const [mcaptchaError, setMcaptchaError] = useState('');
     const [error, setError] = useState('');
     const [emailError, setEmailError] = useState('');
     const [passwordError, setPasswordError] = useState('');
@@ -33,20 +42,22 @@ export default function ControlPlaneLogin() {
 
     const validateEmail = (value: string) => {
         if (!value.trim()) return 'Email is required';
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) return 'Enter a valid email address';
+        if (!CONTROL_PLANE_LOGIN_SCHEMA.emailPattern.test(value)) return 'Enter a valid email address';
         return '';
     };
 
     const validatePassword = (value: string) => {
         if (!value.trim()) return 'Password is required';
-        if (value.length < 8) return 'Password must be at least 8 characters';
+        if (value.length < CONTROL_PLANE_LOGIN_SCHEMA.minPasswordLength) {
+            return `Password must be at least ${CONTROL_PLANE_LOGIN_SCHEMA.minPasswordLength} characters`;
+        }
         return '';
     };
 
     const validateMfa = (value: string) => {
         if (!showMfa) return '';
         if (!value.trim()) return 'MFA code is required';
-        if (!/^\d{6}$/.test(value)) return 'MFA code must be 6 digits';
+        if (!CONTROL_PLANE_LOGIN_SCHEMA.mfaPattern.test(value)) return 'MFA code must be 6 digits';
         return '';
     };
 
@@ -70,6 +81,7 @@ export default function ControlPlaneLogin() {
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
         setError('');
+        setMcaptchaError('');
         setLoading(true);
 
         const nextEmailError = validateEmail(email);
@@ -89,6 +101,12 @@ export default function ControlPlaneLogin() {
             return;
         }
 
+        if (process.env.NEXT_PUBLIC_MCAPTCHA_ENABLED === 'true' && !mcaptchaToken.trim()) {
+            setMcaptchaError('Complete the CAPTCHA challenge before signing in.');
+            setLoading(false);
+            return;
+        }
+
         try {
             const response = await fetch('/api/auth/login', {
                 method: 'POST',
@@ -100,6 +118,7 @@ export default function ControlPlaneLogin() {
                     email, 
                     password,
                     mfaCode: showMfa ? mfaCode : undefined,
+                    mcaptchaToken: mcaptchaToken || undefined,
                 }),
             });
 
@@ -111,6 +130,11 @@ export default function ControlPlaneLogin() {
                     setError('');
                 } else {
                     setError(data.error || 'Login failed');
+                }
+
+                if (data.errorCode === 'MCAPTCHA_REQUIRED' || data.errorCode === 'MCAPTCHA_INVALID' || data.errorCode === 'MCAPTCHA_UNAVAILABLE') {
+                    setMcaptchaError(data.error || 'CAPTCHA verification failed. Please retry.');
+                    setMcaptchaToken('');
                 }
                 return;
             }
@@ -250,6 +274,12 @@ export default function ControlPlaneLogin() {
                                     </p>
                                 </div>
                             )}
+
+                            <MCaptchaWidget
+                                token={mcaptchaToken}
+                                onTokenChange={setMcaptchaToken}
+                                error={mcaptchaError}
+                            />
 
                             <button
                                 type="submit"

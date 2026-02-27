@@ -88,8 +88,12 @@ impl Default for AnalyticsConfig {
 
 impl AnalyticsConfig {
     pub fn from_env() -> Self {
-        let _ = dotenvy::dotenv();
-        let config = Self {
+        if let Err(error) = dotenvy::dotenv() {
+            if !matches!(error, dotenvy::Error::Io(ref io) if io.kind() == std::io::ErrorKind::NotFound) {
+                eprintln!("failed to load .env: {error}");
+            }
+        }
+        let mut config = Self {
             database_url: std::env::var("DATABASE_URL").unwrap_or_default(),
             redis_url: std::env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
@@ -131,7 +135,28 @@ impl AnalyticsConfig {
             },
         };
         if let Err(err) = config.validate() {
-            panic!("Invalid analytics config: {err}");
+            tracing::error!(error = %err, "Invalid analytics config; applying safe defaults");
+            if config.database_url.trim().is_empty() {
+                config.database_url = "postgres://localhost/apexmail".into();
+            }
+            if config.redis_url.trim().is_empty() {
+                config.redis_url = "redis://127.0.0.1:6379".into();
+            }
+            if config.storage_path.trim().is_empty() {
+                config.storage_path = "/var/lib/apexmail/analytics".into();
+            }
+            if config.compaction.batch_size == 0 {
+                config.compaction.batch_size = 100_000;
+            }
+            if config.compaction.hot_retention_days == 0 {
+                config.compaction.hot_retention_days = 90;
+            }
+            if config.compaction.cold_retention_days == 0 {
+                config.compaction.cold_retention_days = 730;
+            }
+            if config.compaction.cold_retention_days < config.compaction.hot_retention_days {
+                config.compaction.cold_retention_days = config.compaction.hot_retention_days;
+            }
         }
         config
     }

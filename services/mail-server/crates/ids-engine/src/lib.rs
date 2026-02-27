@@ -24,7 +24,7 @@ pub mod signature;
 pub use config::IdsConfig;
 pub use engine::{IdsEngine, IdsVerdict, Alert, AlertSeverity};
 pub use signature::{Signature, SignatureSet, SignatureAction};
-pub use connection_tracker::ConnectionTracker;
+pub use connection_tracker::{ConnectionTracker, ConnectionAnomaly, TrackerStats};
 
 /// IDS errors
 #[derive(Debug, thiserror::Error)]

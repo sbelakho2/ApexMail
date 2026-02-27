@@ -63,13 +63,17 @@ pub fn scan_entropy(text: &str, threshold: f64, min_length: usize) -> EntropyRes
     let mut findings = Vec::new();
     let mut total_risk = 0.0;
 
-    // Tokenize by whitespace and common delimiters
-    let mut offset = 0;
-    for segment in text.split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == ';') {
+    // Tokenize by whitespace and common delimiters, tracking byte positions
+    let mut current_offset = 0;
+    for segment in text.split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == ';' || c == '=') {
         let trimmed = segment.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '=' && c != '+' && c != '/');
 
         if trimmed.len() >= min_length {
             let entropy = shannon_entropy(trimmed);
+            // False-positive reduction relies on the looks_like_secret()
+            // heuristic (mixed case, base64/hex patterns, known key
+            // prefixes) rather than an inflated threshold, which would
+            // miss real secrets like AWS keys with entropy ~4.6.
             if entropy >= threshold {
                 // Check if it looks like a common high-entropy pattern (base64, hex, etc.)
                 let is_likely_secret = looks_like_secret(trimmed);
@@ -81,25 +85,63 @@ pub fn scan_entropy(text: &str, threshold: f64, min_length: usize) -> EntropyRes
                         trimmed.to_string()
                     };
 
+                    // Calculate correct byte offset by searching within the current segment
+                    let segment_start = text[current_offset..].find(segment).map(|pos| current_offset + pos).unwrap_or(current_offset);
+                    let token_offset = text[segment_start..].find(trimmed).map(|pos| segment_start + pos).unwrap_or(segment_start);
+
                     findings.push(EntropyFinding {
                         token_preview: preview,
                         entropy,
                         length: trimmed.len(),
                         risk,
-                        offset: offset + text[offset..].find(trimmed).unwrap_or(0),
+                        offset: token_offset,
                     });
                     total_risk += risk;
                 }
             }
         }
 
-        offset += segment.len() + 1; // +1 for delimiter
+        // Advance offset past this segment plus the delimiter
+        current_offset += segment.len();
+        if current_offset < text.len() {
+            // Skip the delimiter character
+            current_offset += text[current_offset..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
     }
 
     EntropyResult {
         findings,
         risk_score: total_risk,
     }
+}
+
+/// Check if a token starts with a known API key / secret prefix.
+fn has_known_key_prefix(token: &str) -> bool {
+    let key_prefixes = [
+        // Generic prefixes
+        "sk_", "pk_", "api_", "key_", "token_", "secret_",
+        // AWS
+        "AKIA", "ASIA", "ABIA", "ACCA",
+        // GitHub
+        "ghp_", "gho_", "ghs_", "ghr_",
+        // Slack
+        "xox", "xoxa-", "xoxb-", "xoxp-", "xoxr-",
+        // OpenAI
+        "sk-",
+        // Stripe
+        "rk_", "whsec_", "sk_live_", "sk_test_", "pk_live_", "pk_test_",
+        // GitLab
+        "glpat-",
+        // npm
+        "npm_",
+        // Twilio
+        "AC", "SK",
+        // Sendgrid
+        "SG.",
+        // JWT (common for high-value tokens)
+        "eyJ",
+    ];
+    key_prefixes.iter().any(|p| token.starts_with(p))
 }
 
 /// Heuristic: does a token look like a secret/key?
@@ -113,13 +155,7 @@ fn looks_like_secret(token: &str) -> bool {
     let mixed = (has_upper && has_lower) || (has_digit && (has_upper || has_lower));
 
     // Check for known key prefixes
-    let key_prefixes = [
-        "sk_", "pk_", "api_", "key_", "token_", "secret_",
-        "AKIA", /* AWS */ "ghp_", "gho_", /* GitHub */
-        "xox", /* Slack */ "sk-", /* OpenAI */
-    ];
-
-    let has_key_prefix = key_prefixes.iter().any(|p| token.starts_with(p));
+    let has_key_prefix = has_known_key_prefix(token);
 
     // Base64-like pattern (letters + digits + /+=)
     let base64_chars = token.chars()

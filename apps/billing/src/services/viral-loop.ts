@@ -205,7 +205,7 @@ export class ViralLoopService {
     try {
       await this.incrementCounter(tenantId, 'impressions');
     } catch (error) {
-      console.error(`[ViralLoop] Failed to record impression for tenant ${tenantId}:`, error);
+      logger.error('Failed to record impression', { tenantId, error: String(error) });
       // Don't throw - analytics failures shouldn't block email delivery
     }
   }
@@ -304,7 +304,7 @@ export class ViralLoopService {
     try {
       features = JSON.parse(row.features || '{}') as Record<string, unknown>;
     } catch {
-      console.warn(`[ViralLoop] Failed to parse plan features for tenant ${tenantId}`);
+      logger.warn('Failed to parse plan features for tenant', { tenantId });
       return Result.ok(true); // Default to showing footer on parse error
     }
     

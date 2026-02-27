@@ -56,11 +56,11 @@ export function generateUuid(): string {
   timestampBytes.copy(uuid, 0, 0, 6);
   
   // Set version 7 (0111) in the 4 high bits of byte 6
-  uuid[6] = (random[0]! & 0x0f) | 0x70;
-  uuid[7] = random[1]!;
+  uuid[6] = ((random[0] ?? 0) & 0x0f) | 0x70;
+  uuid[7] = random[1] ?? 0;
   
   // Set variant (10) in the 2 high bits of byte 8
-  uuid[8] = (random[2]! & 0x3f) | 0x80;
+  uuid[8] = ((random[2] ?? 0) & 0x3f) | 0x80;
   
   // Copy remaining random bytes
   random.copy(uuid, 9, 3, 10);

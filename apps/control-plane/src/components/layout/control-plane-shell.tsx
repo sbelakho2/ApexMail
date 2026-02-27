@@ -180,7 +180,7 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
                     <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl" onClick={(event) => event.stopPropagation()}>
                         <div className="flex items-center justify-between mb-3">
                             <h2 className="text-base font-semibold text-foreground">Operator Shortcuts</h2>
-                            <button className="text-sm text-muted-foreground hover:text-foreground" onClick={() => setShowShortcutSheet(false)}>Close</button>
+                            <button aria-label="Close operator shortcuts" className="text-sm text-muted-foreground hover:text-foreground" onClick={() => setShowShortcutSheet(false)}>Close</button>
                         </div>
                         <ul className="space-y-2 text-sm text-foreground">
                             <li><span className="font-mono text-xs px-1.5 py-0.5 rounded bg-muted mr-2">?</span>Open shortcut sheet</li>

@@ -15,6 +15,6 @@ pub use processor::WebhookProcessor;
 pub use ssrf::{is_private_ip, SsrfValidator};
 pub use types::{
     truncate_payload, PendingSuccess, WebhookDelivery, WebhookDeliveryResult, WebhookJob,
-    BLOCKED_HOSTNAMES, DNS_CACHE_MAX_ENTRIES, DNS_CACHE_TTL_SECS, MAX_CONCURRENT_PER_TENANT,
-    MAX_RESPONSE_BYTES, MAX_WEBHOOK_PAYLOAD_BYTES, SIGNATURE_VERSION,
+    BLOCKED_HOSTNAMES, MAX_CONCURRENT_PER_TENANT, MAX_RESPONSE_BYTES,
+    MAX_WEBHOOK_PAYLOAD_BYTES, SIGNATURE_VERSION, dns_cache_max_entries, dns_cache_ttl_secs,
 };

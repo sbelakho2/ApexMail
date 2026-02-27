@@ -7,10 +7,11 @@ use sales_autopilot::{
     inbox::InboxManager,
     routes::{self, AppState},
 };
+use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     // Initialise structured logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -26,7 +27,7 @@ async fn main() {
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/apexmail".into());
     let db = sqlx::PgPool::connect(&database_url)
         .await
-        .expect("Failed to connect to database");
+        .context("Failed to connect to database")?;
 
     let state = AppState {
         db,
@@ -43,11 +44,13 @@ async fn main() {
         Ok(listener) => listener,
         Err(err) => {
             tracing::error!(error = %err, addr = %addr, "failed to bind listener");
-            return;
+            return Ok(());
         }
     };
     tracing::info!(addr = %addr, "listening");
     if let Err(err) = axum::serve(listener, app).await {
         tracing::error!(error = %err, "server error");
     }
+
+    Ok(())
 }

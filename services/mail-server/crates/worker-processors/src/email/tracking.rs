@@ -71,7 +71,7 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> String {
 }
 
 /// Decode a tracking ID back to its payload.
-#[allow(dead_code)]
+#[allow(unused)]
 pub fn decode_tracking_id(encoded: &str) -> Option<TrackingPayload> {
     let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -181,11 +181,13 @@ mod tests {
         };
 
         let encoded = encode_tracking_id(&payload);
-        let decoded = decode_tracking_id(&encoded).expect("decode failed");
-
-        assert_eq!(decoded.message_id, payload.message_id);
-        assert_eq!(decoded.tenant_id, payload.tenant_id);
-        assert_eq!(decoded.original_url, payload.original_url);
+        let decoded = decode_tracking_id(&encoded);
+        assert!(decoded.is_some(), "decode should succeed");
+        if let Some(decoded) = decoded {
+            assert_eq!(decoded.message_id, payload.message_id);
+            assert_eq!(decoded.tenant_id, payload.tenant_id);
+            assert_eq!(decoded.original_url, payload.original_url);
+        }
     }
 
     #[test]

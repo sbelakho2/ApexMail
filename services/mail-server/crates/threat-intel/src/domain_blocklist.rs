@@ -49,7 +49,11 @@ impl DomainBlocklist {
         true
     }
 
-    /// Look up a domain, checking exact match and parent domain wildcards
+    /// Look up a domain, checking exact match and parent domain wildcards.
+    ///
+    /// Parent domain walk is capped at 3 levels to prevent abuse from
+    /// deeply-nested subdomains (e.g., a.b.c.d.e.f.evil.com) which could
+    /// cause excessive DashMap lookups per request.
     pub fn lookup(&self, domain: &str) -> Option<DomainBlockEntry> {
         let normalized = domain.to_lowercase();
         let normalized = normalized.trim_end_matches('.');
@@ -62,10 +66,16 @@ impl DomainBlocklist {
             }
         }
 
-        // Walk up the domain hierarchy (e.g., sub.evil.com → evil.com → com)
+        // Walk up the domain hierarchy, capped at 3 levels
         let mut parts = normalized;
+        let mut walk_count = 0;
+        const MAX_DOMAIN_WALK: usize = 3;
         while let Some(dot_pos) = parts.find('.') {
+            if walk_count >= MAX_DOMAIN_WALK {
+                break;
+            }
             parts = &parts[dot_pos + 1..];
+            walk_count += 1;
             if let Some(entry) = self.exact.get(parts) {
                 if entry.expires_at > now {
                     return Some(entry.clone());

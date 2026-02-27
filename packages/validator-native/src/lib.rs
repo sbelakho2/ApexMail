@@ -65,6 +65,7 @@ static DNS_CACHE: LazyLock<RwLock<HashMap<String, DnsCacheEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
+const DNS_CACHE_MAX_ENTRIES: usize = 10_000;
 
 struct DnsCacheEntry {
     has_mx: bool,
@@ -73,10 +74,8 @@ struct DnsCacheEntry {
 
 static RESOLVER: OnceLock<TokioAsyncResolver> = OnceLock::new();
 
-fn get_resolver() -> &'static TokioAsyncResolver {
-    RESOLVER.get_or_init(|| {
-        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-    })
+fn get_resolver() -> Option<&'static TokioAsyncResolver> {
+    RESOLVER.get()
 }
 
 fn lookup_dns_cache(domain: &str) -> Option<bool> {
@@ -97,6 +96,13 @@ fn store_dns_cache(domain: String, has_mx: bool) {
         return;
     };
     cache.retain(|_, entry| entry.expires_at > Instant::now());
+    while cache.len() >= DNS_CACHE_MAX_ENTRIES {
+        if let Some(key) = cache.keys().next().cloned() {
+            cache.remove(&key);
+        } else {
+            break;
+        }
+    }
     cache.insert(
         domain,
         DnsCacheEntry {
@@ -166,8 +172,7 @@ fn validate_email_sync(email: &str) -> ValidationResult {
         errors.push(format!("Address exceeds {MAX_ADDRESS} characters"));
     }
 
-    let parts: Vec<&str> = email.rsplitn(2, '@').collect();
-    if parts.len() != 2 {
+    let Some((local_part, domain)) = email.split_once('@') else {
         return ValidationResult {
             valid: false,
             email: email.to_string(),
@@ -179,10 +184,7 @@ fn validate_email_sync(email: &str) -> ValidationResult {
             errors: vec!["Missing @ separator".into()],
             warnings,
         };
-    }
-
-    let domain = parts[0];
-    let local_part = parts[1];
+    };
 
     // Local part checks
     if local_part.is_empty() {
@@ -282,7 +284,10 @@ pub async fn validate_email_with_mx(email: String) -> Result<ValidationResult> {
             }
             return Ok(result);
         }
-        let resolver = get_resolver();
+        let Some(resolver) = get_resolver() else {
+            result.warnings.push("DNS resolver not initialized".into());
+            return Ok(result);
+        };
 
         let has_mx = match resolver.mx_lookup(&domain).await {
             Ok(mx) => mx.iter().next().is_some(),
@@ -350,7 +355,9 @@ pub fn set_disposable_domains(domains: Vec<String>, replace: bool) -> Result<u32
 /// Check MX records for a domain.
 #[napi]
 pub async fn check_mx(domain: String) -> Result<MxCheckResult> {
-    let resolver = get_resolver();
+    let Some(resolver) = get_resolver() else {
+        return Err(napi::Error::from_reason("DNS resolver not initialized"));
+    };
 
     let mx_result = resolver.mx_lookup(&domain).await;
     let mx_records: Vec<String> = match &mx_result {
@@ -376,22 +383,34 @@ pub async fn check_mx(domain: String) -> Result<MxCheckResult> {
 /// Check if a domain is in the disposable email list.
 #[napi]
 pub fn is_disposable_domain(domain: String) -> bool {
-    DISPOSABLE_DOMAINS.contains(domain.to_lowercase().as_str())
+    let Ok(domains) = DISPOSABLE_DOMAINS.read() else {
+        return false;
+    };
+    domains.contains(domain.to_lowercase().as_str())
 }
 
 /// Normalize an email address (lowercase domain, trim).
 #[napi]
 pub fn normalize_email(email: String) -> Result<String> {
     let email = email.trim();
-    let parts: Vec<&str> = email.rsplitn(2, '@').collect();
-    if parts.len() != 2 {
+    let Some((local_part, domain)) = email.split_once('@') else {
         return Err(napi::Error::from_reason("Invalid email format"));
-    }
-    Ok(format!("{}@{}", parts[1], parts[0].to_lowercase()))
+    };
+    Ok(format!("{}@{}", local_part, domain.to_lowercase()))
 }
 
 /// Get the list of known disposable domains.
 #[napi]
 pub fn get_disposable_domains() -> Vec<String> {
-    DISPOSABLE_DOMAINS.iter().map(|d| d.to_string()).collect()
+    let Ok(domains) = DISPOSABLE_DOMAINS.read() else {
+        return Vec::new();
+    };
+    domains.iter().map(|d| d.to_string()).collect()
+}
+
+#[napi]
+pub fn initialize_dns_resolver() {
+    let _ = RESOLVER.get_or_init(|| {
+        TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+    });
 }

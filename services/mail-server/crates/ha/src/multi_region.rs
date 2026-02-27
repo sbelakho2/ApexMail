@@ -381,8 +381,12 @@ mod tests {
         let active: Vec<&RegionInfo> = regions.iter()
             .filter(|r| r.status == "active" && r.health_score > 0.0)
             .collect();
-        let selected = active.iter().find(|r| r.is_primary).or(active.first()).unwrap();
-        assert_eq!(selected.name, "us-east-1");
+        let selected = active
+            .iter()
+            .find(|r| r.is_primary)
+            .or(active.first())
+            .copied();
+        assert_eq!(selected.map(|r| r.name.as_str()), Some("us-east-1"));
     }
 
     #[test]
@@ -405,8 +409,8 @@ mod tests {
             .min_by(|a, b| a.latency_ms.unwrap_or(f64::MAX)
                 .partial_cmp(&b.latency_ms.unwrap_or(f64::MAX))
                 .unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap();
-        assert_eq!(best.name, "eu-west-1");
+            .map(|r| r.name.as_str());
+        assert_eq!(best, Some("eu-west-1"));
     }
 
     #[test]
@@ -427,8 +431,8 @@ mod tests {
         ];
         let best = regions.iter()
             .max_by(|a, b| a.health_score.partial_cmp(&b.health_score).unwrap_or(std::cmp::Ordering::Equal))
-            .unwrap();
-        assert_eq!(best.name, "b");
+            .map(|r| r.name.as_str());
+        assert_eq!(best, Some("b"));
     }
 
     #[test]

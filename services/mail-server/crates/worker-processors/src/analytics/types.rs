@@ -79,6 +79,7 @@ impl AggregatedStats {
 
 /// Event type enumeration.
 /// Fix #95: Removed blanket #[allow(dead_code)] — type is part of public API.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     Sent,

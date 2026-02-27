@@ -113,9 +113,9 @@ fn test_parallel_billing_threads() {
             thread::spawn(move || {
                 for vol in 0..10_000u64 {
                     let (email_cost, api_cost, total) = p.calculate(vol * 10, vol * 100);
-                    assert!(email_cost >= 0.0);
-                    assert!(api_cost >= 0.0);
-                    assert!(total >= 0.0);
+                    assert!(email_cost >= 0);
+                    assert!(api_cost >= 0);
+                    assert!(total >= 0);
 
                     let overage = calculate_overage_cost(vol as i64 * 10, 50_000);
                     assert!(overage >= 0);

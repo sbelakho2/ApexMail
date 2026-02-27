@@ -12,7 +12,7 @@ use crate::{AttackCategory, MatchLocation, RuleMatch};
 
 /// Analyze input for XSS patterns
 pub fn analyze_xss(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(6);
     let lower = input.to_lowercase();
     // Strip null bytes (common evasion)
     let cleaned: String = lower.chars().filter(|c| *c != '\0').collect();
@@ -188,11 +188,12 @@ fn detect_css_injection(input: &str) -> bool {
     false
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
+/// Safely truncate a string at character boundary (not byte offset).
+/// Prevents panic on multi-byte UTF-8 sequences.
+fn truncate(s: &str, max_chars: usize) -> String {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}...", &s[..byte_idx]),
+        None => s.to_string(),
     }
 }
 

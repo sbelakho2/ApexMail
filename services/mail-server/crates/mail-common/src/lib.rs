@@ -4,9 +4,22 @@
 
 pub mod config;
 pub mod error;
+pub mod security;
 
 pub use config::Config;
 pub use error::{Error, Result};
+pub use security::{
+	generate_correlation_id,
+	global_security_correlator,
+	ingest_security_event,
+	CompositeAlert,
+	CorrelationContext,
+	SecurityAction,
+	SecurityCorrelator,
+	SecurityEvent,
+	SecuritySeverity,
+	SecuritySystem,
+};
 
 /// Re-export commonly used types
 pub use chrono::{DateTime, Utc};

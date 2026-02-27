@@ -12,7 +12,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
 
@@ -23,12 +23,12 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub struct AuditLogger {
     db: PgPool,
-    #[allow(dead_code)]
+    #[allow(unused)]
     config: AuditConfig,
     signing_key: Vec<u8>,
     /// In-memory cache of last hash per chain key. Primary source:
     /// Redis `audit:lasthash:{key}`, falling back to DB.
-    last_hashes: Mutex<HashMap<String, String>>,
+    last_hashes: RwLock<HashMap<String, String>>,
 }
 
 impl AuditLogger {
@@ -38,7 +38,7 @@ impl AuditLogger {
             db,
             config,
             signing_key,
-            last_hashes: Mutex::new(HashMap::new()),
+            last_hashes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -63,7 +63,7 @@ impl AuditLogger {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        let mut map = self.last_hashes.lock().await;
+        let mut map = self.last_hashes.write().await;
         for (tenant_id, hash) in rows {
             let chain_key = tenant_id.unwrap_or_else(|| "global".into());
             map.insert(chain_key, hash);
@@ -93,7 +93,7 @@ impl AuditLogger {
             .unwrap_or_else(|| "global".into());
 
         let previous_hash = {
-            let map = self.last_hashes.lock().await;
+            let map = self.last_hashes.read().await;
             map.get(&chain_key).cloned()
         };
 
@@ -139,7 +139,7 @@ impl AuditLogger {
 
         // Update last hash cache
         {
-            let mut map = self.last_hashes.lock().await;
+            let mut map = self.last_hashes.write().await;
             map.insert(chain_key, hash);
         }
 
@@ -707,7 +707,7 @@ fn csv_escape(value: &str) -> String {
 
 fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
     // Generate a minimal text-based PDF 1.4
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(entries.len().saturating_add(4));
     lines.push("Audit Log Export".to_string());
     lines.push(format!("Generated: {}", Utc::now().to_rfc3339()));
     lines.push(format!("Total entries: {}", entries.len()));
@@ -832,7 +832,7 @@ mod tests {
         AuditLogger::new(pool, config)
     }
 
-    #[allow(dead_code)]
+    #[allow(unused)]
     fn test_context() -> LogContext {
         LogContext {
             tenant_id: Some("tenant-1".into()),
@@ -1146,11 +1146,11 @@ mod tests {
     fn test_last_hash_cache() {
         let logger = test_logger();
         {
-            let mut map = logger.last_hashes.blocking_lock();
+            let mut map = logger.last_hashes.blocking_write();
             map.insert("tenant-a".into(), "hash123".into());
         }
         {
-            let map = logger.last_hashes.blocking_lock();
+            let map = logger.last_hashes.blocking_read();
             assert_eq!(map.get("tenant-a").unwrap(), "hash123");
         }
     }

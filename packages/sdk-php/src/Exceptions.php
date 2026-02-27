@@ -8,7 +8,7 @@ class ApexMailException extends \RuntimeException
 {
     public function __construct(
         string           $message,
-        private readonly int    $statusCode = 0,
+        private readonly int    $statusCode,
         private readonly ?string $apiCode   = null,
     ) {
         parent::__construct($message, $statusCode);

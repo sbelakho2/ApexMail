@@ -4,7 +4,10 @@
  */
 
 import { Result } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import type { DatabasePool } from '@apexmail/db';
+
+const logger = createLogger();
 
 export interface Plan {
   id: string;
@@ -235,6 +238,24 @@ export interface CreatePlanInput {
   stripePriceIdYearly?: string;
   sortOrder?: number;
 }
+
+type PlanRow = {
+  id: string;
+  name: string;
+  display_name: string;
+  description: string;
+  price_monthly: number;
+  price_yearly: number;
+  email_limit: number;
+  api_call_limit: number;
+  features: string;
+  stripe_price_id_monthly: string | null;
+  stripe_price_id_yearly: string | null;
+  is_active: boolean;
+  sort_order: number;
+  created_at: Date;
+  updated_at: Date;
+};
 
 const DEFAULT_PLANS: CreatePlanInput[] = [
   {
@@ -571,23 +592,7 @@ export class PlansService {
    * Create or update a plan
    */
   async createOrUpdatePlan(input: CreatePlanInput): Promise<Result<Plan, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      name: string;
-      display_name: string;
-      description: string;
-      price_monthly: number;
-      price_yearly: number;
-      email_limit: number;
-      api_call_limit: number;
-      features: string;
-      stripe_price_id_monthly: string | null;
-      stripe_price_id_yearly: string | null;
-      is_active: boolean;
-      sort_order: number;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<PlanRow>(
       `INSERT INTO plans (
         id, name, display_name, description, price_monthly, price_yearly,
         email_limit, api_call_limit, features, stripe_price_id_monthly,
@@ -636,23 +641,7 @@ export class PlansService {
    * Get all active plans
    */
   async getActivePlans(): Promise<Result<Plan[], Error>> {
-    const result = await this.db.query<{
-      id: string;
-      name: string;
-      display_name: string;
-      description: string;
-      price_monthly: number;
-      price_yearly: number;
-      email_limit: number;
-      api_call_limit: number;
-      features: string;
-      stripe_price_id_monthly: string | null;
-      stripe_price_id_yearly: string | null;
-      is_active: boolean;
-      sort_order: number;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<PlanRow>(
       `SELECT id, name, display_name, description, price_monthly, price_yearly,
               email_limit, api_call_limit, features, stripe_price_id_monthly,
               stripe_price_id_yearly, is_active, sort_order, created_at, updated_at
@@ -668,23 +657,7 @@ export class PlansService {
    * Get plan by name
    */
   async getPlanByName(name: string): Promise<Result<Plan | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      name: string;
-      display_name: string;
-      description: string;
-      price_monthly: number;
-      price_yearly: number;
-      email_limit: number;
-      api_call_limit: number;
-      features: string;
-      stripe_price_id_monthly: string | null;
-      stripe_price_id_yearly: string | null;
-      is_active: boolean;
-      sort_order: number;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<PlanRow>(
       `SELECT id, name, display_name, description, price_monthly, price_yearly,
               email_limit, api_call_limit, features, stripe_price_id_monthly,
               stripe_price_id_yearly, is_active, sort_order, created_at, updated_at
@@ -803,29 +776,13 @@ export class PlansService {
     return this.getPlanByName(row.plan);
   }
 
-  private mapRow(row: {
-    id: string;
-    name: string;
-    display_name: string;
-    description: string;
-    price_monthly: number;
-    price_yearly: number;
-    email_limit: number;
-    api_call_limit: number;
-    features: string;
-    stripe_price_id_monthly: string | null;
-    stripe_price_id_yearly: string | null;
-    is_active: boolean;
-    sort_order: number;
-    created_at: Date;
-    updated_at: Date;
-  }): Plan {
+  private mapRow(row: PlanRow): Plan {
     let features: PlanFeatures = { ...DEFAULT_PLAN_FEATURES };
     try {
       const parsed = JSON.parse(row.features);
       features = { ...DEFAULT_PLAN_FEATURES, ...parsed };
     } catch {
-      console.error('Invalid plan features JSON for plan:', row.id);
+      logger.error('Invalid plan features JSON for plan', { planId: row.id });
     }
     
     return {

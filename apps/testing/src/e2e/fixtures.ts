@@ -82,8 +82,7 @@ export const test = base.extend<ApexMailFixtures>({
     },
     
     // Test users
-    // eslint-disable-next-line no-empty-pattern
-    testUser: async ({}, use) => {
+    testUser: async ({ page: _page }, use) => {
         const testUser: TestUser = {
             id: 'test-user-1',
             email: 'test@apexmail.test',
@@ -93,8 +92,7 @@ export const test = base.extend<ApexMailFixtures>({
         await use(testUser);
     },
     
-    // eslint-disable-next-line no-empty-pattern
-    adminUser: async ({}, use) => {
+    adminUser: async ({ page: _page }, use) => {
         const adminUser: TestUser = {
             id: 'test-admin-1',
             email: 'admin@apexmail.test',

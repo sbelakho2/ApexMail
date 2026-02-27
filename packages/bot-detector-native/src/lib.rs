@@ -97,7 +97,7 @@ const BUILTIN_PATTERNS: &[(&str, &str, &str)] = &[
 
 struct PatternStore {
     patterns: Vec<PatternEntry>,
-    automaton: AhoCorasick,
+    automaton: Option<AhoCorasick>,
 }
 
 impl PatternStore {
@@ -108,7 +108,10 @@ impl PatternStore {
             .match_kind(MatchKind::LeftmostLongest)
             .build(&sources)
             .map_err(|err| Error::from_reason(format!("Failed to build automaton: {err}")))?;
-        Ok(Self { patterns, automaton })
+        Ok(Self {
+            patterns,
+            automaton: Some(automaton),
+        })
     }
 }
 
@@ -127,15 +130,10 @@ fn load_builtin_patterns() -> Vec<PatternEntry> {
 
 fn get_store() -> &'static RwLock<PatternStore> {
     PATTERN_STORE.get_or_init(|| {
-        let store = PatternStore::new(load_builtin_patterns())
-            .unwrap_or_else(|_| PatternStore {
-                patterns: Vec::new(),
-                automaton: AhoCorasickBuilder::new()
-                    .ascii_case_insensitive(true)
-                    .match_kind(MatchKind::LeftmostLongest)
-                    .build(&[])
-                    .expect("automaton must build"),
-            });
+        let store = PatternStore::new(load_builtin_patterns()).unwrap_or(PatternStore {
+            patterns: Vec::new(),
+            automaton: None,
+        });
         RwLock::new(store)
     })
 }
@@ -193,9 +191,14 @@ pub fn detect_bot(user_agent: String) -> BotDetectionResult {
             return BotDetectionResult {
                 is_bot: false,
                 user_agent,
-                matches: Vec::new(),
+                matches: vec![BotMatch {
+                    pattern: "<lock-poisoned>".to_string(),
+                    label: "internal:lock-poisoned".to_string(),
+                    category: "internal_error".to_string(),
+                    position: 0,
+                }],
                 confidence: 0.0,
-                category: None,
+                category: Some("internal_error".to_string()),
             };
         }
     };
@@ -204,16 +207,18 @@ pub fn detect_bot(user_agent: String) -> BotDetectionResult {
 
     let mut matches = Vec::new();
 
-    for mat in store_guard.automaton.find_iter(&ua_lower) {
-        let idx = mat.pattern().as_usize();
-        if idx < store_guard.patterns.len() {
-            let entry = &store_guard.patterns[idx];
-            matches.push(BotMatch {
-                pattern: entry.pattern.clone(),
-                label: entry.label.clone(),
-                category: entry.category.clone(),
-                position: mat.start() as u32,
-            });
+    if let Some(automaton) = &store_guard.automaton {
+        for mat in automaton.find_iter(&ua_lower) {
+            let idx = mat.pattern().as_usize();
+            if idx < store_guard.patterns.len() {
+                let entry = &store_guard.patterns[idx];
+                matches.push(BotMatch {
+                    pattern: entry.pattern.clone(),
+                    label: entry.label.clone(),
+                    category: entry.category.clone(),
+                    position: mat.start() as u32,
+                });
+            }
         }
     }
 

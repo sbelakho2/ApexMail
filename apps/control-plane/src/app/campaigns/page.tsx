@@ -86,7 +86,7 @@ export default function CampaignsPage() {
                         Manage automated email sequences for lead nurturing
                     </p>
                 </div>
-                <button type="button" className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
+                <button aria-label="Create campaign" type="button" className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 shadow-sm transition-all hover:shadow-md">
                     + Create Campaign
                 </button>
             </div>
@@ -165,6 +165,7 @@ export default function CampaignsPage() {
                                 <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                                     {(campaign.status === 'active' || campaign.status === 'paused') && (
                                         <button
+                                            aria-label={campaign.status === 'active' ? `Pause campaign ${campaign.name}` : `Resume campaign ${campaign.name}`}
                                             onClick={() => toggleCampaignStatus(campaign.id)}
                                             className={cn(
                                                 'px-4 py-2 rounded-lg text-sm font-medium transition-colors border',
@@ -177,11 +178,11 @@ export default function CampaignsPage() {
                                         </button>
                                     )}
                                     {campaign.status === 'draft' && (
-                                        <button type="button" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm">
+                                        <button aria-label={`Start campaign ${campaign.name}`} type="button" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 shadow-sm">
                                             Start
                                         </button>
                                     )}
-                                    <button type="button" className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+                                    <button aria-label={`Open settings for ${campaign.name}`} type="button" className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
                                         Settings
                                     </button>
                                 </div>

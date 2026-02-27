@@ -2,6 +2,20 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { cn, formatDate } from '../../lib/utils';
+import {
+    COMPETITOR_PROVIDERS,
+    DiscoverySource,
+    DiscoveryStats,
+    DiscoveredLead,
+    DISCOVERY_SOURCES,
+    getFilteredLeads,
+    getProviderCounts,
+    getScoreColor,
+    OUTREACH_OFFERS,
+    SALES_TABS,
+    TabKey,
+    TARGET_CATEGORIES,
+} from './sales-config';
 
 /**
  * Automated Sales System - Comprehensive Lead Discovery & Outreach
@@ -12,98 +26,6 @@ import { cn, formatDate } from '../../lib/utils';
  * - Automated, highly personalized outreach campaigns
  * - Offers: Deliverability Audit, Webhook Migration, Free Migration Support
  */
-
-// ── Types ──
-
-interface DiscoverySource {
-    id: 'product_hunt' | 'g2' | 'capterra' | 'crunchbase';
-    name: string;
-    icon: string;
-    enabled: boolean;
-    description: string;
-}
-
-interface DiscoveredLead {
-    id: string;
-    companyName: string;
-    domain: string;
-    source: string;
-    category: string;
-    description: string;
-    foundAt: string;
-    emailProvider: string | null;
-    mxRecords: string[];
-    score: number;
-    status: 'new' | 'contacted' | 'qualified' | 'nurturing';
-    tags: string[];
-}
-
-interface OutreachOffer {
-    id: string;
-    name: string;
-    description: string;
-    icon: string;
-    templateId: string;
-}
-
-interface DiscoveryStats {
-    totalScraped: number;
-    totalWithMx: number;
-    byProvider: Record<string, number>;
-    bySource: Record<string, number>;
-}
-
-// ── Constants ──
-
-const DISCOVERY_SOURCES: DiscoverySource[] = [
-    { id: 'product_hunt', name: 'Product Hunt', icon: '🚀', enabled: true, description: 'New SaaS launches and trending products' },
-    { id: 'g2', name: 'G2 Crowd', icon: '⭐', enabled: true, description: 'Enterprise software reviews and comparisons' },
-    { id: 'capterra', name: 'Capterra', icon: '📊', enabled: false, description: 'Business software directory and reviews' },
-    { id: 'crunchbase', name: 'Crunchbase', icon: '💼', enabled: false, description: 'Startup and company funding data' },
-];
-
-const TARGET_CATEGORIES = [
-    'Email Marketing',
-    'Marketing Automation',
-    'CRM Software',
-    'Sales Enablement',
-    'Customer Success',
-    'Newsletter Platforms',
-    'Transactional Email',
-    'E-commerce',
-    'SaaS',
-];
-
-const COMPETITOR_PROVIDERS = ['SendGrid', 'Mailgun', 'Resend', 'Postmark', 'Mailchimp/Mandrill', 'SparkPost', 'Amazon SES'];
-
-const OUTREACH_OFFERS: OutreachOffer[] = [
-    {
-        id: 'deliverability_audit',
-        name: 'Free Deliverability Audit',
-        description: 'Comprehensive DNS, reputation, and deliverability analysis',
-        icon: '🔍',
-        templateId: 'tmpl_competitor_migration',
-    },
-    {
-        id: 'webhook_migration',
-        name: 'Webhook Migration Guide',
-        description: 'Provider-specific webhook migration documentation',
-        icon: '🔗',
-        templateId: 'tmpl_competitor_migration',
-    },
-    {
-        id: 'free_migration_support',
-        name: 'Free Migration Support',
-        description: '1:1 onboarding call with DNS review and webhook testing',
-        icon: '🚀',
-        templateId: 'tmpl_competitor_migration',
-    },
-];
-
-// ── Tab Definitions ──
-
-const TABS = ['discovery', 'leads', 'outreach', 'analytics'] as const;
-type TabKey = (typeof TABS)[number];
 
 // ── Main Component ──
 
@@ -171,7 +93,7 @@ export default function AutomatedSalesPage() {
     }, []);
 
     const selectAllFiltered = useCallback(() => {
-        const filtered = getFilteredLeads();
+        const filtered = getFilteredLeads(leads, providerFilter);
         setSelectedLeads(new Set(filtered.map(l => l.id)));
     }, [leads, providerFilter]);
 
@@ -231,30 +153,8 @@ export default function AutomatedSalesPage() {
         }
     }
 
-    function getFilteredLeads(): DiscoveredLead[] {
-        if (!providerFilter) return leads;
-        return leads.filter(l => l.emailProvider === providerFilter);
-    }
-
-    function getProviderCounts(): Record<string, number> {
-        const counts: Record<string, number> = {};
-        for (const lead of leads) {
-            if (lead.emailProvider) {
-                counts[lead.emailProvider] = (counts[lead.emailProvider] || 0) + 1;
-            }
-        }
-        return counts;
-    }
-
-    function getScoreColor(score: number): string {
-        if (score >= 80) return 'text-success bg-success/10 border border-success/20';
-        if (score >= 60) return 'text-warning bg-warning/10 border border-warning/20';
-        if (score >= 40) return 'text-amber-600 bg-amber-500/10 border border-amber-500/20';
-        return 'text-muted-foreground bg-muted border border-border';
-    }
-
-    const filteredLeads = getFilteredLeads();
-    const providerCounts = getProviderCounts();
+    const filteredLeads = getFilteredLeads(leads, providerFilter);
+    const providerCounts = getProviderCounts(leads);
     const competitorLeads = leads.filter(l => l.emailProvider && COMPETITOR_PROVIDERS.includes(l.emailProvider));
 
     if (loading && leads.length === 0) {
@@ -300,7 +200,7 @@ export default function AutomatedSalesPage() {
 
             {/* Tabs */}
             <div className="flex gap-1 mb-6 bg-muted/50 p-1 rounded-xl w-fit">
-                {TABS.map(tab => (
+                {SALES_TABS.map(tab => (
                     <button
                         key={tab}
                         onClick={() => setActiveTab(tab)}

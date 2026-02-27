@@ -7,9 +7,10 @@ license = "PROPRIETARY"
 
 [features]
 default = ["core"]
-full = ["core", "phishing"]
+full = ["core", "phishing", "events"]
 core = []
-phishing = []  # Enables deep URL and attachment analysis
+phishing = ["reqwest"]  # Enables deep URL and attachment analysis
+events = ["mail-common"]
 
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }
@@ -26,6 +27,9 @@ url = "2.5"
 prometheus = "0.13"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.8", features = ["v4"] }
+mail-common = { path = "../mail-common", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

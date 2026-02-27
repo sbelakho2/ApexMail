@@ -874,6 +874,7 @@ impl MessageStorage {
         Ok(())
     }
     
+    #[allow(dead_code)]
     async fn update_account_usage(&self, account_id: &Uuid, delta: i64) -> Result<()> {
         sqlx::query(r#"
             UPDATE mail_accounts

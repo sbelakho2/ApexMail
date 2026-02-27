@@ -33,6 +33,19 @@ CREATE TABLE events_unpartitioned (
 -- Step 2: Copy data from partitioned table
 INSERT INTO events_unpartitioned SELECT * FROM events;
 
+DO $$
+DECLARE
+    partitioned_count BIGINT;
+    unpartitioned_count BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO partitioned_count FROM events;
+    SELECT COUNT(*) INTO unpartitioned_count FROM events_unpartitioned;
+
+    IF partitioned_count <> unpartitioned_count THEN
+        RAISE EXCEPTION 'rollback integrity check failed: partitioned=% unpartitioned=%', partitioned_count, unpartitioned_count;
+    END IF;
+END $$;
+
 -- Step 3: Drop the partitioned table (cascades to all partitions)
 DROP TABLE events CASCADE;
 

@@ -61,6 +61,29 @@ export interface CreateContractInput {
   customTerms?: string;
 }
 
+type ContractRow = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  status: Contract['status'];
+  start_date: Date;
+  end_date: Date;
+  auto_renew: boolean;
+  base_price: number;
+  committed_volume: number;
+  overage_rate: number;
+  annual_prepay_discount: number;
+  additional_fees: string;
+  payment_terms_days: number;
+  sla_credit_percentage: number;
+  custom_terms: string | null;
+  signed_at: Date | null;
+  signed_by: string | null;
+  purchase_order_number: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
 /**
  * Enterprise contract management service
  */
@@ -71,28 +94,7 @@ export class EnterpriseContractService {
    * Create a new contract
    */
   async createContract(input: CreateContractInput): Promise<Result<Contract, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      name: string;
-      status: Contract['status'];
-      start_date: Date;
-      end_date: Date;
-      auto_renew: boolean;
-      base_price: number;
-      committed_volume: number;
-      overage_rate: number;
-      annual_prepay_discount: number;
-      additional_fees: string;
-      payment_terms_days: number;
-      sla_credit_percentage: number;
-      custom_terms: string | null;
-      signed_at: Date | null;
-      signed_by: string | null;
-      purchase_order_number: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ContractRow>(
       `INSERT INTO enterprise_contracts (
         id, tenant_id, name, status, start_date, end_date, auto_renew,
         base_price, committed_volume, overage_rate, annual_prepay_discount,
@@ -139,28 +141,7 @@ export class EnterpriseContractService {
     purchaseOrderNumber?: string
   ): Promise<Result<Contract, Error>> {
     // Use atomic CTE to activate contract and upgrade tenant plan together
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      name: string;
-      status: Contract['status'];
-      start_date: Date;
-      end_date: Date;
-      auto_renew: boolean;
-      base_price: number;
-      committed_volume: number;
-      overage_rate: number;
-      annual_prepay_discount: number;
-      additional_fees: string;
-      payment_terms_days: number;
-      sla_credit_percentage: number;
-      custom_terms: string | null;
-      signed_at: Date | null;
-      signed_by: string | null;
-      purchase_order_number: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ContractRow>(
       `WITH activate_contract AS (
         UPDATE enterprise_contracts
         SET status = 'active',
@@ -288,28 +269,7 @@ export class EnterpriseContractService {
    * Get contract by ID
    */
   async getContract(contractId: string, tenantId?: string): Promise<Result<Contract | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      name: string;
-      status: Contract['status'];
-      start_date: Date;
-      end_date: Date;
-      auto_renew: boolean;
-      base_price: number;
-      committed_volume: number;
-      overage_rate: number;
-      annual_prepay_discount: number;
-      additional_fees: string;
-      payment_terms_days: number;
-      sla_credit_percentage: number;
-      custom_terms: string | null;
-      signed_at: Date | null;
-      signed_by: string | null;
-      purchase_order_number: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ContractRow>(
       `SELECT id, tenant_id, name, status, start_date, end_date, auto_renew,
               base_price, committed_volume, overage_rate, annual_prepay_discount,
               additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
@@ -332,28 +292,7 @@ export class EnterpriseContractService {
    * Get active contract for tenant
    */
   async getActiveContract(tenantId: string): Promise<Result<Contract | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      name: string;
-      status: Contract['status'];
-      start_date: Date;
-      end_date: Date;
-      auto_renew: boolean;
-      base_price: number;
-      committed_volume: number;
-      overage_rate: number;
-      annual_prepay_discount: number;
-      additional_fees: string;
-      payment_terms_days: number;
-      sla_credit_percentage: number;
-      custom_terms: string | null;
-      signed_at: Date | null;
-      signed_by: string | null;
-      purchase_order_number: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ContractRow>(
       `SELECT id, tenant_id, name, status, start_date, end_date, auto_renew,
               base_price, committed_volume, overage_rate, annual_prepay_discount,
               additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,
@@ -615,34 +554,13 @@ export class EnterpriseContractService {
 </html>`;
   }
 
-  private mapRow(row: {
-    id: string;
-    tenant_id: string;
-    name: string;
-    status: Contract['status'];
-    start_date: Date;
-    end_date: Date;
-    auto_renew: boolean;
-    base_price: number;
-    committed_volume: number;
-    overage_rate: number;
-    annual_prepay_discount: number;
-    additional_fees: string;
-    payment_terms_days: number;
-    sla_credit_percentage: number;
-    custom_terms: string | null;
-    signed_at: Date | null;
-    signed_by: string | null;
-    purchase_order_number: string | null;
-    created_at: Date;
-    updated_at: Date;
-  }): Contract {
+  private mapRow(row: ContractRow): Contract {
     // Safe JSON parsing for additional_fees
     let additionalFees: Contract['additionalFees'] = [];
     try {
       additionalFees = JSON.parse(row.additional_fees || '[]') as Contract['additionalFees'];
     } catch {
-      console.warn(`[EnterpriseContracts] Failed to parse additional_fees for contract ${row.id}`);
+      logger.warn('Failed to parse contract additional fees', { contractId: row.id });
     }
     
     return {
@@ -685,28 +603,7 @@ export class EnterpriseContractService {
    * List all contracts for a tenant
    */
   async listContracts(tenantId: string): Promise<Result<Contract[], Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      name: string;
-      status: Contract['status'];
-      start_date: Date;
-      end_date: Date;
-      auto_renew: boolean;
-      base_price: number;
-      committed_volume: number;
-      overage_rate: number;
-      annual_prepay_discount: number;
-      additional_fees: string;
-      payment_terms_days: number;
-      sla_credit_percentage: number;
-      custom_terms: string | null;
-      signed_at: Date | null;
-      signed_by: string | null;
-      purchase_order_number: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<ContractRow>(
       `SELECT id, tenant_id, name, status, start_date, end_date, auto_renew,
               base_price, committed_volume, overage_rate, annual_prepay_discount,
               additional_fees, payment_terms_days, sla_credit_percentage, custom_terms,

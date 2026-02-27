@@ -10,9 +10,7 @@
         "NEXT_PUBLIC_API_URL",
         "NEXT_PUBLIC_TRACKING_URL",
         "NEXT_PUBLIC_APP_URL",
-        "BASE_URL",
-        "STRIPE_PUBLIC_KEY",
-        "SENTRY_DSN"
+        "STRIPE_PUBLIC_KEY"
       ]
     },
     "dev": {
@@ -41,7 +39,7 @@
       "env": ["CI", "NODE_ENV"]
     },
     "test:integration": {
-      "outputs": [],
+      "outputs": ["coverage/**", "test-results/**"],
       "env": ["CI", "NODE_ENV"]
     },
     "test:coverage": {

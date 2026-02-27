@@ -161,15 +161,12 @@ impl ReplicationService {
 
     /// Switch between sync and async replication.
     pub async fn set_sync_mode(&self, synchronous: bool) -> Result<(), String> {
-        let sync_standby = if synchronous {
-            "'*'"
+        let sql = if synchronous {
+            "ALTER SYSTEM SET synchronous_standby_names = '*'"
         } else {
-            "''"
+            "ALTER SYSTEM SET synchronous_standby_names = ''"
         };
-        let sql = format!(
-            "ALTER SYSTEM SET synchronous_standby_names = {sync_standby}"
-        );
-        sqlx::query(&sql)
+        sqlx::query(sql)
             .execute(&self.pool)
             .await
             .map_err(|e| format!("Set sync mode: {e}"))?;

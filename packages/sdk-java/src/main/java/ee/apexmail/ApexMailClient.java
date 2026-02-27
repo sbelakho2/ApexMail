@@ -13,6 +13,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Optional;
@@ -32,18 +38,21 @@ import java.util.regex.Pattern;
  *   ));
  * </pre>
  */
-public final class ApexMailClient {
+public final class ApexMailClient implements AutoCloseable {
 
     private static final String DEFAULT_BASE_URL = "https://api.apexmail.ee";
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
     private static final int DEFAULT_MAX_RETRIES = 3;
     private static final Duration DEFAULT_INITIAL_BACKOFF = Duration.ofMillis(500);
     private static final Duration DEFAULT_MAX_BACKOFF = Duration.ofSeconds(5);
+    private static final int DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
     private static final Pattern API_KEY_PATTERN = Pattern.compile("^am_(live|test)_[A-Za-z0-9]{16,}$");
 
     private final String apiKey;
     private final String baseUrl;
     private final HttpClient httpClient;
+    private final ExecutorService executor;
+    private final ScheduledExecutorService retryScheduler;
     private final ObjectMapper objectMapper;
 
     // ── Resource accessors ────────────────────────────────────────────────
@@ -82,12 +91,18 @@ public final class ApexMailClient {
         }
         this.apiKey  = apiKey;
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        this.httpClient = httpClient != null
-            ? httpClient
-            : HttpClient.newBuilder()
+        if (httpClient != null) {
+            this.httpClient = httpClient;
+            this.executor = null;
+        } else {
+            this.executor = Executors.newCachedThreadPool();
+            this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(timeout)
                 .version(HttpClient.Version.HTTP_2)
+                .executor(this.executor)
                 .build();
+        }
+            this.retryScheduler = Executors.newSingleThreadScheduledExecutor();
         this.objectMapper = new ObjectMapper()
             .registerModule(new JavaTimeModule())
             .registerModule(new Jdk8Module())
@@ -131,35 +146,18 @@ public final class ApexMailClient {
         while (true) {
             try {
                 String jsonBody = body != null ? objectMapper.writeValueAsString(body) : "";
-                HttpRequest.Builder builder = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + path))
-                    .header("X-API-Key", apiKey)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .header("User-Agent", "apexmail-java/1.0.0");
-
-                if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-                    builder.header("X-Idempotency-Key", idempotencyKey);
-                }
-
-                HttpRequest.BodyPublisher publisher =
-                    jsonBody.isEmpty()
-                        ? HttpRequest.BodyPublishers.noBody()
-                        : HttpRequest.BodyPublishers.ofString(jsonBody);
-
-                builder.method(method, publisher);
-
                 HttpResponse<String> response = httpClient.send(
-                    builder.build(),
+                    buildRequest(method, path, jsonBody, idempotencyKey),
                     HttpResponse.BodyHandlers.ofString()
                 );
 
                 int status = response.statusCode();
-                String responseBody = response.body();
+                String responseBody = safeResponseBody(response);
+                ensureResponseWithinLimit(responseBody);
 
                 if ((status == 429 || status >= 500) && attempt < DEFAULT_MAX_RETRIES) {
                     Duration delay = retryDelay(response, attempt);
-                    Thread.sleep(delay.toMillis());
+                    waitForRetry(delay);
                     attempt++;
                     continue;
                 }
@@ -204,35 +202,18 @@ public final class ApexMailClient {
         while (true) {
             try {
                 String jsonBody = body != null ? objectMapper.writeValueAsString(body) : "";
-                HttpRequest.Builder builder = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + path))
-                    .header("X-API-Key", apiKey)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
-                    .header("User-Agent", "apexmail-java/1.0.0");
-
-                if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-                    builder.header("X-Idempotency-Key", idempotencyKey);
-                }
-
-                HttpRequest.BodyPublisher publisher =
-                    jsonBody.isEmpty()
-                        ? HttpRequest.BodyPublishers.noBody()
-                        : HttpRequest.BodyPublishers.ofString(jsonBody);
-
-                builder.method(method, publisher);
-
                 HttpResponse<String> response = httpClient.send(
-                    builder.build(),
+                    buildRequest(method, path, jsonBody, idempotencyKey),
                     HttpResponse.BodyHandlers.ofString()
                 );
 
                 int status = response.statusCode();
-                String responseBody = response.body();
+                String responseBody = safeResponseBody(response);
+                ensureResponseWithinLimit(responseBody);
 
                 if ((status == 429 || status >= 500) && attempt < DEFAULT_MAX_RETRIES) {
                     Duration delay = retryDelay(response, attempt);
-                    Thread.sleep(delay.toMillis());
+                    waitForRetry(delay);
                     attempt++;
                     continue;
                 }
@@ -273,20 +254,24 @@ public final class ApexMailClient {
         }
         try {
             return objectMapper.readValue(responseBody, new TypeReference<Map<String, Object>>() {});
-        } catch (IOException ignored) {
-            return new HashMap<>();
+        } catch (IOException parseFailure) {
+            Map<String, Object> fallback = new HashMap<>();
+            fallback.put("error", responseBody);
+            fallback.put("code", "unparseable_error_response");
+            fallback.put("parseFailure", parseFailure.getMessage());
+            return fallback;
         }
     }
 
     // ── Error mapping ─────────────────────────────────────────────────────
 
     private void throwApiException(int status, Map<String, Object> body) {
-        String message = body.containsKey("error")
-            ? String.valueOf(body.get("error"))
-            : "API error";
-        String code = body.containsKey("code")
-            ? String.valueOf(body.get("code"))
-            : null;
+        Object errorField = body.get("error");
+        String message = errorField == null || String.valueOf(errorField).isBlank()
+            ? "API error"
+            : String.valueOf(errorField);
+        Object codeField = body.get("code");
+        String code = codeField == null ? null : String.valueOf(codeField);
 
         throw switch (status) {
             case 401 -> new AuthenticationException(message, code, status);
@@ -316,12 +301,71 @@ public final class ApexMailClient {
     }
 
     private static Duration calculateBackoff(int attempt) {
+        if (attempt < 0) {
+            attempt = 0;
+        }
+        if (attempt > 30) {
+            attempt = 30;
+        }
         long multiplier = 1L << attempt;
         Duration delay = DEFAULT_INITIAL_BACKOFF.multipliedBy(multiplier);
         return delay.compareTo(DEFAULT_MAX_BACKOFF) > 0 ? DEFAULT_MAX_BACKOFF : delay;
     }
 
-    private static void sleepBackoff(int attempt) throws InterruptedException {
-        Thread.sleep(calculateBackoff(attempt).toMillis());
+    private HttpRequest buildRequest(String method, String path, String jsonBody, String idempotencyKey) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+            .uri(URI.create(baseUrl + path))
+            .header("X-API-Key", apiKey)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("User-Agent", "apexmail-java/1.0.0");
+
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            builder.header("X-Idempotency-Key", idempotencyKey);
+        }
+
+        HttpRequest.BodyPublisher publisher =
+            jsonBody.isEmpty()
+                ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofString(jsonBody);
+
+        return builder.method(method, publisher).build();
+    }
+
+    private static void ensureResponseWithinLimit(String responseBody) {
+        if (responseBody != null && responseBody.length() > DEFAULT_MAX_RESPONSE_BYTES) {
+            throw new ApexMailException("Response body exceeds max size limit", "response_too_large", 0);
+        }
+    }
+
+    private static String safeResponseBody(HttpResponse<String> response) {
+        String body = response.body();
+        return body == null ? "" : body;
+    }
+
+    private void waitForRetry(Duration delay) throws InterruptedException {
+        if (delay == null || delay.isNegative() || delay.isZero()) {
+            return;
+        }
+
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        retryScheduler.schedule(() -> future.complete(null), delay.toMillis(), TimeUnit.MILLISECONDS);
+        try {
+            future.get();
+        } catch (ExecutionException e) {
+            throw new ApexMailException("Retry scheduling failed", e.getCause());
+        }
+    }
+
+    private void sleepBackoff(int attempt) throws InterruptedException {
+        waitForRetry(calculateBackoff(attempt));
+    }
+
+    @Override
+    public void close() {
+        if (executor != null) {
+            executor.shutdown();
+        }
+        retryScheduler.shutdown();
     }
 }

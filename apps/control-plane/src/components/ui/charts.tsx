@@ -170,9 +170,9 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
         <div className="flex items-center gap-6">
             <div className="relative inline-block">
                 <svg width={size} height={size} className="transform -rotate-0" role="img" aria-label={ariaLabel}>
-                    {segments.map((seg, i) => (
+                    {segments.map((seg) => (
                         <path
-                            key={i}
+                            key={`${seg.label}-${seg.value}`}
                             d={seg.path}
                             fill="none"
                             stroke={seg.color}
@@ -191,8 +191,8 @@ export function DonutChart({ data, size = 200, thickness = 40, showLegend = true
             </div>
             {showLegend && (
                 <div className="space-y-2">
-                    {segments.map((seg, i) => (
-                        <div key={i} className="flex items-center gap-2 text-sm">
+                    {segments.map((seg) => (
+                        <div key={`${seg.label}-${seg.value}`} className="flex items-center gap-2 text-sm">
                             <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
                                 <circle cx="6" cy="6" r="6" fill={seg.color} />
                             </svg>
@@ -228,7 +228,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                     const percent = (d.value / maxValue) * 100;
                     const color = d.color || CHART_PALETTE[i % CHART_PALETTE.length];
                     return (
-                        <div key={i}>
+                        <div key={`${d.label}-${d.value}`}>
                             <div className="flex justify-between text-sm mb-1">
                                 <span className="text-surface-600">{d.label}</span>
                                 {showValues && <span className="text-surface-900 font-medium">{d.value.toLocaleString()}</span>}
@@ -255,7 +255,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                     const x = (i * (100 / data.length)) + (50 / data.length);
                     const color = d.color || CHART_PALETTE[i % CHART_PALETTE.length];
                     return (
-                        <g key={i}>
+                        <g key={`${d.label}-${d.value}`}>
                             <rect
                                 x={`${x - (barWidth / 6)}%`}
                                 y={height - barHeight - 20}
@@ -336,8 +336,8 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
     return (
         <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
             {/* Grid lines */}
-            {showGrid && yTicks.map((tick, i) => (
-                <g key={i}>
+            {showGrid && yTicks.map((tick) => (
+                <g key={tick.value}>
                     <line
                         x1={padding.left}
                         y1={tick.y}
@@ -362,13 +362,13 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
             <path d={linePath} fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
 
             {/* Dots */}
-            {showDots && points.map((p, i) => (
-                <circle key={i} cx={p.x} cy={p.y} r={4} fill={color} className="transition-all hover:r-6" />
+            {showDots && points.map((p) => (
+                <circle key={p.date} cx={p.x} cy={p.y} r={4} fill={color} className="transition-all hover:r-6" />
             ))}
 
             {/* X-axis labels (show every few) */}
-            {points.filter((_, i) => i % Math.ceil(data.length / 6) === 0 || i === data.length - 1).map((p, i) => (
-                <text key={i} x={p.x} y={height - 8} textAnchor="middle" className="text-xs fill-surface-400">
+            {points.filter((_, i) => i % Math.ceil(data.length / 6) === 0 || i === data.length - 1).map((p) => (
+                <text key={p.date} x={p.x} y={height - 8} textAnchor="middle" className="text-xs fill-surface-400">
                     {p.date}
                 </text>
             ))}
@@ -405,9 +405,9 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
         <div>
             <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
                 {/* Grid */}
-                {[0, 0.5, 1].map((t, i) => (
+                {[0, 0.5, 1].map((t) => (
                     <line
-                        key={i}
+                        key={`grid-${t}`}
                         x1={padding.left}
                         y1={padding.top + chartHeight - t * chartHeight}
                         x2={width - padding.right}
@@ -524,7 +524,7 @@ export function HeatMap({ data, width = 500, height = 150, ariaLabel = 'Heat map
                 const color = `rgba(37, 99, 235, ${0.1 + intensity * 0.9})`;
                 return (
                     <rect
-                        key={i}
+                        key={`${d.day}-${d.hour}`}
                         x={40 + d.hour * cellWidth}
                         y={20 + d.day * cellHeight}
                         width={cellWidth - 2}
@@ -565,7 +565,7 @@ export function FunnelChart({ data, height = 200, ariaLabel = 'Funnel chart' }: 
                 const leftOffset = (100 - width) / 2;
 
                 return (
-                    <div key={i} className="relative">
+                    <div key={`${d.label}-${d.value}`} className="relative">
                         <div className="rounded-lg overflow-hidden relative">
                             <svg width="100%" height={rowHeight} viewBox={`0 0 100 ${rowHeight}`} preserveAspectRatio="none" role="img" aria-label={`${ariaLabel} stage ${d.label}`}>
                                 <rect x={leftOffset} y="0" width={width} height={rowHeight} rx="8" ry="8" fill={color} />

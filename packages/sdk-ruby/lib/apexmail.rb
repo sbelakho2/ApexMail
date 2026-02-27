@@ -18,6 +18,7 @@
 require "net/http"
 require "uri"
 require "json"
+require "openssl"
 
 module ApexMail
   DEFAULT_BASE_URL = "https://api.apexmail.ee"
@@ -70,6 +71,7 @@ module ApexMail
       @max_response_bytes = max_response_bytes
       @http = Net::HTTP.new(@base_uri.host, @base_uri.port)
       @http.use_ssl = @base_uri.scheme == "https"
+      @http.verify_mode = OpenSSL::SSL::VERIFY_PEER if @http.use_ssl?
       @http.open_timeout = @open_timeout
       @http.read_timeout = @read_timeout
       @keep_alive_timeout = 30
@@ -104,7 +106,7 @@ module ApexMail
         end
 
         handle_response(resp, body)
-      rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError => e
+      rescue IOError, EOFError, Timeout::Error, Errno::ECONNRESET, Errno::ECONNREFUSED, SocketError, OpenSSL::SSL::SSLError => e
         reset_connection
         if attempt < MAX_RETRIES
           sleep(backoff(attempt))
@@ -159,7 +161,7 @@ module ApexMail
           date = Time.httpdate(retry_after)
           delay = [date - Time.now, 0].max
           return [delay, MAX_BACKOFF].min
-        rescue ArgumentError
+        rescue ArgumentError, TypeError
         end
       end
 
@@ -178,8 +180,8 @@ module ApexMail
                else
                  JSON.parse(body_text, symbolize_names: true)
                end
-    rescue JSON::ParserError
-      parsed = { raw: body_text }
+    rescue JSON::ParserError => e
+      parsed = { raw: body_text, parse_error: e.message }
     ensure
       parsed ||= {}
 
@@ -232,6 +234,10 @@ module ApexMail
     end
 
     private
+
+    def inspect
+      "#<#{self.class} api_key=[FILTERED] resources=#{%i[emails domains webhooks templates suppressions events analytics api_keys].join(',')}>"
+    end
 
     def validate_api_key!(api_key)
       return if API_KEY_REGEX.match?(api_key)

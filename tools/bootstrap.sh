@@ -13,8 +13,10 @@ CHECKSUMS_FILE="$SCRIPT_DIR/checksums.sha256"
 # Version pins - update these for upgrades
 NODE_VERSION="20.11.0"
 PNPM_VERSION="8.14.0"
-RUST_VERSION="1.75.0"
-GO_VERSION="1.21.6"
+RUST_VERSION="1.82.0"
+GO_VERSION="1.22.6"
+
+CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-all-errors)
 
 # Platform detection
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -55,6 +57,29 @@ get_checksum() {
   grep "^$name " "$CHECKSUMS_FILE" | cut -d' ' -f2
 }
 
+require_checksum() {
+  local name="$1"
+  local checksum
+  checksum="$(get_checksum "$name")"
+  if [[ -z "$checksum" ]]; then
+    error "Missing required checksum entry for $name in $CHECKSUMS_FILE"
+  fi
+  echo "$checksum"
+}
+
+download_with_retry() {
+  local url="$1"
+  local output="$2"
+  curl -fL "${CURL_RETRY_ARGS[@]}" "$url" -o "$output"
+}
+
+verify_archive_integrity() {
+  local archive_path="$1"
+  if ! tar -tzf "$archive_path" >/dev/null 2>&1; then
+    error "Archive integrity check failed for $archive_path"
+  fi
+}
+
 setup_node() {
   local node_dir="$TOOLCHAIN_DIR/node"
   local node_bin="$node_dir/bin/node"
@@ -75,16 +100,13 @@ setup_node() {
   mkdir -p "$TOOLCHAIN_DIR/downloads"
   
   if [[ ! -f "$archive_path" ]]; then
-    curl -fsSL "$download_url" -o "$archive_path"
+    download_with_retry "$download_url" "$archive_path"
   fi
-  
+
   local expected_checksum
-  expected_checksum="$(get_checksum "node-${OS}-${ARCH}")"
-  if [[ -n "$expected_checksum" ]]; then
-    verify_checksum "$archive_path" "$expected_checksum"
-  else
-    log "Warning: No checksum found for Node.js archive"
-  fi
+  expected_checksum="$(require_checksum "node-${OS}-${ARCH}")"
+  verify_checksum "$archive_path" "$expected_checksum"
+  verify_archive_integrity "$archive_path"
   
   tar -xzf "$archive_path" -C "$node_dir" --strip-components=1
   log "Node.js $NODE_VERSION installed to $node_dir"
@@ -120,9 +142,11 @@ setup_rust() {
   
   log "Installing Rust $RUST_VERSION..."
   mkdir -p "$rustup_home" "$cargo_home"
-  
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain "$RUST_VERSION" --no-modify-path
+
+  local rustup_script="$TOOLCHAIN_DIR/downloads/rustup-init.sh"
+  mkdir -p "$TOOLCHAIN_DIR/downloads"
+  download_with_retry "https://sh.rustup.rs" "$rustup_script"
+  sh "$rustup_script" -y --default-toolchain "$RUST_VERSION" --no-modify-path
   
   log "Rust $RUST_VERSION installed"
 }
@@ -151,16 +175,13 @@ setup_go() {
   mkdir -p "$TOOLCHAIN_DIR/downloads"
   
   if [[ ! -f "$archive_path" ]]; then
-    curl -fsSL "$download_url" -o "$archive_path"
+    download_with_retry "$download_url" "$archive_path"
   fi
-  
+
   local expected_checksum
-  expected_checksum="$(get_checksum "go-${go_os}-${go_arch}")"
-  if [[ -n "$expected_checksum" ]]; then
-    verify_checksum "$archive_path" "$expected_checksum"
-  else
-    log "Warning: No checksum found for Go archive"
-  fi
+  expected_checksum="$(require_checksum "go-${go_os}-${go_arch}")"
+  verify_checksum "$archive_path" "$expected_checksum"
+  verify_archive_integrity "$archive_path"
   
   tar -xzf "$archive_path" -C "$TOOLCHAIN_DIR"
   log "Go $GO_VERSION installed to $go_dir"

@@ -17,24 +17,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { ATOMIC_DRAIN_SCRIPT, createMockRedis } from './perf-improvements-helpers';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 1. PERF-001: Atomic Redis WAL Flush (Lua Script)
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('PERF-001: Atomic Redis WAL Flush', () => {
-  /**
-   * The Lua script that runs LRANGE + LTRIM atomically inside Redis.
-   * Copied from EventProcessor.ATOMIC_DRAIN_SCRIPT.
-   */
-  const ATOMIC_DRAIN_SCRIPT = `
-local events = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[1]) - 1)
-if #events > 0 then
-  redis.call('LTRIM', KEYS[1], #events, -1)
-end
-return events
-`;
-
   describe('Lua script structure', () => {
     it('should contain LRANGE command', () => {
       expect(ATOMIC_DRAIN_SCRIPT).toContain("redis.call('LRANGE'");
@@ -71,32 +60,6 @@ return events
   });
 
   describe('EventProcessor.flush() with Lua script', () => {
-    // Simulate the flush() logic with a mock Redis
-    interface MockRedisState {
-      list: string[];
-      evalCalls: Array<{ script: string; keys: string[]; args: string[] }>;
-    }
-
-    function createMockRedis(): MockRedisState & {
-      rpush: (key: string, value: string) => void;
-      eval: (script: string, numKeys: number, key: string, ...args: string[]) => string[];
-    } {
-      const state: MockRedisState = { list: [], evalCalls: [] };
-      return {
-        ...state,
-        rpush: (_key: string, value: string) => {
-          state.list.push(value);
-        },
-        eval: (script: string, _numKeys: number, key: string, ...args: string[]) => {
-          state.evalCalls.push({ script, keys: [key], args });
-          // Simulate the Lua script
-          const batchSize = parseInt(args[0] ?? '100', 10);
-          const events = state.list.splice(0, batchSize);
-          return events;
-        },
-      };
-    }
-
     it('should drain all events from the list', () => {
       const redis = createMockRedis();
       redis.rpush('key', JSON.stringify({ id: '1', type: 'opened' }));

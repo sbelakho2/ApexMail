@@ -3,6 +3,9 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use mail_common::{
+    CorrelationContext, SecurityAction, SecurityEvent, SecuritySeverity, SecuritySystem,
+};
 use tracing::{debug, warn};
 
 use crate::config::WafConfig;
@@ -12,13 +15,11 @@ use crate::fast_path;
 use crate::json_graphql;
 use crate::sql_analyzer;
 use crate::xss_analyzer;
-use crate::{MatchLocation, RuleMatch};
+use crate::{AttackCategory, MatchLocation, RuleMatch};
 
 /// WAF engine
 pub struct WafEngine {
     config: Arc<WafConfig>,
-    /// Per-IP hit counters for adaptive blocking
-    hit_counters: Arc<dashmap::DashMap<IpAddr, u32>>,
 }
 
 /// Decision the middleware should take
@@ -64,13 +65,12 @@ impl WafEngine {
     pub fn new(config: WafConfig) -> Self {
         Self {
             config: Arc::new(config),
-            hit_counters: Arc::new(dashmap::DashMap::new()),
         }
     }
 
     /// Inspect an HTTP request and return a verdict
     pub fn inspect(&self, req: &HttpRequest<'_>) -> ThreatInfo {
-        let mut all_matches: Vec<RuleMatch> = Vec::new();
+        let mut all_matches: Vec<RuleMatch> = Vec::with_capacity(16);
 
         // Check IP-level allow-lists — IP allowlist = full bypass (trusted internal scanners etc.)
         let ip_str = req.client_ip.to_string();
@@ -89,7 +89,11 @@ impl WafEngine {
             .any(|p| req.path.starts_with(p.as_str()));
 
         // 1. Decode and inspect URL path
-        let decoded_path = decoder::decode_payload(req.path, self.config.max_decode_depth);
+        let decoded_path = decoder::canonicalize_input(
+            req.path,
+            self.config.max_decode_depth,
+            self.config.enable_unicode_normalization,
+        );
         
         // Fast-path pre-filter: only run expensive parsers if suspicious keywords found
         let path_fast_check = fast_path::fast_path_check(&decoded_path);
@@ -111,7 +115,11 @@ impl WafEngine {
                 let mut parts = pair.splitn(2, '=');
                 let key = parts.next().unwrap_or("");
                 let value = parts.next().unwrap_or("");
-                let decoded_value = decoder::decode_payload(value, self.config.max_decode_depth);
+                let decoded_value = decoder::canonicalize_input(
+                    value,
+                    self.config.max_decode_depth,
+                    self.config.enable_unicode_normalization,
+                );
                 let loc = MatchLocation::QueryParam(key.to_string());
 
                 // Fast-path pre-filter for query parameters
@@ -134,7 +142,11 @@ impl WafEngine {
 
         // 3. Inspect headers
         for (name, value) in req.headers {
-            let decoded_value = decoder::decode_payload(value, self.config.max_decode_depth);
+            let decoded_value = decoder::canonicalize_input(
+                value,
+                self.config.max_decode_depth,
+                self.config.enable_unicode_normalization,
+            );
             let loc = MatchLocation::Header(name.clone());
             
             // Fast-path pre-filter for headers
@@ -159,7 +171,11 @@ impl WafEngine {
             } else {
                 body
             };
-            let decoded_body = decoder::decode_payload(truncated, self.config.max_decode_depth);
+            let decoded_body = decoder::canonicalize_input(
+                truncated,
+                self.config.max_decode_depth,
+                self.config.enable_unicode_normalization,
+            );
             
             // Fast-path pre-filter for body
             let body_fast_check = fast_path::fast_path_check(&decoded_body);
@@ -170,6 +186,20 @@ impl WafEngine {
                 if ct_lower.contains("application/json") || ct_lower.contains("application/graphql") {
                     // Extract values from JSON/GraphQL and inspect them
                     let json_result = json_graphql::extract_json_values(&decoded_body);
+                    if !json_result.parsed_ok {
+                        if let Some(err) = &json_result.error {
+                            if err.contains("Maximum") {
+                                all_matches.push(RuleMatch {
+                                    rule_id: 920330,
+                                    category: AttackCategory::RequestAnomaly,
+                                    score: 6,
+                                    message: format!("JSON complexity limit exceeded: {}", err),
+                                    location: MatchLocation::Body,
+                                    matched_data: "json_complexity_limit".to_string(),
+                                });
+                            }
+                        }
+                    }
                     for jpv in &json_result.string_values {
                         let val_fast_check = fast_path::fast_path_check(&jpv.value);
                         let loc = MatchLocation::Body; // Could be more specific: JsonPath(jpv.path.clone())
@@ -187,6 +217,19 @@ impl WafEngine {
                     
                     // Also check GraphQL queries
                     let gql_result = json_graphql::extract_graphql_values(&decoded_body);
+                    if gql_result.limit_exceeded {
+                        all_matches.push(RuleMatch {
+                            rule_id: 944260,
+                            category: AttackCategory::RequestAnomaly,
+                            score: 6,
+                            message: format!(
+                                "GraphQL complexity limit exceeded: depth={} fields={}",
+                                gql_result.max_depth, gql_result.field_count
+                            ),
+                            location: MatchLocation::Body,
+                            matched_data: "graphql_complexity_limit".to_string(),
+                        });
+                    }
                     for arg in &gql_result.string_arguments {
                         let arg_fast_check = fast_path::fast_path_check(&arg.value);
                         let loc = MatchLocation::Body;
@@ -223,6 +266,57 @@ impl WafEngine {
             ));
         }
 
+        // 6. HTTP Request Smuggling detection
+        if self.config.enable_smuggling {
+            all_matches.extend(detection::analyze_request_smuggling(
+                req.headers,
+                req.body,
+                MatchLocation::Header("Transfer-Encoding/Content-Length".to_string()),
+            ));
+        }
+
+        // 7. NoSQL injection detection across all decoded inputs
+        if self.config.enable_nosqli {
+            if let Some(body) = req.body {
+                let decoded_body = decoder::canonicalize_input(
+                    body, self.config.max_decode_depth, self.config.enable_unicode_normalization,
+                );
+                all_matches.extend(detection::analyze_nosql_injection(&decoded_body, MatchLocation::Body));
+            }
+            if let Some(qs) = req.query_string {
+                for pair in qs.split('&') {
+                    let value = pair.splitn(2, '=').nth(1).unwrap_or("");
+                    let decoded = decoder::canonicalize_input(
+                        value, self.config.max_decode_depth, self.config.enable_unicode_normalization,
+                    );
+                    all_matches.extend(detection::analyze_nosql_injection(&decoded, MatchLocation::QueryParam(pair.to_string())));
+                }
+            }
+        }
+
+        // 8. SSRF detection
+        if self.config.enable_ssrf {
+            let decoded_path = decoder::canonicalize_input(
+                req.path, self.config.max_decode_depth, self.config.enable_unicode_normalization,
+            );
+            all_matches.extend(detection::analyze_ssrf(&decoded_path, MatchLocation::Path));
+            if let Some(qs) = req.query_string {
+                for pair in qs.split('&') {
+                    let value = pair.splitn(2, '=').nth(1).unwrap_or("");
+                    let decoded = decoder::canonicalize_input(
+                        value, self.config.max_decode_depth, self.config.enable_unicode_normalization,
+                    );
+                    all_matches.extend(detection::analyze_ssrf(&decoded, MatchLocation::QueryParam(pair.to_string())));
+                }
+            }
+            if let Some(body) = req.body {
+                let decoded_body = decoder::canonicalize_input(
+                    body, self.config.max_decode_depth, self.config.enable_unicode_normalization,
+                );
+                all_matches.extend(detection::analyze_ssrf(&decoded_body, MatchLocation::Body));
+            }
+        }
+
         // Calculate total anomaly score
         let total_score: u32 = all_matches.iter().map(|m| m.score).sum();
 
@@ -254,18 +348,66 @@ impl WafEngine {
         }
     }
 
-    fn is_allowlisted(&self, req: &HttpRequest<'_>) -> bool {
-        // IP allowlist only — path allowlisting is handled inline above
-        // to ensure query params/headers/body are still inspected.
-        let ip_str = req.client_ip.to_string();
-        self.config.allowlist_ips.iter().any(|a| *a == ip_str)
+    /// Inspect request and also emit a normalized security event.
+    pub fn inspect_with_event(
+        &self,
+        req: &HttpRequest<'_>,
+        correlation: Option<CorrelationContext>,
+    ) -> (ThreatInfo, SecurityEvent) {
+        let info = self.inspect(req);
+        let correlation = correlation.unwrap_or_else(CorrelationContext::generated);
+
+        let (action, severity) = match info.decision {
+            WafDecision::Allow => (SecurityAction::Allow, SecuritySeverity::Info),
+            WafDecision::Monitor => (SecurityAction::Monitor, SecuritySeverity::Medium),
+            WafDecision::Block(_) => (SecurityAction::Block, SecuritySeverity::High),
+        };
+
+        let risk_score = if self.config.blocking_threshold == 0 {
+            10.0
+        } else {
+            ((info.total_score as f64 / self.config.blocking_threshold as f64) * 10.0).min(10.0)
+        };
+
+        let mut event = SecurityEvent::new(
+            SecuritySystem::Waf,
+            action,
+            severity,
+            risk_score,
+            format!(
+                "WAF decision={:?} score={} matches={} path={}",
+                info.decision,
+                info.total_score,
+                info.matches.len(),
+                req.path
+            ),
+            correlation,
+        )
+        .with_metadata("client_ip", req.client_ip.to_string())
+        .with_metadata("src_ip", req.client_ip.to_string())
+        .with_metadata("http_method", req.method.to_string())
+        .with_metadata("path", req.path.to_string());
+
+        if let Some(alert) = mail_common::ingest_security_event(event.clone()) {
+            event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            event.metadata.insert(
+                "composite_score".to_string(),
+                format!("{:.2}", alert.composite_score),
+            );
+            event.metadata.insert(
+                "composite_action".to_string(),
+                format!("{:?}", alert.recommended_action),
+            );
+        }
+
+        (info, event)
     }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
 
     fn make_engine() -> WafEngine {
         WafEngine::new(WafConfig::default())
@@ -285,6 +427,23 @@ mod tests {
         let info = engine.inspect(&req);
         assert!(info.total_score >= 5);
         assert!(matches!(info.decision, WafDecision::Block(_)));
+    }
+
+    #[test]
+    fn test_inspect_with_event_has_correlation() {
+        let engine = make_engine();
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "GET",
+            path: "/api/v1/health",
+            query_string: None,
+            headers: &[("Host".into(), "example.com".into())],
+            body: None,
+        };
+
+        let (_info, event) = engine.inspect_with_event(&req, None);
+        assert_eq!(event.system, SecuritySystem::Waf);
+        assert!(!event.correlation.correlation_id.is_empty());
     }
 
     #[test]

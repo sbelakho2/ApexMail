@@ -200,13 +200,19 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn test_state() -> AppState {
+    fn test_state() -> Result<AppState, crate::types::DevExError> {
         AppState::from_config(DevExConfig::default())
     }
 
     #[tokio::test]
     async fn test_health_endpoint() {
-        let app = build_router(test_state());
+        let state = test_state();
+        assert!(state.is_ok());
+        let app = if let Ok(state) = state {
+            build_router(state)
+        } else {
+            return;
+        };
         let req = Request::builder()
             .uri("/health")
             .body(Body::empty())
@@ -223,7 +229,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_versions_endpoint() {
-        let app = build_router(test_state());
+        let state = test_state();
+        assert!(state.is_ok());
+        let app = if let Ok(state) = state {
+            build_router(state)
+        } else {
+            return;
+        };
         let req = Request::builder()
             .uri("/versions")
             .body(Body::empty())
@@ -240,7 +252,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_sdks_endpoint() {
-        let app = build_router(test_state());
+        let state = test_state();
+        assert!(state.is_ok());
+        let app = if let Ok(state) = state {
+            build_router(state)
+        } else {
+            return;
+        };
         let req = Request::builder()
             .uri("/sdks")
             .body(Body::empty())

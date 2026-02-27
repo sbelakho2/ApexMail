@@ -12,6 +12,10 @@ import * as path from 'node:path';
 // Test utilities
 const ROOT_DIR = path.resolve(__dirname, '../../../..');
 
+function report(message: string): void {
+    process.stderr.write(`${message}\n`);
+}
+
 function fileExists(relativePath: string): boolean {
     return fs.existsSync(path.join(ROOT_DIR, relativePath));
 }
@@ -31,11 +35,11 @@ function directoryExists(relativePath: string): boolean {
 
 describe('Phase 9: Testing & Perfect Product Gates (Comprehensive)', () => {
     beforeAll(() => {
-        console.log('🧪 Starting Phase 9 Testing & Gates test suite...');
+        report('🧪 Starting Phase 9 Testing & Gates test suite...');
     });
 
     afterAll(() => {
-        console.log('✅ Phase 9 test suite completed');
+        report('✅ Phase 9 test suite completed');
     });
 
     describe('9.0 Testing Infrastructure', () => {

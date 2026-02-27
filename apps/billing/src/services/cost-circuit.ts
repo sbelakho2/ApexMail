@@ -423,9 +423,9 @@ export class CostCircuitService {
     let totalChecked = 0;
     let warnings = 0;
     let critical = 0;
+    let hasMore = true;
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    while (hasMore) {
       const tenantsResult = await this.db.query<{ id: string }>(
         `SELECT id FROM tenants WHERE status = 'active' ORDER BY id LIMIT $1 OFFSET $2`,
         [BATCH_SIZE, offset]
@@ -434,7 +434,10 @@ export class CostCircuitService {
       if (!tenantsResult.ok) return Result.err(tenantsResult.error);
       
       const rows = tenantsResult.value.rows;
-      if (rows.length === 0) break;
+      if (rows.length === 0) {
+        hasMore = false;
+        continue;
+      }
 
       const results = await Promise.all(rows.map((row) => this.checkMargin(row.id)));
       for (const result of results) {
@@ -445,8 +448,11 @@ export class CostCircuitService {
         totalChecked += 1;
       }
 
-      if (rows.length < BATCH_SIZE) break;
-      offset += BATCH_SIZE;
+      if (rows.length < BATCH_SIZE) {
+        hasMore = false;
+      } else {
+        offset += BATCH_SIZE;
+      }
     }
 
     return Result.ok({
@@ -521,7 +527,10 @@ export class CostCircuitService {
       // Log throttling failure but don't throw - degraded operation is acceptable
       // Throttling is a best-effort cost-protection measure; failure should not
       // block billing processing for the tenant.
-      console.error(`[CostCircuit] Failed to apply throttling for tenant ${tenantId}:`, error);
+      logger.error('Failed to apply cost-circuit throttling', {
+        tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 }

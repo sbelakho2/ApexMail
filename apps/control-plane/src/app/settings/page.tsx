@@ -2,70 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { formatDate, cn } from '../../lib/utils';
-
-function parseIpv4(value: string): number | null {
-    const parts = value.split('.');
-    if (parts.length !== 4) return null;
-    const numbers = parts.map(part => Number(part));
-    if (numbers.some(number => Number.isNaN(number) || number < 0 || number > 255)) return null;
-    return ((numbers[0] << 24) >>> 0) + (numbers[1] << 16) + (numbers[2] << 8) + numbers[3];
-}
-
-function parseCidr(input: string): { network: number; maskBits: number } | null {
-    const [ip, mask] = input.split('/');
-    if (!ip || !mask) return null;
-    const ipValue = parseIpv4(ip);
-    const maskBits = Number(mask);
-    if (ipValue === null || Number.isNaN(maskBits) || maskBits < 0 || maskBits > 32) return null;
-    const maskValue = maskBits === 0 ? 0 : ((0xffffffff << (32 - maskBits)) >>> 0);
-    return { network: ipValue & maskValue, maskBits };
-}
-
-function isValidIpOrCidr(input: string): boolean {
-    const trimmed = input.trim();
-    if (!trimmed) return false;
-    if (trimmed.includes('/')) return parseCidr(trimmed) !== null;
-    return parseIpv4(trimmed) !== null;
-}
-
-function hasCidrOverlap(candidate: string, existing: string[]): string | null {
-    const normalizedCandidate = candidate.trim();
-    const candidateCidr = normalizedCandidate.includes('/') ? parseCidr(normalizedCandidate) : null;
-    const candidateIp = !normalizedCandidate.includes('/') ? parseIpv4(normalizedCandidate) : null;
-
-    for (const current of existing) {
-        if (current === normalizedCandidate) {
-            return `Duplicate entry: ${current}`;
-        }
-
-        const currentCidr = current.includes('/') ? parseCidr(current) : null;
-        const currentIp = !current.includes('/') ? parseIpv4(current) : null;
-
-        if (candidateIp !== null && currentCidr) {
-            const maskValue = currentCidr.maskBits === 0 ? 0 : ((0xffffffff << (32 - currentCidr.maskBits)) >>> 0);
-            if ((candidateIp & maskValue) === currentCidr.network) {
-                return `IP overlaps existing range: ${current}`;
-            }
-        }
-
-        if (candidateCidr && currentIp !== null) {
-            const maskValue = candidateCidr.maskBits === 0 ? 0 : ((0xffffffff << (32 - candidateCidr.maskBits)) >>> 0);
-            if ((currentIp & maskValue) === candidateCidr.network) {
-                return `Range overlaps existing IP: ${current}`;
-            }
-        }
-
-        if (candidateCidr && currentCidr) {
-            const smallestMaskBits = Math.min(candidateCidr.maskBits, currentCidr.maskBits);
-            const smallestMask = smallestMaskBits === 0 ? 0 : ((0xffffffff << (32 - smallestMaskBits)) >>> 0);
-            if ((candidateCidr.network & smallestMask) === (currentCidr.network & smallestMask)) {
-                return `CIDR overlaps existing range: ${current}`;
-            }
-        }
-    }
-
-    return null;
-}
+import { hasCidrOverlap, isValidIpOrCidr } from './network-utils';
 
 /**
  * Platform Settings - Configure the SaaS platform
@@ -1031,6 +968,7 @@ export default function SettingsPage() {
                                             <div className="text-sm text-muted-foreground">{item.desc}</div>
                                         </div>
                                         <button
+                                            aria-label={`${item.label} toggle`}
                                             onClick={() => {
                                                 if (!canEditHighRiskSettings || readOnlyReason) return;
                                                 if ((item.key === 'hipaaMode' || item.key === 'soc2Mode') && !window.confirm(`Confirm ${item.label} change. This action has compliance impact.`)) {
@@ -1106,6 +1044,7 @@ export default function SettingsPage() {
                                     </div>
                                 </div>
                                 <button
+                                    aria-label="Disaster recovery toggle"
                                     onClick={() => setBackupConfig({ ...backupConfig, drEnabled: !backupConfig.drEnabled })}
                                     className={cn(
                                         'relative w-14 h-7 rounded-full transition-colors',
@@ -1138,13 +1077,13 @@ export default function SettingsPage() {
                             )}
 
                             <div className="flex gap-2 pt-4 border-t border-border">
-                                <button className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
+                                <button aria-label="Run backup now" className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm hover:bg-primary/90 font-medium transition-colors">
                                     Run Backup Now
                                 </button>
-                                <button className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">
+                                <button aria-label="View backup history" className="px-4 py-2 bg-muted text-foreground rounded-lg text-sm hover:bg-muted/80 font-medium transition-colors">
                                     View Backup History
                                 </button>
-                                <button className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
+                                <button aria-label="Test disaster recovery failover" className="px-4 py-2 bg-warning/10 text-warning rounded-lg text-sm hover:bg-warning/20 font-medium transition-colors">
                                     Test DR Failover
                                 </button>
                             </div>

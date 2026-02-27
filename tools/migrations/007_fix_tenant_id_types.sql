@@ -4,6 +4,31 @@
 
 BEGIN;
 
+DO $$
+DECLARE
+  invalid_count BIGINT;
+BEGIN
+  SELECT COUNT(*) INTO invalid_count FROM sales_pipelines WHERE tenant_id IS NOT NULL AND length(tenant_id::text) > 26;
+  IF invalid_count > 0 THEN
+    RAISE EXCEPTION 'sales_pipelines contains % tenant_id values longer than 26 chars', invalid_count;
+  END IF;
+
+  SELECT COUNT(*) INTO invalid_count FROM sales_lead_activities WHERE tenant_id IS NOT NULL AND length(tenant_id::text) > 26;
+  IF invalid_count > 0 THEN
+    RAISE EXCEPTION 'sales_lead_activities contains % tenant_id values longer than 26 chars', invalid_count;
+  END IF;
+
+  SELECT COUNT(*) INTO invalid_count FROM sales_lead_tasks WHERE tenant_id IS NOT NULL AND length(tenant_id::text) > 26;
+  IF invalid_count > 0 THEN
+    RAISE EXCEPTION 'sales_lead_tasks contains % tenant_id values longer than 26 chars', invalid_count;
+  END IF;
+
+  SELECT COUNT(*) INTO invalid_count FROM queue_jobs WHERE tenant_id IS NOT NULL AND length(tenant_id::text) > 26;
+  IF invalid_count > 0 THEN
+    RAISE EXCEPTION 'queue_jobs contains % tenant_id values longer than 26 chars', invalid_count;
+  END IF;
+END $$;
+
 -- sales_pipelines: UUID → VARCHAR(26)
 ALTER TABLE IF EXISTS sales_pipelines
   ALTER COLUMN tenant_id TYPE VARCHAR(26);

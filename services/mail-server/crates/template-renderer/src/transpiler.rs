@@ -462,9 +462,9 @@ mod tests {
         let source = r#"<img src="logo.png" />"#;
         let result = transpile(source, 4096).unwrap();
         assert_eq!(result.nodes.len(), 1);
-        match &result.nodes[0].kind {
-            NodeKind::Element { tag } => assert_eq!(tag, "img"),
-            _ => panic!("Expected element node"),
+        assert!(matches!(&result.nodes[0].kind, NodeKind::Element { .. }), "Expected element node");
+        if let NodeKind::Element { tag } = &result.nodes[0].kind {
+            assert_eq!(tag, "img");
         }
     }
 

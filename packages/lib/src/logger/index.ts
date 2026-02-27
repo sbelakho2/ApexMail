@@ -200,5 +200,9 @@ export function createLogger(options?: LoggerOptions): Logger {
   return new PinoLoggerWrapper(options);
 }
 
+export function resetGlobalLoggerForTests(): void {
+  globalLogger = null;
+}
+
 // Re-export for convenience
 export { type LoggerOptions };

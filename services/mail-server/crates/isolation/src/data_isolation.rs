@@ -19,12 +19,12 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?i)SET\s+session",
     ]
     .iter()
-    .map(|p| Regex::new(p).unwrap())
+    .filter_map(|p| Regex::new(p).ok())
     .collect()
 });
 
-static IDENT_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-z_][a-z0-9_]{0,62}$").expect("valid identifier regex"));
+static IDENT_REGEX: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"^[a-z_][a-z0-9_]{0,62}$").ok());
 
 // ── Data Isolation Service ─────────────────────────────────
 
@@ -130,46 +130,48 @@ impl DataIsolationService {
         // #293: fail-closed identifier validation for dynamic DDL.
         let table = validate_sql_ident(table_name)?;
         let schema = validate_sql_ident(schema_name)?;
+        let table_quoted = quote_sql_ident(&table);
+        let schema_quoted = quote_sql_ident(&schema);
 
         sqlx::query(&format!(
-            r#"ALTER TABLE "{}"."{}" ENABLE ROW LEVEL SECURITY"#,
-            schema, table
+            "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
+            schema_quoted, table_quoted
         ))
         .execute(&self.db)
         .await?;
 
         // SELECT policy
         sqlx::query(&format!(
-            r#"CREATE POLICY workspace_isolation_select ON "{}"."{}" FOR SELECT
-               USING (workspace_id = current_setting('app.current_workspace_id'))"#,
-            schema, table
+            "CREATE POLICY workspace_isolation_select ON {}.{} FOR SELECT
+               USING (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
         ))
         .execute(&self.db)
         .await?;
 
         // INSERT policy
         sqlx::query(&format!(
-            r#"CREATE POLICY workspace_isolation_insert ON "{}"."{}" FOR INSERT
-               WITH CHECK (workspace_id = current_setting('app.current_workspace_id'))"#,
-            schema, table
+            "CREATE POLICY workspace_isolation_insert ON {}.{} FOR INSERT
+               WITH CHECK (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
         ))
         .execute(&self.db)
         .await?;
 
         // UPDATE policy
         sqlx::query(&format!(
-            r#"CREATE POLICY workspace_isolation_update ON "{}"."{}" FOR UPDATE
-               USING (workspace_id = current_setting('app.current_workspace_id'))"#,
-            schema, table
+            "CREATE POLICY workspace_isolation_update ON {}.{} FOR UPDATE
+               USING (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
         ))
         .execute(&self.db)
         .await?;
 
         // DELETE policy
         sqlx::query(&format!(
-            r#"CREATE POLICY workspace_isolation_delete ON "{}"."{}" FOR DELETE
-               USING (workspace_id = current_setting('app.current_workspace_id'))"#,
-            schema, table
+            "CREATE POLICY workspace_isolation_delete ON {}.{} FOR DELETE
+               USING (workspace_id = current_setting('app.current_workspace_id'))",
+            schema_quoted, table_quoted
         ))
         .execute(&self.db)
         .await?;
@@ -235,7 +237,7 @@ impl DataIsolationService {
             .await
             .unwrap_or_default();
 
-        let mut policies = Vec::new();
+        let mut policies = Vec::with_capacity(rows.len());
         for (id, name, resource, conditions, actions, effect) in rows {
             policies.push(DataAccessPolicy {
                 id,
@@ -256,11 +258,12 @@ impl DataIsolationService {
         resource_id: &str,
     ) -> anyhow::Result<bool> {
         let table = resource_to_table(resource);
-        let safe = sanitize_sql_ident(&table);
+        let safe = validate_sql_ident(&table)?;
+        let safe_quoted = quote_sql_ident(&safe);
 
         let row: Option<(String,)> = sqlx::query_as(&format!(
             "SELECT workspace_id FROM {} WHERE id = $1",
-            safe
+            safe_quoted
         ))
         .bind(resource_id)
         .fetch_optional(&self.db)
@@ -384,7 +387,9 @@ impl DataIsolationService {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
         let schema = format!("ws_{}", sanitize_sql_ident(workspace_id));
-        sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{}""#, schema))
+        let schema_safe = validate_sql_ident(&schema)?;
+        let schema_quoted = quote_sql_ident(&schema_safe);
+        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema_quoted))
             .execute(&mut **tx)
             .await?;
 
@@ -392,16 +397,20 @@ impl DataIsolationService {
         for table in tables {
             // Create table in new schema
             sqlx::query(&format!(
-                r#"CREATE TABLE IF NOT EXISTS "{}"."{}" (LIKE public."{}" INCLUDING ALL)"#,
-                schema, table, table
+                "CREATE TABLE IF NOT EXISTS {}.{} (LIKE public.{} INCLUDING ALL)",
+                schema_quoted,
+                quote_sql_ident(table),
+                quote_sql_ident(table)
             ))
             .execute(&mut **tx)
             .await?;
 
             // Copy data
             sqlx::query(&format!(
-                r#"INSERT INTO "{}"."{}" SELECT * FROM public."{}" WHERE workspace_id = $1"#,
-                schema, table, table
+                "INSERT INTO {}.{} SELECT * FROM public.{} WHERE workspace_id = $1",
+                schema_quoted,
+                quote_sql_ident(table),
+                quote_sql_ident(table)
             ))
             .bind(workspace_id)
             .execute(&mut **tx)
@@ -409,8 +418,8 @@ impl DataIsolationService {
 
             // Delete from shared
             sqlx::query(&format!(
-                r#"DELETE FROM public."{}" WHERE workspace_id = $1"#,
-                table
+                "DELETE FROM public.{} WHERE workspace_id = $1",
+                quote_sql_ident(table)
             ))
             .bind(workspace_id)
             .execute(&mut **tx)
@@ -444,12 +453,16 @@ impl DataIsolationService {
             Some(s) => s,
             None => anyhow::bail!("No schema found for workspace {}", workspace_id),
         };
+        let schema_safe = validate_sql_ident(&schema)?;
+        let schema_quoted = quote_sql_ident(&schema_safe);
 
         let tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
         for table in tables {
             sqlx::query(&format!(
-                r#"INSERT INTO public."{}" SELECT * FROM "{}"."{}" WHERE workspace_id = $1"#,
-                table, sanitize_sql_ident(&schema), table
+                "INSERT INTO public.{} SELECT * FROM {}.{} WHERE workspace_id = $1",
+                quote_sql_ident(table),
+                schema_quoted,
+                quote_sql_ident(table)
             ))
             .bind(workspace_id)
             .execute(&mut **tx)
@@ -458,8 +471,8 @@ impl DataIsolationService {
 
         // Drop the schema
         sqlx::query(&format!(
-            r#"DROP SCHEMA IF EXISTS "{}" CASCADE"#,
-            sanitize_sql_ident(&schema)
+            "DROP SCHEMA IF EXISTS {} CASCADE",
+            schema_quoted
         ))
         .execute(&mut **tx)
         .await?;
@@ -484,10 +497,18 @@ fn sanitize_sql_ident(s: &str) -> String {
 
 fn validate_sql_ident(s: &str) -> anyhow::Result<String> {
     let normalized = s.trim().to_lowercase();
-    if !IDENT_REGEX.is_match(&normalized) {
+    let is_valid = IDENT_REGEX
+        .as_ref()
+        .map(|re| re.is_match(&normalized))
+        .unwrap_or(false);
+    if !is_valid {
         anyhow::bail!("Invalid SQL identifier: {s}");
     }
     Ok(normalized)
+}
+
+fn quote_sql_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 fn resource_to_table(resource: &str) -> String {

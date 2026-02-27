@@ -31,6 +31,23 @@ pub struct ThreatIntelConfig {
 
     /// Feed source configurations
     pub feeds: Vec<FeedSource>,
+
+    /// Minimum trust required for a feed to be eligible for hard block decisions
+    pub min_feed_trust_score: f64,
+
+    /// When the total number of IP + domain entries exceeds this fraction of
+    /// the configured maximums, trigger an immediate TTL purge instead of
+    /// waiting for the next scheduled purge cycle (default: 0.9 = 90%).
+    pub purge_pressure_threshold: f64,
+}
+
+/// Feed enforcement mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FeedEnforcementMode {
+    /// Feed contributes to scoring, but can only produce FLAG outcomes.
+    Monitor,
+    /// Feed contributes fully and may produce BLOCK outcomes.
+    Enforce,
 }
 
 /// A threat intelligence feed source
@@ -46,6 +63,10 @@ pub struct FeedSource {
     pub refresh_interval_secs: u64,
     /// Whether this feed is enabled
     pub enabled: bool,
+    /// Feed trust score (0.0-10.0)
+    pub trust_score: f64,
+    /// Whether matches from this feed are monitor-only or enforceable
+    pub enforcement_mode: FeedEnforcementMode,
 }
 
 /// Supported feed formats
@@ -74,6 +95,8 @@ impl Default for ThreatIntelConfig {
             weight_ip: 1.0,
             weight_domain: 1.0,
             enable_ttl_expiration: true,
+            min_feed_trust_score: 6.0,
+            purge_pressure_threshold: 0.9,
             feeds: vec![
                 FeedSource {
                     name: "Spamhaus DROP".into(),
@@ -81,6 +104,8 @@ impl Default for ThreatIntelConfig {
                     format: FeedFormat::SpamhausDrop,
                     refresh_interval_secs: 3600,
                     enabled: true,
+                    trust_score: 9.5,
+                    enforcement_mode: FeedEnforcementMode::Enforce,
                 },
                 FeedSource {
                     name: "Spamhaus EDROP".into(),
@@ -88,6 +113,35 @@ impl Default for ThreatIntelConfig {
                     format: FeedFormat::SpamhausDrop,
                     refresh_interval_secs: 3600,
                     enabled: true,
+                    trust_score: 9.5,
+                    enforcement_mode: FeedEnforcementMode::Enforce,
+                },
+                FeedSource {
+                    name: "Spamhaus DBL".into(),
+                    url: "https://www.spamhaus.org/drop/dbl.txt".into(),
+                    format: FeedFormat::DomainList,
+                    refresh_interval_secs: 3600,
+                    enabled: true,
+                    trust_score: 9.0,
+                    enforcement_mode: FeedEnforcementMode::Enforce,
+                },
+                FeedSource {
+                    name: "abuse.ch URLhaus".into(),
+                    url: "https://urlhaus.abuse.ch/downloads/text/".into(),
+                    format: FeedFormat::PlainText,
+                    refresh_interval_secs: 900,
+                    enabled: true,
+                    trust_score: 8.0,
+                    enforcement_mode: FeedEnforcementMode::Enforce,
+                },
+                FeedSource {
+                    name: "abuse.ch ThreatFox IOCs".into(),
+                    url: "https://threatfox.abuse.ch/downloads/hostfile/".into(),
+                    format: FeedFormat::PlainText,
+                    refresh_interval_secs: 1800,
+                    enabled: true,
+                    trust_score: 7.5,
+                    enforcement_mode: FeedEnforcementMode::Monitor,
                 },
             ],
         }

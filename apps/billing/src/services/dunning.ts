@@ -507,7 +507,7 @@ export class DunningService {
         [tenantId, notificationType, JSON.stringify(details)]
       );
     } catch (error) {
-      console.error(`[Dunning] Failed to send notification for tenant ${tenantId}:`, error);
+      logger.error('Failed to send dunning notification', { tenantId, error: String(error) });
       // Don't throw - notification failure shouldn't block dunning process
     }
   }
@@ -522,7 +522,7 @@ export class DunningService {
 
       return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
     } catch (error) {
-      console.error(`[Dunning] Failed to get queued messages count for tenant ${tenantId}:`, error);
+      logger.error('Failed to get queued messages count', { tenantId, error: String(error) });
       return 0;
     }
   }
@@ -542,7 +542,7 @@ export class DunningService {
 
       return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
     } catch (error) {
-      console.error(`[Dunning] Failed to release queued messages for tenant ${tenantId}:`, error);
+      logger.error('Failed to release queued messages', { tenantId, error: String(error) });
       throw new Error(`Failed to release queued messages: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -565,7 +565,7 @@ export class DunningService {
 
       return result.ok ? parseInt(result.value.rows[0]?.count ?? '0', 10) : 0;
     } catch (error) {
-      console.error(`[Dunning] Failed to purge queued messages for tenant ${tenantId}:`, error);
+      logger.error('Failed to purge queued messages', { tenantId, error: String(error) });
       throw new Error(`Failed to purge queued messages: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }

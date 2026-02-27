@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -32,10 +32,10 @@ pub struct WebhookProcessor {
     config: WebhookConfig,
     client: Client,
     ssrf_validator: SsrfValidator,
-    circuit_breakers: Mutex<HashMap<String, Arc<CircuitBreaker>>>,
+    circuit_breakers: RwLock<HashMap<String, Arc<CircuitBreaker>>>,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
-    tenant_active_jobs: Mutex<HashMap<String, usize>>,
+    tenant_active_jobs: RwLock<HashMap<String, usize>>,
     pending_successes: Mutex<Vec<PendingSuccess>>,
     shutdown_notify: Arc<Notify>,
 }
@@ -58,10 +58,10 @@ impl WebhookProcessor {
             config,
             client,
             ssrf_validator,
-            circuit_breakers: Mutex::new(HashMap::new()),
+            circuit_breakers: RwLock::new(HashMap::new()),
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
-            tenant_active_jobs: Mutex::new(HashMap::new()),
+            tenant_active_jobs: RwLock::new(HashMap::new()),
             pending_successes: Mutex::new(Vec::new()),
             shutdown_notify: Arc::new(Notify::new()),
         })
@@ -182,7 +182,7 @@ impl WebhookProcessor {
     async fn process_job(&self, job: WebhookJob) -> ProcessorResult<()> {
         // Enforce per-tenant concurrency limit
         let tenant_count = {
-            let tenant_jobs = self.tenant_active_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            let tenant_jobs = self.tenant_active_jobs.read().unwrap_or_else(|e| e.into_inner());
             *tenant_jobs.get(&job.tenant_id).unwrap_or(&0)
         };
 
@@ -207,7 +207,7 @@ impl WebhookProcessor {
         // Track active job
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
         {
-            let mut tenant_jobs = self.tenant_active_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut tenant_jobs = self.tenant_active_jobs.write().unwrap_or_else(|e| e.into_inner());
             *tenant_jobs.entry(job.tenant_id.clone()).or_insert(0) += 1;
         }
 
@@ -217,7 +217,7 @@ impl WebhookProcessor {
         // Decrement counters
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
         {
-            let mut tenant_jobs = self.tenant_active_jobs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut tenant_jobs = self.tenant_active_jobs.write().unwrap_or_else(|e| e.into_inner());
             if let Some(count) = tenant_jobs.get_mut(&job.tenant_id) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -328,12 +328,15 @@ impl WebhookProcessor {
         if result.success {
             circuit_breaker.as_ref().record_success();
             // Set dedup key AFTER successful delivery (24h TTL)
-            let _ = redis::cmd("SETEX")
+            if let Err(error) = redis::cmd("SETEX")
                 .arg(&dedup_key)
                 .arg(86400)
                 .arg("1")
                 .query_async::<()>(&mut *conn)
-                .await;
+                .await
+            {
+                warn!(webhook_id = %job.webhook_id, error = %error, "Failed to write webhook dedup key");
+            }
             self.handle_success(job, result).await?;
         } else {
             circuit_breaker.as_ref().record_failure();
@@ -348,7 +351,7 @@ impl WebhookProcessor {
     fn get_circuit_breaker(&self, webhook_id: &str) -> Arc<CircuitBreaker> {
         const MAX_CIRCUIT_BREAKERS: usize = 10_000;
         let key = format!("webhook:{}", webhook_id);
-        let mut cbs = self.circuit_breakers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cbs = self.circuit_breakers.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(cb) = cbs.get(&key) {
             return Arc::clone(cb);

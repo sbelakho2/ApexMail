@@ -18,7 +18,7 @@ use sales_autopilot::crm::CrmService;
 
 #[tokio::test]
 async fn test_concurrent_id_generation() {
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(100);
     for _ in 0..100 {
         handles.push(tokio::spawn(async move {
             let mut ids = Vec::with_capacity(100);
@@ -45,7 +45,7 @@ async fn test_concurrent_id_generation() {
 
 #[tokio::test]
 async fn test_concurrent_email_validation() {
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(1_000);
     for i in 0..1_000 {
         handles.push(tokio::spawn(async move {
             let valid = format!("user{}@example.com", i);
@@ -69,7 +69,7 @@ async fn test_concurrent_hmac() {
     let data = b"deterministic payload";
     let expected = create_hmac_signature(key, data);
 
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(100);
     for _ in 0..100 {
         let exp = expected.clone();
         handles.push(tokio::spawn(async move {
@@ -89,7 +89,7 @@ async fn test_concurrent_hmac() {
 #[tokio::test]
 async fn test_concurrent_lead_scoring() {
     let crm = Arc::new(CrmService::new());
-    let mut handles = Vec::new();
+    let mut handles = Vec::with_capacity(100);
 
     for i in 0..100 {
         let crm = Arc::clone(&crm);

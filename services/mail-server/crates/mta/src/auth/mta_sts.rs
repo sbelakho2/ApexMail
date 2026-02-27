@@ -14,11 +14,11 @@ static MTA_STS_RESOLVER: LazyLock<TokioAsyncResolver> = LazyLock::new(|| {
 });
 
 // #135: Shared HTTP client with timeout – avoids per-call TLS handshake overhead
-static MTA_STS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+static MTA_STS_CLIENT: LazyLock<Option<Client>> = LazyLock::new(|| {
     Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("MTA-STS HTTP client")
+    .ok()
 });
 
 /// MTA‑STS mode.
@@ -107,7 +107,10 @@ pub async fn verify_mta_sts(domain: &str) -> MtaStsVerificationResult {
     // 2. Fetch policy from https://mta-sts.<domain>/.well-known/mta-sts.txt
     let policy_url = format!("https://mta-sts.{domain}/.well-known/mta-sts.txt");
     // #135: Use shared HTTP client instead of creating a new one per call
-    let client = &*MTA_STS_CLIENT;
+    let Some(client) = MTA_STS_CLIENT.as_ref() else {
+        result.errors.push("MTA-STS HTTP client unavailable".to_string());
+        return result;
+    };
 
     match client.get(&policy_url).send().await {
         Ok(resp) => {

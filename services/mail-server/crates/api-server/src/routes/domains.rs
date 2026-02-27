@@ -379,7 +379,7 @@ impl From<DomainRow> for DomainResponse {
 }
 
 #[derive(sqlx::FromRow)]
-#[allow(dead_code)]
+#[allow(unused)]
 struct DomainFullRow {
     id: Uuid,
     name: String,

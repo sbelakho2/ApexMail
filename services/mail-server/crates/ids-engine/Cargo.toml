@@ -14,11 +14,13 @@ deep_inspection = []  # Full payload reassembly and inspection
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
+mail-common = { path = "../mail-common" }
 parking_lot = "0.12"
 dashmap = "6.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 aho-corasick = { version = "1.1", features = ["perf-literal"] }
+regex = { version = "1.10", features = ["perf"] }
 sha2 = "0.10"
 hex = "0.4"
 prometheus = "0.13"
@@ -27,3 +29,8 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = "0.5"
+
+[[bench]]
+name = "ids_bench"
+harness = false

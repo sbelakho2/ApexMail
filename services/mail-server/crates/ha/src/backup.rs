@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -161,7 +161,7 @@ impl BackupService {
             return Err(format!("Invalid table name: {table}"));
         }
 
-        let mut all_data = Vec::new();
+        let mut all_data = Vec::with_capacity((BATCH_SIZE as usize).saturating_mul(256));
         let mut tx = self.pool.begin().await
             .map_err(|e| format!("Begin cursor transaction: {e}"))?;
         let cursor_name = format!("backup_cursor_{}", Uuid::new_v4().simple());
@@ -197,7 +197,9 @@ impl BackupService {
         }
 
         let close = format!("CLOSE {cursor}", cursor = cursor_name);
-        let _ = sqlx::query(&close).execute(&mut *tx).await;
+        if let Err(error) = sqlx::query(&close).execute(&mut *tx).await {
+            warn!(table = %table, error = %error, "Failed to close backup cursor cleanly");
+        }
         tx.commit().await.map_err(|e| format!("Commit cursor transaction: {e}"))?;
         Ok(all_data)
     }
@@ -247,7 +249,7 @@ impl BackupService {
         use flate2::read::GzDecoder;
         use std::io::Read;
         let mut decoder = GzDecoder::new(&compressed_data[..]);
-        let mut decompressed = Vec::new();
+        let mut decompressed = Vec::with_capacity(compressed_data.len().saturating_mul(2));
         decoder.read_to_end(&mut decompressed)
             .map_err(|e| format!("Decompress failed: {e}"))?;
 
@@ -538,7 +540,7 @@ impl BackupService {
                     started_at, completed_at, duration_ms, parent_backup_id, metadata
              FROM ha_backups WHERE 1=1"
         );
-        let mut params: Vec<String> = Vec::new();
+        let mut params: Vec<String> = Vec::with_capacity(2);
         if let Some(bt) = backup_type {
             params.push(bt.to_string());
             sql.push_str(&format!(" AND backup_type = ${}", params.len()));

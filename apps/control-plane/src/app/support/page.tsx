@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { cn, timeAgo, getStatusChipClasses } from '../../lib/utils';
 import { getCsrfToken } from '../../lib/client-csrf';
 import { PageLoadingState } from '../../components/ui/async-state';
+import { CATEGORY_CONFIG, PRIORITY_CONFIG, STATUS_CONFIG, Ticket, TicketAnalytics, TicketMessage } from './support-types';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,71 +19,6 @@ export const dynamic = 'force-dynamic';
  * - Ticket analytics dashboard
  * - Filter by status, priority, category, and tenant
  */
-
-interface Ticket {
-    id: string;
-    subject: string;
-    description: string;
-    tenantId: string;
-    tenantName: string;
-    tenantEmail: string;
-    status: 'open' | 'in_progress' | 'waiting_on_customer' | 'resolved' | 'closed';
-    priority: 'low' | 'medium' | 'high' | 'urgent';
-    category: 'billing' | 'technical' | 'feature_request' | 'bug' | 'general';
-    assignee: string | null;
-    createdAt: string;
-    updatedAt: string;
-    messages: TicketMessage[];
-}
-
-interface TicketMessage {
-    id: string;
-    content: string;
-    author: string;
-    authorType: 'customer' | 'support' | 'bot';
-    createdAt: string;
-    attachments: string[];
-}
-
-interface TicketAnalytics {
-    totalTickets: number;
-    openTickets: number;
-    inProgressTickets: number;
-    waitingTickets: number;
-    resolvedTickets: number;
-    closedTickets: number;
-    urgentTickets: number;
-    avgResolutionHours: number;
-    ticketsByCategory: Record<string, number>;
-    ticketsByPriority: Record<string, number>;
-    ticketsOverTime: { date: string; count: number }[];
-    topTenants: { tenantName: string; count: number }[];
-    recentTickets: { id: string; subject: string; tenantName: string; status: string; priority: string; category: string; createdAt: string }[];
-    responseTimeBuckets: Record<string, number>;
-}
-
-const STATUS_CONFIG: Record<string, { label: string; color: string; bgColor: string }> = {
-    open: { label: 'Open', color: 'text-info', bgColor: 'bg-info/10' },
-    in_progress: { label: 'In Progress', color: 'text-warning', bgColor: 'bg-warning/10' },
-    waiting_on_customer: { label: 'Waiting on Customer', color: 'text-purple-600', bgColor: 'bg-purple-500/10' },
-    resolved: { label: 'Resolved', color: 'text-success', bgColor: 'bg-success/10' },
-    closed: { label: 'Closed', color: 'text-muted-foreground', bgColor: 'bg-muted' },
-};
-
-const PRIORITY_CONFIG: Record<string, { label: string; color: string; bgColor: string }> = {
-    low: { label: 'Low', color: 'text-muted-foreground', bgColor: 'bg-muted' },
-    medium: { label: 'Medium', color: 'text-info', bgColor: 'bg-info/10' },
-    high: { label: 'High', color: 'text-orange-600', bgColor: 'bg-orange-500/10' },
-    urgent: { label: 'Urgent', color: 'text-destructive', bgColor: 'bg-destructive/10' },
-};
-
-const CATEGORY_CONFIG: Record<string, { label: string; icon: string }> = {
-    billing: { label: 'Billing', icon: '💳' },
-    technical: { label: 'Technical', icon: '🔧' },
-    feature_request: { label: 'Feature Request', icon: '💡' },
-    bug: { label: 'Bug Report', icon: '🐛' },
-    general: { label: 'General', icon: '📝' },
-};
 
 const ENV_TEAM_MEMBERS = (process.env.NEXT_PUBLIC_CONTROL_PLANE_TEAM_MEMBERS || '')
     .split(',')
@@ -480,8 +416,8 @@ function SupportPageContent() {
                                         <p className="text-sm text-muted-foreground">No data yet</p>
                                     ) : (
                                         <div className="space-y-2">
-                                            {analytics.topTenants.map((t, i) => (
-                                                <div key={i} className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
+                                            {analytics.topTenants.map((t) => (
+                                                <div key={`${t.tenantName}-${t.count}`} className="flex items-center justify-between py-1.5 border-b border-border last:border-0">
                                                     <span className="text-sm">{t.tenantName}</span>
                                                     <span className="font-medium text-sm">{t.count}</span>
                                                 </div>
@@ -501,7 +437,7 @@ function SupportPageContent() {
                                                 const maxCount = Math.max(...analytics.ticketsOverTime.map(x => x.count), 1);
                                                 const height = (d.count / maxCount) * 100;
                                                 return (
-                                                    <div key={i} className="flex-1 flex flex-col items-center gap-1" title={`${d.date}: ${d.count} tickets`}>
+                                                    <div key={d.date} className="flex-1 flex flex-col items-center gap-1" title={`${d.date}: ${d.count} tickets`}>
                                                         <div className="w-full h-full rounded-t overflow-hidden">
                                                             <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                                                                 <rect
@@ -804,6 +740,7 @@ function SupportPageContent() {
                                             ))}
                                         </select>
                                         <button
+                                            aria-label={`Impersonate tenant ${selectedTicket.tenantId}`}
                                             onClick={() => {
                                                 const impersonateUrl = `${process.env.NEXT_PUBLIC_CONSOLE_URL || 'http://localhost:3000'}?impersonate=${selectedTicket.tenantId}`;
                                                 window.open(impersonateUrl, '_blank');

@@ -9,7 +9,6 @@ SECURITY: Implements HTTPS enforcement, retry logic, and masked API key repr.
 from __future__ import annotations
 
 import asyncio
-import random
 import re
 import time
 from datetime import timezone
@@ -43,8 +42,14 @@ if TYPE_CHECKING:
 DEFAULT_BASE_URL = "https://api.apexmail.ee"
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
+DEFAULT_TOTAL_RETRY_TIMEOUT = 90.0
+DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
+DEFAULT_INITIAL_BACKOFF = 0.5
+DEFAULT_MAX_BACKOFF = 5.0
 # Retry on these status codes
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+
+API_KEY_PATTERN = re.compile(r'^am_(live|test)_[a-zA-Z0-9]{16,}$')
 
 
 class BaseClient:
@@ -57,16 +62,16 @@ class BaseClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         if not api_key:
             raise ValueError("API key is required")
 
-        # SECURITY FIX: Stronger API key validation
-        if not re.match(r'^am_(live|test)_[a-zA-Z0-9]{32,}$', api_key):
+        if not API_KEY_PATTERN.match(api_key):
             raise ValueError(
                 "API key must match format 'am_live_<key>' or 'am_test_<key>' "
-                "where <key> is at least 32 alphanumeric characters"
+                "where <key> is at least 16 alphanumeric characters"
             )
 
         normalized_base_url = base_url.rstrip("/")
@@ -77,37 +82,40 @@ class BaseClient:
         parsed_url = urlparse(normalized_base_url)
         if parsed_url.scheme != "https":
             hostname = parsed_url.hostname or ""
-            if hostname not in {"localhost", "127.0.0.1"}:
+            if hostname not in {"localhost", "127.0.0.1", "::1"}:
                 raise ValueError(
                     "HTTPS is required for production API URLs. "
                     "HTTP is only allowed for localhost."
                 )
 
-        self._api_key = api_key  # Private to avoid accidental exposure
+        self._api_key_bytes = bytearray(api_key.encode("utf-8"))
         self.base_url = normalized_base_url
         self.timeout = timeout
         self.max_retries = max_retries
+        self.max_response_bytes = max_response_bytes
+        self.total_retry_timeout = max(timeout, DEFAULT_TOTAL_RETRY_TIMEOUT)
         self._sleep = sleep_fn or time.sleep
         self._base_headers = {
-            "X-API-Key": self._api_key,
+            "X-API-Key": self.api_key,
             "Content-Type": "application/json",
             "User-Agent": "apexmail-python/1.0.0",
         }
 
     # SECURITY FIX: Mask API key in repr to prevent accidental logging
     def __repr__(self) -> str:
-        masked_key = f"{self._api_key[:10]}...{self._api_key[-4:]}"
+        key = self.api_key
+        masked_key = f"{key[:6]}...{key[-2:]}"
         return f"{self.__class__.__name__}(api_key='{masked_key}', base_url='{self.base_url}')"
 
     @property
     def api_key(self) -> str:
         """Access API key (use with caution)."""
-        return self._api_key
+        return self._api_key_bytes.decode("utf-8")
 
-    def _get_headers(self, idempotency_key: Optional[str] = None) -> Optional[dict[str, str]]:
+    def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
         if idempotency_key:
             return {"X-Idempotency-Key": idempotency_key}
-        return None
+        return {}
 
     def _parse_retry_after(self, retry_after: Optional[str]) -> Optional[float]:
         if not retry_after:
@@ -120,14 +128,21 @@ class BaseClient:
                 if parsed.tzinfo is None:
                     parsed = parsed.replace(tzinfo=timezone.utc)
                 return max(0.0, parsed.timestamp() - time.time())
-            except Exception:
+            except (TypeError, ValueError, OverflowError):
                 return None
 
     def _calculate_backoff(self, attempt: int) -> float:
-        """Calculate exponential backoff with jitter."""
-        base_delay = min(2 ** attempt, 30.0)  # Max 30 seconds
-        jitter = random.uniform(0, 0.3 * base_delay)
-        return base_delay + jitter
+        """Calculate bounded exponential backoff."""
+        return min(DEFAULT_INITIAL_BACKOFF * (2 ** max(attempt, 0)), DEFAULT_MAX_BACKOFF)
+
+    def _ensure_response_size(self, response: httpx.Response) -> None:
+        content = response.content
+        if len(content) > self.max_response_bytes:
+            raise ApexMailError(
+                message="Response body exceeds maxResponseBytes",
+                code="RESPONSE_TOO_LARGE",
+                status_code=0,
+            )
 
     def _handle_response(self, response: httpx.Response) -> dict:
         """Handle API response and raise appropriate exceptions."""
@@ -135,14 +150,15 @@ class BaseClient:
         if response.status_code == 204:
             return {}
         if response.status_code == 200 or response.status_code == 201:
+            self._ensure_response_size(response)
             return response.json()
 
         try:
             error_data = response.json()
-            message = error_data.get("message", "Unknown error")
-            code = error_data.get("code", "UNKNOWN")
+            message = error_data.get("error") or error_data.get("message") or response.text or "Unknown error"
+            code = error_data.get("code") or "UNKNOWN"
             errors = error_data.get("errors", [])
-        except Exception:
+        except (ValueError, TypeError):
             message = response.text or f"HTTP {response.status_code}"
             code = "UNKNOWN"
             errors = []
@@ -197,6 +213,7 @@ class ApexMail(BaseClient):
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         super().__init__(
@@ -204,6 +221,7 @@ class ApexMail(BaseClient):
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            max_response_bytes=max_response_bytes,
             sleep_fn=sleep_fn,
         )
 
@@ -233,8 +251,15 @@ class ApexMail(BaseClient):
         """Make a synchronous HTTP request with retry logic."""
         headers = self._get_headers(idempotency_key)
         last_exception: Optional[Exception] = None
+        started_at = time.monotonic()
         
         for attempt in range(self.max_retries + 1):
+            if (time.monotonic() - started_at) > self.total_retry_timeout:
+                raise ApexMailError(
+                    message="Total retry timeout exceeded",
+                    code="TOTAL_TIMEOUT",
+                    status_code=408,
+                )
             try:
                 response = self._client.request(
                     method=method,
@@ -320,6 +345,7 @@ class AsyncApexMail(BaseClient):
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         super().__init__(
@@ -327,6 +353,7 @@ class AsyncApexMail(BaseClient):
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            max_response_bytes=max_response_bytes,
             sleep_fn=sleep_fn,
         )
 
@@ -356,8 +383,15 @@ class AsyncApexMail(BaseClient):
         """Make an asynchronous HTTP request with retry logic."""
         headers = self._get_headers(idempotency_key)
         last_exception: Optional[Exception] = None
+        started_at = time.monotonic()
         
         for attempt in range(self.max_retries + 1):
+            if (time.monotonic() - started_at) > self.total_retry_timeout:
+                raise ApexMailError(
+                    message="Total retry timeout exceeded",
+                    code="TOTAL_TIMEOUT",
+                    status_code=408,
+                )
             try:
                 response = await self._client.request(
                     method=method,

@@ -32,6 +32,7 @@
 
 pub mod config;
 pub mod geo;
+pub mod lockout_backend;
 pub mod session;
 pub mod behavior;
 pub mod engine;

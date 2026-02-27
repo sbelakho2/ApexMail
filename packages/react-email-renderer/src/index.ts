@@ -72,9 +72,9 @@ function setCachedTranspiled(source: string, code: string): void {
   const key = createHash('sha256').update(source).digest('hex');
   transpileCache.set(key, code);
   if (transpileCache.size > TRANSPILE_CACHE_MAX) {
-    const oldestKey = transpileCache.keys().next().value as string | undefined;
-    if (oldestKey) {
-      transpileCache.delete(oldestKey);
+    const oldestEntry = transpileCache.keys().next();
+    if (!oldestEntry.done) {
+      transpileCache.delete(oldestEntry.value);
     }
   }
 }

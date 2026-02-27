@@ -247,17 +247,7 @@ function validateSyntax(email: string): { valid: boolean; local: string; domain:
  */
 async function checkMxRecords(domain: string, timeout: number): Promise<{ valid: boolean; records?: dns.MxRecord[] }> {
     try {
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        const timeoutPromise = new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error('DNS timeout')), timeout);
-        });
-
-        const records = await Promise.race([resolveMx(domain), timeoutPromise])
-            .finally(() => {
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
-            });
+        const records = await withTimeout(resolveMx(domain), timeout, 'DNS timeout');
         
         if (records && records.length > 0) {
             return { valid: true, records: records.sort((a, b) => a.priority - b.priority) };
@@ -267,19 +257,7 @@ async function checkMxRecords(domain: string, timeout: number): Promise<{ valid:
     } catch (err) {
         // Try resolving A record as fallback (some domains accept mail without MX)
         try {
-            let timeoutId: ReturnType<typeof setTimeout> | null = null;
-            const timeoutPromise = new Promise<never>((_, reject) => {
-                timeoutId = setTimeout(() => reject(new Error('DNS timeout')), timeout);
-            });
-
-            const aRecords = await Promise.race([
-                promisify(dns.resolve4)(domain),
-                timeoutPromise,
-            ]).finally(() => {
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
-            });
+            const aRecords = await withTimeout(promisify(dns.resolve4)(domain), timeout, 'DNS timeout');
             if (aRecords && aRecords.length > 0) {
                 return { valid: true, records: [{ exchange: domain, priority: 10 }] };
             }
@@ -289,6 +267,22 @@ async function checkMxRecords(domain: string, timeout: number): Promise<{ valid:
         
         logger.debug('MX lookup failed', { domain, error: err instanceof Error ? err.message : 'Unknown error' });
         return { valid: false };
+    }
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+            timeoutId.unref?.();
+        });
+
+        return await Promise.race([operation, timeoutPromise]);
+    } finally {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
     }
 }
 

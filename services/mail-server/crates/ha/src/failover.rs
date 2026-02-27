@@ -220,7 +220,9 @@ impl FailoverService {
             metadata: None,
         };
 
-        let _ = self.record_event(&event).await;
+        if let Err(error) = self.record_event(&event).await {
+            warn!(error = %error, "Failed to record failback event");
+        }
 
         {
             let mut p = self.primary_node.write().await;
@@ -231,7 +233,9 @@ impl FailoverService {
             *s = FailoverState::Normal;
         }
 
-        let _ = self.publish_state_change("normal").await;
+        if let Err(error) = self.publish_state_change("normal").await {
+            warn!(error = %error, "Failed to publish failback state change");
+        }
         info!("Failback completed");
         Ok(event)
     }
@@ -350,16 +354,30 @@ impl FailoverService {
     }
 
     async fn try_acquire_lock(&self) -> bool {
+        use tokio::time::timeout;
+
+        const LOCK_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
         let url = self.config.redis.url();
         let Ok(client) = redis::Client::open(url.as_str()) else { return false };
-        let Ok(mut conn) = client.get_multiplexed_async_connection().await else { return false };
+        let Ok(Ok(mut conn)) = timeout(LOCK_ACQUIRE_TIMEOUT, client.get_multiplexed_async_connection()).await else {
+            return false;
+        };
 
-        let result: Result<bool, _> = redis::cmd("SET")
-            .arg(FAILOVER_LOCK_KEY)
-            .arg(&self.config.multi_region.node_id)
-            .arg("NX")
-            .arg("EX").arg(FAILOVER_LOCK_TTL)
-            .query_async(&mut conn).await;
+        let result: Result<bool, _> = match timeout(
+            LOCK_ACQUIRE_TIMEOUT,
+            redis::cmd("SET")
+                .arg(FAILOVER_LOCK_KEY)
+                .arg(&self.config.multi_region.node_id)
+                .arg("NX")
+                .arg("EX")
+                .arg(FAILOVER_LOCK_TTL)
+                .query_async(&mut conn),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return false,
+        };
 
         result.unwrap_or(false)
     }

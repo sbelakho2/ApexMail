@@ -45,20 +45,61 @@ pub struct DeviceFingerprint {
 
 impl DeviceFingerprint {
     /// Create a fingerprint from login attributes
+    /// 
+    /// The fingerprint is a SHA-256 hash of multiple device characteristics:
+    /// - User-Agent header
+    /// - IP prefix (first 2 octets for IPv4 /16, making it network-aware but not too specific)
+    /// - TLS fingerprint hash (JA4-style, if available)
+    /// 
+    /// TLS fingerprints are much harder to spoof than User-Agent and help
+    /// detect credential stuffing from automated tools even when they
+    /// rotate through residential proxy networks.
     pub fn from_event(event: &LoginEvent) -> Self {
         let mut hasher = Sha256::new();
+        
+        // User-Agent (primary identifier, easily spoofed but indicative)
         hasher.update(event.user_agent.as_bytes());
-        // Include IP prefix (first 3 octets for IPv4) for network fingerprinting
+        
+        // IP prefix (/16 instead of /24 to be more permissive for legitimate users
+        // on dynamic IPs, while still catching cross-network attacks)
         let ip_prefix = event.ip_address
             .splitn(4, '.')
-            .take(3)
+            .take(2)  // Changed from 3 to 2 (/16 instead of /24)
             .collect::<Vec<_>>()
             .join(".");
         hasher.update(ip_prefix.as_bytes());
+        
+        // TLS fingerprint (if available - much harder to spoof)
+        // This catches automated tools even when they spoof User-Agent
+        if let Some(ref tls_fp) = event.tls_fingerprint {
+            hasher.update(tls_fp.hash.as_bytes());
+        }
+        
         let hash = hex::encode(hasher.finalize());
         Self {
             hash,
             user_agent: event.user_agent.clone(),
+        }
+    }
+    
+    /// Create a fingerprint with explicit TLS component for testing
+    #[cfg(test)]
+    pub fn from_components(user_agent: &str, ip_address: &str, tls_hash: Option<&str>) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(user_agent.as_bytes());
+        let ip_prefix = ip_address
+            .splitn(4, '.')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(".");
+        hasher.update(ip_prefix.as_bytes());
+        if let Some(tls) = tls_hash {
+            hasher.update(tls.as_bytes());
+        }
+        let hash = hex::encode(hasher.finalize());
+        Self {
+            hash,
+            user_agent: user_agent.to_string(),
         }
     }
 }
@@ -85,8 +126,8 @@ impl UserLoginHistory {
     }
 
     /// Record a login event, returns whether the device is new
-    pub fn record(&mut self, event: &LoginEvent) -> bool {
-        let fingerprint = DeviceFingerprint::from_event(event);
+    pub fn record(&mut self, event: LoginEvent) -> bool {
+        let fingerprint = DeviceFingerprint::from_event(&event);
         let is_new_device = !self.known_devices.iter().any(|d| d.hash == fingerprint.hash);
 
         if is_new_device {
@@ -97,7 +138,7 @@ impl UserLoginHistory {
             }
         }
 
-        self.events.insert(0, event.clone());
+        self.events.insert(0, event);
         if self.events.len() > self.max_entries {
             self.events.truncate(self.max_entries);
         }
@@ -164,12 +205,12 @@ impl SessionStore {
         let mut entry = self.histories
             .entry(event.user_id.clone())
             .or_insert_with(|| UserLoginHistory::new(self.max_entries_per_user));
-        entry.record(event)
+        entry.record(event.clone())
     }
 
     /// Get user history (cloned snapshot)
     pub fn get_history(&self, user_id: &str) -> Option<UserLoginHistory> {
-        self.histories.get(user_id).map(|h| h.clone())
+        self.histories.get(user_id).map(|h| h.value().clone())
     }
 
     /// Count recent failed attempts for a user
@@ -259,7 +300,7 @@ mod tests {
         for i in 0..10 {
             let mut event = make_event("user1", &format!("1.2.3.{}", i), true);
             event.user_agent = format!("Agent-{}", i);
-            history.record(&event);
+            history.record(event);
         }
         assert_eq!(history.events.len(), 5, "Should cap at max_entries");
     }

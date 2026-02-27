@@ -6,6 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+type Dict = Record<string, unknown>;
+
 // Campaign Service Tests
 describe('CampaignService', () => {
     const mockDb = {
@@ -38,7 +40,7 @@ describe('CampaignService', () => {
             mockDb.campaign.count.mockResolvedValue(10);
             
             // Mock implementation
-            const listCampaigns = async (orgId: string, options: any) => {
+            const listCampaigns = async (orgId: string, options: { page?: number; limit?: number; status?: string }) => {
                 const { page = 1, limit = 20, status } = options;
                 const where = { organizationId: orgId, ...(status && { status }) };
                 
@@ -66,7 +68,7 @@ describe('CampaignService', () => {
             mockDb.campaign.findMany.mockResolvedValue([]);
             mockDb.campaign.count.mockResolvedValue(0);
             
-            const listCampaigns = async (orgId: string, options: any) => {
+            const listCampaigns = async (orgId: string, options: { status?: string }) => {
                 const { status } = options;
                 const where = { organizationId: orgId, ...(status && { status }) };
                 
@@ -93,7 +95,7 @@ describe('CampaignService', () => {
             const created = { id: 'new-id', ...input, status: 'draft' };
             mockDb.campaign.create.mockResolvedValue(created);
             
-            const createCampaign = async (orgId: string, data: any) => {
+            const createCampaign = async (orgId: string, data: Dict) => {
                 return mockDb.campaign.create({
                     data: {
                         ...data,
@@ -110,7 +112,7 @@ describe('CampaignService', () => {
         });
         
         it('should validate required fields', async () => {
-            const validateCampaign = (data: any) => {
+            const validateCampaign = (data: Dict) => {
                 const errors: string[] = [];
                 if (!data.name) errors.push('Name is required');
                 if (!data.subject) errors.push('Subject is required');
@@ -212,7 +214,7 @@ describe('ContactService', () => {
             mockDb.contact.findUnique.mockResolvedValue(null);
             mockDb.contact.create.mockResolvedValue({ id: 'contact-1', ...input });
             
-            const createContact = async (orgId: string, data: any) => {
+            const createContact = async (orgId: string, data: { email: string } & Dict) => {
                 // Check for duplicate
                 const existing = await mockDb.contact.findUnique({
                     where: { organizationId_email: { organizationId: orgId, email: data.email } },
@@ -246,7 +248,7 @@ describe('ContactService', () => {
         it('should reject duplicate email', async () => {
             mockDb.contact.findUnique.mockResolvedValue({ id: 'existing', email: 'test@example.com' });
             
-            const createContact = async (orgId: string, data: any) => {
+            const createContact = async (orgId: string, data: { email: string }) => {
                 const existing = await mockDb.contact.findUnique({
                     where: { organizationId_email: { organizationId: orgId, email: data.email } },
                 });
@@ -271,7 +273,7 @@ describe('ContactService', () => {
             
             mockDb.contact.createMany.mockResolvedValue({ count: 100 });
             
-            const importContacts = async (orgId: string, contacts: any[]) => {
+            const importContacts = async (orgId: string, contacts: Dict[]) => {
                 const batchSize = 100;
                 const results = { created: 0, failed: 0, errors: [] as string[] };
                 
@@ -370,7 +372,7 @@ describe('AnalyticsService', () => {
                 });
                 
                 const eventCounts = Object.fromEntries(
-                    events.map((e: any) => [e.eventType, e._count])
+                    events.map((e: { eventType: string; _count: number }) => [e.eventType, e._count])
                 );
                 
                 const sent = eventCounts.sent || 0;
@@ -429,7 +431,7 @@ describe('AnalyticsService', () => {
                     },
                 });
                 
-                return campaigns.map((c: any) => ({
+                return campaigns.map((c: { id: string; name: string; _count: { emailsSent: number; opens: number; clicks: number } }) => ({
                     id: c.id,
                     name: c.name,
                     sent: c._count.emailsSent,
@@ -563,7 +565,7 @@ describe('Validation', () => {
     });
     
     describe('campaignValidation', () => {
-        const validateCampaign = (data: any) => {
+        const validateCampaign = (data: Dict) => {
             const errors: Record<string, string> = {};
             
             if (!data.name?.trim()) {

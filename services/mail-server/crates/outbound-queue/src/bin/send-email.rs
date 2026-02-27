@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             }
             
             let response = client.send_email_now(SendEmailRequest {
-                tenant_id: String::new(),
+                tenant_id: "default".to_string(),
                 from: from.clone(),
                 to: to.clone(),
                 subject: subject.clone(),

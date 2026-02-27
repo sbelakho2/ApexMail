@@ -87,6 +87,16 @@ retry_delay_seconds = 300
 concurrent_deliveries = 10
 ```
 
+### Login CAPTCHA (mCaptcha)
+
+`mCaptcha` enforcement for interactive login flows is configured at the application layer (`apps/web` and `apps/control-plane`), not in this Rust mail server runtime.
+
+Use these docs for setup and behavior:
+
+- `docs/security/mcaptcha-login.md`
+- `docs/deployment/configuration.md` (Login CAPTCHA section)
+- `docs/deployment/quickstart.md` (optional local setup and smoke checks)
+
 ## Building
 
 ```bash

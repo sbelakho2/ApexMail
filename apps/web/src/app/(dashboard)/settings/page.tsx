@@ -2,14 +2,7 @@
 
 import { useEffect } from 'react';
 import {
-    User,
-    Bell,
-    Shield,
-    CreditCard,
     Key,
-    Mail,
-    Webhook,
-    Building2,
     Save,
 } from '@/components/ui/icons';
 import { PageHeader } from '@/components/layout/page-header';
@@ -32,16 +25,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn, formatDate } from '@/lib/utils';
 import { PlanSelector, PaygUsageDashboard } from '@/components/billing';
 import { useSettingsController } from './use-settings-controller';
-
-const settingsSections = [
-    { id: 'profile', label: 'Profile', icon: User },
-    { id: 'account', label: 'Account', icon: Building2 },
-    { id: 'notifications', label: 'Notifications', icon: Bell },
-    { id: 'email', label: 'Email Settings', icon: Mail },
-    { id: 'security', label: 'Security', icon: Shield },
-    { id: 'api', label: 'API & Webhooks', icon: Webhook },
-    { id: 'billing', label: 'Billing', icon: CreditCard },
-];
+import { settingsSections } from './settings-sections';
 
 export default function SettingsPage() {
     const {

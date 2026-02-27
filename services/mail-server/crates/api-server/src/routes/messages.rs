@@ -6,6 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -23,9 +24,21 @@ pub fn router() -> Router<AppState> {
 // ─── Constants ─────────────────────────────────────────────────
 
 /// Maximum recipients per single message (to + cc + bcc combined).
-const MAX_RECIPIENTS: usize = 1000;
+static MAX_RECIPIENTS: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("API_MESSAGES_MAX_RECIPIENTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1000)
+});
 /// Maximum messages in a batch request.
-const MAX_BATCH_SIZE: usize = 100;
+static MAX_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("API_MESSAGES_MAX_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(100)
+});
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -171,9 +184,10 @@ async fn send_batch(
     require_scopes(&auth, &["messages:send"])?;
 
     // Fix #26: Limit batch size to prevent abuse.
-    if body.messages.len() > MAX_BATCH_SIZE {
+    if body.messages.len() > *MAX_BATCH_SIZE {
         return Err(ApiError::BadRequest(format!(
-            "batch size {} exceeds maximum of {MAX_BATCH_SIZE}",
+            "batch size {} exceeds maximum of {}",
+            *MAX_BATCH_SIZE,
             body.messages.len()
         )));
     }
@@ -383,9 +397,10 @@ async fn validate_send(
     let total_recipients = body.to.len()
         + body.cc.as_ref().map_or(0, |v| v.len())
         + body.bcc.as_ref().map_or(0, |v| v.len());
-    if total_recipients > MAX_RECIPIENTS {
+    if total_recipients > *MAX_RECIPIENTS {
         errors.push(format!(
-            "total recipients ({total_recipients}) exceeds maximum of {MAX_RECIPIENTS}"
+            "total recipients ({total_recipients}) exceeds maximum of {}",
+            *MAX_RECIPIENTS
         ));
     }
 

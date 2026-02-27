@@ -198,16 +198,22 @@ mod tests {
 
     #[test]
     fn test_cached_resolver_invalidate() {
-        let resolver = CachedDnsResolver::default_resolver().unwrap();
-        resolver.invalidate_domain("example.com");
-        // Should not panic
-        assert_eq!(resolver.cache_size(), 0);
+        let resolver = CachedDnsResolver::default_resolver();
+        assert!(resolver.is_ok());
+        if let Ok(resolver) = resolver {
+            resolver.invalidate_domain("example.com");
+            // Should not panic
+            assert_eq!(resolver.cache_size(), 0);
+        }
     }
 
     #[test]
     fn test_cached_resolver_clear() {
-        let resolver = CachedDnsResolver::default_resolver().unwrap();
-        resolver.clear_cache();
-        assert_eq!(resolver.cache_size(), 0);
+        let resolver = CachedDnsResolver::default_resolver();
+        assert!(resolver.is_ok());
+        if let Ok(resolver) = resolver {
+            resolver.clear_cache();
+            assert_eq!(resolver.cache_size(), 0);
+        }
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, TimeDelta, TimeZone, Timelike, Utc};
-use std::sync::Mutex;
+use std::sync::RwLock;
 use sqlx::PgPool;
 use tokio::sync::Notify;
 use tokio::time::{interval, sleep};
@@ -28,8 +28,8 @@ pub struct AnalyticsProcessor {
     config: AnalyticsConfig,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
-    event_buffer: Arc<Mutex<Vec<AnalyticsEvent>>>,
-    aggregation_buffer: Arc<Mutex<HashMap<String, AggregatedStats>>>,
+    event_buffer: Arc<RwLock<Vec<AnalyticsEvent>>>,
+    aggregation_buffer: Arc<RwLock<HashMap<String, AggregatedStats>>>,
     is_flushing: AtomicBool,
     shutdown_notify: Arc<Notify>,
 }
@@ -43,8 +43,8 @@ impl AnalyticsProcessor {
             config,
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
-            event_buffer: Arc::new(Mutex::new(Vec::new())),
-            aggregation_buffer: Arc::new(Mutex::new(HashMap::new())),
+            event_buffer: Arc::new(RwLock::new(Vec::new())),
+            aggregation_buffer: Arc::new(RwLock::new(HashMap::new())),
             is_flushing: AtomicBool::new(false),
             shutdown_notify: Arc::new(Notify::new()),
         }
@@ -227,7 +227,7 @@ impl AnalyticsProcessor {
         
         // Add to event buffer (sync operation)
         let should_flush = {
-            let mut buffer = self.event_buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
             buffer.extend(events.iter().cloned());
 
             // Enforce buffer size cap
@@ -318,7 +318,7 @@ impl AnalyticsProcessor {
             ));
         }
 
-        let mut buffer = self.aggregation_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buffer = self.aggregation_buffer.write().unwrap_or_else(|e| e.into_inner());
 
         for (key, domain_id, campaign_id) in keys {
             let stats = buffer.entry(key).or_insert_with(|| {
@@ -393,14 +393,14 @@ impl AnalyticsProcessor {
     async fn flush_buffers_inner(&self) -> ProcessorResult<()> {
         // Fix #92: Take ownership of buffers via drain/mem::take instead of cloning
         let (events, _event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
-            let mut buffer = self.event_buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
             let ids: Vec<_> = buffer.iter().map(|e| e.id.clone()).collect();
             let events = std::mem::take(&mut *buffer);
             (events, ids)
         };
 
         let aggregations: HashMap<String, AggregatedStats> = {
-            let mut buffer = self.aggregation_buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut buffer = self.aggregation_buffer.write().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *buffer)
         };
 

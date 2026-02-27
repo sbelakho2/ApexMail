@@ -8,6 +8,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { validateCsrf } from '@/lib/csrf';
+import { verifyMCaptchaToken } from '@/lib/security/mcaptcha';
 
 const loginSchema = z.object({
     email: z.string().email().max(254),
@@ -15,6 +16,7 @@ const loginSchema = z.object({
     tenantId: z.string().uuid().optional(),
     rememberMe: z.boolean().optional(),
     mfaCode: z.string().max(8).optional(),
+    mcaptchaToken: z.string().max(4096).optional(),
 });
 
 const USER_SESSION_COOKIE = 'am_session';
@@ -47,6 +49,15 @@ function getSafeLoginError(status: number, payload: LoginErrorPayload): { error:
 
     if (status === 403 || rawErrorCode === 'MFA_REQUIRED') {
         return { error: 'Additional verification is required.', errorCode: 'MFA_REQUIRED' };
+    }
+
+    if (status === 400 || status === 403) {
+        if (rawErrorCode === 'MCAPTCHA_REQUIRED') {
+            return { error: 'Complete the CAPTCHA challenge and try again.', errorCode: 'MCAPTCHA_REQUIRED' };
+        }
+        if (rawErrorCode === 'MCAPTCHA_INVALID') {
+            return { error: 'CAPTCHA verification failed. Please retry.', errorCode: 'MCAPTCHA_INVALID' };
+        }
     }
 
     return { error: 'Unable to sign in. Please try again.' };
@@ -92,7 +103,29 @@ export async function POST(request: NextRequest) {
 
     try {
         const body = await request.json();
-        const { email, password, tenantId, rememberMe, mfaCode } = loginSchema.parse(body);
+        const { email, password, tenantId, rememberMe, mfaCode, mcaptchaToken } = loginSchema.parse(body);
+
+        const captchaResult = await verifyMCaptchaToken(mcaptchaToken);
+        if (!captchaResult.ok) {
+            const status = captchaResult.reason === 'provider' || captchaResult.reason === 'misconfigured' ? 503 : 400;
+            const errorCode = captchaResult.reason === 'missing'
+                ? 'MCAPTCHA_REQUIRED'
+                : captchaResult.reason === 'invalid'
+                    ? 'MCAPTCHA_INVALID'
+                    : 'MCAPTCHA_UNAVAILABLE';
+
+            return NextResponse.json(
+                {
+                    error: errorCode === 'MCAPTCHA_REQUIRED'
+                        ? 'Complete the CAPTCHA challenge and try again.'
+                        : errorCode === 'MCAPTCHA_INVALID'
+                            ? 'CAPTCHA verification failed. Please retry.'
+                            : 'CAPTCHA verification service is unavailable. Please try again shortly.',
+                    errorCode,
+                },
+                { status }
+            );
+        }
 
         const apiBaseUrl = process.env.API_URL || 'http://localhost:3001';
         const response = await fetch(`${apiBaseUrl}/v1/auth/login`, {

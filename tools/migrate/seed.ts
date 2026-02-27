@@ -6,8 +6,14 @@
 import { Pool } from 'pg';
 import { randomBytes, createHash, scryptSync } from 'crypto';
 
+const databaseUrl = process.env.DATABASE_URL;
+
+if (!databaseUrl) {
+  throw new Error('DATABASE_URL must be set before running seed script');
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/apexmail',
+  connectionString: databaseUrl,
 });
 
 interface SeedOptions {
@@ -22,6 +28,7 @@ async function seed(options: SeedOptions = {}) {
     users = 2,
     domains = 1,
   } = options;
+  const seededAdminPassword = process.env.SEED_ADMIN_PASSWORD ?? randomBytes(16).toString('base64url');
 
   console.log('🌱 Seeding database...');
   console.log(`   Tenants: ${tenants}`);
@@ -45,8 +52,9 @@ async function seed(options: SeedOptions = {}) {
     await pool.query(`
       INSERT INTO users (id, tenant_id, email, password_hash, name, role, status, created_at, updated_at)
       VALUES ($1, $2, 'admin@test.com', $3, 'Admin User', 'admin', 'active', NOW(), NOW())
-    `, [userId, tenantId, hashPassword('password123')]);
+    `, [userId, tenantId, hashPassword(seededAdminPassword)]);
     console.log(`✓ Created user: admin@test.com`);
+    console.log(`   Admin password source: ${process.env.SEED_ADMIN_PASSWORD ? 'SEED_ADMIN_PASSWORD env var' : 'generated secure random value'}`);
 
     // Create test API key
     const apiKeyId = generateId('key');

@@ -28,6 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
+use tracing::warn;
 
 use crate::ThreatIntelEngine;
 
@@ -92,29 +93,7 @@ pub async fn run_purge_loop(engine: Arc<ThreatIntelEngine>, config: PurgeTaskCon
         
         let stats = purge_once(&engine);
         
-        // Log if we actually removed anything (when tracing is available)
-        #[cfg(feature = "tracing")]
-        {
-            if stats.expired_ips_removed > 0 || stats.expired_domains_removed > 0 {
-                tracing::info!(
-                    ips_removed = stats.expired_ips_removed,
-                    domains_removed = stats.expired_domains_removed,
-                    ips_remaining = stats.ip_entries_remaining,
-                    domains_remaining = stats.domain_entries_remaining,
-                    duration_ms = stats.duration_ms,
-                    "Threat intel purge completed"
-                );
-            } else {
-                tracing::debug!(
-                    ips_remaining = stats.ip_entries_remaining,
-                    domains_remaining = stats.domain_entries_remaining,
-                    duration_ms = stats.duration_ms,
-                    "Threat intel purge: no expired entries found"
-                );
-            }
-        }
-        
-        // Suppress unused variable warning when tracing is disabled
+        // Reserved for optional observability hooks.
         let _ = &stats;
     }
 }
@@ -238,13 +217,9 @@ pub async fn run_refresh_loop<F>(
         })
         .await;
 
-        #[cfg(feature = "tracing")]
-        match result {
-            Ok(()) => tracing::info!("Threat intel feed refresh completed"),
-            Err(e) => tracing::error!(error = %e, "Threat intel feed refresh task panicked"),
+        if let Err(error) = result {
+            warn!(error = %error, "Threat-intel feed refresh task failed");
         }
-
-        let _ = result;
     }
 }
 
@@ -265,7 +240,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ip_blocklist::ThreatCategory;
     use std::time::Duration;
 
     #[test]

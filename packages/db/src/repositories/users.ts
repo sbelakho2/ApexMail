@@ -195,17 +195,13 @@ export class UsersRepository {
       return Result.ok(null);
     }
 
-    // Update last login (fire-and-forget but log errors — E-139)
-    this.db.query(
+    const loginUpdate = await this.db.query(
       'UPDATE users SET last_login_at = NOW() WHERE id = $1',
       [row.id]
-    ).then((res) => {
-      if (!res.ok) {
-        logger.error('Failed to update last login', { error: (res.error as Error).message, userId: row.id });
-      }
-    }).catch((err: unknown) => {
-      logger.error('Failed to update last login', { error: err instanceof Error ? err.message : String(err), userId: row.id });
-    });
+    );
+    if (!loginUpdate.ok) {
+      logger.error('Failed to update last login', { error: (loginUpdate.error as Error).message, userId: row.id });
+    }
 
     return Result.ok(this.mapRow(row));
   }

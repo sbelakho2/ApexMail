@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 /// Trained Bayesian classifier model
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BayesianModel {
     /// Word frequencies in spam
     spam_words: HashMap<String, u64>,
@@ -153,14 +153,32 @@ impl BayesianClassifier {
             vocab_size: guard.vocab_size,
         }
     }
+
+    /// Replace the in-memory model (used for rollback/snapshot restore).
+    pub fn replace_model(&self, model: BayesianModel) {
+        *self.model.write() = model;
+    }
 }
 
-/// Tokenize text into words (lowercased, alphanumeric only, 3+ chars)
+/// Tokenize text into unigrams and bigrams (lowercased, alphanumeric only, 3+ chars).
+///
+/// Bigrams capture two-word context (e.g., "free offer") which significantly
+/// improves classification accuracy compared to unigrams alone.
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+    let unigrams: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
         .map(|w| w.to_lowercase())
-        .collect()
+        .collect();
+
+    let mut tokens = unigrams.clone();
+
+    // Generate bigrams from adjacent unigrams
+    for pair in unigrams.windows(2) {
+        tokens.push(format!("{}_{}", pair[0], pair[1]));
+    }
+
+    tokens
 }
 
 #[cfg(test)]

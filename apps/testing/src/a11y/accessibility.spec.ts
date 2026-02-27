@@ -5,17 +5,18 @@
  */
 
 import { test, expect } from '@playwright/test';
+import type { Page } from '@playwright/test';
 import { injectAxe, getViolations } from 'axe-playwright';
 
 /**
  * Custom AxeBuilder class for compatibility with the test code
  */
 class AxeBuilder {
-    private page: any;
+    private page: Page;
     private tags: string[] = [];
     private includeSelector: string | null = null;
 
-    constructor(options: { page: any }) {
+    constructor(options: { page: Page }) {
         this.page = options.page;
     }
 
@@ -29,7 +30,7 @@ class AxeBuilder {
         return this;
     }
 
-    async analyze(): Promise<{ violations: Array<{ id: string; nodes: any[] }> }> {
+    async analyze(): Promise<{ violations: Array<{ id: string; nodes: unknown[] }> }> {
         await injectAxe(this.page);
         const violations = await getViolations(this.page, this.includeSelector || undefined, {
             runOnly: this.tags.length > 0 ? { type: 'tag', values: this.tags } : undefined,
@@ -53,7 +54,7 @@ const pages = [
 ];
 
 test.describe('Accessibility Tests', () => {
-    const authenticate = async (page: any) => {
+    const authenticate = async (page: Page) => {
         await page.goto('/login');
         await page.getByLabel('Email').fill('test@example.com');
         await page.getByLabel('Password').fill('password123');

@@ -32,12 +32,20 @@ pub struct WafConfig {
     pub enable_command_injection: bool,
     /// Enable protocol violation detection
     pub enable_protocol_checks: bool,
+    /// Enable NoSQL injection detection (MongoDB, Redis, Elasticsearch)
+    pub enable_nosqli: bool,
+    /// Enable SSRF detection (internal IPs, dangerous URL schemes)
+    pub enable_ssrf: bool,
+    /// Enable HTTP request smuggling detection
+    pub enable_smuggling: bool,
     /// IP allowlist (bypass WAF)
     pub allowlist_ips: Vec<String>,
     /// URL path allowlist (bypass WAF for specific paths)
     pub allowlist_paths: Vec<String>,
     /// Maximum recursion depth for decoders
     pub max_decode_depth: usize,
+    /// Enable Unicode normalization and confusable folding during canonicalization
+    pub enable_unicode_normalization: bool,
 }
 
 impl Default for WafConfig {
@@ -56,9 +64,13 @@ impl Default for WafConfig {
             enable_path_traversal: true,
             enable_command_injection: true,
             enable_protocol_checks: true,
+            enable_nosqli: true,
+            enable_ssrf: true,
+            enable_smuggling: true,
             allowlist_ips: Vec::new(),
             allowlist_paths: Vec::new(),
             max_decode_depth: 5,
+            enable_unicode_normalization: true,
         }
     }
 }

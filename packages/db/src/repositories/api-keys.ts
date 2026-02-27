@@ -78,6 +78,8 @@ export interface VerifyApiKeyResult {
   reason?: 'not_found' | 'inactive' | 'expired' | 'ip_blocked' | 'invalid_hash';
 }
 
+type ApiKeySqlParam = string | number | boolean | Date | null | string[] | ApiKeyScope[];
+
 export class ApiKeysRepository {
   private readonly logger: Logger;
 
@@ -444,7 +446,7 @@ export class ApiKeysRepository {
     }
 
     const updates: string[] = [];
-    const values: unknown[] = [];
+    const values: ApiKeySqlParam[] = [];
     let paramIndex = 1;
 
     if (input.name !== undefined) {
@@ -717,7 +719,7 @@ export class ApiKeysRepository {
     options: { includeInactive?: boolean; limit?: number; offset?: number } = {}
   ): Promise<Result<{ apiKeys: ApiKey[]; total: number }, Error>> {
     const conditions = ['tenant_id = $1'];
-    const values: unknown[] = [tenantId];
+    const values: ApiKeySqlParam[] = [tenantId];
     let paramIndex = 2;
 
     if (!options.includeInactive) {

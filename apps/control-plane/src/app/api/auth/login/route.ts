@@ -16,10 +16,12 @@ import * as crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { validateCsrf } from '@/lib/csrf';
 import { query } from '@/lib/db';
+import { verifyMCaptchaToken } from '@/lib/security/mcaptcha';
 
 // Rate limiting storage (database-backed for multi-instance consistency)
 let rateLimitTableReady: Promise<void> | null = null;
 let rateLimitCleanupStarted = false;
+let lastRateLimitCleanupAt = 0;
 
 async function ensureRateLimitTable(): Promise<void> {
     if (!rateLimitTableReady) {
@@ -40,20 +42,23 @@ async function ensureRateLimitTable(): Promise<void> {
 
     await rateLimitTableReady;
 
-    // FIX-500-029: Periodic cleanup prevents unbounded growth in attempts table.
+    // FIX-500-029: Periodic cleanup without retaining process-lifetime interval handles.
     if (!rateLimitCleanupStarted) {
         rateLimitCleanupStarted = true;
-        const cleanupInterval = setInterval(async () => {
-            try {
-                await query(
-                    `DELETE FROM control_plane_login_attempts
-                     WHERE last_attempt_at < NOW() - INTERVAL '24 hours'`
-                );
-            } catch (error) {
-                console.warn('[AUTH] Failed to cleanup login attempts table:', error);
-            }
-        }, 10 * 60 * 1000);
-        cleanupInterval.unref();
+        lastRateLimitCleanupAt = 0;
+    }
+
+    const now = Date.now();
+    if (now - lastRateLimitCleanupAt >= 10 * 60 * 1000) {
+        lastRateLimitCleanupAt = now;
+        try {
+            await query(
+                `DELETE FROM control_plane_login_attempts
+                 WHERE last_attempt_at < NOW() - INTERVAL '24 hours'`
+            );
+        } catch {
+            // Cleanup failures should never block authentication flow.
+        }
     }
 }
 
@@ -369,7 +374,12 @@ export async function POST(request: NextRequest) {
     
     try {
         const body = await request.json();
-        const { email, password, mfaCode } = body;
+        const { email, password, mfaCode, mcaptchaToken } = body as {
+            email?: string;
+            password?: string;
+            mfaCode?: string;
+            mcaptchaToken?: string;
+        };
         
         // Validate required fields
         if (!email || !password) {
@@ -377,6 +387,28 @@ export async function POST(request: NextRequest) {
             return NextResponse.json(
                 { error: 'Email and password are required' },
                 { status: 400 }
+            );
+        }
+
+        const captchaResult = await verifyMCaptchaToken(mcaptchaToken);
+        if (!captchaResult.ok) {
+            const status = captchaResult.reason === 'provider' || captchaResult.reason === 'misconfigured' ? 503 : 400;
+            const errorCode = captchaResult.reason === 'missing'
+                ? 'MCAPTCHA_REQUIRED'
+                : captchaResult.reason === 'invalid'
+                    ? 'MCAPTCHA_INVALID'
+                    : 'MCAPTCHA_UNAVAILABLE';
+
+            return NextResponse.json(
+                {
+                    error: errorCode === 'MCAPTCHA_REQUIRED'
+                        ? 'Complete the CAPTCHA challenge and try again.'
+                        : errorCode === 'MCAPTCHA_INVALID'
+                            ? 'CAPTCHA verification failed. Please retry.'
+                            : 'CAPTCHA verification service is unavailable. Please try again shortly.',
+                    errorCode,
+                },
+                { status }
             );
         }
         

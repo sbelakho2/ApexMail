@@ -178,11 +178,13 @@ fn observability_alert_pipeline() {
 // 5. Ops pipeline: start warmup → progress → check status
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[test]
-fn ops_warmup_pipeline() {
+#[tokio::test]
+async fn ops_warmup_pipeline() {
     use ops_service::warmup::IpWarmupManager;
+    use sqlx::PgPool;
 
-    let warmup = IpWarmupManager::new_in_memory();
+    let pool = PgPool::connect_lazy("postgres://localhost/unused").expect("lazy pool");
+    let warmup = IpWarmupManager::new(pool);
 
     // Step 1: Create a warmup schedule
     let schedule = warmup.create_schedule_sync("10.0.0.1", 100_000, 14);

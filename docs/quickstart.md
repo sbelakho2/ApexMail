@@ -118,6 +118,7 @@ The free tier allows 100 requests/minute. Upgrade your plan or wait for the rate
 ## Need Help?
 
 - 📚 [Full API Documentation](https://docs.apexmail.ee)
+- 🛡️ [Login mCaptcha Protection](./security/mcaptcha-login.md)
 - 💬 [Discord Community](https://discord.gg/apexmail)
 - 📧 [Email Support](mailto:contact@apexmail.ee)
 - 🐛 [Report a Bug](https://github.com/Bel-Consulting-OU/ApexMail/issues)

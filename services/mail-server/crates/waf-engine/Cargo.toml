@@ -15,6 +15,7 @@ learning = ["dep:rand"]  # Adaptive false-positive learning
 # Async
 tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
+mail-common = { path = "../mail-common" }
 
 # Concurrency
 parking_lot = "0.12"
@@ -27,6 +28,7 @@ serde_json = "1.0"
 # Pattern matching (Aho-Corasick, zero-backtrack)
 aho-corasick = { version = "1.1", features = ["perf-literal"] }
 regex = { version = "1.10", features = ["perf"] }
+unicode-normalization = "0.1"
 
 # Crypto (HMAC for signed cookies)
 sha2 = "0.10"
@@ -43,3 +45,8 @@ rand = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = "0.5"
+
+[[bench]]
+name = "waf_bench"
+harness = false

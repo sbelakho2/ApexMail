@@ -18,7 +18,7 @@ pub struct MatchResult {
 /// Uses Aho-Corasick automaton for O(n) matching over any number of patterns.
 /// Immune to ReDoS by construction (no backtracking).
 pub struct PatternMatcher {
-    automaton: AhoCorasick,
+    automaton: Option<AhoCorasick>,
     patterns: Vec<PatternEntry>,
 }
 
@@ -40,17 +40,20 @@ impl PatternMatcher {
             })
             .collect();
 
-        let automaton = AhoCorasickBuilder::new()
+        let automaton = match AhoCorasickBuilder::new()
             .ascii_case_insensitive(true)
             .match_kind(MatchKind::LeftmostLongest)
             .build(patterns.iter().map(|(p, _)| p.as_str()))
-            .unwrap_or_else(|e| {
-                // #190: Log the error instead of panicking; build a fallback empty matcher
-                tracing::error!(error = %e, "Failed to build Aho-Corasick automaton from config patterns; using empty matcher");
-                AhoCorasickBuilder::new()
-                    .build(std::iter::empty::<&str>())
-                    .expect("empty pattern set is always valid")
-            });
+        {
+            Ok(automaton) => Some(automaton),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to build Aho-Corasick automaton from config patterns; using empty matcher"
+                );
+                None
+            }
+        };
 
         Self {
             automaton,
@@ -60,7 +63,11 @@ impl PatternMatcher {
 
     /// Find all matches in the input text.
     pub fn find_all(&self, text: &str) -> Vec<MatchResult> {
-        self.automaton
+        let Some(automaton) = self.automaton.as_ref() else {
+            return Vec::new();
+        };
+
+        automaton
             .find_iter(text)
             .map(|m| {
                 let entry = &self.patterns[m.pattern().as_usize()];
@@ -77,17 +84,23 @@ impl PatternMatcher {
 
     /// Check if any pattern matches.
     pub fn is_match(&self, text: &str) -> bool {
-        self.automaton.is_match(text)
+        self.automaton
+            .as_ref()
+            .map(|a| a.is_match(text))
+            .unwrap_or(false)
     }
 
     /// Count total matches.
     pub fn count_matches(&self, text: &str) -> usize {
-        self.automaton.find_iter(text).count()
+        self.automaton
+            .as_ref()
+            .map(|a| a.find_iter(text).count())
+            .unwrap_or(0)
     }
 
     /// Find first match only.
     pub fn find_first(&self, text: &str) -> Option<MatchResult> {
-        self.automaton.find(text).map(|m| {
+        self.automaton.as_ref()?.find(text).map(|m| {
             let entry = &self.patterns[m.pattern().as_usize()];
             MatchResult {
                 pattern_index: m.pattern().as_usize(),

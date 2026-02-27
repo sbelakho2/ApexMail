@@ -236,9 +236,13 @@ mod tests {
     #[test]
     fn test_sign_and_verify() {
         let secret = "whsec_test_secret_12345";
-        let tester = WebhookTester::new(secret.to_string()).expect("tester init");
+        let tester = WebhookTester::new(secret.to_string());
+        assert!(tester.is_ok());
         let body = b"{\"type\":\"email.delivered\"}";
-        let sig = tester.sign_payload(body);
+        let sig = tester
+            .as_ref()
+            .map(|t| t.sign_payload(body))
+            .unwrap_or_default();
 
         // The signature should start with "t=" and contain "v1="
         assert!(sig.starts_with("t="));
@@ -250,9 +254,13 @@ mod tests {
 
     #[test]
     fn test_verify_wrong_secret_fails() {
-        let tester = WebhookTester::new("correct_secret".to_string()).expect("tester init");
+        let tester = WebhookTester::new("correct_secret".to_string());
+        assert!(tester.is_ok());
         let body = b"{}";
-        let sig = tester.sign_payload(body);
+        let sig = tester
+            .as_ref()
+            .map(|t| t.sign_payload(body))
+            .unwrap_or_default();
 
         assert!(!WebhookTester::verify_signature("wrong_secret", body, &sig));
     }

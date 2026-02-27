@@ -1,6 +1,6 @@
 # Data Protection and Privacy
 
-> Last updated: 2026-02-09
+> Last updated: 2026-02-27
 
 This document describes the data protection controls, privacy compliance framework, and tenant isolation mechanisms in the ApexMail platform.
 
@@ -234,12 +234,12 @@ Audit logs can be exported for external compliance review, legal discovery, or i
 
 | Aspect              | Detail                                         |
 |----------------------|------------------------------------------------|
-| Primary storage      | EU (Finland and Germany data centres)           |
-| Backup storage       | EU (same provider, different availability zone)|
-| Data sovereignty     | All data processed and stored within the EU    |
+| Primary storage      | Region-constrained per deployment policy        |
+| Backup storage       | Region-constrained per deployment policy        |
+| Data sovereignty     | Configured according to tenant contract and environment |
 
-- No personal data is transferred outside the European Economic Area (EEA).
-- Data residency configuration is enforced at the infrastructure level — tenants cannot accidentally route data to non-EU regions.
+- Cross-region transfer behavior follows tenant contract and deployment configuration.
+- Data residency controls are enforced at the infrastructure and service policy layers.
 
 ---
 

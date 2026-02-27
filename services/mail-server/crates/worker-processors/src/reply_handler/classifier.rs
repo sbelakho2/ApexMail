@@ -131,6 +131,7 @@ static PATTERNS: LazyLock<PatternSet> = LazyLock::new(|| PatternSet {
 static QUICK_PATTERNS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
     let patterns = [
         "out of office",
+        "out of the office",
         "not interested",
         "interested",
         "tell me more",
@@ -192,7 +193,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
     // Score each classification
     // Fix #72: (classification, priority_score, actual_matches, reasoning)
     // priority_score is for sorting; actual_matches is for confidence calculation
-    let mut scores: Vec<(ReplyClassification, usize, usize, &str)> = Vec::new();
+    let mut scores: Vec<(ReplyClassification, usize, usize, &str)> = Vec::with_capacity(8);
 
     // Out of office
     let ooo_matches: usize = PATTERNS

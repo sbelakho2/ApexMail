@@ -22,25 +22,27 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	defaultBaseURL = "https://api.apexmail.ee"
-	defaultTimeout = 30 * time.Second
-	sdkVersion     = "1.0.0"
-	defaultMaxResponseBytes = 20 * 1024 * 1024
-	defaultMaxRetries = 3
-	defaultInitialBackoff = 500 * time.Millisecond
-	defaultMaxBackoff = 5 * time.Second
-	defaultIdleConnTimeout = 90 * time.Second
-	defaultTLSHandshakeTimeout = 10 * time.Second
-	defaultMaxIdleConns = 100
-	defaultMaxIdleConnsPerHost = 10
+	defaultBaseURL               = "https://api.apexmail.ee"
+	defaultTimeout               = 30 * time.Second
+	sdkVersion                   = "1.0.0"
+	defaultMaxResponseBytes      = 20 * 1024 * 1024
+	defaultMaxRetries            = 3
+	defaultInitialBackoff        = 500 * time.Millisecond
+	defaultMaxBackoff            = 5 * time.Second
+	defaultIdleConnTimeout       = 90 * time.Second
+	defaultTLSHandshakeTimeout   = 10 * time.Second
+	defaultMaxIdleConns          = 100
+	defaultMaxIdleConnsPerHost   = 10
 	defaultExpectContinueTimeout = 1 * time.Second
 )
 
@@ -49,24 +51,25 @@ var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 // Client is the root ApexMail API client. Use New() to create one.
 type Client struct {
-	apiKey       string
-	apiKeyErr    error
-	baseURL      string
-	httpClient   *http.Client
+	mu               sync.RWMutex
+	apiKey           string
+	apiKeyErr        error
+	baseURL          string
+	httpClient       *http.Client
 	maxResponseBytes int64
-	Emails       *EmailsAPI
-	Domains      *DomainsAPI
-	Webhooks     *WebhooksAPI
-	Templates    *TemplatesAPI
-	Suppressions *SuppressionsAPI
-	Events       *EventsAPI
+	Emails           *EmailsAPI
+	Domains          *DomainsAPI
+	Webhooks         *WebhooksAPI
+	Templates        *TemplatesAPI
+	Suppressions     *SuppressionsAPI
+	Events           *EventsAPI
 }
 
 // Config holds optional configuration for the client.
 type Config struct {
-	BaseURL    string
-	HTTPClient *http.Client
-	Timeout    time.Duration
+	BaseURL          string
+	HTTPClient       *http.Client
+	Timeout          time.Duration
 	MaxResponseBytes int64
 }
 
@@ -91,14 +94,14 @@ func New(apiKey string, cfg ...Config) *Client {
 	httpClient := c.HTTPClient
 	if httpClient == nil {
 		httpClient = newDefaultHTTPClient(timeout)
-	} else if httpClient.Timeout == 0 {
-		httpClient.Timeout = timeout
+	} else {
+		httpClient = normalizeHTTPClient(httpClient, timeout)
 	}
 	cl := &Client{
-		apiKey:     apiKey,
-		baseURL:    baseURL,
-		httpClient: httpClient,
-		apiKeyErr:  validateAPIKey(apiKey),
+		apiKey:           apiKey,
+		baseURL:          baseURL,
+		httpClient:       httpClient,
+		apiKeyErr:        validateAPIKey(apiKey),
 		maxResponseBytes: maxResponseBytes,
 	}
 	cl.Emails = &EmailsAPI{client: cl}
@@ -130,6 +133,41 @@ func newDefaultHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+func normalizeHTTPClient(client *http.Client, timeout time.Duration) *http.Client {
+	if client == nil {
+		return newDefaultHTTPClient(timeout)
+	}
+	normalized := *client
+	if normalized.Timeout == 0 {
+		normalized.Timeout = timeout
+	}
+
+	transport, ok := normalized.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		return &normalized
+	}
+
+	clone := transport.Clone()
+	if clone.MaxIdleConns == 0 {
+		clone.MaxIdleConns = defaultMaxIdleConns
+	}
+	if clone.MaxIdleConnsPerHost == 0 {
+		clone.MaxIdleConnsPerHost = defaultMaxIdleConnsPerHost
+	}
+	if clone.IdleConnTimeout == 0 {
+		clone.IdleConnTimeout = defaultIdleConnTimeout
+	}
+	if clone.TLSHandshakeTimeout == 0 {
+		clone.TLSHandshakeTimeout = defaultTLSHandshakeTimeout
+	}
+	if clone.ExpectContinueTimeout == 0 {
+		clone.ExpectContinueTimeout = defaultExpectContinueTimeout
+	}
+
+	normalized.Transport = clone
+	return &normalized
+}
+
 func validateAPIKey(apiKey string) error {
 	if apiKey == "" || !apiKeyPattern.MatchString(apiKey) {
 		return fmt.Errorf("apexmail: invalid API key format")
@@ -141,24 +179,24 @@ func validateSendEmailRequest(req *SendEmailRequest) error {
 	if req == nil {
 		return fmt.Errorf("apexmail: send request is required")
 	}
-	if req.From.Email == "" || !emailPattern.MatchString(req.From.Email) {
+	if req.From.Email == "" || !isValidEmailAddress(req.From.Email) {
 		return fmt.Errorf("apexmail: invalid from address")
 	}
 	if len(req.To) == 0 {
 		return fmt.Errorf("apexmail: at least one recipient is required")
 	}
 	for _, recipient := range req.To {
-		if recipient.Email == "" || !emailPattern.MatchString(recipient.Email) {
+		if recipient.Email == "" || !isValidEmailAddress(recipient.Email) {
 			return fmt.Errorf("apexmail: invalid to address")
 		}
 	}
 	for _, recipient := range req.CC {
-		if recipient.Email == "" || !emailPattern.MatchString(recipient.Email) {
+		if recipient.Email == "" || !isValidEmailAddress(recipient.Email) {
 			return fmt.Errorf("apexmail: invalid cc address")
 		}
 	}
 	for _, recipient := range req.BCC {
-		if recipient.Email == "" || !emailPattern.MatchString(recipient.Email) {
+		if recipient.Email == "" || !isValidEmailAddress(recipient.Email) {
 			return fmt.Errorf("apexmail: invalid bcc address")
 		}
 	}
@@ -169,6 +207,23 @@ func validateSendEmailRequest(req *SendEmailRequest) error {
 		return fmt.Errorf("apexmail: html, text, or templateId is required")
 	}
 	return nil
+}
+
+func isValidEmailAddress(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	if _, err := mail.ParseAddress(trimmed); err == nil {
+		parts := strings.Split(trimmed, "@")
+		if len(parts) == 2 {
+			domain := strings.TrimSpace(parts[1])
+			if strings.Contains(domain, ".") {
+				return true
+			}
+		}
+	}
+	return emailPattern.MatchString(trimmed)
 }
 
 // WebhookSignatureOptions configures webhook signature verification.
@@ -243,8 +298,16 @@ func absInt64(value int64) int64 {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out interface{}, idempotencyKey ...string) error {
-	if c.apiKeyErr != nil {
-		return c.apiKeyErr
+	c.mu.RLock()
+	apiKeyErr := c.apiKeyErr
+	apiKey := c.apiKey
+	baseURL := c.baseURL
+	httpClient := c.httpClient
+	maxResponseBytes := c.maxResponseBytes
+	c.mu.RUnlock()
+
+	if apiKeyErr != nil {
+		return apiKeyErr
 	}
 
 	var bodyBytes []byte
@@ -257,15 +320,19 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 	}
 
 	for attempt := 0; attempt <= defaultMaxRetries; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return &NetworkError{Message: "request canceled", Cause: ctxErr}
+		}
+
 		var bodyReader io.Reader
 		if len(bodyBytes) > 0 {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+		req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bodyReader)
 		if err != nil {
 			return &NetworkError{Message: "create request: " + err.Error(), Cause: err}
 		}
-		req.Header.Set("X-API-Key", c.apiKey)
+		req.Header.Set("X-API-Key", apiKey)
 		req.Header.Set("User-Agent", "apexmail-go/"+sdkVersion)
 		if bodyReader != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -274,24 +341,30 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			req.Header.Set("X-Idempotency-Key", idempotencyKey[0])
 		}
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			if attempt < defaultMaxRetries {
-				time.Sleep(calculateBackoff(attempt))
+				if sleepErr := sleepWithContext(ctx, calculateBackoff(attempt)); sleepErr != nil {
+					return &NetworkError{Message: "request canceled", Cause: sleepErr}
+				}
 				continue
 			}
 			return &NetworkError{Message: err.Error(), Cause: err}
 		}
 
-		respBody, readErr := readLimitedBody(resp, c.maxResponseBytes)
-		resp.Body.Close()
+		respBody, readErr := func() ([]byte, error) {
+			defer resp.Body.Close()
+			return readLimitedBody(resp, maxResponseBytes)
+		}()
 		if readErr != nil {
 			return readErr
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
 			if attempt < defaultMaxRetries {
-				time.Sleep(retryDelay(resp, attempt))
+				if sleepErr := sleepWithContext(ctx, retryDelay(resp, attempt)); sleepErr != nil {
+					return &NetworkError{Message: "request canceled", Cause: sleepErr}
+				}
 				continue
 			}
 		}
@@ -300,6 +373,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			var apiErr APIError
 			if jsonErr := json.Unmarshal(respBody, &apiErr); jsonErr != nil {
 				apiErr.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
+				apiErr.Code = "invalid_error_payload"
 			}
 			apiErr.StatusCode = resp.StatusCode
 			switch resp.StatusCode {
@@ -326,14 +400,18 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 	return &NetworkError{Message: "request failed after retries", Cause: nil}
 }
 
-
 func readLimitedBody(resp *http.Response, maxBytes int64) ([]byte, error) {
-	limited := io.LimitReader(resp.Body, maxBytes+1)
+	limited := io.LimitReader(resp.Body, maxBytes)
 	respBody, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, &NetworkError{Message: "read response body: " + err.Error(), Cause: err}
 	}
-	if int64(len(respBody)) > maxBytes {
+	extra := make([]byte, 1)
+	n, readErr := resp.Body.Read(extra)
+	if readErr != nil && readErr != io.EOF {
+		return nil, &NetworkError{Message: "read response body overflow: " + readErr.Error(), Cause: readErr}
+	}
+	if n > 0 {
 		return nil, &NetworkError{Message: "response body too large", Cause: nil}
 	}
 	return respBody, nil
@@ -375,11 +453,31 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 }
 
 func calculateBackoff(attempt int) time.Duration {
-	delay := defaultInitialBackoff * time.Duration(1<<attempt)
+	if attempt < 0 {
+		attempt = 0
+	}
+	if attempt > 20 {
+		attempt = 20
+	}
+	delay := defaultInitialBackoff * time.Duration(1<<uint(attempt))
 	if delay > defaultMaxBackoff {
 		return defaultMaxBackoff
 	}
 	return delay
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // APIError represents an error response from the ApexMail API.
@@ -448,21 +546,21 @@ type EmailsAPI struct{ client *Client }
 
 // SendEmailRequest is the request body for sending a single email.
 type SendEmailRequest struct {
-	From           EmailAddress  `json:"from"`
-	To             []EmailAddress `json:"to"`
-	CC             []EmailAddress `json:"cc,omitempty"`
-	BCC            []EmailAddress `json:"bcc,omitempty"`
-	ReplyTo        *EmailAddress `json:"replyTo,omitempty"`
-	Subject        string       `json:"subject"`
-	HTML           string       `json:"html,omitempty"`
-	Text           string       `json:"text,omitempty"`
-	TemplateID     string       `json:"templateId,omitempty"`
-	TemplateData   interface{}  `json:"templateData,omitempty"`
-	Attachments    []Attachment `json:"attachments,omitempty"`
-	Tags           []string     `json:"tags,omitempty"`
-	Priority       string       `json:"priority,omitempty"`
-	ScheduledAt    string       `json:"scheduledAt,omitempty"`
-	Metadata       interface{}  `json:"metadata,omitempty"`
+	From         EmailAddress   `json:"from"`
+	To           []EmailAddress `json:"to"`
+	CC           []EmailAddress `json:"cc,omitempty"`
+	BCC          []EmailAddress `json:"bcc,omitempty"`
+	ReplyTo      *EmailAddress  `json:"replyTo,omitempty"`
+	Subject      string         `json:"subject"`
+	HTML         string         `json:"html,omitempty"`
+	Text         string         `json:"text,omitempty"`
+	TemplateID   string         `json:"templateId,omitempty"`
+	TemplateData interface{}    `json:"templateData,omitempty"`
+	Attachments  []Attachment   `json:"attachments,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	Priority     string         `json:"priority,omitempty"`
+	ScheduledAt  string         `json:"scheduledAt,omitempty"`
+	Metadata     interface{}    `json:"metadata,omitempty"`
 }
 
 // SendOptions configures optional behavior for Emails.Send.

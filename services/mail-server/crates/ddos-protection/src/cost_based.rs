@@ -117,9 +117,8 @@ impl CostBasedLimiter {
         
         let total_cost = cost.total_cost();
         
-        // Check system-wide budget first (atomic)
-        let system_remaining = self.system_budget.load(Ordering::Relaxed);
-        if total_cost > system_remaining {
+        // Reserve system-wide budget first using CAS to avoid TOCTOU race
+        if !self.reserve_system_budget(total_cost) {
             return CostDecision::SystemOverloaded {
                 retry_after: Duration::from_secs(5),
             };
@@ -147,6 +146,8 @@ impl CostBasedLimiter {
         
         if total_cost > budget.remaining {
             let wait_secs = (total_cost - budget.remaining) / budget.refill_rate.max(1) + 1;
+            // Tenant exceeded quota after system reservation; refund reservation.
+            self.refund_system_budget(total_cost);
             return CostDecision::QuotaExceeded {
                 remaining: budget.remaining,
                 retry_after: Duration::from_secs(wait_secs),
@@ -155,20 +156,6 @@ impl CostBasedLimiter {
         
         // Deduct cost
         budget.remaining -= total_cost;
-        // Use CAS loop to prevent underflow on the global atomic counter
-        loop {
-            let current = self.system_budget.load(Ordering::Relaxed);
-            let new_val = current.saturating_sub(total_cost);
-            match self.system_budget.compare_exchange(
-                current,
-                new_val,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(_) => continue,
-            }
-        }
         
         CostDecision::Allowed {
             cost: total_cost,
@@ -280,6 +267,37 @@ impl CostBasedLimiter {
     pub fn tracked_tenants(&self) -> usize {
         self.tenant_budgets.len()
     }
+
+    fn reserve_system_budget(&self, amount: u64) -> bool {
+        loop {
+            let current = self.system_budget.load(Ordering::Relaxed);
+            if current < amount {
+                return false;
+            }
+            let new_val = current - amount;
+            if self
+                .system_budget
+                .compare_exchange(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn refund_system_budget(&self, amount: u64) {
+        loop {
+            let current = self.system_budget.load(Ordering::Relaxed);
+            let new_val = current.saturating_add(amount).min(self.system_capacity);
+            if self
+                .system_budget
+                .compare_exchange(current, new_val, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
 }
 
 /// Cost-based rate limit decision
@@ -326,10 +344,8 @@ mod tests {
         let limiter = CostBasedLimiter::new(config);
         
         // First request should be allowed
-        match limiter.check("tenant1", "/v1/health", None) {
-            CostDecision::Allowed { .. } => {}
-            _ => panic!("Expected Allowed"),
-        }
+        let first = limiter.check("tenant1", "/v1/health", None);
+        assert!(matches!(first, CostDecision::Allowed { .. }), "Expected Allowed");
         
         // Exhaust budget
         for _ in 0..100 {
@@ -337,15 +353,11 @@ mod tests {
         }
         
         // Should be rate limited now
-        match limiter.check("tenant1", "/v1/messages/:id", None) {
-            CostDecision::QuotaExceeded { .. } => {}
-            d => panic!("Expected QuotaExceeded, got {:?}", d),
-        }
+        let limited = limiter.check("tenant1", "/v1/messages/:id", None);
+        assert!(matches!(limited, CostDecision::QuotaExceeded { .. }), "Expected QuotaExceeded, got {:?}", limited);
         
         // Different tenant should still work
-        match limiter.check("tenant2", "/v1/health", None) {
-            CostDecision::Allowed { .. } => {}
-            _ => panic!("Expected Allowed for different tenant"),
-        }
+        let other_tenant = limiter.check("tenant2", "/v1/health", None);
+        assert!(matches!(other_tenant, CostDecision::Allowed { .. }), "Expected Allowed for different tenant");
     }
 }

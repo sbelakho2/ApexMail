@@ -486,10 +486,25 @@ mod tests {
     #[test]
     fn enterprise_has_all_premium_features() {
         let plans = default_plans();
-        let ent = plans.iter().find(|p| p.name == "enterprise").unwrap();
-        assert!(ent.features.sso_enabled);
-        assert!(ent.features.hipaa_compliance);
-        assert!(ent.features.private_cloud);
-        assert_eq!(ent.features.support_level, SupportLevel::Dedicated);
+        let ent_features = plans
+            .iter()
+            .find(|p| p.name == "enterprise")
+            .map(|p| p.features.clone());
+        assert!(ent_features.as_ref().map(|f| f.sso_enabled).unwrap_or(false));
+        assert!(ent_features
+            .as_ref()
+            .map(|f| f.hipaa_compliance)
+            .unwrap_or(false));
+        assert!(ent_features
+            .as_ref()
+            .map(|f| f.private_cloud)
+            .unwrap_or(false));
+        assert_eq!(
+            ent_features
+                .as_ref()
+                .map(|f| f.support_level)
+                .unwrap_or(SupportLevel::Community),
+            SupportLevel::Dedicated
+        );
     }
 }

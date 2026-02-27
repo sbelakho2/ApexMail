@@ -276,8 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn test_volume_shared_always_allowed() {
-        assert!(check_volume_logic(&VolumeAllocationMode::Shared, 999999, Some(100), 0));
+    fn test_volume_shared_requires_headroom() {
+        assert!(!check_volume_logic(&VolumeAllocationMode::Shared, 999999, Some(100), 0));
+        assert!(check_volume_logic(&VolumeAllocationMode::Shared, 999999, Some(100), 1));
     }
 
     #[test]

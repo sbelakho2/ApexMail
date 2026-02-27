@@ -1,6 +1,7 @@
 //! Bot detection – 5-signal scoring, UA matching, velocity tracking.
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use regex::Regex;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -69,7 +70,7 @@ pub struct BotDetectionService {
     /// counter (e.g., `bot:velocity:{ip}:{minute}`) for shared state.
     /// Current in-memory approach is acceptable for single-replica or when
     /// per-replica velocity detection is sufficient (bots typically target all replicas).
-    velocity_cache: Arc<DashMap<String, Vec<Instant>>>,
+    velocity_cache: Arc<DashMap<String, Arc<RwLock<Vec<Instant>>>>>,
 }
 
 impl BotDetectionService {
@@ -82,7 +83,7 @@ impl BotDetectionService {
     /// Detect if a click event is from a bot.
     pub fn detect(&self, event: &ClickEvent) -> BotDetectionResult {
         let mut score = 0.0;
-        let mut signals = Vec::new();
+        let mut signals = Vec::with_capacity(5);
 
         // Signal 1: User-Agent match
         if let Some(ref ua) = event.user_agent {
@@ -151,17 +152,23 @@ impl BotDetectionService {
             self.cleanup_velocity_cache();
         }
 
-        let mut entry = self.velocity_cache.entry(ip.to_string()).or_insert_with(Vec::new);
-        entry.retain(|t| now.duration_since(*t) < window);
-        entry.push(now);
-        entry.len()
+        let entry = self
+            .velocity_cache
+            .entry(ip.to_string())
+            .or_insert_with(|| Arc::new(RwLock::new(Vec::new())))
+            .clone();
+        let mut timestamps = entry.write();
+        timestamps.retain(|t| now.duration_since(*t) < window);
+        timestamps.push(now);
+        timestamps.len()
     }
 
     fn cleanup_velocity_cache(&self) {
         let cutoff = Instant::now() - Duration::from_secs(600);
         self.velocity_cache.retain(|_, v| {
-            v.retain(|t| *t > cutoff);
-            !v.is_empty()
+            let mut timestamps = v.write();
+            timestamps.retain(|t| *t > cutoff);
+            !timestamps.is_empty()
         });
     }
 

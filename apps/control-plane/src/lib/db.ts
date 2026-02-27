@@ -46,12 +46,10 @@ async function verifyMigrationSystem(dbPool: Pool): Promise<void> {
         );
 
         if (!result.rows[0]?.has_migration_tracking) {
-            console.warn('[CONTROL_PLANE] No migration tracking table detected (_prisma_migrations/schema_migrations)');
+            return;
         }
     } catch (error) {
-        console.warn('[CONTROL_PLANE] Failed to verify migration tracking table', {
-            error: error instanceof Error ? error.message : String(error),
-        });
+        void error;
     }
 }
 

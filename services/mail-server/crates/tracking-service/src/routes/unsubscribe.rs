@@ -166,7 +166,7 @@ pub async fn handle_unsub_get(
 // ── GET /p/:token ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-#[allow(dead_code)] // `saved` populated by Serde from query params; field used in future confirmation-UX branch
+#[allow(unused)] // `saved` populated by Serde from query params; field used in future confirmation-UX branch
 pub struct PrefsQuery {
     saved: Option<String>,
 }

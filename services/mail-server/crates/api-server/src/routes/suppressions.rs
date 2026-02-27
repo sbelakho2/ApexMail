@@ -347,6 +347,7 @@ mod tests {
         let resp = BulkSuppressResponse {
             created: 5,
             duplicates: 2,
+            invalid: 0,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["created"], 5);

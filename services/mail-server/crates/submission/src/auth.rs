@@ -205,7 +205,7 @@ fn record_auth_failure(ip: IpAddr) {
 }
 
 /// Generate a password hash
-#[allow(dead_code)]
+#[allow(unused)]
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()

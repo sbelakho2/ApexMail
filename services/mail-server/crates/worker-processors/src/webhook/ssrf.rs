@@ -9,7 +9,7 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 use url::Url;
 
-use super::types::{BLOCKED_HOSTNAMES, DNS_CACHE_MAX_ENTRIES, DNS_CACHE_TTL_SECS};
+use super::types::{dns_cache_max_entries, dns_cache_ttl_secs, BLOCKED_HOSTNAMES};
 use crate::common::{ProcessorError, ProcessorResult};
 
 /// DNS resolver with caching and SSRF protection.
@@ -29,8 +29,8 @@ impl SsrfValidator {
         let resolver = SSRF_RESOLVER.clone();
 
         let cache = Cache::builder()
-            .max_capacity(DNS_CACHE_MAX_ENTRIES)
-            .time_to_live(Duration::from_secs(DNS_CACHE_TTL_SECS))
+                .max_capacity(dns_cache_max_entries())
+                .time_to_live(Duration::from_secs(dns_cache_ttl_secs()))
             .build();
 
         // Load extra blocked hosts from environment
@@ -171,8 +171,8 @@ impl Default for SsrfValidator {
             Self {
                 resolver: SSRF_RESOLVER.clone(),
                 cache: Cache::builder()
-                    .max_capacity(DNS_CACHE_MAX_ENTRIES)
-                    .time_to_live(Duration::from_secs(DNS_CACHE_TTL_SECS))
+                    .max_capacity(dns_cache_max_entries())
+                    .time_to_live(Duration::from_secs(dns_cache_ttl_secs()))
                     .build(),
                 extra_blocked_hosts: Vec::new(),
             }

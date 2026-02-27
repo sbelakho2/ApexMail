@@ -201,10 +201,9 @@ impl VersionRegistry {
 /// Helper: build a `DateTime<Utc>` from y/m/d.
 fn date(year: i32, month: u32, day: u32) -> DateTime<Utc> {
     NaiveDate::from_ymd_opt(year, month, day)
-        .expect("valid date")
-        .and_hms_opt(0, 0, 0)
-        .expect("valid time")
-        .and_utc()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc())
+        .unwrap_or_else(Utc::now)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

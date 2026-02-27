@@ -90,6 +90,17 @@ pub enum ConnectionAnomaly {
     },
 }
 
+/// Statistics about the connection tracker state
+#[derive(Debug, Clone)]
+pub struct TrackerStats {
+    /// Number of active tracked connections
+    pub active_connections: usize,
+    /// Number of IPs being tracked for half-open connections
+    pub tracked_ips_half_open: usize,
+    /// Number of IPs being tracked for port scanning
+    pub tracked_ips_portscan: usize,
+}
+
 impl ConnectionTracker {
     /// Create a new connection tracker
     pub fn new(
@@ -112,7 +123,7 @@ impl ConnectionTracker {
     /// Record a new connection attempt (SYN).
     /// Returns any detected anomalies.
     pub fn record_syn(&self, src_ip: IpAddr, dst_port: u16) -> Vec<ConnectionAnomaly> {
-        let mut anomalies = Vec::new();
+        let mut anomalies = Vec::with_capacity(3);
         let now = Instant::now();
 
         // Update connection table
@@ -198,6 +209,84 @@ impl ConnectionTracker {
         self.connections.retain(|_, conn| {
             now.duration_since(conn.last_seen) < timeout
         });
+    }
+
+    /// Comprehensive cleanup including all trackers
+    /// Should be called periodically (e.g., every 30-60 seconds)
+    /// Returns number of entries removed
+    pub fn cleanup_all(&self, connection_timeout: std::time::Duration, tracker_timeout: std::time::Duration) -> usize {
+        let now = Instant::now();
+        let mut removed = 0;
+        
+        // 1. Clean expired connections
+        let before = self.connections.len();
+        self.connections.retain(|_, conn| {
+            now.duration_since(conn.last_seen) < connection_timeout
+        });
+        removed += before - self.connections.len();
+        
+        // 2. Clean half_open_counts for IPs with no recent connections
+        // IPs with 0 half-open connections can be removed
+        self.half_open_counts.retain(|ip, count| {
+            if *count == 0 {
+                removed += 1;
+                return false;
+            }
+            // Also remove if we have no active connections from this IP
+            let has_active = self.connections.iter().any(|entry| &entry.key().0 == ip);
+            if !has_active {
+                removed += 1;
+                return false;
+            }
+            true
+        });
+        
+        // 3. Clean port scan tracker entries that are stale
+        self.port_scan.retain(|_, tracker| {
+            // Remove ports outside the tracking window
+            tracker.ports.retain(|(_, ts)| now.duration_since(*ts) < tracker_timeout);
+            // If no recent ports and not flagged, remove the entry
+            if tracker.ports.is_empty() && !tracker.flagged {
+                removed += 1;
+                return false;
+            }
+            true
+        });
+        
+        removed
+    }
+
+    /// Reset all tracking state.
+    ///
+    /// **Warning**: This clears all tracked connections, half-open counts, and
+    /// port scan state. In production, this should ONLY be called through an
+    /// audited admin path. Every reset call should be accompanied by a security
+    /// event emission in the calling code.
+    ///
+    /// Returns the number of entries that were cleared.
+    pub fn reset(&self) -> usize {
+        let cleared = self.connections.len()
+            + self.half_open_counts.len()
+            + self.port_scan.len();
+        tracing::warn!(
+            connections = self.connections.len(),
+            half_open_ips = self.half_open_counts.len(),
+            portscan_ips = self.port_scan.len(),
+            "Connection tracker RESET — all state cleared (audit event required)"
+        );
+        self.connections.clear();
+        self.half_open_counts.clear();
+        self.port_scan.clear();
+        cleared
+    }
+
+    /// Get statistics about tracker memory usage
+    pub fn stats(&self) -> TrackerStats {
+        TrackerStats {
+            active_connections: self.connections.len(),
+            tracked_ips_half_open: self.half_open_counts.len(),
+            tracked_ips_portscan: self.port_scan.len(),
+        }
     }
 
     /// Get current number of tracked connections

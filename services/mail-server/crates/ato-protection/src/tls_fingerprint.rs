@@ -58,15 +58,17 @@ impl TlsFingerprint {
             v => format!("t{:02x}", v),
         };
 
-        let cipher_strs: Vec<String> = cipher_suites
+        let mut sorted_ciphers: Vec<String> = cipher_suites
             .iter()
             .map(|c| format!("{:04x}", c))
             .collect();
+        sorted_ciphers.sort();
 
-        let ext_strs: Vec<String> = extensions
+        let mut sorted_exts: Vec<String> = extensions
             .iter()
             .map(|e| format!("{:04x}", e))
             .collect();
+        sorted_exts.sort();
 
         let sig_strs: Vec<String> = signature_algorithms
             .iter()
@@ -75,17 +77,11 @@ impl TlsFingerprint {
 
         let alpn_strs: Vec<String> = alpn.iter().map(|a| a.to_string()).collect();
 
-        // Build JA4-style fingerprint
-        let mut sorted_ciphers = cipher_strs.clone();
-        sorted_ciphers.sort();
-        let mut sorted_exts = ext_strs.clone();
-        sorted_exts.sort();
-
         let raw = format!(
             "{}_{}_{}_{}_{}",
             version_str,
-            cipher_strs.len(),
-            ext_strs.len(),
+            sorted_ciphers.len(),
+            sorted_exts.len(),
             sorted_ciphers.join(","),
             sorted_exts.join(",")
         );
@@ -98,8 +94,8 @@ impl TlsFingerprint {
         Self {
             hash,
             tls_version: version_str,
-            cipher_suites: cipher_strs,
-            extensions: ext_strs,
+            cipher_suites: sorted_ciphers,
+            extensions: sorted_exts,
             signature_algorithms: sig_strs,
             alpn_protocols: alpn_strs,
         }

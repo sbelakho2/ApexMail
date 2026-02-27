@@ -26,9 +26,9 @@ impl Default for DevExConfig {
         Self {
             port: 4200,
             host: "0.0.0.0".into(),
-            database_url: String::new(),
-            redis_url: String::new(),
-            webhook_signing_secret: String::new(),
+            database_url: "postgres://127.0.0.1:5432/apexmail".into(),
+            redis_url: "redis://127.0.0.1:6379".into(),
+            webhook_signing_secret: "devex-local-signing-secret".into(),
             cors_origins: vec!["*".into()],
             api_base_url: "https://api.apexmail.ee".into(),
             docs_base_url: "https://docs.apexmail.ee".into(),

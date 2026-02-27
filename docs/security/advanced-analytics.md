@@ -1,5 +1,6 @@
 # Advanced Analytics & Engagement Features
 
+
 ApexMail includes cutting-edge analytics and engagement features that provide a competitive advantage in email deliverability and subscriber relationship management.
 
 ## Overview
@@ -205,6 +206,7 @@ X-API-Key: YOUR_API_KEY
   },
   "trend": "improving"
 }
+```
 
 ### Component Scoring
 

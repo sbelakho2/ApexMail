@@ -50,6 +50,12 @@ const CATEGORY_CONFIG: Record<string, { label: string; bg: string; text: string;
     killswitch: { label: 'Killswitch', bg: 'bg-destructive/10', text: 'text-destructive', icon: 'Kill' },
 };
 
+const OVERRIDE_FORM_SCHEMA = {
+    tenantIdPattern: /^tenant-[a-z0-9-]+$/i,
+    tenantNameMinLength: 2,
+    reasonMinLength: 5,
+};
+
 function FeatureFlagsPageContent() {
     const searchParams = useSearchParams();
     const [flags, setFlags] = useState<FeatureFlag[]>([]);
@@ -62,6 +68,7 @@ function FeatureFlagsPageContent() {
     // Modal states
     const [editingFlag, setEditingFlag] = useState<FeatureFlag | null>(null);
     const [showAddOverride, setShowAddOverride] = useState(false);
+    const [overrideFormError, setOverrideFormError] = useState('');
 
     const loadData = useCallback(async () => {
         try {
@@ -502,18 +509,46 @@ function FeatureFlagsPageContent() {
                                 e.preventDefault();
                                 const form = e.target as HTMLFormElement;
                                 const formData = new FormData(form);
+                                const tenantId = (formData.get('tenantId') as string).trim();
+                                const tenantName = (formData.get('tenantName') as string).trim();
+                                const flagKey = (formData.get('flagKey') as string).trim();
+                                const reason = (formData.get('reason') as string).trim();
+
+                                if (!OVERRIDE_FORM_SCHEMA.tenantIdPattern.test(tenantId)) {
+                                    setOverrideFormError('Tenant ID must follow the format tenant-<id>.');
+                                    return;
+                                }
+                                if (tenantName.length < OVERRIDE_FORM_SCHEMA.tenantNameMinLength) {
+                                    setOverrideFormError(`Tenant name must be at least ${OVERRIDE_FORM_SCHEMA.tenantNameMinLength} characters.`);
+                                    return;
+                                }
+                                if (!flags.some(flag => flag.key === flagKey)) {
+                                    setOverrideFormError('Select a valid feature flag.');
+                                    return;
+                                }
+                                if (reason.length < OVERRIDE_FORM_SCHEMA.reasonMinLength) {
+                                    setOverrideFormError(`Reason must be at least ${OVERRIDE_FORM_SCHEMA.reasonMinLength} characters.`);
+                                    return;
+                                }
+
+                                setOverrideFormError('');
                                 const newOverride: TenantOverride = {
-                                    tenantId: formData.get('tenantId') as string,
-                                    tenantName: formData.get('tenantName') as string,
-                                    flagKey: formData.get('flagKey') as string,
+                                    tenantId,
+                                    tenantName,
+                                    flagKey,
                                     value: formData.get('value') === 'true',
-                                    reason: formData.get('reason') as string,
+                                    reason,
                                     createdAt: new Date().toISOString(),
                                 };
                                 setOverrides(prev => [...prev, newOverride]);
                                 setShowAddOverride(false);
                             }}
                         >
+                            {overrideFormError ? (
+                                <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
+                                    {overrideFormError}
+                                </div>
+                            ) : null}
                             <div>
                                 <label className="block text-sm font-medium text-foreground mb-1">Tenant ID</label>
                                 <input

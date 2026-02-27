@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 /// Sales Autopilot configuration.
 ///
@@ -59,7 +60,12 @@ impl SalesConfig {
                 .unwrap_or(30),
         };
         if let Err(err) = config.validate() {
-            panic!("Invalid sales-autopilot config: {err}");
+            error!(error = %err, "Invalid sales-autopilot config, falling back to defaults");
+            let fallback = Self::default();
+            if let Err(default_err) = fallback.validate() {
+                error!(error = %default_err, "Default sales-autopilot config failed validation");
+            }
+            return fallback;
         }
         config
     }

@@ -5,8 +5,9 @@ declare global {
     [guardKey]?: boolean;
   }
 
-  // eslint-disable-next-line no-var
-  var __apexmail_console_guard_installed__: boolean | undefined;
+  interface GlobalThis {
+    __apexmail_console_guard_installed__?: boolean;
+  }
 }
 
 function installConsoleGuard(): void {

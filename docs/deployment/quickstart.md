@@ -59,6 +59,15 @@ TRACKING_SECRET_KEY=your-secure-tracking-secret-minimum-32-characters
 
 # URLs
 TRACKING_BASE_URL=http://localhost:3001
+
+# Optional: login CAPTCHA protection (mCaptcha)
+# Keep server-side and frontend flags aligned
+MCAPTCHA_ENABLED=false
+NEXT_PUBLIC_MCAPTCHA_ENABLED=false
+# Required only when enabling CAPTCHA
+# MCAPTCHA_SITE_KEY=...
+# MCAPTCHA_SECRET=...
+# NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=...
 ```
 
 Generate secure secrets:
@@ -123,6 +132,29 @@ Readiness check (includes dependencies):
 ```bash
 curl http://localhost:3001/ready
 ```
+
+### Optional Login CAPTCHA Smoke Test
+
+If you enable mCaptcha, verify both login surfaces:
+
+1. Set these env values and restart frontend services:
+
+```env
+MCAPTCHA_ENABLED=true
+MCAPTCHA_SITE_KEY=your-site-key
+MCAPTCHA_SECRET=your-secret
+NEXT_PUBLIC_MCAPTCHA_ENABLED=true
+NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=https://your-mcaptcha-instance/widget-path
+```
+
+2. Open both login pages:
+  - `http://localhost:3000/login` (web)
+  - `http://localhost:4000/login` (control-plane)
+
+3. Confirm expected behavior:
+  - Widget is visible on both pages.
+  - Submitting without solving CAPTCHA shows a CAPTCHA-required error.
+  - Solving CAPTCHA allows normal auth flow.
 
 ## 6. Send Your First Email
 

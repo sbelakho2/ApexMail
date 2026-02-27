@@ -4,7 +4,6 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::{DdosProtector, ProtectionDecision, RequestContext};
 
@@ -203,6 +202,7 @@ pub fn extract_client_ip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_request_context_builder() {

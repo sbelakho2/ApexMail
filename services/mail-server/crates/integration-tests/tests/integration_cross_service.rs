@@ -295,7 +295,7 @@ fn devex_webhook_signing_verification() {
     use devex_service::webhook_tester::WebhookTester;
 
     let secret = "whsec_test_secret_123";
-    let tester = WebhookTester::new(secret.to_string());
+    let tester = WebhookTester::new(secret.to_string()).expect("webhook tester");
 
     // Build a test payload
     let payload = WebhookTester::build_test_payload("email.delivered");

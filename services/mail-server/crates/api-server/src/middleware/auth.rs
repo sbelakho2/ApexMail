@@ -44,8 +44,6 @@ pub struct JwtClaims {
 const API_KEY_CACHE_TTL: u64 = 10; // seconds
 const TOKEN_BLACKLIST_PREFIX: &str = "apexmail:token_blacklist:";
 const API_KEY_CACHE_PREFIX: &str = "apexmail:api_key_cache:";
-// SEC-008: Prefix for marking revoked API keys (short TTL marker)
-const API_KEY_REVOKED_PREFIX: &str = "apexmail:api_key_revoked:";
 
 // ─── Extractor ─────────────────────────────────────────────────
 
@@ -307,6 +305,7 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn test_api_key_hashing() {

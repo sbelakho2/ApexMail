@@ -17,7 +17,15 @@ use crate::types::{
 };
 
 /// Safety check interval during experiments.
-const SAFETY_CHECK_INTERVAL_MS: u64 = 5000;
+static SAFETY_CHECK_INTERVAL_MS: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    std::env::var("HA_CHAOS_SAFETY_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(5000)
+});
+/// Hard ceiling for a single experiment runtime.
+const MAX_EXPERIMENT_DURATION_MS: u64 = 60 * 60 * 1000;
 
 /// ChaosEngineeringService manages chaos experiments.
 pub struct ChaosEngineeringService {
@@ -62,6 +70,16 @@ impl ChaosEngineeringService {
         // Validate experiment type
         let _exp_type = ExperimentType::parse(&experiment_config.experiment_type)
             .ok_or_else(|| format!("Unknown experiment type: {}", experiment_config.experiment_type))?;
+
+        if experiment_config.parameters.duration_ms == 0 {
+            return Err("Experiment duration must be greater than 0ms".into());
+        }
+        if experiment_config.parameters.duration_ms > MAX_EXPERIMENT_DURATION_MS {
+            return Err(format!(
+                "Experiment duration exceeds hard limit of {}ms",
+                MAX_EXPERIMENT_DURATION_MS
+            ));
+        }
 
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -149,11 +167,11 @@ impl ChaosEngineeringService {
         running_experiments: Arc<RwLock<HashMap<Uuid, tokio::sync::watch::Sender<bool>>>>,
     ) {
         let start = std::time::Instant::now();
-        let duration = std::time::Duration::from_millis(duration_ms);
+        let duration = std::time::Duration::from_millis(duration_ms.min(MAX_EXPERIMENT_DURATION_MS));
 
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(SAFETY_CHECK_INTERVAL_MS)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(*SAFETY_CHECK_INTERVAL_MS)) => {
                     // Check safety thresholds
                     let current = Self::capture_metrics_with_collector(metrics_collector.as_ref()).await;
                     for check in &safety_checks {
@@ -263,7 +281,9 @@ impl ChaosEngineeringService {
     pub async fn abort_experiment(&self, id: Uuid) -> Result<(), String> {
         let running = self.running_experiments.read().await;
         if let Some(tx) = running.get(&id) {
-            let _ = tx.send(true);
+            if let Err(error) = tx.send(true) {
+                return Err(format!("Failed to send abort signal: {error}"));
+            }
             info!(experiment_id = %id, "Abort signal sent");
             Ok(())
         } else {
@@ -591,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_safety_check_interval_constant() {
-        assert_eq!(SAFETY_CHECK_INTERVAL_MS, 5000);
+        assert!(*SAFETY_CHECK_INTERVAL_MS >= 1);
     }
 
     #[test]

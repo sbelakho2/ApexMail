@@ -14,7 +14,7 @@ use std::time::Duration;
 use moka::future::Cache;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use trust_dns_resolver::TokioAsyncResolver;
@@ -62,8 +62,15 @@ impl Default for SmtpSenderConfig {
 
 /// Maximum entries in the MX cache
 const MX_CACHE_MAX: u64 = 10_000;
-const MAX_SMTP_RESPONSE_LINE: usize = 1000;
+static MAX_SMTP_RESPONSE_LINE: LazyLock<usize> = LazyLock::new(|| {
+    env::var("SMTP_MAX_RESPONSE_LINE")
+        .ok()
+        .and_then(|val| val.parse::<usize>().ok())
+        .filter(|val| *val > 0)
+        .unwrap_or(1000)
+});
 const MAX_EHLO_LINES: usize = 64;
+const MAX_CONNECTION_POOL_DOMAINS: usize = 2048;
 
 fn default_sender_hostname() -> String {
     env::var("SMTP_SENDER_HOSTNAME")
@@ -82,14 +89,14 @@ fn default_mx_cache_ttl_secs() -> u64 {
 /// Direct SMTP Sender - Enterprise-Grade Infrastructure
 pub struct SmtpSender {
     config: SmtpSenderConfig,
-    #[allow(dead_code)]
+    #[allow(unused)]
     from_domain: String,
     resolver: TokioAsyncResolver,
     dkim_signer: Option<DkimSigner>,
     /// MX cache with TTL and bounded size (#106/#107)
     mx_cache: Cache<String, Vec<String>>,
     /// Per-MX SMTP connection pool to reduce TCP/TLS handshakes
-    connection_pool: Mutex<HashMap<String, Vec<PooledStream>>>,
+    connection_pool: RwLock<HashMap<String, Vec<PooledStream>>>,
 }
 
 struct OutboundMetrics {
@@ -168,6 +175,7 @@ impl SmtpSender {
         dkim_signer: Option<DkimSigner>,
     ) -> Self {
         let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+        let mx_cache_ttl_secs = config.mx_cache_ttl_secs;
 
         Self {
             config,
@@ -176,9 +184,9 @@ impl SmtpSender {
             dkim_signer,
             mx_cache: Cache::builder()
                 .max_capacity(MX_CACHE_MAX)
-                .time_to_live(Duration::from_secs(config.mx_cache_ttl_secs))
+                .time_to_live(Duration::from_secs(mx_cache_ttl_secs))
                 .build(),
-            connection_pool: Mutex::new(HashMap::new()),
+            connection_pool: RwLock::new(HashMap::new()),
         }
     }
     
@@ -207,9 +215,9 @@ impl SmtpSender {
                 .push(recipient.clone());
         }
         
-        let mut all_accepted = Vec::new();
-        let mut all_rejected = Vec::new();
-        let mut last_response = String::new();
+        let mut all_accepted = Vec::with_capacity(to.len());
+        let mut all_rejected = Vec::with_capacity(to.len());
+        let mut last_response: Option<String> = None;
         
         // Generate a single Message-ID for the email (#103: avoid dual generation)
         let message_id = format!("<{}@{}>", uuid::Uuid::new_v4(), self.config.hostname);
@@ -235,12 +243,16 @@ impl SmtpSender {
                 let mx_servers = self.lookup_mx(&domain).await?;
                 if mx_servers.is_empty() {
                     warn!(domain = %domain, "No MX records found");
-                    return Ok((Vec::new(), recipients, String::new()));
+                    return Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
+                        Vec::new(),
+                        recipients,
+                        String::new(),
+                    ));
                 }
 
                 let mut sent = false;
-                let mut accepted = Vec::new();
-                let mut rejected = Vec::new();
+                let mut accepted = Vec::with_capacity(recipients.len());
+                let mut rejected = Vec::with_capacity(recipients.len());
                 let mut response = String::new();
                 for mx_host in &mx_servers {
                     match self
@@ -264,7 +276,11 @@ impl SmtpSender {
                     rejected.extend(recipients);
                 }
 
-                Ok((accepted, rejected, response))
+                Ok::<(Vec<String>, Vec<String>, String), anyhow::Error>((
+                    accepted,
+                    rejected,
+                    response,
+                ))
             });
         }
 
@@ -273,7 +289,7 @@ impl SmtpSender {
             all_accepted.extend(accepted);
             all_rejected.extend(rejected);
             if !response.is_empty() {
-                last_response = response;
+                last_response = Some(response);
             }
         }
         
@@ -284,7 +300,7 @@ impl SmtpSender {
         Ok(SmtpSendResult {
             success,
             message_id,
-            response: last_response,
+            response: last_response.unwrap_or_default(),
             accepted: all_accepted,
             rejected: all_rejected,
         })
@@ -326,9 +342,12 @@ impl SmtpSender {
         };
         
         // Cache the result (moka enforces TTL + max capacity)
-        self.mx_cache.insert(domain.to_string(), mx_servers.clone()).await;
-        
-        Ok(mx_servers)
+        self.mx_cache.insert(domain.to_string(), mx_servers).await;
+
+        self.mx_cache
+            .get(domain)
+            .await
+            .ok_or_else(|| anyhow!("MX cache insert/read inconsistency for {}", domain))
     }
     
     /// Send to a specific MX server
@@ -340,17 +359,21 @@ impl SmtpSender {
         message: &[u8],
         message_id: &str,
     ) -> Result<SmtpSendResult> {
+        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
+        let session_timeout = timeout_duration.saturating_mul(4);
+
         if let Some(stream) = self.take_pooled_connection(mx_host).await {
-            let (result, pooled) = self
-                .smtp_session_from_pool(stream, mx_host, from, recipients, message, message_id)
-                .await?;
+            let (result, pooled) = timeout(
+                session_timeout,
+                self.smtp_session_from_pool(stream, mx_host, from, recipients, message, message_id),
+            )
+            .await
+            .map_err(|_| anyhow!("Timed out reusing pooled SMTP session for {}", mx_host))??;
             if let Some(returned) = pooled {
                 self.return_pooled_connection(mx_host, returned).await;
             }
             return Ok(result);
         }
-
-        let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
 
         // Resolve MX host to IP
         let addrs = self.resolver.lookup_ip(mx_host).await?;
@@ -365,9 +388,12 @@ impl SmtpSender {
 
         // Connect with timeout
         let stream = timeout(timeout_duration, TcpStream::connect(socket_addr)).await??;
-        let (result, pooled) = self
-            .smtp_session_plain(stream, mx_host, from, recipients, message, message_id, true)
-            .await?;
+        let (result, pooled) = timeout(
+            session_timeout,
+            self.smtp_session_plain(stream, mx_host, from, recipients, message, message_id, true),
+        )
+        .await
+        .map_err(|_| anyhow!("Timed out SMTP session for {}", mx_host))??;
         if let Some(returned) = pooled {
             self.return_pooled_connection(mx_host, returned).await;
         }
@@ -426,8 +452,8 @@ impl SmtpSender {
         }
         
         // RCPT TO for each recipient
-        let mut accepted = Vec::new();
-        let mut rejected = Vec::new();
+        let mut accepted = Vec::with_capacity(recipients.len());
+        let mut rejected = Vec::with_capacity(recipients.len());
         
         for recipient in recipients {
             let rcpt_to = format!("RCPT TO:<{}>\r\n", recipient);
@@ -446,7 +472,9 @@ impl SmtpSender {
             // RSET and read response (#104: avoid stream desync)
             stream.write_all(b"RSET\r\n").await?;
             response.clear();
-            let _ = read_smtp_line_timeout(stream, &mut response, timeout_duration).await;
+            if let Err(error) = read_smtp_line_timeout(stream, &mut response, timeout_duration).await {
+                warn!(error = %error, "Failed to read SMTP response after RSET");
+            }
             return Ok(SmtpSendResult {
                 success: false,
                 message_id: message_id.to_string(),
@@ -513,7 +541,7 @@ impl SmtpSender {
         
         let date = Utc::now().to_rfc2822();
         
-        let mut msg = Vec::new();
+        let mut msg = Vec::with_capacity(1024);
         
         // Required headers — sanitize all user-supplied values (#101)
         let safe_from = Self::sanitize_header(from);
@@ -595,12 +623,17 @@ impl SmtpSender {
 
 impl SmtpSender {
     async fn take_pooled_connection(&self, mx_host: &str) -> Option<PooledStream> {
-        let mut pool = self.connection_pool.lock().await;
+        let mut pool = self.connection_pool.write().await;
         pool.get_mut(mx_host).and_then(|connections| connections.pop())
     }
 
     async fn return_pooled_connection(&self, mx_host: &str, stream: PooledStream) {
-        let mut pool = self.connection_pool.lock().await;
+        let mut pool = self.connection_pool.write().await;
+        if !pool.contains_key(mx_host) && pool.len() >= MAX_CONNECTION_POOL_DOMAINS {
+            drop(pool);
+            self.close_pooled_connection(stream).await;
+            return;
+        }
         let entry = pool.entry(mx_host.to_string()).or_default();
         if entry.len() < self.config.connection_pool_size {
             entry.push(stream);
@@ -614,11 +647,15 @@ impl SmtpSender {
         match stream {
             PooledStream::Plain(tcp_stream) => {
                 let mut stream = BufStream::new(tcp_stream);
-                let _ = self.send_quit(&mut stream).await;
+                if let Err(error) = self.send_quit(&mut stream).await {
+                    warn!(error = %error, "Failed to close pooled plaintext SMTP stream cleanly");
+                }
             }
             PooledStream::Tls(tls_stream) => {
                 let mut stream = BufStream::new(tls_stream);
-                let _ = self.send_quit(&mut stream).await;
+                if let Err(error) = self.send_quit(&mut stream).await {
+                    warn!(error = %error, "Failed to close pooled TLS SMTP stream cleanly");
+                }
             }
         }
     }
@@ -803,8 +840,12 @@ impl SmtpSender {
         let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
         stream.write_all(b"QUIT\r\n").await?;
         let mut response = String::new();
-        let _ = read_smtp_line_timeout(stream, &mut response, timeout_duration).await;
-        let _ = stream.shutdown().await;
+        if let Err(error) = read_smtp_line_timeout(stream, &mut response, timeout_duration).await {
+            warn!(error = %error, "No SMTP response received after QUIT");
+        }
+        if let Err(error) = stream.shutdown().await {
+            warn!(error = %error, "Failed to shutdown SMTP stream after QUIT");
+        }
         Ok(())
     }
 }
@@ -829,7 +870,7 @@ where
         };
 
         bytes.push(byte);
-        if bytes.len() > MAX_SMTP_RESPONSE_LINE {
+        if bytes.len() > *MAX_SMTP_RESPONSE_LINE {
             while let Ok(next) = reader.read_u8().await {
                 if next == b'\n' {
                     break;
@@ -868,7 +909,7 @@ async fn read_ehlo_response<S>(
 where
     S: AsyncRead + Unpin,
 {
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(MAX_EHLO_LINES);
     let mut response = String::new();
 
     for _ in 0..MAX_EHLO_LINES {

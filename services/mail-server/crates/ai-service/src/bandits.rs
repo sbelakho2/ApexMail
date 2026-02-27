@@ -45,7 +45,7 @@ impl BanditOptimizer {
             rng.gen_range(0..arms.len())
         } else {
             // Exploit: pick best conversion rate
-            arms.iter()
+            match arms.iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| {
                     a.conversion_rate()
@@ -53,7 +53,10 @@ impl BanditOptimizer {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(i, _)| i)
-                .unwrap()
+            {
+                Some(i) => i,
+                None => return Err(AiError::InvalidInput("no available bandit arms".into())),
+            }
         };
 
         Ok(arms[idx].id.clone())

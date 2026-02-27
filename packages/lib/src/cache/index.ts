@@ -137,15 +137,19 @@ export class RedisCacheProvider implements CacheProvider {
     try {
       return JSON.parse(value) as T;
     } catch (e) {
-      // BUG-010 FIX: Log parse error and delete corrupt cache entry
-      // This prevents stale data issues where parse always fails
       this.logger.error('Cache JSON parse error - deleting corrupt entry', {
         key,
         error: e instanceof Error ? e.message : String(e),
       });
-      // Delete the corrupt entry to allow fresh write
-      void this.client.del(this.key(key)).catch(() => { /* ignore delete errors */ });
-      return null;
+      try {
+        await this.client.del(this.key(key));
+      } catch (deleteError) {
+        this.logger.warn('Failed to delete corrupt cache entry', {
+          key,
+          error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+        });
+      }
+      throw new Error(`Corrupt cache payload for key: ${key}`);
     }
   }
 

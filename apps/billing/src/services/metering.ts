@@ -10,8 +10,11 @@
 
 import type { Redis } from 'ioredis';
 import { Result } from '@apexmail/lib';
+import { createLogger } from '@apexmail/lib/logger';
 import { generateId } from '@apexmail/lib/id';
 import type { DatabasePool } from '@apexmail/db';
+
+const logger = createLogger();
 
 export interface MeterEvent {
   id: string;
@@ -123,14 +126,17 @@ export class MeteringService {
     if (this.buffer.length >= this.config.maxBufferSize) {
       const flushResult = await this.flush();
       if (!flushResult.ok) {
-        console.error('[Metering] Flush attempt during buffer pressure failed:', flushResult.error.message);
+        logger.error('Flush attempt during buffer pressure failed', {
+          error: flushResult.error.message,
+        });
       }
 
       if (this.buffer.length >= this.config.maxBufferSize) {
         // Event is still durable in Redis pending key, but signal backpressure to caller
-        console.error(
-          `[Metering] Buffer at capacity (${this.config.maxBufferSize}); returning error for backpressure: ${event.id}`
-        );
+        logger.error('Metering buffer at capacity; returning backpressure error', {
+          maxBufferSize: this.config.maxBufferSize,
+          eventId: event.id,
+        });
         return Result.err(new Error('Metering buffer full - apply backpressure'));
       }
     }

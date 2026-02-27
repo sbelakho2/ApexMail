@@ -114,7 +114,7 @@ impl QueryEngine {
             rows.into_iter().collect();
 
         let stages = ["queued", "sent", "delivered", "opened", "clicked"];
-        let mut result: Vec<FunnelStage> = Vec::new();
+        let mut result: Vec<FunnelStage> = Vec::with_capacity(stages.len());
         let mut prev_count: Option<i64> = None;
 
         for stage in &stages {

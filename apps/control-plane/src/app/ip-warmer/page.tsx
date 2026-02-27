@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { formatNumber, cn, timeAgo } from '../../lib/utils';
 import { useDialog } from '../../components/ui/confirm-dialog';
 import { PageLoadingState } from '../../components/ui/async-state';
+import { IPWarmupInfo, STATUS_CONFIG, WarmupPoolInfo, WarmupScheduleInfo } from './types';
 
 /**
  * IP Warmer Management - Dedicated IP warming interface
@@ -16,47 +17,6 @@ import { PageLoadingState } from '../../components/ui/async-state';
  * - Trigger daily warmup advancement
  * - View ISP-specific warmup schedules
  */
-
-// Types matching the backend WarmupManager
-interface IPWarmupInfo {
-    id: string;
-    ipAddress: string;
-    poolId: string;
-    warmupDay: number;
-    dailyLimit: number;
-    dailySent: number;
-    warmupStartedAt: string | null;
-    status: 'active' | 'paused' | 'inactive';
-    isFullyWarmed: boolean;
-    nextDayLimit: number | null;
-    utilizationPercent: number;
-}
-
-interface WarmupPoolInfo {
-    id: string;
-    name: string;
-    tenantId: string;
-    ipCount: number;
-    activeIPs: number;
-    totalDailyLimit: number;
-    totalDailySent: number;
-    utilizationPercent: number;
-}
-
-interface WarmupScheduleInfo {
-    schedule: number[];
-    maxDay: number;
-    maxLimit: number;
-}
-
-// Demo data matching backend structures
-
-
-const STATUS_CONFIG: Record<string, { label: string; color: string; bgColor: string; borderColor: string }> = {
-    active: { label: 'Active', color: 'text-success', bgColor: 'bg-success/10', borderColor: 'border-success/20' },
-    paused: { label: 'Paused', color: 'text-warning', bgColor: 'bg-warning/10', borderColor: 'border-warning/20' },
-    inactive: { label: 'Not Started', color: 'text-muted-foreground', bgColor: 'bg-muted', borderColor: 'border-border' },
-};
 
 export default function IPWarmerPage() {
     const dialog = useDialog();
@@ -116,7 +76,7 @@ export default function IPWarmerPage() {
             setLastRefreshedAt(new Date().toISOString());
             setIsStale(false);
         } catch (err) {
-            console.error('Failed to load warmup data:', err);
+            void err;
         } finally {
             setLoading(false);
         }
@@ -132,7 +92,7 @@ export default function IPWarmerPage() {
             setLastRefreshedAt(new Date().toISOString());
             setIsStale(false);
         } catch (err) {
-            console.error('Failed to load pool IPs:', err);
+            void err;
             setPoolIPs([]);
         }
     }

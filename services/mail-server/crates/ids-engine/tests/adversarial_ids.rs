@@ -391,3 +391,15 @@ fn test_rcpt_to_no_false_positive() {
     assert_eq!(verdict, IdsVerdict::Pass);
 }
 
+#[test]
+fn test_rcpt_to_burst_detected() {
+    let engine = ids_engine();
+    let payload = b"RCPT TO:<a@example.com>\r\nRCPT TO:<b@example.com>\r\nRCPT TO:<c@example.com>\r\n";
+    let (_verdict, alerts) = engine.inspect(src_ip(), 25, "smtp", payload);
+    assert!(
+        alerts.iter().any(|a| a.id == 3000007),
+        "Expected SMTP RCPT burst anomaly (3000007), got: {:?}",
+        alerts.iter().map(|a| a.id).collect::<Vec<_>>()
+    );
+}
+

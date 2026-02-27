@@ -403,6 +403,54 @@ impl IsolationForest {
             is_trained: !self.trees.is_empty(),
         }
     }
+
+    /// Serialize the trained model (trees + config) to a JSON byte vector
+    /// for persistence across restarts.
+    ///
+    /// Call this after `train()` or `retrain()` and write the bytes to a file
+    /// or object store. On next startup, use [`Self::restore_snapshot`] to
+    /// warm-start the model instead of waiting for the online buffer to fill.
+    ///
+    /// Returns `None` if no trees have been trained yet.
+    pub fn snapshot(&self) -> Option<Vec<u8>> {
+        if self.trees.is_empty() {
+            return None;
+        }
+        let snap = ModelSnapshot {
+            trees: self.trees.clone(),
+            sample_size: self.sample_size,
+            config: self.config.clone(),
+        };
+        serde_json::to_vec(&snap).ok()
+    }
+
+    /// Restore a model from a previously saved snapshot.
+    ///
+    /// This replaces the current trees and configuration, allowing the model
+    /// to start scoring immediately without waiting for online learning data.
+    /// The training buffer is NOT restored — new observations will accumulate
+    /// and eventually trigger a `retrain()` that incorporates fresh data.
+    pub fn restore_snapshot(snapshot_bytes: &[u8]) -> Option<Self> {
+        let snap: ModelSnapshot = serde_json::from_slice(snapshot_bytes).ok()?;
+        Some(Self {
+            trees: snap.trees,
+            sample_size: snap.sample_size,
+            config: snap.config.clone(),
+            training_buffer: RwLock::new(VecDeque::new()),
+            samples_at_last_training: AtomicUsize::new(0),
+        })
+    }
+}
+
+/// Serializable snapshot of a trained Isolation Forest model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSnapshot {
+    /// Trained trees
+    pub trees: Vec<IsolationTree>,
+    /// Sample size used for training
+    pub sample_size: usize,
+    /// Configuration at time of snapshot
+    pub config: IsolationForestConfig,
 }
 
 /// Model statistics

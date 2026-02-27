@@ -37,17 +37,24 @@ use zeroize::Zeroizing;
 
 const AES_GCM_NONCE_LEN: usize = 12;
 const HKDF_DERIVED_LEN: usize = 32;
-const AES128_ENABLED: bool = false;
-const DEFAULT_ARGON2_MEMORY_KIB: u32 = 65_536;
+const AES128_ENABLED: bool = true;
+const DEFAULT_ARGON2_MEMORY_KIB: u32 = 32_768;
 const MAX_RSA_BITS: u32 = 4096;
+const MAX_RANDOM_BYTES: usize = 1_048_576;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Generate cryptographically-random bytes using the OS RNG.
-fn random_bytes(n: usize) -> Vec<u8> {
+fn random_bytes(n: usize) -> Result<Vec<u8>> {
+    if n > MAX_RANDOM_BYTES {
+        return Err(napi::Error::from_reason(format!(
+            "requested byte length exceeds {} bytes",
+            MAX_RANDOM_BYTES
+        )));
+    }
     let mut buf = vec![0u8; n];
     OsRng.fill_bytes(&mut buf);
-    buf
+    Ok(buf)
 }
 
 // ─── AES-GCM encryption ───────────────────────────────────────────────────────
@@ -65,21 +72,21 @@ pub fn encrypt_aes128_gcm(
     plaintext: Buffer,
     aad: Option<Buffer>,
 ) -> Result<Buffer> {
-    if !AES128_ENABLED {
-        return Err(napi::Error::from_reason(
-            "AES-128-GCM is disabled; use AES-256-GCM",
-        ));
-    }
     if key.len() != 16 {
         return Err(napi::Error::from_reason(format!(
             "AES-128-GCM key must be 16 bytes, got {}",
             key.len()
         )));
     }
+    if !AES128_ENABLED {
+        return Err(napi::Error::from_reason(
+            "AES-128-GCM is disabled; use AES-256-GCM",
+        ));
+    }
     let cipher = Aes128Gcm::new_from_slice(&key).map_err(|e| {
         napi::Error::from_reason(format!("invalid key: {e}"))
     })?;
-    let nonce_bytes = random_bytes(AES_GCM_NONCE_LEN);
+    let nonce_bytes = random_bytes(AES_GCM_NONCE_LEN)?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let payload = AeadPayload {
         msg: &plaintext,
@@ -103,18 +110,18 @@ pub fn decrypt_aes128_gcm(
     ciphertext: Buffer,
     aad: Option<Buffer>,
 ) -> Result<Buffer> {
-    if !AES128_ENABLED {
-        return Err(napi::Error::from_reason(
-            "AES-128-GCM is disabled; use AES-256-GCM",
-        ));
-    }
     if key.len() != 16 {
         return Err(napi::Error::from_reason(format!(
             "AES-128-GCM key must be 16 bytes, got {}",
             key.len()
         )));
     }
-    if ciphertext.len() < AES_GCM_NONCE_LEN + 16 {
+    if !AES128_ENABLED {
+        return Err(napi::Error::from_reason(
+            "AES-128-GCM is disabled; use AES-256-GCM",
+        ));
+    }
+    if ciphertext.len() <= AES_GCM_NONCE_LEN + 16 {
         return Err(napi::Error::from_reason("ciphertext too short"));
     }
     let cipher = Aes128Gcm::new_from_slice(&key).map_err(|e| {
@@ -151,7 +158,7 @@ pub fn encrypt_aes256_gcm(
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| {
         napi::Error::from_reason(format!("invalid key: {e}"))
     })?;
-    let nonce_bytes = random_bytes(AES_GCM_NONCE_LEN);
+    let nonce_bytes = random_bytes(AES_GCM_NONCE_LEN)?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let payload = AeadPayload {
         msg: &plaintext,
@@ -178,7 +185,7 @@ pub fn decrypt_aes256_gcm(
             key.len()
         )));
     }
-    if ciphertext.len() < AES_GCM_NONCE_LEN + 16 {
+    if ciphertext.len() <= AES_GCM_NONCE_LEN + 16 {
         return Err(napi::Error::from_reason("ciphertext too short"));
     }
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| {
@@ -417,7 +424,7 @@ pub fn secure_random_bytes(length: u32) -> Result<Buffer> {
             "requested byte length exceeds 1 MiB limit",
         ));
     }
-    Ok(Buffer::from(random_bytes(length as usize)))
+    Ok(Buffer::from(random_bytes(length as usize)?))
 }
 
 // ─── Hex / Base64 helpers (thin wrappers to keep codec in Rust) ───────────────

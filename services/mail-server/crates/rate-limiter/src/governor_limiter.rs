@@ -165,8 +165,7 @@ mod tests {
         let limiter = GovernorLimiter::from_params(1000, 1);
         limiter.check(); // consume one
         // should complete quickly at 1000 rps
-        tokio::time::timeout(Duration::from_millis(50), limiter.until_ready())
-            .await
-            .expect("Should complete within 50ms");
+        let result = tokio::time::timeout(Duration::from_millis(50), limiter.until_ready()).await;
+        assert!(result.is_ok(), "Should complete within 50ms");
     }
 }

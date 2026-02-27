@@ -723,7 +723,7 @@ fn factor(
 struct ProfileRow {
     tenant_id: String,
     risk_score: f64,
-    #[allow(dead_code)]
+    #[allow(unused)]
     risk_level: String,
     factors: serde_json::Value,
     limits: serde_json::Value,

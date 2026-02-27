@@ -303,9 +303,12 @@ mod tests {
         
         // Put and get
         cache.put_by_ip("192.168.1.1", 0.8, true);
-        let entry = cache.get_by_ip("192.168.1.1").expect("should be cached");
-        assert_eq!(entry.score, 0.8);
-        assert!(entry.is_anomalous);
+        let entry = cache.get_by_ip("192.168.1.1");
+        assert!(entry.is_some(), "entry should be cached");
+        if let Some(entry) = entry {
+            assert_eq!(entry.score, 0.8);
+            assert!(entry.is_anomalous);
+        }
     }
 
     #[test]
@@ -368,8 +371,11 @@ mod tests {
         let fingerprint = "abc123fingerprint";
         
         cache.put_by_session(fingerprint, 0.9, true);
-        let entry = cache.get_by_session(fingerprint).expect("should be cached");
-        assert_eq!(entry.score, 0.9);
-        assert!(entry.is_anomalous);
+        let entry = cache.get_by_session(fingerprint);
+        assert!(entry.is_some(), "entry should be cached");
+        if let Some(entry) = entry {
+            assert_eq!(entry.score, 0.9);
+            assert!(entry.is_anomalous);
+        }
     }
 }

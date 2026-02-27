@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// HTTP/2 Settings identifiers
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Http2Setting {
     /// SETTINGS_HEADER_TABLE_SIZE (0x1)
@@ -26,6 +27,7 @@ pub enum Http2Setting {
     Unknown(u16),
 }
 
+#[allow(dead_code)]
 impl Http2Setting {
     /// Parse from raw setting ID
     pub fn from_id(id: u16) -> Self {
@@ -57,16 +59,27 @@ impl Http2Setting {
 /// HTTP/2 frame types observed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FrameType {
+    /// DATA frame (0x0)
     Data,
+    /// HEADERS frame (0x1)
     Headers,
+    /// PRIORITY frame (0x2)
     Priority,
+    /// RST_STREAM frame (0x3)
     RstStream,
+    /// SETTINGS frame (0x4)
     Settings,
+    /// PUSH_PROMISE frame (0x5)
     PushPromise,
+    /// PING frame (0x6)
     Ping,
+    /// GOAWAY frame (0x7)
     GoAway,
+    /// WINDOW_UPDATE frame (0x8)
     WindowUpdate,
+    /// CONTINUATION frame (0x9)
     Continuation,
+    /// Unknown frame type
     Unknown(u8),
 }
 

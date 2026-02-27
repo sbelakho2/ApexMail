@@ -6,41 +6,56 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounterVec, Opts, GaugeVec
 };
 
-fn safe_int_counter_vec(name: &str, help: &str, labels: &[&str]) -> IntCounterVec {
+fn safe_int_counter_vec(name: &str, help: &str, labels: &[&str]) -> Option<IntCounterVec> {
     match register_int_counter_vec!(name, help, labels) {
-        Ok(metric) => metric,
+        Ok(metric) => Some(metric),
         Err(err) => {
             tracing::warn!(metric = name, error = %err, "Falling back to unregistered IntCounterVec");
-            IntCounterVec::new(Opts::new(name, help), labels)
-                .expect("static IntCounterVec definition must be valid")
+            match IntCounterVec::new(Opts::new(name, help), labels) {
+                Ok(metric) => Some(metric),
+                Err(build_err) => {
+                    tracing::error!(metric = name, error = %build_err, "Failed to construct fallback IntCounterVec");
+                    None
+                }
+            }
         }
     }
 }
 
-fn safe_gauge_vec(name: &str, help: &str, labels: &[&str]) -> GaugeVec {
+fn safe_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Option<GaugeVec> {
     match register_gauge_vec!(name, help, labels) {
-        Ok(metric) => metric,
+        Ok(metric) => Some(metric),
         Err(err) => {
             tracing::warn!(metric = name, error = %err, "Falling back to unregistered GaugeVec");
-            GaugeVec::new(Opts::new(name, help), labels)
-                .expect("static GaugeVec definition must be valid")
+            match GaugeVec::new(Opts::new(name, help), labels) {
+                Ok(metric) => Some(metric),
+                Err(build_err) => {
+                    tracing::error!(metric = name, error = %build_err, "Failed to construct fallback GaugeVec");
+                    None
+                }
+            }
         }
     }
 }
 
-fn safe_histogram_vec(name: &str, help: &str, labels: &[&str], buckets: Vec<f64>) -> HistogramVec {
+fn safe_histogram_vec(name: &str, help: &str, labels: &[&str], buckets: Vec<f64>) -> Option<HistogramVec> {
     match register_histogram_vec!(name, help, labels, buckets.clone()) {
-        Ok(metric) => metric,
+        Ok(metric) => Some(metric),
         Err(err) => {
             tracing::warn!(metric = name, error = %err, "Falling back to unregistered HistogramVec");
-            HistogramVec::new(HistogramOpts::new(name, help).buckets(buckets), labels)
-                .expect("static HistogramVec definition must be valid")
+            match HistogramVec::new(HistogramOpts::new(name, help).buckets(buckets), labels) {
+                Ok(metric) => Some(metric),
+                Err(build_err) => {
+                    tracing::error!(metric = name, error = %build_err, "Failed to construct fallback HistogramVec");
+                    None
+                }
+            }
         }
     }
 }
 
 /// Total requests processed
-pub static REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static REQUESTS_TOTAL: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_requests_total",
         "Total requests processed by DDoS protection",
@@ -49,7 +64,7 @@ pub static REQUESTS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Currently blocked IPs
-pub static BLOCKED_IPS: Lazy<GaugeVec> = Lazy::new(|| {
+pub static BLOCKED_IPS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_blocked_ips",
         "Number of currently blocked IP addresses",
@@ -58,7 +73,7 @@ pub static BLOCKED_IPS: Lazy<GaugeVec> = Lazy::new(|| {
 });
 
 /// Anomaly score distribution
-pub static ANOMALY_SCORE: Lazy<HistogramVec> = Lazy::new(|| {
+pub static ANOMALY_SCORE: Lazy<Option<HistogramVec>> = Lazy::new(|| {
     safe_histogram_vec(
         "ddos_anomaly_score",
         "Anomaly scores from ML model",
@@ -68,7 +83,7 @@ pub static ANOMALY_SCORE: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 /// Challenge latency (time for client to solve)
-pub static CHALLENGE_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+pub static CHALLENGE_LATENCY: Lazy<Option<HistogramVec>> = Lazy::new(|| {
     safe_histogram_vec(
         "ddos_challenge_latency_seconds",
         "Time for clients to solve challenges",
@@ -78,7 +93,7 @@ pub static CHALLENGE_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 /// Challenges issued
-pub static CHALLENGES_ISSUED: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static CHALLENGES_ISSUED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_challenges_issued_total",
         "Total challenges issued",
@@ -87,7 +102,7 @@ pub static CHALLENGES_ISSUED: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Challenges passed
-pub static CHALLENGES_PASSED: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static CHALLENGES_PASSED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_challenges_passed_total",
         "Total challenges passed",
@@ -96,7 +111,7 @@ pub static CHALLENGES_PASSED: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Challenges failed
-pub static CHALLENGES_FAILED: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static CHALLENGES_FAILED: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_challenges_failed_total",
         "Total challenges failed",
@@ -105,7 +120,7 @@ pub static CHALLENGES_FAILED: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Reputation score distribution
-pub static REPUTATION_SCORE: Lazy<HistogramVec> = Lazy::new(|| {
+pub static REPUTATION_SCORE: Lazy<Option<HistogramVec>> = Lazy::new(|| {
     safe_histogram_vec(
         "ddos_reputation_score",
         "Distribution of IP reputation scores",
@@ -115,7 +130,7 @@ pub static REPUTATION_SCORE: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 /// Threat events shared across regions
-pub static THREAT_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static THREAT_EVENTS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_threat_events_total",
         "Threat events shared across regions",
@@ -124,7 +139,7 @@ pub static THREAT_EVENTS: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Cost budget usage
-pub static COST_BUDGET_USAGE: Lazy<GaugeVec> = Lazy::new(|| {
+pub static COST_BUDGET_USAGE: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_cost_budget_usage_ratio",
         "Cost budget usage ratio (0-1)",
@@ -133,7 +148,7 @@ pub static COST_BUDGET_USAGE: Lazy<GaugeVec> = Lazy::new(|| {
 });
 
 /// Attack detection state
-pub static UNDER_ATTACK: Lazy<GaugeVec> = Lazy::new(|| {
+pub static UNDER_ATTACK: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_under_attack",
         "Whether the system is under attack (0 or 1)",
@@ -142,7 +157,7 @@ pub static UNDER_ATTACK: Lazy<GaugeVec> = Lazy::new(|| {
 });
 
 /// XDP statistics (if available)
-pub static XDP_PACKETS: Lazy<IntCounterVec> = Lazy::new(|| {
+pub static XDP_PACKETS: Lazy<Option<IntCounterVec>> = Lazy::new(|| {
     safe_int_counter_vec(
         "ddos_xdp_packets_total",
         "Packets processed by XDP filter",
@@ -151,7 +166,7 @@ pub static XDP_PACKETS: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 /// Session tracking stats
-pub static ACTIVE_SESSIONS: Lazy<GaugeVec> = Lazy::new(|| {
+pub static ACTIVE_SESSIONS: Lazy<Option<GaugeVec>> = Lazy::new(|| {
     safe_gauge_vec(
         "ddos_active_sessions",
         "Number of active sessions being tracked",

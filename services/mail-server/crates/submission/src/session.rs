@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -31,7 +32,13 @@ pub struct SubmissionSession {
 
 const MAX_MESSAGE_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 /// #171: Maximum recipients per message
-const MAX_RECIPIENTS: usize = 100;
+static MAX_RECIPIENTS: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("SUBMISSION_MAX_RECIPIENTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(100)
+});
 
 enum SessionStream {
     Plain(BufStream<TcpStream>),
@@ -307,7 +314,7 @@ impl SubmissionSession {
         }
         
         // #171: Enforce maximum recipient limit
-        if self.rcpt_to.len() >= MAX_RECIPIENTS {
+        if self.rcpt_to.len() >= *MAX_RECIPIENTS {
             self.send_response(452, "Too many recipients").await?;
             return Ok(());
         }

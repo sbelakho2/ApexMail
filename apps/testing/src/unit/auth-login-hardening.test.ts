@@ -8,6 +8,7 @@ const webAppRoot = join(currentDir, '../../../web/src/app');
 
 const loginPageSource = readFileSync(join(webAppRoot, 'login/page.tsx'), 'utf-8');
 const loginControllerSource = readFileSync(join(webAppRoot, 'login/use-login-controller.ts'), 'utf-8');
+const loginApiRouteSource = readFileSync(join(webAppRoot, 'api/auth/login/route.ts'), 'utf-8');
 const forgotPasswordSource = readFileSync(join(webAppRoot, 'forgot-password/page.tsx'), 'utf-8');
 const forgotPasswordRouteSource = readFileSync(join(webAppRoot, 'api/auth/forgot-password/route.ts'), 'utf-8');
 
@@ -24,6 +25,14 @@ describe('Web auth hardening coverage', () => {
     expect(loginPageSource).toContain('onClick={loadCsrfToken}');
     expect(loginPageSource).toContain('Security check complete');
     expect(loginPageSource).toContain('Redirecting…');
+  });
+
+  it('covers mCaptcha token wiring and backend verification', () => {
+    expect(loginPageSource).toContain('MCaptchaWidget');
+    expect(loginControllerSource).toContain('mcaptchaToken');
+    expect(loginControllerSource).toContain('auth.error.mcaptcha_required');
+    expect(loginApiRouteSource).toContain('verifyMCaptchaToken');
+    expect(loginApiRouteSource).toContain('MCAPTCHA_REQUIRED');
   });
 
   it('covers forgot-password contract via app API route proxy', () => {

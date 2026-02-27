@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from ..client import ApexMail, AsyncApexMail
 
 # FIX-500-287: Basic email format validation
-_EMAIL_REGEX = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+_EMAIL_REGEX = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._%+\-]{0,63}@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$')
 # FIX-500-291: ID format validation
 _ID_REGEX = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
 

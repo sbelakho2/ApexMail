@@ -499,7 +499,7 @@ impl DeliveryService {
                 .query_async::<Option<String>>(&mut *conn)
                 .await
             {
-                return val == "1";
+                return Ok(val == "1");
             }
         }
 

@@ -47,9 +47,9 @@ impl LogAggregator {
         }
 
         let guard = self.entries.read();
-        let mut heap: BinaryHeap<(Reverse<chrono::DateTime<Utc>>, LogEntry)> = BinaryHeap::new();
+        let mut heap: BinaryHeap<(Reverse<chrono::DateTime<Utc>>, usize)> = BinaryHeap::new();
 
-        for entry in guard.iter() {
+        for (idx, entry) in guard.iter().enumerate() {
             let level_ok = level_filter.map(|l| entry.level >= l).unwrap_or(true);
             let svc_ok = service_filter
                 .map(|s| entry.service == s)
@@ -58,13 +58,16 @@ impl LogAggregator {
                 continue;
             }
 
-            heap.push((Reverse(entry.timestamp), entry.clone()));
+            heap.push((Reverse(entry.timestamp), idx));
             if heap.len() > limit {
                 heap.pop();
             }
         }
 
-        let mut results: Vec<LogEntry> = heap.into_iter().map(|(_, entry)| entry).collect();
+        let mut results: Vec<LogEntry> = heap
+            .into_iter()
+            .map(|(_, idx)| guard[idx].clone())
+            .collect();
         results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         results
     }

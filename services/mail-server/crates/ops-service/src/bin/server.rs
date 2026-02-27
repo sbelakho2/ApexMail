@@ -8,10 +8,11 @@ use ops_service::slo::SloTracker;
 use ops_service::warmup::IpWarmupManager;
 use std::sync::Arc;
 use dashmap::DashMap;
+use anyhow::Context;
 use tracing::info;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     // Initialise tracing
     tracing_subscriber::fmt::init();
 
@@ -23,7 +24,7 @@ async fn main() {
         .max_connections(10)
         .connect(&config.database_url)
         .await
-        .expect("failed to connect to database");
+        .context("failed to connect to database")?;
 
     let state = AppState {
         db: db.clone(),
@@ -50,9 +51,11 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .expect("failed to bind TCP listener");
+        .context("failed to bind TCP listener")?;
 
     axum::serve(listener, app)
         .await
-        .expect("server error");
+        .context("server error")?;
+
+    Ok(())
 }

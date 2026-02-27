@@ -106,6 +106,12 @@ pub enum AttackCategory {
     CommandInjection,
     /// Remote Code Execution
     Rce,
+    /// NoSQL Injection (MongoDB, Redis, Elasticsearch)
+    NoSqlInjection,
+    /// Server-Side Request Forgery
+    Ssrf,
+    /// HTTP Request Smuggling
+    RequestSmuggling,
     /// Protocol violation
     ProtocolViolation,
     /// Request anomaly (unusual headers, encoding, etc.)

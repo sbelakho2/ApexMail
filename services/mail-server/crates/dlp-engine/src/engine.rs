@@ -4,6 +4,7 @@ use crate::config::DlpConfig;
 use crate::content_policy;
 use crate::entropy;
 use crate::pii::{self, PiiMatch};
+use chrono::Utc;
 
 /// Composite DLP verdict
 #[derive(Debug, Clone)]
@@ -70,19 +71,12 @@ impl DlpEngine {
     /// * `body` - Email body text
     /// * `recipient_domain` - The recipient's domain (for allowlist check)
     pub fn scan(&self, body: &str, recipient_domain: Option<&str>) -> DlpVerdict {
-        // Check allowlist
-        if let Some(domain) = recipient_domain {
-            if self.config.allowlisted_domains.iter().any(|d| d == domain) {
-                return DlpVerdict {
-                    risk_score: 0.0,
-                    action: DlpAction::Allow,
-                    pii_findings: vec![],
-                    entropy_findings: vec![],
-                    policy_matches: vec![],
-                    summary: "Recipient domain is allowlisted".into(),
-                };
-            }
-        }
+        // Even for allowlisted domains, run a PII baseline scan so that
+        // the result contains the findings (for auditing). The action
+        // will still be Allow, but the findings are visible.
+        let is_allowlisted = recipient_domain
+            .map(|domain| self.config.allowlisted_domains.iter().any(|d| d == domain))
+            .unwrap_or(false);
 
         // Truncate body to max scan size
         let scan_text = if body.len() > self.config.max_scan_size {
@@ -92,7 +86,7 @@ impl DlpEngine {
         };
 
         let mut total_risk = 0.0;
-        let mut summary_parts = Vec::new();
+        let mut summary_parts = Vec::with_capacity(16);
 
         // 1. PII scanning
         let pii_findings = pii::scan_pii(
@@ -135,8 +129,12 @@ impl DlpEngine {
             summary_parts.push(format!("Policy: \"{}\"", pm.keyword));
         }
 
+        if let Some(domain) = recipient_domain {
+            total_risk *= self.risk_multiplier_for_domain(domain);
+        }
+
         // Determine action
-        let action = if total_risk >= self.config.block_threshold {
+        let mut action = if total_risk >= self.config.block_threshold {
             DlpAction::Block
         } else if total_risk >= self.config.quarantine_threshold {
             DlpAction::Quarantine
@@ -145,6 +143,24 @@ impl DlpEngine {
         } else {
             DlpAction::Allow
         };
+
+        // For allowlisted domains, override action to Allow but keep findings for audit
+        if is_allowlisted {
+            action = DlpAction::Allow;
+            summary_parts.push("Recipient domain is allowlisted (findings retained for audit)".into());
+        }
+
+        if let Some(domain) = recipient_domain {
+            if let Some(exception) = self.matching_active_exception(domain) {
+                if total_risk <= exception.max_risk_score {
+                    action = DlpAction::Audit;
+                    summary_parts.push(format!(
+                        "Exception applied for {} ({})",
+                        exception.recipient_domain, exception.reason
+                    ));
+                }
+            }
+        }
 
         let summary = if summary_parts.is_empty() {
             "No sensitive content detected".into()
@@ -165,6 +181,103 @@ impl DlpEngine {
     /// Scan with default recipient (no allowlist bypass)
     pub fn scan_body(&self, body: &str) -> DlpVerdict {
         self.scan(body, None)
+    }
+}
+
+impl DlpEngine {
+    fn risk_multiplier_for_domain(&self, domain: &str) -> f64 {
+        if self
+            .config
+            .trusted_recipient_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(domain))
+        {
+            return self.config.trusted_domain_risk_multiplier.max(0.0);
+        }
+
+        if self
+            .config
+            .partner_recipient_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(domain))
+        {
+            return self.config.partner_domain_risk_multiplier.max(0.0);
+        }
+
+        1.0
+    }
+
+    fn matching_active_exception(&self, domain: &str) -> Option<&crate::config::DlpTemporaryException> {
+        let now = Utc::now().timestamp();
+        self.config.temporary_exceptions.iter().find(|ex| {
+            ex.recipient_domain.eq_ignore_ascii_case(domain) && ex.expires_at_unix > now
+        })
+    }
+}
+
+#[cfg(feature = "events")]
+impl DlpEngine {
+    /// Scan outbound content and also produce a normalized security event.
+    ///
+    /// Requires the `events` feature flag (which enables the `mail-common` dep).
+    pub fn scan_with_event(
+        &self,
+        body: &str,
+        recipient_domain: Option<&str>,
+        correlation: Option<mail_common::security::CorrelationContext>,
+    ) -> (DlpVerdict, mail_common::security::SecurityEvent) {
+        let verdict = self.scan(body, recipient_domain);
+        let correlation = correlation.unwrap_or_else(
+            mail_common::security::CorrelationContext::generated,
+        );
+
+        let (action, severity) = match verdict.action {
+            DlpAction::Allow => (
+                mail_common::security::SecurityAction::Allow,
+                mail_common::security::SecuritySeverity::Info,
+            ),
+            DlpAction::Audit => (
+                mail_common::security::SecurityAction::Audit,
+                mail_common::security::SecuritySeverity::Low,
+            ),
+            DlpAction::Quarantine => (
+                mail_common::security::SecurityAction::Quarantine,
+                mail_common::security::SecuritySeverity::Medium,
+            ),
+            DlpAction::Block => (
+                mail_common::security::SecurityAction::Block,
+                mail_common::security::SecuritySeverity::High,
+            ),
+        };
+
+        let mut event = mail_common::security::SecurityEvent::new(
+            mail_common::security::SecuritySystem::Dlp,
+            action,
+            severity,
+            verdict.risk_score.min(10.0),
+            format!(
+                "DLP action={} risk={:.1} pii={} secrets={}",
+                verdict.action,
+                verdict.risk_score,
+                verdict.pii_findings.len(),
+                verdict.entropy_findings.len()
+            ),
+            correlation,
+        );
+
+        if let Some(alert) = mail_common::security::ingest_security_event(event.clone()) {
+            event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            event.metadata.insert(
+                "composite_score".to_string(),
+                format!("{:.2}", alert.composite_score),
+            );
+            event.metadata.insert(
+                "composite_action".to_string(),
+                format!("{:?}", alert.recommended_action),
+            );
+        }
+
+        (verdict, event)
     }
 }
 
@@ -227,7 +340,12 @@ mod tests {
             "SSN: 123-45-6789 CONFIDENTIAL",
             Some("internal.example.com"),
         );
+        // Allowlisted domains still get action=Allow but findings are retained for audit
         assert_eq!(verdict.action, DlpAction::Allow);
+        assert!(
+            !verdict.pii_findings.is_empty() || !verdict.policy_matches.is_empty(),
+            "Allowlisted domains should still report findings for audit"
+        );
     }
 
     #[test]
@@ -246,5 +364,39 @@ mod tests {
         assert_eq!(DlpAction::Block.to_string(), "BLOCK");
         assert_eq!(DlpAction::Quarantine.to_string(), "QUARANTINE");
         assert_eq!(DlpAction::Audit.to_string(), "AUDIT");
+    }
+
+    #[test]
+    fn test_trusted_domain_risk_tier() {
+        let config = DlpConfig {
+            trusted_recipient_domains: vec!["trusted.example.com".into()],
+            trusted_domain_risk_multiplier: 0.1,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        let verdict = engine.scan(
+            "Card 4111 1111 1111 1111 confidential",
+            Some("trusted.example.com"),
+        );
+        assert!(matches!(verdict.action, DlpAction::Audit | DlpAction::Allow));
+    }
+
+    #[test]
+    fn test_temporary_exception() {
+        let config = DlpConfig {
+            temporary_exceptions: vec![crate::config::DlpTemporaryException {
+                recipient_domain: "partner.example.com".into(),
+                expires_at_unix: Utc::now().timestamp() + 3600,
+                max_risk_score: 12.0,
+                reason: "INC-123 approved transfer".into(),
+            }],
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        let verdict = engine.scan(
+            "SSN 123-45-6789",
+            Some("partner.example.com"),
+        );
+        assert_eq!(verdict.action, DlpAction::Audit);
     }
 }

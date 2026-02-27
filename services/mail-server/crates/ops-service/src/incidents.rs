@@ -358,8 +358,8 @@ fn parse_incident_id(id: &str) -> Result<Uuid, sqlx::Error> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_create_and_list_active() {
+    #[tokio::test]
+    async fn test_create_and_list_active() {
         let mgr = IncidentManager::new_in_memory();
         let id = mgr.create_incident_sync("DB outage", IncidentSeverity::P1, vec!["db".into()]);
 
@@ -369,8 +369,8 @@ mod tests {
         assert_eq!(active[0].status, IncidentStatus::Open);
     }
 
-    #[test]
-    fn test_update_status() {
+    #[tokio::test]
+    async fn test_update_status() {
         let mgr = IncidentManager::new_in_memory();
         let id = mgr.create_incident_sync("Slow API", IncidentSeverity::P3, vec!["api".into()]);
 
@@ -381,8 +381,8 @@ mod tests {
         assert_eq!(inc.status, IncidentStatus::Investigating);
     }
 
-    #[test]
-    fn test_resolve_removes_from_active() {
+    #[tokio::test]
+    async fn test_resolve_removes_from_active() {
         let mgr = IncidentManager::new_in_memory();
         let id = mgr.create_incident_sync("High latency", IncidentSeverity::P2, vec!["api".into()]);
 
@@ -395,8 +395,8 @@ mod tests {
         assert!(inc.resolved_at.is_some());
     }
 
-    #[test]
-    fn test_timeline() {
+    #[tokio::test]
+    async fn test_timeline() {
         let mgr = IncidentManager::new_in_memory();
         let id = mgr.create_incident_sync("Disk full", IncidentSeverity::P1, vec!["storage".into()]);
         mgr.update_status_sync(id, IncidentStatus::Identified, "Root cause found");

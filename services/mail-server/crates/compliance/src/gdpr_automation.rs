@@ -10,7 +10,7 @@
 //! Consent: Upsert on (tenant_id, subscriber_id, consent_type). Marketing
 //! cascade: withdrawing marketing revokes analytics and profiling.
 
-use chrono::{TimeDelta, Utc};
+use chrono::{Duration, TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -729,8 +729,8 @@ impl GdprAutomation {
         let mut conn = self.redis.get().await
             .map_err(|e| format!("Redis: {e}"))?;
 
-        let mut results = Vec::new();
         let limit = max_items.min(10); // max 10 per tick
+        let mut results = Vec::with_capacity(limit);
 
         for _ in 0..limit {
             let item: Option<String> = redis::cmd("LPOP")

@@ -22,6 +22,7 @@ pub mod pii;
 pub mod entropy;
 pub mod content_policy;
 pub mod engine;
+pub mod attachment;
 
 use thiserror::Error;
 

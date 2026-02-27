@@ -62,6 +62,49 @@ JWT_ACCESS_TTL=3600
 JWT_REFRESH_TTL=2592000
 ```
 
+### Login CAPTCHA (mCaptcha)
+
+Login protection is available for both login surfaces:
+- User web login: `apps/web` (`/login`)
+- Control-plane login: `apps/control-plane` (`/login`)
+
+Server-side verification variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `MCAPTCHA_ENABLED` | | `false` | Enforce CAPTCHA verification in login API routes |
+| `MCAPTCHA_SITE_KEY` | ✓ when enabled | - | Site key sent to verification API |
+| `MCAPTCHA_SECRET` | ✓ when enabled | - | Secret sent to verification API |
+| `MCAPTCHA_VERIFY_URL` | | `https://demo.mcaptcha.org/api/v1/pow/siteverify` | Verification endpoint |
+
+Frontend widget variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `NEXT_PUBLIC_MCAPTCHA_ENABLED` | | `false` | Render mCaptcha widget in login pages |
+| `NEXT_PUBLIC_MCAPTCHA_WIDGET_URL` | ✓ when enabled | - | Widget URL used by vanilla glue |
+| `NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL` | | `https://unpkg.com/@mcaptcha/vanilla-glue@0.1.0-rc2/dist/index.js` | Optional glue script override |
+
+```env
+# Server-side enforcement
+MCAPTCHA_ENABLED=true
+MCAPTCHA_SITE_KEY=your-site-key
+MCAPTCHA_SECRET=your-secret
+MCAPTCHA_VERIFY_URL=https://demo.mcaptcha.org/api/v1/pow/siteverify
+
+# Frontend widget rendering
+NEXT_PUBLIC_MCAPTCHA_ENABLED=true
+NEXT_PUBLIC_MCAPTCHA_WIDGET_URL=https://your-mcaptcha-instance/widget-path
+NEXT_PUBLIC_MCAPTCHA_GLUE_SCRIPT_URL=https://unpkg.com/@mcaptcha/vanilla-glue@0.1.0-rc2/dist/index.js
+```
+
+Behavior when enabled:
+- Missing token: login is rejected (`MCAPTCHA_REQUIRED`)
+- Invalid token: login is rejected (`MCAPTCHA_INVALID`)
+- Provider/verification outage: login is rejected (`MCAPTCHA_UNAVAILABLE`)
+
+Important: keep `MCAPTCHA_ENABLED` and `NEXT_PUBLIC_MCAPTCHA_ENABLED` aligned to avoid UX drift between form rendering and API enforcement.
+
 ### Encryption
 
 | Variable | Required | Default | Description |

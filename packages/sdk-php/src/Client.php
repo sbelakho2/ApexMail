@@ -128,11 +128,11 @@ class Client
                     return $len;
                 },
                 CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$responseBody, &$responseTooLarge, $maxBytes): int {
-                    $responseBody .= $chunk;
-                    if (strlen($responseBody) > $maxBytes) {
+                    if ((strlen($responseBody) + strlen($chunk)) > $maxBytes) {
                         $responseTooLarge = true;
                         return 0;
                     }
+                    $responseBody .= $chunk;
                     return strlen($chunk);
                 },
             ]);
@@ -147,7 +147,7 @@ class Client
             curl_close($ch);
 
             if ($responseTooLarge) {
-                throw new Exceptions\NetworkException('Response body exceeds maxResponseBytes');
+                throw new Exceptions\NetworkException('Response body exceeds maxResponseBytes', 0);
             }
 
             if ($curlError) {
@@ -156,7 +156,7 @@ class Client
                     $attempt++;
                     continue;
                 }
-                throw new Exceptions\NetworkException('cURL error: ' . $curlError);
+                throw new Exceptions\NetworkException('cURL error: ' . $curlError, 0);
             }
 
             if (in_array($statusCode, [429, 500, 502, 503, 504], true) && $attempt < $this->maxRetries) {
@@ -166,7 +166,7 @@ class Client
             }
 
             $decoded = $responseBody !== ''
-                ? (array) json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR)
+                ? $this->decodeResponseBody($responseBody)
                 : [];
 
             if ($statusCode >= 400) {
@@ -277,6 +277,21 @@ class Client
     }
 
     // ── Private ─────────────────────────────────────────────────────────────
+
+    private function decodeResponseBody(string $responseBody): array
+    {
+        $decoded = json_decode($responseBody, false, 512, JSON_THROW_ON_ERROR);
+
+        if ($decoded instanceof \stdClass) {
+            return get_object_vars($decoded);
+        }
+
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        return [];
+    }
 
     /** @throws ApexMailException */
     private function throwApiError(int $statusCode, array $body): void

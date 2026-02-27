@@ -84,8 +84,14 @@ async fn main() -> anyhow::Result<()> {
                 }),
             );
         let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{health_port}"))
-            .await
-            .expect("health listener");
+            .await;
+        let listener = match listener {
+            Ok(listener) => listener,
+            Err(error) => {
+                error!(error = %error, port = health_port, "Failed to bind health listener");
+                return;
+            }
+        };
         info!(port = health_port, "Health server listening");
         axum::serve(listener, app).await.ok();
     });

@@ -11,11 +11,25 @@
 use crate::behavior;
 use crate::config::AtoConfig;
 use crate::geo::{self, GeoPoint};
+use crate::lockout_backend::{InMemoryLockoutBackend, LockoutBackend, RedisLockoutBackend};
 use crate::session::{LoginEvent, SessionStore};
 use crate::tls_fingerprint::UserTlsHistory;
 
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use tracing;
+
+type LockoutRegistry = Arc<DashMap<String, Vec<DateTime<Utc>>>>;
+
+fn global_lockout_registry() -> LockoutRegistry {
+    static GLOBAL_LOCKOUT_REGISTRY: OnceLock<LockoutRegistry> = OnceLock::new();
+    GLOBAL_LOCKOUT_REGISTRY
+        .get_or_init(|| Arc::new(DashMap::new()))
+        .clone()
+}
 
 /// Risk evaluation result
 #[derive(Debug, Clone)]
@@ -41,6 +55,9 @@ pub enum AtoAction {
     RequireMfa,
     /// Block the login attempt
     Block,
+    /// Require CAPTCHA or admin unlock — escalated lockout after repeated lockout events
+    /// This is more severe than Block and indicates repeated abuse patterns
+    RequireCaptcha,
 }
 
 impl std::fmt::Display for AtoAction {
@@ -49,6 +66,7 @@ impl std::fmt::Display for AtoAction {
             AtoAction::Allow => write!(f, "ALLOW"),
             AtoAction::RequireMfa => write!(f, "REQUIRE_MFA"),
             AtoAction::Block => write!(f, "BLOCK"),
+            AtoAction::RequireCaptcha => write!(f, "REQUIRE_CAPTCHA"),
         }
     }
 }
@@ -64,12 +82,54 @@ pub struct RiskFactor {
     pub risk: f64,
 }
 
+/// Continuous session activity event for post-login risk evaluation.
+#[derive(Debug, Clone)]
+pub struct SessionActivityEvent {
+    /// User identifier for the active session.
+    pub user_id: String,
+    /// Session identifier associated with this activity.
+    pub session_id: String,
+    /// Whether the client IP changed within the same session.
+    pub ip_changed: bool,
+    /// Whether the User-Agent changed within the same session.
+    pub user_agent_changed: bool,
+    /// Whether the TLS fingerprint changed within the same session.
+    pub tls_fingerprint_changed: bool,
+    /// Whether the event represents a privileged action.
+    pub privileged_action: bool,
+    /// Optional in-session geovelocity estimate in km/h.
+    pub geo_velocity_kmh: Option<f64>,
+}
+
+/// Session-level risk verdict.
+#[derive(Debug, Clone)]
+pub struct SessionRiskVerdict {
+    /// Composite session risk score (0.0-10.0).
+    pub risk_score: f64,
+    /// Recommended response action for this session activity.
+    pub action: AtoAction,
+    /// Session risk factors that contributed to the score.
+    pub factors: Vec<RiskFactor>,
+}
+
 /// The ATO protection engine
 pub struct AtoEngine {
     config: AtoConfig,
     store: SessionStore,
     /// Per-user TLS fingerprint history — detects bot stack changes
     tls_histories: Arc<DashMap<String, UserTlsHistory>>,
+    /// Per-user lockout event timestamps — for escalation tracking (legacy in-memory path)
+    /// When a user hits the max_failed_attempts threshold, the timestamp is recorded.
+    /// After lockout_escalation_threshold events within lockout_escalation_window,
+    /// escalate to RequireCaptcha action.
+    lockout_events: Arc<DashMap<String, Vec<DateTime<Utc>>>>,
+    /// Pluggable lockout backend for shared state across nodes.
+    /// When `config.redis_lockout_url` is set, this is a `RedisLockoutBackend`.
+    /// Otherwise it falls back to [`InMemoryLockoutBackend`].
+    lockout_backend: Arc<dyn LockoutBackend>,
+    /// Per-IP call counter for self-protecting rate limit.
+    /// Maps IP → (epoch_second, count) to enforce `config.rate_limit_rps`.
+    ip_call_counts: Arc<DashMap<String, (u64, AtomicU64)>>,
 }
 
 impl AtoEngine {
@@ -77,37 +137,155 @@ impl AtoEngine {
     pub fn new() -> Self {
         let config = AtoConfig::default();
         let store = SessionStore::new(config.max_history_per_user);
-        Self { config, store, tls_histories: Arc::new(DashMap::new()) }
+        let lockout_events = if config.use_process_global_lockout_registry {
+            global_lockout_registry()
+        } else {
+            Arc::new(DashMap::new())
+        };
+        let lockout_backend: Arc<dyn LockoutBackend> = match &config.redis_lockout_url {
+            Some(url) => Arc::new(RedisLockoutBackend::new(url.clone())),
+            None => Arc::new(InMemoryLockoutBackend::new()),
+        };
+        Self {
+            config,
+            store,
+            tls_histories: Arc::new(DashMap::new()),
+            lockout_events,
+            lockout_backend,
+            ip_call_counts: Arc::new(DashMap::new()),
+        }
     }
 
     /// Create engine with custom config
     pub fn with_config(config: AtoConfig) -> Self {
         let store = SessionStore::new(config.max_history_per_user);
-        Self { config, store, tls_histories: Arc::new(DashMap::new()) }
+        let lockout_events = if config.use_process_global_lockout_registry {
+            global_lockout_registry()
+        } else {
+            Arc::new(DashMap::new())
+        };
+        let lockout_backend: Arc<dyn LockoutBackend> = match &config.redis_lockout_url {
+            Some(url) => Arc::new(RedisLockoutBackend::new(url.clone())),
+            None => Arc::new(InMemoryLockoutBackend::new()),
+        };
+        Self {
+            config,
+            store,
+            tls_histories: Arc::new(DashMap::new()),
+            lockout_events,
+            lockout_backend,
+            ip_call_counts: Arc::new(DashMap::new()),
+        }
     }
 
-    /// Evaluate a login event and return a risk verdict
+    /// Evaluate a login event and return a risk verdict.
+    ///
+    /// When `config.rate_limit_rps > 0`, this method enforces a per-IP
+    /// calls-per-second limit. If the caller exceeds the limit, an immediate
+    /// `Block` verdict is returned to prevent resource exhaustion from
+    /// brute-force floods targeting the auth endpoint.
     pub fn evaluate(&self, event: &LoginEvent) -> AtoVerdict {
-        let mut factors = Vec::new();
-        let mut risk_score = 0.0;
-        let mut impossible_travel = false;
+        // 0. Self-protecting rate limit (per-IP, per-second)
+        if self.config.rate_limit_rps > 0 {
+            let now_epoch = Utc::now().timestamp() as u64;
+            let mut entry = self.ip_call_counts
+                .entry(event.ip_address.clone())
+                .or_insert_with(|| (now_epoch, AtomicU64::new(0)));
 
-        // 1. Check failed attempt lockout
+            let (ref mut epoch_sec, ref counter) = *entry;
+
+            if *epoch_sec != now_epoch {
+                // New second — reset counter
+                *epoch_sec = now_epoch;
+                counter.store(1, Ordering::Release);
+            } else {
+                let prev = counter.fetch_add(1, Ordering::AcqRel);
+                if prev >= self.config.rate_limit_rps as u64 {
+                    return AtoVerdict {
+                        risk_score: 10.0,
+                        action: AtoAction::Block,
+                        new_device: false,
+                        impossible_travel: false,
+                        factors: vec![RiskFactor {
+                            id: "RATE_LIMITED",
+                            description: format!(
+                                "IP {} exceeded {} evaluate calls/sec",
+                                event.ip_address, self.config.rate_limit_rps
+                            ),
+                            risk: 10.0,
+                        }],
+                    };
+                }
+            }
+        }
+
+        let mut factors = Vec::new();
+        let mut risk_score: f64 = 0.0;
+        let mut impossible_travel = false;
+        let mut escalated_lockout = false;
+
+        // 1. Check failed attempt lockout with escalation tracking
         let recent_failures = self.store.recent_failures(
             &event.user_id,
             self.config.failed_attempt_window_secs,
         );
         if recent_failures >= self.config.max_failed_attempts {
-            factors.push(RiskFactor {
-                id: "LOCKOUT",
-                description: format!(
-                    "{} failed attempts in {} seconds (max: {})",
-                    recent_failures,
-                    self.config.failed_attempt_window_secs,
-                    self.config.max_failed_attempts
-                ),
-                risk: 10.0,
-            });
+            // This is a lockout event - record it for escalation tracking
+            let now = Utc::now();
+            let escalation_cutoff = now - chrono::Duration::seconds(
+                self.config.lockout_escalation_window_secs as i64
+            );
+            
+            // Record via pluggable backend (Redis or in-memory)
+            self.lockout_backend.record_lockout(
+                &event.user_id,
+                self.config.lockout_escalation_window_secs,
+            );
+
+            let mut entry = self.lockout_events
+                .entry(event.user_id.clone())
+                .or_insert_with(Vec::new);
+            
+            // Clean up old lockout events outside the escalation window
+            entry.retain(|ts| *ts > escalation_cutoff);
+            
+            // Record this lockout event in the local DashMap too
+            entry.push(now);
+            
+            // Use the higher of local count and backend count for consistency
+            let local_count = entry.len() as u32;
+            let backend_count = self.lockout_backend.recent_lockouts(
+                &event.user_id,
+                self.config.lockout_escalation_window_secs,
+            );
+            let lockout_count = local_count.max(backend_count);
+            
+            // Check if we should escalate to RequireCaptcha
+            if lockout_count >= self.config.lockout_escalation_threshold {
+                escalated_lockout = true;
+                factors.push(RiskFactor {
+                    id: "LOCKOUT_ESCALATED",
+                    description: format!(
+                        "{} lockout events in {} hours — requires CAPTCHA/admin unlock",
+                        lockout_count,
+                        self.config.lockout_escalation_window_secs / 3600
+                    ),
+                    risk: 10.0,
+                });
+            } else {
+                factors.push(RiskFactor {
+                    id: "LOCKOUT",
+                    description: format!(
+                        "{} failed attempts in {} seconds (max: {}), lockout {}/{}",
+                        recent_failures,
+                        self.config.failed_attempt_window_secs,
+                        self.config.max_failed_attempts,
+                        lockout_count,
+                        self.config.lockout_escalation_threshold
+                    ),
+                    risk: 10.0,
+                });
+            }
             risk_score += 10.0 * self.config.weight_failures;
         } else if recent_failures > 0 {
             let failure_risk = (recent_failures as f64 / self.config.max_failed_attempts as f64) * 5.0;
@@ -152,6 +330,26 @@ impl AtoEngine {
                             });
                             risk_score += 8.0 * self.config.weight_geo;
                         }
+                    }
+                }
+            }
+        } else {
+            // No geo coordinates available for this login — check if IP is different
+            // from the last successful login. If so, apply a moderate penalty because
+            // we cannot verify geographic feasibility.
+            if let Some(history) = self.store.get_history(&event.user_id) {
+                if let Some(last) = history.last_successful() {
+                    if last.ip_address != event.ip_address {
+                        let geo_unknown_risk = 2.0;
+                        factors.push(RiskFactor {
+                            id: "GEO_UNKNOWN",
+                            description: format!(
+                                "IP changed ({} → {}) but GeoIP data unavailable — travel speed unverifiable",
+                                last.ip_address, event.ip_address
+                            ),
+                            risk: geo_unknown_risk,
+                        });
+                        risk_score += geo_unknown_risk * self.config.weight_geo;
                     }
                 }
             }
@@ -210,7 +408,10 @@ impl AtoEngine {
         risk_score = risk_score.min(10.0);
 
         // Determine action
-        let action = if risk_score >= self.config.block_threshold {
+        // Escalated lockout requires CAPTCHA/admin unlock (not a timed block)
+        let action = if escalated_lockout {
+            AtoAction::RequireCaptcha
+        } else if risk_score >= self.config.block_threshold {
             AtoAction::Block
         } else if risk_score >= self.config.mfa_threshold {
             AtoAction::RequireMfa
@@ -230,6 +431,182 @@ impl AtoEngine {
     /// Get the session store (for testing/inspection)
     pub fn store(&self) -> &SessionStore {
         &self.store
+    }
+
+    /// Evict stale entries from the per-IP rate limit map.
+    ///
+    /// Call periodically (e.g., every 60 seconds) to prevent unbounded growth
+    /// of `ip_call_counts`. Entries whose epoch second is older than `max_age_secs`
+    /// seconds ago are removed.
+    pub fn evict_stale_rate_limits(&self, max_age_secs: u64) -> usize {
+        let cutoff = Utc::now().timestamp() as u64 - max_age_secs;
+        let before = self.ip_call_counts.len();
+        self.ip_call_counts.retain(|_, (epoch_sec, _)| *epoch_sec >= cutoff);
+        let removed = before - self.ip_call_counts.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed = removed,
+                remaining = self.ip_call_counts.len(),
+                "Evicted stale ip_call_counts entries"
+            );
+        }
+        removed
+    }
+
+    /// Evaluate in-session behavior to support continuous authentication decisions.
+    pub fn evaluate_session_activity(&self, event: &SessionActivityEvent) -> SessionRiskVerdict {
+        let mut factors = Vec::new();
+        let mut risk_score: f64 = 0.0;
+
+        if event.ip_changed {
+            factors.push(RiskFactor {
+                id: "SESSION_IP_CHANGE",
+                description: format!("Session {} observed IP change", event.session_id),
+                risk: 2.5,
+            });
+            risk_score += 2.5;
+        }
+
+        if event.user_agent_changed {
+            factors.push(RiskFactor {
+                id: "SESSION_UA_CHANGE",
+                description: "User-Agent changed mid-session".into(),
+                risk: 2.0,
+            });
+            risk_score += 2.0;
+        }
+
+        if event.tls_fingerprint_changed {
+            factors.push(RiskFactor {
+                id: "SESSION_TLS_CHANGE",
+                description: "TLS fingerprint changed mid-session".into(),
+                risk: 2.5,
+            });
+            risk_score += 2.5;
+        }
+
+        if event.privileged_action {
+            factors.push(RiskFactor {
+                id: "SESSION_PRIVILEGED_ACTION",
+                description: "Privileged action requested".into(),
+                risk: 1.5,
+            });
+            risk_score += 1.5;
+        }
+
+        if let Some(speed) = event.geo_velocity_kmh {
+            if speed > self.config.max_travel_speed_kmh {
+                factors.push(RiskFactor {
+                    id: "SESSION_GEO_VELOCITY",
+                    description: format!(
+                        "In-session geovelocity {:.0} km/h exceeds threshold {:.0} km/h",
+                        speed,
+                        self.config.max_travel_speed_kmh
+                    ),
+                    risk: 8.0,
+                });
+                risk_score += 8.0;
+            }
+        } else if event.ip_changed {
+            // Geo-velocity was not computed even though IP changed —
+            // this means the GeoIP lookup failed or was unavailable.
+            // Apply a moderate risk penalty because we CANNOT verify
+            // travel speed. An attacker who hides their geo-location
+            // should not get a free pass on impossible-travel checks.
+            let geo_unknown_penalty = 2.0;
+            factors.push(RiskFactor {
+                id: "SESSION_GEO_UNKNOWN",
+                description: "IP changed but GeoIP lookup unavailable — cannot verify travel speed".into(),
+                risk: geo_unknown_penalty,
+            });
+            risk_score += geo_unknown_penalty;
+            tracing::warn!(
+                user_id = %event.user_id,
+                session_id = %event.session_id,
+                "geo_velocity_kmh is None but IP changed — GeoIP lookup may have failed; applied {:.1} risk penalty",
+                geo_unknown_penalty
+            );
+        }
+
+        risk_score = risk_score.min(10.0);
+        let action = if risk_score >= self.config.block_threshold {
+            AtoAction::Block
+        } else if risk_score >= self.config.mfa_threshold {
+            AtoAction::RequireMfa
+        } else {
+            AtoAction::Allow
+        };
+
+        SessionRiskVerdict {
+            risk_score,
+            action,
+            factors,
+        }
+    }
+}
+
+#[cfg(feature = "events")]
+impl AtoEngine {
+    /// Evaluate a login event and also produce a normalized security event.
+    ///
+    /// Requires the `events` feature flag (which enables the `mail-common` dep).
+    pub fn evaluate_with_event(
+        &self,
+        event: &LoginEvent,
+        correlation: Option<mail_common::security::CorrelationContext>,
+    ) -> (AtoVerdict, mail_common::security::SecurityEvent) {
+        let verdict = self.evaluate(event);
+        let correlation = correlation.unwrap_or_else(
+            mail_common::security::CorrelationContext::generated,
+        );
+
+        let (action, severity) = match verdict.action {
+            AtoAction::Allow => (
+                mail_common::security::SecurityAction::Allow,
+                mail_common::security::SecuritySeverity::Info,
+            ),
+            AtoAction::RequireMfa => (
+                mail_common::security::SecurityAction::RequireMfa,
+                mail_common::security::SecuritySeverity::Medium,
+            ),
+            AtoAction::Block => (
+                mail_common::security::SecurityAction::Block,
+                mail_common::security::SecuritySeverity::High,
+            ),
+            AtoAction::RequireCaptcha => (
+                mail_common::security::SecurityAction::Block,
+                mail_common::security::SecuritySeverity::Critical,
+            ),
+        };
+
+        let mut sec_event = mail_common::security::SecurityEvent::new(
+            mail_common::security::SecuritySystem::Ato,
+            action,
+            severity,
+            verdict.risk_score,
+            format!(
+                "ATO action={} risk={:.1} travel={} new_device={}",
+                verdict.action, verdict.risk_score, verdict.impossible_travel, verdict.new_device
+            ),
+            correlation,
+        )
+        .with_metadata("user_id", event.user_id.clone())
+        .with_metadata("src_ip", event.ip_address.clone())
+        .with_metadata("ip_address", event.ip_address.clone());
+
+        if let Some(alert) = mail_common::security::ingest_security_event(sec_event.clone()) {
+            sec_event.metadata.insert("composite_alert".to_string(), "true".to_string());
+            sec_event.metadata.insert(
+                "composite_score".to_string(),
+                format!("{:.2}", alert.composite_score),
+            );
+            sec_event.metadata.insert(
+                "composite_action".to_string(),
+                format!("{:?}", alert.recommended_action),
+            );
+        }
+
+        (verdict, sec_event)
     }
 }
 
@@ -313,5 +690,20 @@ mod tests {
         assert_eq!(AtoAction::Allow.to_string(), "ALLOW");
         assert_eq!(AtoAction::RequireMfa.to_string(), "REQUIRE_MFA");
         assert_eq!(AtoAction::Block.to_string(), "BLOCK");
+    }
+
+    #[test]
+    fn test_session_continuous_auth_risk() {
+        let engine = AtoEngine::new();
+        let verdict = engine.evaluate_session_activity(&SessionActivityEvent {
+            user_id: "user1".into(),
+            session_id: "sess-1".into(),
+            ip_changed: true,
+            user_agent_changed: true,
+            tls_fingerprint_changed: true,
+            privileged_action: true,
+            geo_velocity_kmh: Some(1400.0),
+        });
+        assert!(matches!(verdict.action, AtoAction::RequireMfa | AtoAction::Block));
     }
 }

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveTime, Timelike, Utc};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -86,13 +86,15 @@ impl CalendarService {
 
     /// Find available 30-minute slots on the given date (UTC).
     pub fn find_available_slots(&self, date: DateTime<Utc>) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
-        let day_start = date
-            .date_naive()
-            .and_time(NaiveTime::from_hms_opt(WORK_START_HOUR, 0, 0).unwrap());
+        let Some(work_start) = NaiveTime::from_hms_opt(WORK_START_HOUR, 0, 0) else {
+            return Vec::new();
+        };
+        let day_start = date.date_naive().and_time(work_start);
         let day_start = day_start.and_utc();
-        let day_end = date
-            .date_naive()
-            .and_time(NaiveTime::from_hms_opt(WORK_END_HOUR, 0, 0).unwrap());
+        let Some(work_end) = NaiveTime::from_hms_opt(WORK_END_HOUR, 0, 0) else {
+            return Vec::new();
+        };
+        let day_end = date.date_naive().and_time(work_end);
         let day_end = day_end.and_utc();
 
         let store = self.events.read();

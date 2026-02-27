@@ -67,10 +67,26 @@ pub const MAX_WEBHOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 1024;
 
 /// DNS cache TTL in seconds.
-pub const DNS_CACHE_TTL_SECS: u64 = 60;
+const DNS_CACHE_TTL_SECS_DEFAULT: u64 = 60;
 
 /// DNS cache max entries.
-pub const DNS_CACHE_MAX_ENTRIES: u64 = 500;
+const DNS_CACHE_MAX_ENTRIES_DEFAULT: u64 = 500;
+
+pub fn dns_cache_ttl_secs() -> u64 {
+    std::env::var("WEBHOOK_DNS_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DNS_CACHE_TTL_SECS_DEFAULT)
+}
+
+pub fn dns_cache_max_entries() -> u64 {
+    std::env::var("WEBHOOK_DNS_CACHE_MAX_ENTRIES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DNS_CACHE_MAX_ENTRIES_DEFAULT)
+}
 
 /// Signature version for HMAC.
 pub const SIGNATURE_VERSION: &str = "sha256=";

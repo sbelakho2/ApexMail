@@ -3,7 +3,7 @@
 //! Uses two half-windows for interpolation to avoid the boundary-spike issue
 //! of simple fixed-window counters.
 
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 use crate::config::SlidingWindowConfig;
@@ -14,7 +14,7 @@ use crate::types::Decision;
 /// Uses two consecutive fixed windows and interpolates the count
 /// based on the current position within the window.
 pub struct SlidingWindowCounter {
-    state: Mutex<WindowState>,
+    state: RwLock<WindowState>,
     max_events: u64,
     window: Duration,
 }
@@ -77,7 +77,7 @@ impl SlidingWindowCounter {
     pub fn new(config: &SlidingWindowConfig) -> Self {
         let window = Duration::from_millis(config.window_ms);
         Self {
-            state: Mutex::new(WindowState::new(window)),
+            state: RwLock::new(WindowState::new(window)),
             max_events: config.max_events,
             window,
         }
@@ -86,7 +86,7 @@ impl SlidingWindowCounter {
     /// Create with simple parameters.
     pub fn from_params(window: Duration, max_events: u64) -> Self {
         Self {
-            state: Mutex::new(WindowState::new(window)),
+            state: RwLock::new(WindowState::new(window)),
             max_events,
             window,
         }
@@ -95,7 +95,7 @@ impl SlidingWindowCounter {
     /// Record an event and check if it's within limits.
     pub fn check_and_increment(&self) -> Decision {
         let now = Instant::now();
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         state.maybe_rotate(now);
 
         let current_estimate = state.weighted_count(now);
@@ -117,7 +117,7 @@ impl SlidingWindowCounter {
     /// Read-only check without incrementing.
     pub fn peek(&self) -> Decision {
         let now = Instant::now();
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         state.maybe_rotate(now);
 
         let current_estimate = state.weighted_count(now);
@@ -136,14 +136,14 @@ impl SlidingWindowCounter {
     /// Current approximate event count.
     pub fn current_count(&self) -> u64 {
         let now = Instant::now();
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         state.maybe_rotate(now);
         state.weighted_count(now).ceil() as u64
     }
 
     /// Reset the counter.
     pub fn reset(&self) {
-        let mut state = self.state.lock();
+        let mut state = self.state.write();
         *state = WindowState::new(self.window);
     }
 
@@ -206,11 +206,12 @@ mod tests {
     fn test_sliding_window_denies_with_retry_after() {
         let counter = SlidingWindowCounter::from_params(Duration::from_secs(10), 1);
         counter.check_and_increment();
-        if let Decision::Denied { retry_after } = counter.check_and_increment() {
+        let decision = counter.check_and_increment();
+        if let Decision::Denied { retry_after } = decision {
             assert!(retry_after > Duration::ZERO);
             assert!(retry_after <= Duration::from_secs(10));
         } else {
-            panic!("Expected Denied");
+            assert!(decision.is_denied(), "Expected Denied");
         }
     }
 

@@ -1,5 +1,6 @@
 # Advanced Email Authentication
 
+
 ApexMail implements comprehensive email authentication beyond basic SPF/DKIM/DMARC to maximize deliverability and brand visibility.
 
 ## Overview
@@ -222,7 +223,7 @@ Content-Type: application/json
 | Yahoo | ✅ Yes | Optional |
 | Apple Mail | ✅ Yes | Optional |
 | Fastmail | ✅ Yes | Optional |
-| Outlook | 🚧 Coming | TBD |
+| Outlook | Varies by rollout | Varies by rollout |
 
 ---
 

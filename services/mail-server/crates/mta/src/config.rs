@@ -172,7 +172,7 @@ impl Default for MtaConfig {
             node_env: default_env(),
             mta_id: default_mta_id(),
             database: DatabaseConfig {
-                connection_string: String::new(),
+                connection_string: "postgres://127.0.0.1:5432/apexmail".into(),
                 max_connections: default_max_connections(),
             },
             redis: RedisConfig {
@@ -234,7 +234,7 @@ impl_default!(DkimConfig, Self {
 impl_default!(SpfConfig, Self { strict_mode: false });
 impl_default!(DmarcConfig, Self {
     report_email: default_report_email(),
-    report_domain: String::new(),
+    report_domain: default_hostname(),
 });
 impl_default!(RateLimitConfig, Self {
     enabled: true,

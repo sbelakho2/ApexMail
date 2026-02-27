@@ -32,8 +32,10 @@ fn sanitize_css(css: &str) -> String {
     }
     
     // Remove HTML tags embedded in CSS
-    static TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
-    sanitized = TAG_REGEX.replace_all(&sanitized, "").to_string();
+    static TAG_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"<[^>]*>").ok());
+    if let Some(tag_regex) = TAG_REGEX.as_ref() {
+        sanitized = tag_regex.replace_all(&sanitized, "").to_string();
+    }
     
     sanitized
 }

@@ -293,7 +293,7 @@ export class PerformanceRunner {
                 // Get LCP
                 new PerformanceObserver((entryList) => {
                     const entries = entryList.getEntries();
-                    const lastEntry = entries[entries.length - 1] as any;
+                    const lastEntry = entries[entries.length - 1] as PerformanceEntry | undefined;
                     metrics.lcp = lastEntry?.startTime || 0;
                 }).observe({ type: 'largest-contentful-paint', buffered: true });
 
@@ -307,9 +307,10 @@ export class PerformanceRunner {
                 // Get CLS
                 let clsValue = 0;
                 new PerformanceObserver((entryList) => {
-                    for (const entry of entryList.getEntries() as any[]) {
+                    type LayoutShiftEntry = PerformanceEntry & { hadRecentInput?: boolean; value?: number };
+                    for (const entry of entryList.getEntries() as LayoutShiftEntry[]) {
                         if (!entry.hadRecentInput) {
-                            clsValue += entry.value;
+                            clsValue += entry.value || 0;
                         }
                     }
                     metrics.cls = clsValue;
@@ -347,7 +348,8 @@ export class PerformanceRunner {
      */
     private async collectMemoryMetrics(page: Page): Promise<Partial<PerformanceMetrics>> {
         return page.evaluate(() => {
-            const memory = (performance as any).memory;
+            type PerformanceWithMemory = Performance & { memory?: { usedJSHeapSize?: number } };
+            const memory = (performance as PerformanceWithMemory).memory;
             const domNodes = document.querySelectorAll('*').length;
 
             return {
@@ -412,7 +414,7 @@ export class PerformanceRunner {
             const mean = average[key] as number;
             const squaredDiffs = values.map((v) => Math.pow(v - mean, 2));
             const avgSquaredDiff = squaredDiffs.reduce((a, b) => a + b, 0) / values.length;
-            (variance as any)[key] = Math.round(Math.sqrt(avgSquaredDiff));
+            variance[key] = Math.round(Math.sqrt(avgSquaredDiff));
         }
 
         return variance;

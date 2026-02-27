@@ -129,10 +129,14 @@ async fn main() -> Result<()> {
         let ctrl_c = async { signal::ctrl_c().await.ok() };
         #[cfg(unix)]
         let sigterm = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("SIGTERM handler")
-                .recv()
-                .await;
+            match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(error) => {
+                    tracing::error!(?error, "SIGTERM handler setup failed");
+                }
+            }
         };
         #[cfg(not(unix))]
         let sigterm = std::future::pending::<()>();

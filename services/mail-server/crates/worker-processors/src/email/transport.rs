@@ -45,7 +45,7 @@ impl SmtpTransport {
             (Some(username), Some(password)) => {
                 builder = builder.credentials(Credentials::Plain {
                     username: username.clone(),
-                    secret: password.as_ref().to_string(),
+                    secret: password.to_string(),
                 });
             }
             (Some(_), None) => {
@@ -141,35 +141,53 @@ impl EmailTransport for SmtpTransport {
         let message = self.build_message(email);
         let builder = self.smtp_builder()?;
 
-        let mut client = if self.config.secure {
-            builder
+        if self.config.secure {
+            let mut client = builder
                 .connect()
                 .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?
-        } else {
-            builder
-                .connect_plain()
-                .await
-                .map_err(|e| ProcessorError::Transport(e.to_string()))?
-        };
+                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
 
-        if let Some(dkim) = &email.dkim {
-            let signer = self.build_dkim_signer(dkim)?;
+            if let Some(dkim) = &email.dkim {
+                let signer = self.build_dkim_signer(dkim)?;
+                client
+                    .send_signed(message, &signer)
+                    .await
+                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+            } else {
+                client
+                    .send(message)
+                    .await
+                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+            }
+
             client
-                .send_signed(message, &signer)
+                .quit()
                 .await
                 .map_err(|e| ProcessorError::Transport(e.to_string()))?;
         } else {
+            let mut client = builder
+                .connect_plain()
+                .await
+                .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+
+            if let Some(dkim) = &email.dkim {
+                let signer = self.build_dkim_signer(dkim)?;
+                client
+                    .send_signed(message, &signer)
+                    .await
+                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+            } else {
+                client
+                    .send(message)
+                    .await
+                    .map_err(|e| ProcessorError::Transport(e.to_string()))?;
+            }
+
             client
-                .send(message)
+                .quit()
                 .await
                 .map_err(|e| ProcessorError::Transport(e.to_string()))?;
         }
-
-        client
-            .quit()
-            .await
-            .map_err(|e| ProcessorError::Transport(e.to_string()))?;
 
         Ok(SendResult {
             smtp_message_id: None,

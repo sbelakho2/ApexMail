@@ -3,10 +3,37 @@
 //! Provides various challenge mechanisms to distinguish legitimate users from bots.
 
 use sha2::{Sha256, Digest};
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+
+/// Verification outcome for replay-aware challenge checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChallengeVerifyResult {
+    /// Whether the submitted solution is valid.
+    pub valid: bool,
+    /// Whether this submission was replayed.
+    pub replayed: bool,
+    /// Whether the challenge was expired.
+    pub expired: bool,
+}
+
+/// Audit event for challenge lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChallengeAuditRecord {
+    /// Challenge identifier.
+    pub challenge_id: String,
+    /// Challenge type label (pow/js/cookie/captcha).
+    pub challenge_type: String,
+    /// Outcome label (issued/passed/failed/replay/expired).
+    pub outcome: String,
+    /// Optional client fingerprint or address token.
+    pub client_fingerprint: Option<String>,
+    /// Event timestamp (unix seconds).
+    pub timestamp: u64,
+}
 
 /// Challenge types available
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,7 +202,7 @@ impl PowChallenge {
             }
             nonce += 1;
             if nonce > 100_000_000 {
-                panic!("Could not solve in reasonable time");
+                return String::new();
             }
         }
     }
@@ -336,6 +363,12 @@ pub struct ChallengeManager {
     captcha_site_key: Option<String>,
     /// CAPTCHA provider
     captcha_provider: Option<CaptchaProvider>,
+    /// Used challenge responses to prevent replay
+    used_responses: parking_lot::RwLock<HashSet<String>>,
+    /// Bounded in-memory audit log
+    audit_log: parking_lot::RwLock<VecDeque<ChallengeAuditRecord>>,
+    /// Max records retained in audit log
+    max_audit_records: usize,
 }
 
 impl ChallengeManager {
@@ -347,6 +380,9 @@ impl ChallengeManager {
             pow_difficulty: 16, // ~65K hashes average
             captcha_site_key: None,
             captcha_provider: None,
+            used_responses: parking_lot::RwLock::new(HashSet::new()),
+            audit_log: parking_lot::RwLock::new(VecDeque::new()),
+            max_audit_records: 10_000,
         }
     }
     
@@ -365,17 +401,41 @@ impl ChallengeManager {
     
     /// Issue JavaScript challenge
     pub fn issue_js_challenge(&self) -> ChallengeType {
-        ChallengeType::JavaScript(JsChallenge::generate())
+        let challenge = JsChallenge::generate();
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_type: "js".into(),
+            outcome: "issued".into(),
+            client_fingerprint: None,
+            timestamp: current_timestamp(),
+        });
+        ChallengeType::JavaScript(challenge)
     }
     
     /// Issue Proof of Work challenge
     pub fn issue_pow_challenge(&self) -> ChallengeType {
-        ChallengeType::ProofOfWork(PowChallenge::generate(self.pow_difficulty))
+        let challenge = PowChallenge::generate(self.pow_difficulty);
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_type: "pow".into(),
+            outcome: "issued".into(),
+            client_fingerprint: None,
+            timestamp: current_timestamp(),
+        });
+        ChallengeType::ProofOfWork(challenge)
     }
     
     /// Issue cookie challenge
     pub fn issue_cookie_challenge(&self) -> ChallengeType {
-        ChallengeType::Cookie(CookieChallenge::generate(&self.secret))
+        let challenge = CookieChallenge::generate(&self.secret);
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_type: "cookie".into(),
+            outcome: "issued".into(),
+            client_fingerprint: None,
+            timestamp: current_timestamp(),
+        });
+        ChallengeType::Cookie(challenge)
     }
     
     /// Issue CAPTCHA challenge
@@ -391,6 +451,129 @@ impl ChallengeManager {
     /// Verify a cookie challenge
     pub fn verify_cookie(&self, cookie_value: &str) -> bool {
         CookieChallenge::verify(cookie_value, &self.secret)
+    }
+
+    /// Verify PoW challenge with replay protection and audit logging.
+    pub fn verify_pow_response(
+        &self,
+        challenge: &PowChallenge,
+        nonce: &str,
+        client_fingerprint: Option<&str>,
+    ) -> ChallengeVerifyResult {
+        let response_key = format!("pow:{}:{}", challenge.challenge_id, hash_result(nonce));
+        {
+            let used = self.used_responses.read();
+            if used.contains(&response_key) {
+                self.record_audit(ChallengeAuditRecord {
+                    challenge_id: challenge.challenge_id.clone(),
+                    challenge_type: "pow".into(),
+                    outcome: "replay".into(),
+                    client_fingerprint: client_fingerprint.map(ToString::to_string),
+                    timestamp: current_timestamp(),
+                });
+                return ChallengeVerifyResult {
+                    valid: false,
+                    replayed: true,
+                    expired: false,
+                };
+            }
+        }
+
+        let now = current_timestamp();
+        let expired = now > challenge.created_at + challenge.time_limit_secs as u64;
+        let valid = !expired && challenge.verify(nonce);
+
+        if valid {
+            self.used_responses.write().insert(response_key);
+        }
+
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_type: "pow".into(),
+            outcome: if expired {
+                "expired".into()
+            } else if valid {
+                "passed".into()
+            } else {
+                "failed".into()
+            },
+            client_fingerprint: client_fingerprint.map(ToString::to_string),
+            timestamp: now,
+        });
+
+        ChallengeVerifyResult {
+            valid,
+            replayed: false,
+            expired,
+        }
+    }
+
+    /// Verify JS challenge with replay protection and audit logging.
+    pub fn verify_js_response(
+        &self,
+        challenge: &JsChallenge,
+        solution: &str,
+        client_fingerprint: Option<&str>,
+    ) -> ChallengeVerifyResult {
+        let response_key = format!("js:{}:{}", challenge.challenge_id, hash_result(solution));
+        {
+            let used = self.used_responses.read();
+            if used.contains(&response_key) {
+                self.record_audit(ChallengeAuditRecord {
+                    challenge_id: challenge.challenge_id.clone(),
+                    challenge_type: "js".into(),
+                    outcome: "replay".into(),
+                    client_fingerprint: client_fingerprint.map(ToString::to_string),
+                    timestamp: current_timestamp(),
+                });
+                return ChallengeVerifyResult {
+                    valid: false,
+                    replayed: true,
+                    expired: false,
+                };
+            }
+        }
+
+        let now = current_timestamp();
+        let expired = now > challenge.created_at + challenge.time_limit_secs as u64;
+        let valid = !expired && challenge.verify(solution);
+
+        if valid {
+            self.used_responses.write().insert(response_key);
+        }
+
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: challenge.challenge_id.clone(),
+            challenge_type: "js".into(),
+            outcome: if expired {
+                "expired".into()
+            } else if valid {
+                "passed".into()
+            } else {
+                "failed".into()
+            },
+            client_fingerprint: client_fingerprint.map(ToString::to_string),
+            timestamp: now,
+        });
+
+        ChallengeVerifyResult {
+            valid,
+            replayed: false,
+            expired,
+        }
+    }
+
+    /// Read challenge audit records (oldest to newest).
+    pub fn audit_records(&self) -> Vec<ChallengeAuditRecord> {
+        self.audit_log.read().iter().cloned().collect()
+    }
+
+    fn record_audit(&self, record: ChallengeAuditRecord) {
+        let mut audit = self.audit_log.write();
+        audit.push_back(record);
+        while audit.len() > self.max_audit_records {
+            audit.pop_front();
+        }
     }
     
     /// Select appropriate challenge based on risk level
@@ -445,8 +628,13 @@ fn hmac_sign(secret: &[u8; 32], data: &[u8]) -> String {
     
     type HmacSha256 = Hmac<Sha256>;
     
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .expect("HMAC can take key of any size");
+    let mut mac = match HmacSha256::new_from_slice(secret) {
+        Ok(mac) => mac,
+        Err(error) => {
+            tracing::error!(?error, "Failed to initialize challenge HMAC");
+            return String::new();
+        }
+    };
     mac.update(data);
     hex::encode(mac.finalize().into_bytes())
 }
@@ -502,5 +690,38 @@ mod tests {
         
         let high_risk = manager.select_challenge(0.8);
         assert!(matches!(high_risk, ChallengeType::ProofOfWork(_)));
+    }
+
+    #[test]
+    fn test_pow_replay_protection() {
+        let manager = ChallengeManager::new([1u8; 32]).with_pow_difficulty(8);
+        let challenge = match manager.issue_pow_challenge() {
+            ChallengeType::ProofOfWork(challenge) => challenge,
+            _ => return,
+        };
+
+        let nonce = challenge.solve();
+        let first = manager.verify_pow_response(&challenge, &nonce, Some("10.0.0.1"));
+        assert!(first.valid);
+        assert!(!first.replayed);
+
+        let second = manager.verify_pow_response(&challenge, &nonce, Some("10.0.0.1"));
+        assert!(!second.valid);
+        assert!(second.replayed);
+    }
+
+    #[test]
+    fn test_audit_log_records_issue_and_verify() {
+        let manager = ChallengeManager::new([2u8; 32]).with_pow_difficulty(8);
+        let challenge = match manager.issue_pow_challenge() {
+            ChallengeType::ProofOfWork(c) => c,
+            _ => return,
+        };
+        let nonce = challenge.solve();
+        let _ = manager.verify_pow_response(&challenge, &nonce, Some("client-a"));
+
+        let audit = manager.audit_records();
+        assert!(audit.iter().any(|r| r.outcome == "issued"));
+        assert!(audit.iter().any(|r| r.outcome == "passed"));
     }
 }

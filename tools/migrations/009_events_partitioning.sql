@@ -26,6 +26,13 @@
  */
 
 -- Step 1: Rename the existing table
+DO $$
+BEGIN
+    IF to_regclass('public.events') IS NULL THEN
+        RAISE EXCEPTION 'events table does not exist; aborting partition migration';
+    END IF;
+END $$;
+
 ALTER TABLE IF EXISTS events RENAME TO events_old;
 
 -- Step 2: Create the new partitioned table matching the existing schema exactly
@@ -92,12 +99,17 @@ BEGIN
         current_end := current_start + INTERVAL '1 month';
         partition_name := 'events_' || TO_CHAR(current_start, 'YYYY_MM');
         
-        EXECUTE format(
-            'CREATE TABLE %I PARTITION OF events FOR VALUES FROM (CAST(%L AS timestamptz)) TO (CAST(%L AS timestamptz))',
-            partition_name,
-            current_start,
-            current_end
-        );
+        BEGIN
+            EXECUTE format(
+                'CREATE TABLE IF NOT EXISTS %I PARTITION OF events FOR VALUES FROM (CAST(%L AS timestamptz)) TO (CAST(%L AS timestamptz))',
+                partition_name,
+                current_start,
+                current_end
+            );
+        EXCEPTION WHEN duplicate_table THEN
+            -- Partition already exists; continue
+            NULL;
+        END;
         
         current_start := current_end;
     END LOOP;
@@ -109,6 +121,18 @@ CREATE TABLE events_default PARTITION OF events DEFAULT;
 -- Step 7: Migrate existing data from the old table
 -- This INSERT will route each row to the correct partition based on timestamp
 INSERT INTO events SELECT * FROM events_old;
+
+DO $$
+DECLARE
+    old_count BIGINT;
+    new_count BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO old_count FROM events_old;
+    SELECT COUNT(*) INTO new_count FROM events;
+    IF old_count <> new_count THEN
+        RAISE EXCEPTION 'events migration integrity check failed: events_old=% events=%', old_count, new_count;
+    END IF;
+END $$;
 
 -- Step 8: Drop the old table
 DROP TABLE events_old;

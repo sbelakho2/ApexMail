@@ -79,6 +79,49 @@ export interface UpdateTemplateInput {
 export class TemplatesRepository {
   constructor(private readonly db: DatabasePool) {}
 
+  private hasBalancedJsxBraces(content: string): boolean {
+    let depth = 0;
+    let quote: 'single' | 'double' | null = null;
+    let escaped = false;
+
+    for (const char of content) {
+      if (quote) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if ((quote === 'single' && char === "'") || (quote === 'double' && char === '"')) {
+          quote = null;
+        }
+        continue;
+      }
+
+      if (char === "'") {
+        quote = 'single';
+        continue;
+      }
+      if (char === '"') {
+        quote = 'double';
+        continue;
+      }
+
+      if (char === '{') {
+        depth += 1;
+      } else if (char === '}') {
+        depth -= 1;
+        if (depth < 0) {
+          return false;
+        }
+      }
+    }
+
+    return depth === 0;
+  }
+
   private static extractRootVariable(variable: string): string | null {
     const trimmed = variable.trim();
     const match = /^[a-zA-Z_][a-zA-Z0-9_]*/.exec(trimmed);
@@ -152,13 +195,8 @@ export class TemplatesRepository {
         break;
       }
       case 'react': {
-        // React templates use JSX syntax
-        // Check for balanced { and } in JSX expressions
-        const jsxOpens = (content.match(/\{[^{]/g) || []).length;
-        const jsxCloses = (content.match(/[^}]\}/g) || []).length;
-        // Allow some imbalance since {} can appear in CSS/objects
-        if (Math.abs(jsxOpens - jsxCloses) > 5) {
-          return `Potentially unbalanced JSX expressions: ${jsxOpens} opening vs ${jsxCloses} closing`;
+        if (!this.hasBalancedJsxBraces(content)) {
+          return 'Unbalanced JSX expressions: opening and closing braces do not match';
         }
         break;
       }

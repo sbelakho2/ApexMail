@@ -44,7 +44,7 @@ pub struct TrackingData {
 pub struct UnsubscribeData {
     pub tenant_id: String,
     pub recipient: String,
-    #[allow(dead_code)] // timestamp used for token expiry validation, wired in future middleware
+    #[allow(unused)] // timestamp used for token expiry validation, wired in future middleware
     pub timestamp_ms: u64,
 }
 
@@ -85,7 +85,7 @@ pub struct TrackingCodec {
 // Token encode/generation methods are not yet wired at the binary level
 // (the decode path is active; encode will be used once the MTA calls this service
 // to embed tokens into outgoing messages).
-#[allow(dead_code)]
+#[allow(unused)]
 impl TrackingCodec {
     /// Build a codec from the master secret string.
     ///
@@ -320,8 +320,13 @@ impl TrackingCodec {
 /// Returns HMAC-SHA-256(secret, info) truncated to `len` bytes.
 fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> Zeroizing<Vec<u8>> {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret)
-        .expect("HMAC accepts any key length");
+    let mut mac = match <HmacSha256 as Mac>::new_from_slice(secret) {
+        Ok(mac) => mac,
+        Err(error) => {
+            tracing::error!(?error, "Failed to initialize derive_key_hmac HMAC");
+            return Zeroizing::new(Vec::new());
+        }
+    };
     mac.update(info);
     let result = mac.finalize().into_bytes();
     Zeroizing::new(result[..len].to_vec())
@@ -330,8 +335,13 @@ fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> Zeroizing<Vec<u8>>
 /// HMAC-SHA-256 of `data` under `key`; returns the full 32-byte digest.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key)
-        .expect("HMAC accepts any key length");
+    let mut mac = match <HmacSha256 as Mac>::new_from_slice(key) {
+        Ok(mac) => mac,
+        Err(error) => {
+            tracing::error!(?error, "Failed to initialize hmac_sha256 HMAC");
+            return [0; 32];
+        }
+    };
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -400,13 +410,13 @@ fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option
 // v2  – 1-byte version + u16-BE per-field lengths
 // v3  – v2 + originalUrl field
 
-#[allow(dead_code)] // encode path wired once outbound tokens are generated here
+#[allow(unused)] // encode path wired once outbound tokens are generated here
 fn write_u16be(buf: &mut Vec<u8>, v: u16) {
     buf.push((v >> 8) as u8);
     buf.push((v & 0xff) as u8);
 }
 
-#[allow(dead_code)] // encode path
+#[allow(unused)] // encode path
 fn serialize_tracking_data(data: &TrackingData) -> Vec<u8> {
     let tid = data.tenant_id.as_bytes();
     let mid = data.message_id.as_bytes();

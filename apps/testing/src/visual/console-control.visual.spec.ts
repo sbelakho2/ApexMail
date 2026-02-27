@@ -30,11 +30,10 @@ async function freezeTime(page: Parameters<typeof test>[0]['page']) {
     await page.addInitScript(fixedTime => {
         const fixed = new Date(fixedTime as string).getTime();
         const OriginalDate = Date;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const globalDate = globalThis as typeof globalThis & { Date: DateConstructor };
         // @ts-expect-error - override Date in the browser context for stability
-        // eslint-disable-next-line no-global-assign
-        Date = class extends OriginalDate {
-            constructor(...args: any[]) {
+        globalDate.Date = class extends OriginalDate {
+            constructor(...args: unknown[]) {
                 if (args.length === 0) {
                     return new OriginalDate(fixed);
                 }

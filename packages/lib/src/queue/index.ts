@@ -12,6 +12,7 @@
 import { Result } from '../result.js';
 import { getLogger, type Logger } from '../logger/index.js';
 import type { Pool, PoolClient } from 'pg';
+import { randomUUID } from 'node:crypto';
 
 export interface QueueJob<T = unknown> {
   id: string;
@@ -132,7 +133,7 @@ export class PostgresQueueProvider implements QueueProvider {
     context: QueueClientContext = {}
   ): Promise<Result<string, Error>> {
     return this.withClient(context.client, async (client) => {
-      const id = crypto.randomUUID();
+      const id = randomUUID();
       const now = new Date();
       const scheduledAt = options.delaySeconds
         ? new Date(now.getTime() + options.delaySeconds * 1000)

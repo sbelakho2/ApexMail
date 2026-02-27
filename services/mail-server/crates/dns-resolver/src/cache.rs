@@ -1,6 +1,7 @@
 //! DNS cache using moka.
 
 use moka::sync::Cache;
+use parking_lot::RwLock;
 use std::time::Duration;
 use tracing::debug;
 
@@ -19,6 +20,7 @@ pub enum CachedResult {
 pub struct DnsCache {
     cache: Cache<String, CachedResult>,
     negative_cache: Cache<String, ()>,
+    consistency_lock: RwLock<()>,
 }
 
 impl DnsCache {
@@ -37,6 +39,7 @@ impl DnsCache {
         Self {
             cache,
             negative_cache,
+            consistency_lock: RwLock::new(()),
         }
     }
 
@@ -47,6 +50,7 @@ impl DnsCache {
 
     /// Get cached result.
     pub fn get(&self, key: &str) -> Option<CachedResult> {
+        let _guard = self.consistency_lock.read();
         // Check positive cache first
         if let Some(result) = self.cache.get(key) {
             debug!(key, "DNS cache hit");
@@ -62,20 +66,25 @@ impl DnsCache {
 
     /// Insert a positive result.
     pub fn insert(&self, key: impl Into<String>, records: Vec<String>) {
+        let _guard = self.consistency_lock.write();
         let key = key.into();
         debug!(key, count = records.len(), "DNS cache insert");
+        self.negative_cache.invalidate(&key);
         self.cache.insert(key, CachedResult::Records(records));
     }
 
     /// Insert a negative (NXDOMAIN) result.
     pub fn insert_negative(&self, key: impl Into<String>) {
+        let _guard = self.consistency_lock.write();
         let key = key.into();
         debug!(key, "DNS negative cache insert");
+        self.cache.invalidate(&key);
         self.negative_cache.insert(key, ());
     }
 
     /// Remove a cached entry.
     pub fn invalidate(&self, key: &str) {
+        let _guard = self.consistency_lock.write();
         self.cache.invalidate(key);
         self.negative_cache.invalidate(key);
     }
@@ -83,6 +92,7 @@ impl DnsCache {
     /// #184: Invalidate all entries whose key contains the given substring.
     /// Used for DKIM keys stored as `dkim:{selector}._domainkey.{domain}`.
     pub fn invalidate_by_domain_suffix(&self, domain: &str) {
+        let _guard = self.consistency_lock.write();
         let suffix = format!("._domainkey.{domain}");
         // Moka doesn't expose key iteration, so we rely on in-memory
         // tracking. For now, since DKIM entries have short TTLs,
@@ -104,6 +114,7 @@ impl DnsCache {
 
     /// Clear all caches.
     pub fn clear(&self) {
+        let _guard = self.consistency_lock.write();
         self.cache.invalidate_all();
         self.negative_cache.invalidate_all();
     }
@@ -122,7 +133,9 @@ mod tests {
                 assert_eq!(recs.len(), 1);
                 assert_eq!(recs[0], "10 mx.example.com");
             }
-            _ => panic!("Expected records"),
+            other => {
+                assert!(matches!(other, Some(CachedResult::Records(_))), "Expected records");
+            }
         }
     }
 
@@ -138,7 +151,9 @@ mod tests {
         cache.insert_negative("nx:missing.example");
         match cache.get("nx:missing.example") {
             Some(CachedResult::NxDomain) => {}
-            _ => panic!("Expected NxDomain"),
+            other => {
+                assert!(matches!(other, Some(CachedResult::NxDomain)), "Expected NxDomain");
+            }
         }
     }
 

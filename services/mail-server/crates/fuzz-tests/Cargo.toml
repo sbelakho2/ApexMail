@@ -20,3 +20,13 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
+
+# Security crates for fuzz testing
+waf-engine = { path = "../waf-engine" }
+ids-engine = { path = "../ids-engine" }
+spam-filter = { path = "../spam-filter" }
+dlp-engine = { path = "../dlp-engine" }
+sandbox = { path = "../sandbox" }
+ato-protection = { path = "../ato-protection" }
+threat-intel = { path = "../threat-intel" }

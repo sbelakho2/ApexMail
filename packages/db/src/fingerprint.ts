@@ -41,10 +41,17 @@ export interface SchemaDiff {
 async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObject[], Error>> {
   const objects: SchemaObject[] = [];
   const pool = db.getPool();
+  const schemaQueryTimeoutMs = 15_000;
+
+  const queryWithTimeout = <T>(text: string) =>
+    pool.query<T>({
+      text,
+      statement_timeout: schemaQueryTimeoutMs,
+    });
 
   try {
     // Get all tables with column definitions
-    const tablesResult = await pool.query<{
+    const tablesResult = await queryWithTimeout<{
       table_schema: string;
       table_name: string;
       column_definitions: string;
@@ -80,7 +87,7 @@ async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObje
     }
 
     // Get all indexes
-    const indexesResult = await pool.query<{
+    const indexesResult = await queryWithTimeout<{
       schemaname: string;
       indexname: string;
       indexdef: string;
@@ -101,7 +108,7 @@ async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObje
     }
 
     // Get all constraints
-    const constraintsResult = await pool.query<{
+    const constraintsResult = await queryWithTimeout<{
       nspname: string;
       conname: string;
       consrc: string;
@@ -126,7 +133,7 @@ async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObje
     }
 
     // Get all functions
-    const functionsResult = await pool.query<{
+    const functionsResult = await queryWithTimeout<{
       nspname: string;
       proname: string;
       prosrc: string;
@@ -152,7 +159,7 @@ async function extractSchemaObjects(db: DatabasePool): Promise<Result<SchemaObje
     }
 
     // Get all triggers
-    const triggersResult = await pool.query<{
+    const triggersResult = await queryWithTimeout<{
       trigger_schema: string;
       trigger_name: string;
       action_statement: string;

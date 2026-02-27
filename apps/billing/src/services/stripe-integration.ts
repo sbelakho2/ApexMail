@@ -51,6 +51,34 @@ export type SubscriptionStatus =
   | 'trialing'
   | 'paused';
 
+type StripeCustomerRow = {
+  id: string;
+  tenant_id: string;
+  stripe_customer_id: string;
+  email: string;
+  name: string;
+  default_payment_method_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+type StripeSubscriptionRow = {
+  id: string;
+  tenant_id: string;
+  stripe_subscription_id: string;
+  stripe_customer_id: string;
+  stripe_price_id: string;
+  status: SubscriptionStatus;
+  billing_interval: 'monthly' | 'yearly';
+  billing_cycle_start: Date;
+  billing_cycle_end: Date;
+  cancel_at_period_end: boolean;
+  canceled_at: Date | null;
+  trial_end: Date | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
 /**
  * Stripe integration service
  */
@@ -74,16 +102,7 @@ export class StripeService {
     metadata?: Record<string, string>
   ): Promise<Result<StripeCustomer, Error>> {
     // Check if customer already exists
-    const existingResult = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      stripe_customer_id: string;
-      email: string;
-      name: string;
-      default_payment_method_id: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const existingResult = await this.db.query<StripeCustomerRow>(
       `SELECT id, tenant_id, stripe_customer_id, email, name,
               default_payment_method_id, created_at, updated_at
        FROM stripe_customers WHERE tenant_id = $1`,
@@ -94,16 +113,7 @@ export class StripeService {
 
     if (existingResult.value.rows[0]) {
       const row = existingResult.value.rows[0];
-      return Result.ok({
-        id: row.id,
-        tenantId: row.tenant_id,
-        stripeCustomerId: row.stripe_customer_id,
-        email: row.email,
-        name: row.name,
-        defaultPaymentMethodId: row.default_payment_method_id,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      });
+      return Result.ok(this.mapStripeCustomer(row));
     }
 
     // Create Stripe customer
@@ -717,22 +727,7 @@ export class StripeService {
    * Get subscription status
    */
   async getSubscription(tenantId: string): Promise<Result<StripeSubscription | null, Error>> {
-    const result = await this.db.query<{
-      id: string;
-      tenant_id: string;
-      stripe_subscription_id: string;
-      stripe_customer_id: string;
-      stripe_price_id: string;
-      status: SubscriptionStatus;
-      billing_interval: 'monthly' | 'yearly';
-      billing_cycle_start: Date;
-      billing_cycle_end: Date;
-      cancel_at_period_end: boolean;
-      canceled_at: Date | null;
-      trial_end: Date | null;
-      created_at: Date;
-      updated_at: Date;
-    }>(
+    const result = await this.db.query<StripeSubscriptionRow>(
       `SELECT id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
               status, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
@@ -745,7 +740,24 @@ export class StripeService {
     const row = result.value.rows[0];
     if (!row) return Result.ok(null);
 
-    return Result.ok({
+    return Result.ok(this.mapStripeSubscription(row));
+  }
+
+  private mapStripeCustomer(row: StripeCustomerRow): StripeCustomer {
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      stripeCustomerId: row.stripe_customer_id,
+      email: row.email,
+      name: row.name,
+      defaultPaymentMethodId: row.default_payment_method_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private mapStripeSubscription(row: StripeSubscriptionRow): StripeSubscription {
+    return {
       id: row.id,
       tenantId: row.tenant_id,
       stripeSubscriptionId: row.stripe_subscription_id,
@@ -760,7 +772,7 @@ export class StripeService {
       trialEnd: row.trial_end,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-    });
+    };
   }
 
   /**
