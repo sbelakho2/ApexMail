@@ -11,6 +11,7 @@ use reqwest::Client;
 
 use api_server::app::build_app;
 use api_server::config::Config;
+use api_server::ses_provider::SesIpProvider;
 use api_server::state::AppStateInner;
 
 #[tokio::main]
@@ -51,12 +52,26 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to create Redis pool: {e}"))?;
     tracing::info!("redis pool created");
 
+    // ── AWS SES client ──────────────────────────────────────
+    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_sdk_sesv2::config::Region::new(config.aws_region.clone()))
+        .load()
+        .await;
+    let ses_client = aws_sdk_sesv2::Client::new(&aws_config);
+    let ses_provider = SesIpProvider::new(
+        ses_client,
+        db.clone(),
+        config.ses_ip_pool_prefix.clone(),
+        config.aws_region.clone(),
+    );
+    tracing::info!(region = %config.aws_region, "AWS SES client initialized");
+
     // ── App state ───────────────────────────────────────────
     let http_client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let state = AppStateInner::new(db, redis, config.clone(), http_client);
+    let state = AppStateInner::new(db, redis, config.clone(), http_client, ses_provider);
 
     // ── Build & serve ───────────────────────────────────────
     let app = build_app(state);

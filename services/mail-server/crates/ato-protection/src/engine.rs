@@ -453,6 +453,90 @@ impl AtoEngine {
         removed
     }
 
+    /// Evict TLS history entries for users whose last activity is older than
+    /// `max_age_secs` seconds ago.
+    ///
+    /// `tls_histories` has no self-evicting mechanism; without this call the
+    /// map grows indefinitely as new users authenticate.  Call periodically
+    /// (e.g., every 300 seconds) to prevent memory exhaustion.
+    pub fn evict_stale_tls_histories(&self, max_age_secs: i64) -> usize {
+        let cutoff = Utc::now() - chrono::Duration::seconds(max_age_secs);
+        let before = self.tls_histories.len();
+        self.tls_histories.retain(|_, history| history.last_seen >= cutoff);
+        let removed = before - self.tls_histories.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed = removed,
+                remaining = self.tls_histories.len(),
+                "Evicted stale tls_histories entries"
+            );
+        }
+        removed
+    }
+
+    /// Evict per-user lockout event lists whose most recent event is older than
+    /// `max_age_secs` seconds ago.
+    ///
+    /// The `lockout_events` map accretes entries for users who are locked out
+    /// but never attempt to authenticate again (their per-login cleanup never
+    /// runs).  Call periodically to bound memory usage.
+    pub fn evict_stale_lockout_events(&self, max_age_secs: i64) -> usize {
+        let cutoff = Utc::now() - chrono::Duration::seconds(max_age_secs);
+        let before = self.lockout_events.len();
+        self.lockout_events.retain(|_, events| {
+            // Keep the entry only if at least one event is still within the window.
+            events.iter().any(|ts| *ts >= cutoff)
+        });
+        let removed = before - self.lockout_events.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed = removed,
+                remaining = self.lockout_events.len(),
+                "Evicted stale lockout_events entries"
+            );
+        }
+        removed
+    }
+
+    /// Spawn a background Tokio task that periodically evicts stale in-memory
+    /// state from all three unbounded DashMaps.
+    ///
+    /// The returned [`tokio::task::JoinHandle`] can be awaited or aborted by
+    /// the caller.  `interval_secs` controls how often the cleanup runs;
+    /// 60 seconds is a reasonable default.  The method requires `Arc<Self>`
+    /// because the background task must hold an independent reference to the
+    /// engine after this method returns.
+    ///
+    /// # Eviction windows
+    ///   * `ip_call_counts`   — entries older than 2× interval (2 × rate-limit windows)
+    ///   * `lockout_events`   — entries whose newest event is older than 1 hour
+    ///   * `tls_histories`    — entries not seen in 24 hours
+    pub fn run_cleanup_loop(
+        self: Arc<Self>,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let interval = tokio::time::Duration::from_secs(interval_secs);
+            let mut ticker = tokio::time::interval(interval);
+            // Skip the first (immediate) tick so we don't evict on startup.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let rate_removed  = self.evict_stale_rate_limits(interval_secs * 2);
+                let lock_removed  = self.evict_stale_lockout_events(3_600);
+                let tls_removed   = self.evict_stale_tls_histories(86_400);
+                if rate_removed + lock_removed + tls_removed > 0 {
+                    tracing::info!(
+                        rate_removed,
+                        lock_removed,
+                        tls_removed,
+                        "ATO engine periodic cleanup complete"
+                    );
+                }
+            }
+        })
+    }
+
     /// Evaluate in-session behavior to support continuous authentication decisions.
     pub fn evaluate_session_activity(&self, event: &SessionActivityEvent) -> SessionRiskVerdict {
         let mut factors = Vec::new();

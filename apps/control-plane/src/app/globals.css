@@ -321,6 +321,39 @@
         @apply focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent;
         @apply placeholder:text-muted-foreground;
     }
+
+    /* Control Plane Page System */
+    .cp-page-frame {
+        @apply w-full;
+    }
+
+    .cp-page {
+        @apply mx-auto w-full max-w-7xl space-y-6 md:space-y-8;
+    }
+
+    .cp-page--narrow {
+        @apply max-w-6xl;
+    }
+
+    .cp-page--wide {
+        @apply max-w-none;
+    }
+
+    .cp-page-header {
+        @apply flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between;
+    }
+
+    .cp-page-title {
+        @apply text-2xl font-bold tracking-tight text-foreground;
+    }
+
+    .cp-page-subtitle {
+        @apply text-sm text-muted-foreground;
+    }
+
+    .cp-section {
+        @apply bg-card rounded-xl border border-border p-6 shadow-sm;
+    }
 }
 
 @layer utilities {

@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 use worker_processors::{
     common::{
         AnalyticsConfig, EmailConfig, ProcessorConfig, ReplyHandlerConfig, SmtpConfig,
-        WebhookConfig,
+        TransportType, WebhookConfig,
     },
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
@@ -124,6 +124,14 @@ async fn main() -> Result<()> {
             ..Default::default()
         };
 
+        // Choose transport backend via EMAIL_TRANSPORT_TYPE env var.
+        // Values: "ses" (default), "smtp" / "self-hosted" / "direct".
+        let transport_type = env::var("EMAIL_TRANSPORT_TYPE")
+            .map(|v| TransportType::from_env(&v))
+            .unwrap_or_default();
+
+        info!(transport = ?transport_type, "Email transport backend selected");
+
         let config = EmailConfig {
             base: ProcessorConfig {
                 name: "email".to_string(),
@@ -131,11 +139,12 @@ async fn main() -> Result<()> {
                 poll_interval,
                 ..Default::default()
             },
+            transport_type,
             smtp: smtp_config,
             ..Default::default()
         };
 
-        match EmailProcessor::new(db.clone(), redis.clone(), config) {
+        match EmailProcessor::new(db.clone(), redis.clone(), config).await {
             Ok(processor) => {
                 let processor = Arc::new(processor);
                 let p = Arc::clone(&processor);

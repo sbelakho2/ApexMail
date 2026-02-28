@@ -33,7 +33,8 @@ docs/
 ├── development/            # Development Guides
 │   ├── getting-started.md          ✅
 │   ├── contributing.md             ✅
-│   └── style-system.md             ✅ (NEW)
+│   ├── style-system.md             ✅ (NEW)
+│   └── control-plane-ui-ux.md      ✅ (NEW)
 ├── enterprise/             # Enterprise Features
 │   ├── README.md                   ✅
 │   ├── sso.md                      ✅
@@ -50,7 +51,8 @@ docs/
 ├── operations/             # Operations Guides
 │   ├── runbooks/
 │   │   └── incident-response.md    ✅
-│   └── slo-management.md           ✅
+│   ├── slo-management.md           ✅
+│   └── control-plane-sales-automation.md ✅ (NEW)
 ├── security/               # Security Documentation
 │   ├── Security_Systems.md         ✅ (NEW — 8 security crates)
 │   ├── compliance.md               ✅
@@ -129,12 +131,14 @@ docs/
 - [Security & Compliance](security/compliance.md)
 - [Operations Runbooks](operations/runbooks/incident-response.md)
 - [SLO Management](operations/slo-management.md)
+- [Control Plane Sales Automation](operations/control-plane-sales-automation.md) (NEW)
 
 ### Development
 
 - [Marketing Website](marketing/README.md)
 - [Contributing Guide](development/contributing.md)
 - [Apex Style System (Premium UI + Apex Icons)](development/style-system.md) (NEW)
+- [Control Plane UI/UX Standards](development/control-plane-ui-ux.md) (NEW)
 
 ## Version
 

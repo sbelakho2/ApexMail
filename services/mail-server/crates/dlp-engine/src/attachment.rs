@@ -446,6 +446,7 @@ impl DlpEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DlpConfig;
 
     #[test]
     fn test_kind_from_filename() {

@@ -367,7 +367,7 @@ export default function IPWarmerPage() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto">
+        <div className="cp-page">
             {/* Toast Notification */}
             {toast && (
                 <div

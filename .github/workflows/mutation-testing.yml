@@ -1,0 +1,200 @@
+# Mutation Testing Workflow
+# Evaluates test quality by checking if tests catch introduced bugs
+#
+# This is a slower process so it runs weekly and on-demand rather than
+# on every push. It helps identify gaps in test coverage.
+
+name: Mutation Testing
+
+on:
+  schedule:
+    # Run weekly on Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Comma-separated list of packages to test (empty = all)'
+        required: false
+        default: ''
+      minimum_score:
+        description: 'Minimum mutation score (0-100)'
+        required: false
+        default: '60'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  mutation-test:
+    name: Rust Mutation Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hours max
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: services/mail-server/target/
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation tests (selected packages)
+        if: github.event.inputs.packages != ''
+        run: |
+          cd services/mail-server
+          IFS=',' read -ra PKGS <<< "${{ github.event.inputs.packages }}"
+          ARGS=""
+          for pkg in "${PKGS[@]}"; do
+            ARGS="$ARGS -p $pkg"
+          done
+          cargo mutants $ARGS --output mutants-out
+
+      - name: Run mutation tests (core security packages)
+        if: github.event.inputs.packages == '' || github.event_name == 'schedule'
+        run: |
+          cd services/mail-server
+          cargo mutants \
+            -p waf-engine \
+            -p ids-engine \
+            -p spam-filter \
+            -p dlp-engine \
+            -p sandbox \
+            -p ato-protection \
+            -p threat-intel \
+            -p mail-common \
+            --output mutants-out
+
+      - name: Parse mutation results
+        id: parse
+        run: |
+          cd services/mail-server/mutants-out
+          
+          # Parse the summary
+          if [ -f summary.json ]; then
+            TOTAL=$(jq '.total_mutants' summary.json)
+            KILLED=$(jq '.killed' summary.json)
+            SURVIVED=$(jq '.survived' summary.json)
+            TIMEOUT=$(jq '.timeout' summary.json)
+            UNVIABLE=$(jq '.unviable' summary.json)
+            
+            # Calculate score (killed + timeout) / (total - unviable)
+            TESTABLE=$((TOTAL - UNVIABLE))
+            if [ $TESTABLE -gt 0 ]; then
+              SCORE=$(( (KILLED + TIMEOUT) * 100 / TESTABLE ))
+            else
+              SCORE=100
+            fi
+            
+            echo "total=$TOTAL" >> $GITHUB_OUTPUT
+            echo "killed=$KILLED" >> $GITHUB_OUTPUT
+            echo "survived=$SURVIVED" >> $GITHUB_OUTPUT
+            echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
+            echo "score=$SCORE" >> $GITHUB_OUTPUT
+          else
+            echo "No summary.json found, checking logs..."
+            cat *.log || true
+            echo "score=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload mutation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: services/mail-server/mutants-out/
+          retention-days: 30
+
+      - name: Create mutation summary
+        run: |
+          echo "## 🧬 Mutation Testing Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Mutation Score** | ${{ steps.parse.outputs.score }}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Mutants | ${{ steps.parse.outputs.total }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Killed | ${{ steps.parse.outputs.killed }} ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Survived | ${{ steps.parse.outputs.survived }} ⚠️ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timeout | ${{ steps.parse.outputs.timeout }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Interpretation" >> $GITHUB_STEP_SUMMARY
+          echo "- **Killed**: Tests caught the mutant (good!)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Survived**: Tests missed the bug - improve test coverage" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timeout**: Mutant caused infinite loop (usually caught)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check minimum score
+        run: |
+          SCORE="${{ steps.parse.outputs.score }}"
+          MINIMUM="${{ github.event.inputs.minimum_score || '60' }}"
+          
+          if [ "$SCORE" -lt "$MINIMUM" ]; then
+            echo "::error::Mutation score $SCORE% is below minimum $MINIMUM%"
+            echo "Tests are not catching enough bugs. Review survived mutants in the artifact."
+            exit 1
+          else
+            echo "✅ Mutation score $SCORE% meets minimum threshold of $MINIMUM%"
+          fi
+
+  mutation-report-comment:
+    name: Report Results
+    needs: mutation-test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const score = '${{ needs.mutation-test.outputs.score }}';
+            const killed = '${{ needs.mutation-test.outputs.killed }}';
+            const survived = '${{ needs.mutation-test.outputs.survived }}';
+            
+            const body = `## 🧬 Mutation Testing Results
+            
+            | Metric | Value |
+            |--------|-------|
+            | **Mutation Score** | ${score}% |
+            | Killed | ${killed} ✅ |
+            | Survived | ${survived} ⚠️ |
+            
+            ${parseInt(score) >= 60 ? '✅ **Passed**: Test quality is acceptable' : '⚠️ **Warning**: Tests are not catching enough bugs'}
+            
+            <details>
+            <summary>What is mutation testing?</summary>
+            
+            Mutation testing introduces small bugs (mutants) into your code and checks if tests catch them.
+            - **Killed**: Tests found the bug 👍
+            - **Survived**: Tests missed the bug - add more tests!
+            </details>`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

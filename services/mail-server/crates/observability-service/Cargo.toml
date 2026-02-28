@@ -42,6 +42,12 @@ tracing-subscriber.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 
+# OpenTelemetry (distributed tracing)
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+
 # HTTP client (for alert webhooks)
 reqwest.workspace = true
 

@@ -28,6 +28,7 @@ dlp-engine = { path = "../dlp-engine" }
 sandbox = { path = "../sandbox" }
 ato-protection = { path = "../ato-protection" }
 threat-intel = { path = "../threat-intel" }
+worker-processors = { path = "../worker-processors" }
 
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum = { workspace = true }

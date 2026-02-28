@@ -45,7 +45,7 @@ All network communication is encrypted using TLS.
 | HSTS                    | Enabled                                     |
 
 - **Platform communication**: All communication between platform components is encrypted with TLS.
-- **SMTP**: Outbound SMTP connections prefer TLS via STARTTLS. MTA-STS policies are respected — if the recipient domain enforces MTA-STS, delivery over unencrypted connections is refused.
+- **SMTP**: Outbound email delivery defaults to **AWS SES**, which enforces TLS for all API calls and uses opportunistic TLS (STARTTLS) for onward delivery to recipient servers. When self-hosted SMTP is enabled (`EMAIL_TRANSPORT_TYPE=smtp`), outbound connections prefer TLS via STARTTLS. MTA-STS policies are respected in both modes — if the recipient domain enforces MTA-STS, delivery over unencrypted connections is refused.
 
 ### Key Management
 

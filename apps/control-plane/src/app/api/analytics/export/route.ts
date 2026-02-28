@@ -19,6 +19,42 @@ interface ExportRow {
     complaints: string;
 }
 
+interface ColumnRow {
+    column_name: string;
+}
+
+interface EventSchema {
+    eventColumn: 'event_type' | 'type';
+    timeColumn: 'created_at' | 'timestamp';
+}
+
+async function resolveEventSchema(): Promise<EventSchema | null> {
+    const rows = await query<ColumnRow>(
+        `SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'events'
+           AND column_name IN ('event_type', 'type', 'created_at', 'timestamp')`
+    );
+
+    if (rows.length === 0) {
+        return null;
+    }
+
+    const columns = new Set(rows.map(row => row.column_name));
+    const eventColumn = columns.has('event_type') ? 'event_type' : columns.has('type') ? 'type' : null;
+    const timeColumn = columns.has('created_at') ? 'created_at' : columns.has('timestamp') ? 'timestamp' : null;
+
+    if (!eventColumn || !timeColumn) {
+        return null;
+    }
+
+    return {
+        eventColumn,
+        timeColumn,
+    };
+}
+
 export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const range = searchParams.get('range') || '30d';
@@ -35,19 +71,31 @@ export async function GET(request: NextRequest) {
     const interval = intervalMap[range] || '30 days';
     
     try {
+        const schema = await resolveEventSchema();
+        if (!schema) {
+            return NextResponse.json({
+                exportedAt: new Date().toISOString(),
+                range,
+                data: [],
+                warning: 'events table schema unavailable',
+            });
+        }
+
+        const { eventColumn, timeColumn } = schema;
+
         const rows = await query<ExportRow>(
             `SELECT 
-                DATE(created_at)::text AS date,
-                SUM(CASE WHEN event_type = 'sent' THEN 1 ELSE 0 END)::text AS sent,
-                SUM(CASE WHEN event_type = 'delivered' THEN 1 ELSE 0 END)::text AS delivered,
-                SUM(CASE WHEN event_type = 'opened' THEN 1 ELSE 0 END)::text AS opened,
-                SUM(CASE WHEN event_type = 'clicked' THEN 1 ELSE 0 END)::text AS clicked,
-                SUM(CASE WHEN event_type = 'bounced' THEN 1 ELSE 0 END)::text AS bounced,
-                SUM(CASE WHEN event_type = 'complained' THEN 1 ELSE 0 END)::text AS complaints
+                DATE(${timeColumn})::text AS date,
+                SUM(CASE WHEN ${eventColumn} = 'sent' THEN 1 ELSE 0 END)::text AS sent,
+                SUM(CASE WHEN ${eventColumn} = 'delivered' THEN 1 ELSE 0 END)::text AS delivered,
+                SUM(CASE WHEN ${eventColumn} = 'opened' THEN 1 ELSE 0 END)::text AS opened,
+                SUM(CASE WHEN ${eventColumn} = 'clicked' THEN 1 ELSE 0 END)::text AS clicked,
+                SUM(CASE WHEN ${eventColumn} = 'bounced' THEN 1 ELSE 0 END)::text AS bounced,
+                SUM(CASE WHEN ${eventColumn} = 'complained' THEN 1 ELSE 0 END)::text AS complaints
             FROM events
-            WHERE created_at >= NOW() - $1::interval
-            GROUP BY DATE(created_at)
-            ORDER BY DATE(created_at) ASC`,
+            WHERE ${timeColumn} >= NOW() - $1::interval
+            GROUP BY DATE(${timeColumn})
+            ORDER BY DATE(${timeColumn}) ASC`,
             [interval]
         );
         

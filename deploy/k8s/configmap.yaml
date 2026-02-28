@@ -1,0 +1,35 @@
+# =============================================================================
+# ApexMail Shared ConfigMap
+#
+# Non-sensitive configuration values. Sensitive values (passwords, tokens,
+# connection strings with credentials) MUST be in the `apexmail-secrets`
+# Secret, NOT in this ConfigMap.
+#
+# Deploy with:
+#   kubectl apply -f configmap.yaml -n apexmail
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apexmail-config
+  namespace: apexmail
+  labels:
+    app.kubernetes.io/name: apexmail
+data:
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis-host: "redis.apexmail.svc.cluster.local"
+  redis-port: "6379"
+
+  # ── ClickHouse ─────────────────────────────────────────────────────────────
+  clickhouse-url: "http://clickhouse.apexmail.svc.cluster.local:8123"
+  clickhouse-database: "apexmail"
+  clickhouse-user: "apexmail"
+
+  # ── Tracking service ───────────────────────────────────────────────────────
+  tracking-base-url: "https://track.apexmail.ee"
+  trusted-proxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+  rate-limit-enabled: "true"
+  rate-limit-max-per-minute: "1000"
+
+  # ── Web app ────────────────────────────────────────────────────────────────
+  web-base-url: "https://app.apexmail.ee"

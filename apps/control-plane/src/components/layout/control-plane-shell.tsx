@@ -171,7 +171,7 @@ export function ControlPlaneShell({ children }: ControlPlaneShellProps) {
 
                 {/* Main Content */}
                 <main className={isLoginPage ? "w-full" : "ml-0 md:ml-64 p-4 md:p-8 pt-4 md:pt-8"}>
-                    {children}
+                    {isLoginPage ? children : <div className="cp-page-frame">{children}</div>}
                 </main>
             </div>
 

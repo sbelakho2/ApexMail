@@ -6,7 +6,85 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Coverage thresholds - fail CI if below these
+  MIN_LINE_COVERAGE: 75
+  MIN_RUST_COVERAGE: 70
+
 jobs:
+  # Rust coverage job (security crates)
+  rust-coverage:
+    name: Rust Coverage
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/
+            ~/.cargo/git/
+            services/mail-server/target/
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run coverage for security crates
+        working-directory: services/mail-server
+        run: |
+          cargo llvm-cov \
+            -p waf-engine \
+            -p ids-engine \
+            -p spam-filter \
+            -p dlp-engine \
+            -p sandbox \
+            -p ato-protection \
+            -p threat-intel \
+            -p mail-common \
+            --lcov --output-path lcov.info \
+            --ignore-filename-regex '(test|mock|generated)'
+
+      - name: Check Rust coverage threshold
+        working-directory: services/mail-server
+        run: |
+          # Parse coverage percentage from lcov
+          TOTAL=$(grep -E "^LF:" lcov.info | cut -d: -f2 | paste -sd+ | bc || echo 0)
+          COVERED=$(grep -E "^LH:" lcov.info | cut -d: -f2 | paste -sd+ | bc || echo 0)
+          
+          if [ "$TOTAL" -gt 0 ]; then
+            PERCENTAGE=$(( COVERED * 100 / TOTAL ))
+          else
+            PERCENTAGE=0
+          fi
+          
+          echo "Rust coverage: $COVERED / $TOTAL lines ($PERCENTAGE%)"
+          echo "rust_coverage=$PERCENTAGE" >> $GITHUB_OUTPUT
+          
+          if [ "$PERCENTAGE" -lt "$MIN_RUST_COVERAGE" ]; then
+            echo "::error::Rust coverage $PERCENTAGE% is below threshold $MIN_RUST_COVERAGE%"
+            exit 1
+          fi
+          echo "::notice::Rust coverage $PERCENTAGE% meets threshold"
+
+      - name: Upload Rust coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: services/mail-server/lcov.info
+          flags: rust
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # TypeScript coverage job
   coverage:
     name: Run Tests with Coverage
     runs-on: ubuntu-latest

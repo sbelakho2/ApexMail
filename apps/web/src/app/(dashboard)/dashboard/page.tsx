@@ -221,7 +221,7 @@ export default function DashboardPage() {
                             <Button
                                 key={days}
                                 type="button"
-                                variant={windowDays === days ? 'default' : 'outline'}
+                                variant={windowDays === days ? (days === 30 ? 'warning' : 'secondary') : 'outline'}
                                 className="border-surface-200 shadow-sm"
                                 onClick={() => setWindowDays(days as 7 | 30 | 90)}
                             >
@@ -232,7 +232,7 @@ export default function DashboardPage() {
                     <Button variant="outline" className="border-surface-200 shadow-sm" onClick={() => setRefreshKey((prev) => prev + 1)}>
                         <RefreshCw className="mr-2 h-4 w-4" />Refresh
                     </Button>
-                    <Button className="bg-primary shadow-lg shadow-primary/20" onClick={() => { window.location.href = '/campaigns/new'; }}><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
+                    <Button variant="success" className="shadow-lg shadow-success/20" onClick={() => { window.location.href = '/campaigns/new'; }}><Zap className="mr-2 h-4 w-4" />Quick Send</Button>
                 </>}
             />
 

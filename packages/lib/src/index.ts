@@ -26,3 +26,4 @@ export * from './attachments/index.js';
 export * from './validation/index.js';
 export * from './company.js';
 export * from './error-codes.js';
+export * from './api-version.js';

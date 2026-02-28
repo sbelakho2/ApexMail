@@ -50,6 +50,13 @@ pub struct Config {
 
     // ── Idempotency ─────────────────────────────────────────
     pub idempotency_ttl_seconds: u64,
+
+    // ── AWS SES (dedicated IPs) ─────────────────────────────
+    pub aws_region: String,
+    pub ses_ip_pool_prefix: String,
+    pub ses_default_warmup_days: u32,
+    /// SES configuration set for event tracking (bounces, complaints, deliveries).
+    pub ses_configuration_set: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +226,14 @@ impl Config {
                 "IDEMPOTENCY_TTL_SECONDS",
                 &env_or("IDEMPOTENCY_TTL_SECONDS", "86400"),
             )?,
+
+            aws_region: env_or("AWS_REGION", "us-east-1"),
+            ses_ip_pool_prefix: env_or("SES_IP_POOL_PREFIX", "apexmail"),
+            ses_default_warmup_days: parse_u32(
+                "SES_DEFAULT_WARMUP_DAYS",
+                &env_or("SES_DEFAULT_WARMUP_DAYS", "14"),
+            )?,
+            ses_configuration_set: env::var("SES_CONFIGURATION_SET").ok(),
         };
 
         // Production security checks
@@ -364,6 +379,10 @@ mod tests {
             webhook_timeout_ms: 5000,
             webhook_max_retries: 3,
             idempotency_ttl_seconds: 86400,
+            aws_region: "us-east-1".into(),
+            ses_ip_pool_prefix: "apexmail".into(),
+            ses_default_warmup_days: 14,
+            ses_configuration_set: None,
         };
         assert!(config.validate_production().is_err());
     }

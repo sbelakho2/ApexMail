@@ -1,0 +1,77 @@
+# Mutation Testing Configuration for cargo-mutants
+# https://mutants.rs/config.html
+#
+# PURPOSE: Mutation testing evaluates test quality by introducing small
+# bugs (mutants) and checking if tests catch them. If tests pass with
+# the mutant, the test suite has gaps.
+#
+# RUN LOCALLY:
+#   cargo install cargo-mutants
+#   cargo mutants --manifest-path services/mail-server/Cargo.toml
+#
+# Understanding Results:
+# - "Killed" mutants: Tests caught the bug (good!)
+# - "Survived" mutants: Tests missed the bug (improve tests)
+# - "Timeout" mutants: Caused infinite loops (usually killed)
+# - "Unviable" mutants: Failed to compile (ignore)
+
+# Timeout for each mutant test (in seconds)
+timeout = 120
+
+# Minimum mutation score (percentage of killed mutants) required
+# Values below this will cause CI to fail
+# Start at 60% and increase as test quality improves
+minimum_test_timeout = 30
+
+# Maximum concurrent mutants to test
+jobs = 4
+
+# Control output verbosity
+print_caught = false
+
+# Files/directories to exclude from mutation testing
+# Focus on business logic, skip generated code and tests
+exclude_globs = [
+  "**/*_test.rs",
+  "**/tests/**",
+  "**/benches/**",
+  "**/examples/**",
+  "**/*.generated.rs",
+  "**/build.rs",
+  "**/migrations/**",
+]
+
+# Modules to exclude from mutation
+exclude_re = [
+  "test_utils",
+  "fixtures",
+  "mock",
+]
+
+# Functions to exclude from mutation (regex patterns)
+# Exclude logging, debug, and display implementations
+examine_re = [
+  # Skip test helper functions
+  "^test_",
+  "^mock_",
+  # Skip trait implementations that are just boilerplate
+  "^fmt$",
+  "^default$",
+  # Skip error conversion boilerplate
+  "^from$",
+]
+
+# Packages to focus mutation testing on (most critical code)
+# Comment out to test all packages
+[package]
+exclude = [
+  # Exclude test packages themselves
+  "fuzz-tests",
+  "integration-tests",
+  "functional-tests",
+  "performance-tests",
+  "load-tests",
+  # Exclude binaries   
+  "mail-server-bin",
+  "apexmail-cli",
+]

@@ -2,7 +2,7 @@
 
 This document describes ApexMail's disaster recovery (DR) architecture, backup strategies, failover mechanisms, and recovery procedures. The systems described here are primarily implemented in the HA (High Availability) application and the Control Plane.
 
-All infrastructure runs on **Hetzner Cloud servers** (Hetzner Cloud ARM) in Finland (primary) and Germany (standby). No AWS, GCP, or Azure services are used for core infrastructure.
+All infrastructure runs on **Hetzner Cloud servers** (Hetzner Cloud ARM) in Finland (primary) and Germany (standby). **AWS SES** is used as the primary outbound email delivery transport (see [ADR 0011](../adr/0011-dual-delivery-ses-primary.md)). Self-hosted SMTP is available as an opt-in alternative.
 
 ---
 

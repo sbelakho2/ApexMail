@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apexmail
+  labels:
+    app.kubernetes.io/name: apexmail
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    # Enforce network policies — only allow intra-namespace + ingress/monitoring traffic
+    policy.network.k8s.io/level: restricted

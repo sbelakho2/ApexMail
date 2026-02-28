@@ -80,7 +80,7 @@ export default function CompliancePage() {
     const totalTenants = overview.riskSummary.low + overview.riskSummary.medium + overview.riskSummary.high + overview.riskSummary.critical;
 
     return (
-        <div className="max-w-7xl mx-auto">
+        <div className="cp-page">
             <div className="mb-8">
                 <h1 className="text-2xl font-bold text-foreground">Compliance Admin</h1>
                 <p className="text-muted-foreground mt-1">

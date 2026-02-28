@@ -1,7 +1,9 @@
 # ApexMail Mail Server - Docker Compose
 #
-# Enterprise-grade email infrastructure with direct SMTP delivery.
-# All emails are sent directly via SMTP with DKIM signing.
+# Enterprise-grade email infrastructure.
+# Outbound delivery defaults to AWS SES API (EMAIL_TRANSPORT_TYPE=ses).
+# Set EMAIL_TRANSPORT_TYPE=smtp for direct SMTP delivery with DKIM signing.
+# Inbound email is always handled by the native Rust MTA.
 
 services:
   # Outbound Queue Service

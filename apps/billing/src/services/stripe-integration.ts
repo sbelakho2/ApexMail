@@ -556,6 +556,83 @@ export class StripeService {
     );
 
     logger.info('Subscription updated', { tenantId, subscriptionId: subscription.id, status: subscription.status });
+
+    // Auto-provision dedicated IPs if the plan includes them
+    if (subscription.status === 'active') {
+      await this.autoProvisionDedicatedIps(tenantId);
+    }
+  }
+
+  /**
+   * Auto-provision dedicated IPs when a tenant's plan includes them.
+   * Queries the plan's `dedicated_ip_count` feature and allocates IPs
+   * if the tenant doesn't already have enough.
+   */
+  private async autoProvisionDedicatedIps(tenantId: string): Promise<void> {
+    try {
+      // Check how many IPs the plan includes
+      const planResult = await this.db.query<{ included_count: number }>(
+        `SELECT COALESCE((p.features->>'dedicated_ip_count')::int, 0) as included_count
+         FROM subscriptions s
+         JOIN plans p ON p.name = s.plan_name
+         WHERE s.tenant_id = $1 AND s.status = 'active'
+         ORDER BY s.created_at DESC LIMIT 1`,
+        [tenantId]
+      );
+
+      if (!planResult.ok || planResult.value.rows.length === 0) return;
+      const includedCount = planResult.value.rows[0]!.included_count;
+      if (includedCount <= 0) return;
+
+      // Check how many they already have
+      const activeResult = await this.db.query<{ count: number }>(
+        `SELECT COUNT(*)::int as count FROM dedicated_ips
+         WHERE tenant_id = $1::uuid AND status NOT IN ('retired', 'releasing')`,
+        [tenantId]
+      );
+
+      if (!activeResult.ok) return;
+      const activeCount = activeResult.value.rows[0]?.count ?? 0;
+
+      const toAllocate = includedCount - activeCount;
+      if (toAllocate <= 0) {
+        logger.info('Tenant already has sufficient dedicated IPs', { tenantId, activeCount, includedCount });
+        return;
+      }
+
+      logger.info('Auto-provisioning dedicated IPs', { tenantId, toAllocate, includedCount, activeCount });
+
+      // Call the internal API to allocate IPs
+      const apiBaseUrl = process.env.API_BASE_URL || 'http://localhost:3001';
+
+      for (let i = 0; i < toAllocate; i++) {
+        try {
+          const response = await fetch(`${apiBaseUrl}/v1/dedicated-ips`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Internal-Service': 'billing',
+              'X-Tenant-Id': tenantId,
+            },
+            body: JSON.stringify({ auto_provisioned: true }),
+          });
+
+          if (response.ok) {
+            logger.info('Auto-provisioned dedicated IP', { tenantId, ipNumber: i + 1, total: toAllocate });
+          } else {
+            const errorText = await response.text();
+            logger.warn('Failed to auto-provision dedicated IP', {
+              tenantId, ipNumber: i + 1, status: response.status, error: errorText,
+            });
+          }
+        } catch (err) {
+          logger.error('Error auto-provisioning dedicated IP', { tenantId, ipNumber: i + 1, error: err });
+        }
+      }
+    } catch (err) {
+      // Non-fatal — don't break the subscription flow
+      logger.error('Auto-provision dedicated IPs failed', { tenantId, error: err });
+    }
   }
 
   private async handleSubscriptionDeleted(subscription: Stripe.Subscription): Promise<void> {

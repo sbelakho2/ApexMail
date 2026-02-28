@@ -54,7 +54,8 @@ pub fn build_app(state: AppState) -> Router {
     // ── Public routes (no auth) ─────────────────────────────
     let public = Router::new()
         .nest("/health", routes::health::router())
-        .nest("/v1/auth", routes::auth::router());
+        .nest("/v1/auth", routes::auth::router())
+        .nest("/v1/ses", routes::ses_notifications::router());
 
     // ── Authenticated v1 routes ─────────────────────────────
     //  Fix #6: Wrap with auth middleware so every route requires authentication.
@@ -74,6 +75,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/automations", routes::automations::router())
         .nest("/v1/ai", routes::ai_insights::router())
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
+        .nest("/v1/account", routes::account::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

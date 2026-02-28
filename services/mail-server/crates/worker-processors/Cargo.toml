@@ -75,7 +75,12 @@ mail-builder.workspace = true
 mail-auth.workspace = true
 mail-send = "0.4"
 tokio-rustls = "0.26"
+rustls.workspace = true
 hex = "0.4"
+
+# AWS SES v2 (email delivery backend)
+aws-config.workspace = true
+aws-sdk-sesv2.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

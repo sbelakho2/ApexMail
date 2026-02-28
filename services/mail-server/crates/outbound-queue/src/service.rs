@@ -17,7 +17,7 @@ use mail_proto::generated::{
     GetQueueStatsRequest, GetQueueStatsResponse,
     DeliveryStatus,
 };
-use crate::queue::{EmailQueue, QueuedEmail, EmailStatus};
+use crate::queue::{EmailQueue, QueuedEmail, EmailStatus, CancelResult};
 
 const MAX_BULK_EMAILS: usize = 1_000;
 
@@ -212,45 +212,23 @@ impl OutboundService for OutboundServiceImpl {
         let email_id = Uuid::parse_str(&req.email_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid email ID: {}", e)))?;
         
-        // #117: Check current state before cancelling — don't overwrite Sent/Failed
-        let email = self.queue.get_email(&email_id).await
-            .map_err(|e| Status::internal(format!("Failed to look up email: {}", e)))?;
-        
-        let email = match email {
-            Some(e) => e,
-            None => return Err(Status::not_found("Email not found")),
-        };
-        
-        match email.status {
-            EmailStatus::Sent => {
-                return Ok(Response::new(CancelEmailResponse {
-                    success: false,
-                    error: "Cannot cancel: email already delivered".to_string(),
-                }));
-            }
-            EmailStatus::Failed => {
-                return Ok(Response::new(CancelEmailResponse {
-                    success: false,
-                    error: "Cannot cancel: email already permanently failed".to_string(),
-                }));
-            }
-            EmailStatus::Processing => {
-                return Ok(Response::new(CancelEmailResponse {
-                    success: false,
-                    error: "Cannot cancel: email is currently being sent".to_string(),
-                }));
-            }
-            EmailStatus::Pending | EmailStatus::Deferred => {
-                // Safe to cancel
-            }
-        }
-        
-        match self.queue.mark_failed(&email_id, "Cancelled by user", false).await {
-            Ok(()) => {
+        // FIX: Atomic cancel — single UPDATE with WHERE status guard eliminates
+        // the TOCTOU race between reading status and writing the cancellation.
+        match self.queue.cancel_email_atomic(&email_id).await {
+            Ok(CancelResult::Cancelled) => {
                 info!(email_id = %email_id, "Email cancelled");
                 Ok(Response::new(CancelEmailResponse {
                     success: true,
                     error: String::new(),
+                }))
+            }
+            Ok(CancelResult::NotFound) => {
+                Err(Status::not_found("Email not found"))
+            }
+            Ok(CancelResult::NotCancellable(reason)) => {
+                Ok(Response::new(CancelEmailResponse {
+                    success: false,
+                    error: reason,
                 }))
             }
             Err(e) => {

@@ -14,7 +14,7 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::tracking::{add_tracking_pixel, rewrite_links};
-use super::transport::{create_transport, EmailTransport};
+use super::transport::{create_transport_from_config, EmailTransport};
 use super::types::{
     Attachment, CachedSuppression, Domain, DkimConfig, EmailJob, PreparedEmail,
     SendOutcome, SendResult, WarmupLimits,
@@ -69,8 +69,10 @@ pub struct EmailProcessor {
 
 impl EmailProcessor {
     /// Create a new email processor.
-    pub fn new(db: PgPool, redis: RedisPool, config: EmailConfig) -> ProcessorResult<Self> {
-        let transport = create_transport(&config.smtp);
+    ///
+    /// This is async because SES transport requires AWS SDK initialisation.
+    pub async fn new(db: PgPool, redis: RedisPool, config: EmailConfig) -> ProcessorResult<Self> {
+        let transport = create_transport_from_config(&config).await?;
 
         let smtp_circuit_breaker = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 10,

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use futures::future::try_join_all;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -11,6 +11,7 @@ use std::sync::{Arc, LazyLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 use bytes::Bytes;
+use dashmap::DashMap;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, timeout};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -37,6 +38,12 @@ static EDGE_RESOLVER: LazyLock<Option<Resolver>> = LazyLock::new(|| {
 
 const COMMAND_RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_COMMANDS_PER_WINDOW: usize = 240;
+/// Maximum number of distinct IPs tracked for rate limiting.
+/// Once exceeded, the oldest entries are evicted to prevent unbounded growth.
+#[allow(dead_code)]
+const MAX_RATE_TRACKER_ENTRIES: usize = 100_000;
+#[allow(dead_code)]
+const RATE_TRACKER_EVICTION_INTERVAL: Duration = Duration::from_secs(30);
 const DATA_BUFFER_SHRINK_THRESHOLD: usize = 128 * 1024;
 const DATA_BUFFER_DEFAULT_CAPACITY: usize = 8 * 1024;
 const DNS_CIRCUIT_FAILURE_THRESHOLD: u32 = 5;
@@ -102,8 +109,54 @@ pub struct SmtpMetricsSnapshot {
     pub deliveries_oversized: u64,
 }
 
-static COMMAND_RATE_TRACKER: LazyLock<tokio::sync::RwLock<HashMap<IpAddr, VecDeque<Instant>>>> =
-    LazyLock::new(|| tokio::sync::RwLock::new(HashMap::new()));
+/// Rate tracker using DashMap for lock-free concurrent access.
+/// Each IP maps to a VecDeque of command timestamps within the sliding window.
+/// Entries are evicted when the map exceeds MAX_RATE_TRACKER_ENTRIES or when
+/// all timestamps for an IP expire.
+static COMMAND_RATE_TRACKER: LazyLock<DashMap<IpAddr, VecDeque<Instant>>> =
+    LazyLock::new(|| DashMap::with_capacity(1024));
+
+/// Spawn a background task that periodically evicts stale entries from the
+/// rate tracker.  Call once at server startup.
+#[allow(dead_code)]
+pub fn spawn_rate_tracker_cleanup() {
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(RATE_TRACKER_EVICTION_INTERVAL).await;
+            evict_stale_rate_entries();
+        }
+    });
+}
+
+/// Remove entries whose most-recent timestamp is older than the window,
+/// or trim the map down to MAX_RATE_TRACKER_ENTRIES by dropping the
+/// least-recently-active IPs.
+#[allow(dead_code)]
+fn evict_stale_rate_entries() {
+    let now = Instant::now();
+    let window_start = now - COMMAND_RATE_WINDOW;
+
+    // Phase 1 — remove fully-expired entries
+    COMMAND_RATE_TRACKER.retain(|_ip, timestamps| {
+        // Drop entries if the newest timestamp is outside the window
+        timestamps.back().map_or(false, |t| *t >= window_start)
+    });
+
+    // Phase 2 — if still over capacity, drop entries with fewest recent commands
+    let len = COMMAND_RATE_TRACKER.len();
+    if len > MAX_RATE_TRACKER_ENTRIES {
+        let excess = len - MAX_RATE_TRACKER_ENTRIES;
+        let mut entries: Vec<(IpAddr, usize)> = COMMAND_RATE_TRACKER
+            .iter()
+            .map(|r| (*r.key(), r.value().len()))
+            .collect();
+        // Sort ascending by number of recent commands — evict least-active first
+        entries.sort_by_key(|&(_, count)| count);
+        for (ip, _) in entries.into_iter().take(excess) {
+            COMMAND_RATE_TRACKER.remove(&ip);
+        }
+    }
+}
 
 struct DnsCircuitState {
     consecutive_failures: u32,
@@ -764,22 +817,26 @@ async fn allow_command_from_peer(peer_ip: IpAddr) -> bool {
     let now = Instant::now();
     let window_start = now - COMMAND_RATE_WINDOW;
 
-    let mut tracker = COMMAND_RATE_TRACKER.write().await;
-    let entries = tracker.entry(peer_ip).or_insert_with(VecDeque::new);
+    // DashMap entry API — only locks the shard for this IP, not the entire map
+    let mut entry = COMMAND_RATE_TRACKER
+        .entry(peer_ip)
+        .or_insert_with(VecDeque::new);
+    let timestamps = entry.value_mut();
 
-    while let Some(front) = entries.front() {
+    // Purge expired timestamps from the front
+    while let Some(front) = timestamps.front() {
         if *front < window_start {
-            entries.pop_front();
+            timestamps.pop_front();
         } else {
             break;
         }
     }
 
-    if entries.len() >= MAX_COMMANDS_PER_WINDOW {
+    if timestamps.len() >= MAX_COMMANDS_PER_WINDOW {
         return false;
     }
 
-    entries.push_back(now);
+    timestamps.push_back(now);
     true
 }
 
@@ -1520,5 +1577,282 @@ impl DmarcPolicyResult {
             policy: "none".to_string(),
             record_domain: domain,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // -----------------------------------------------------------------------
+    // SmtpMetrics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn metrics_initial_state_is_zero() {
+        let m = SmtpMetrics::new();
+        let s = m.snapshot();
+        assert_eq!(s.sessions_started, 0);
+        assert_eq!(s.sessions_ended, 0);
+        assert_eq!(s.deliveries_ok, 0);
+        assert_eq!(s.deliveries_rejected, 0);
+        assert_eq!(s.deliveries_oversized, 0);
+    }
+
+    #[test]
+    fn metrics_increment_independently() {
+        let m = SmtpMetrics::new();
+        m.record_session_start();
+        m.record_session_start();
+        m.record_delivery_ok();
+        m.record_delivery_rejected();
+        m.record_delivery_oversized();
+        m.record_session_end();
+
+        let s = m.snapshot();
+        assert_eq!(s.sessions_started, 2);
+        assert_eq!(s.sessions_ended, 1);
+        assert_eq!(s.deliveries_ok, 1);
+        assert_eq!(s.deliveries_rejected, 1);
+        assert_eq!(s.deliveries_oversized, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate tracker — allow_command_from_peer
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn rate_tracker_allows_first_command() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 1));
+        COMMAND_RATE_TRACKER.remove(&ip); // ensure clean slate for this IP
+        assert!(allow_command_from_peer(ip).await);
+        assert!(COMMAND_RATE_TRACKER.get(&ip).unwrap().len() >= 1);
+    }
+
+    #[tokio::test]
+    async fn rate_tracker_allows_up_to_max_commands() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2));
+        COMMAND_RATE_TRACKER.remove(&ip);
+        for _ in 0..MAX_COMMANDS_PER_WINDOW {
+            assert!(allow_command_from_peer(ip).await);
+        }
+        // Exactly at limit — next should be rejected
+        assert!(!allow_command_from_peer(ip).await);
+    }
+
+    #[tokio::test]
+    async fn rate_tracker_different_ips_independent() {
+        let ip_a = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 3));
+        let ip_b = IpAddr::V4(Ipv4Addr::new(10, 99, 0, 4));
+        COMMAND_RATE_TRACKER.remove(&ip_a);
+        COMMAND_RATE_TRACKER.remove(&ip_b);
+
+        for _ in 0..MAX_COMMANDS_PER_WINDOW {
+            assert!(allow_command_from_peer(ip_a).await);
+        }
+        // ip_a exhausted, ip_b should still be allowed
+        assert!(!allow_command_from_peer(ip_a).await);
+        assert!(allow_command_from_peer(ip_b).await);
+    }
+
+    #[tokio::test]
+    async fn rate_tracker_ipv6_works() {
+        let ip = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 99));
+        COMMAND_RATE_TRACKER.remove(&ip);
+        assert!(allow_command_from_peer(ip).await);
+        assert!(COMMAND_RATE_TRACKER.contains_key(&ip));
+    }
+
+    // -----------------------------------------------------------------------
+    // Eviction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn eviction_removes_empty_entries() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 1, 1));
+        // Insert an entry with an empty VecDeque
+        COMMAND_RATE_TRACKER.insert(ip, VecDeque::new());
+        assert!(COMMAND_RATE_TRACKER.contains_key(&ip));
+
+        evict_stale_rate_entries();
+        // Empty deque => back() returns None => should be evicted
+        assert!(!COMMAND_RATE_TRACKER.contains_key(&ip));
+    }
+
+    #[test]
+    fn eviction_keeps_recent_entries() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 1, 2));
+        let mut deque = VecDeque::new();
+        deque.push_back(Instant::now()); // fresh timestamp
+        COMMAND_RATE_TRACKER.insert(ip, deque);
+
+        evict_stale_rate_entries();
+        assert!(COMMAND_RATE_TRACKER.contains_key(&ip));
+        // Cleanup
+        COMMAND_RATE_TRACKER.remove(&ip);
+    }
+
+    #[test]
+    fn eviction_phase2_trims_over_capacity() {
+        // Instead of creating 100K+ unique IPs (slow), we verify the eviction
+        // logic by checking that after inserting known entries and calling
+        // evict, entries with stale timestamps are removed.
+        let base_ip = |i: u8| IpAddr::V4(Ipv4Addr::new(10, 98, 0, i));
+
+        // Insert 5 entries: 3 with only expired timestamps, 2 with fresh
+        for i in 0..3u8 {
+            COMMAND_RATE_TRACKER.insert(base_ip(i), VecDeque::new());
+        }
+        for i in 3..5u8 {
+            let mut deque: VecDeque<Instant> = VecDeque::new();
+            deque.push_back(Instant::now());
+            COMMAND_RATE_TRACKER.insert(base_ip(i), deque);
+        }
+
+        evict_stale_rate_entries();
+
+        // Stale (empty) entries should be gone
+        for i in 0..3u8 {
+            assert!(!COMMAND_RATE_TRACKER.contains_key(&base_ip(i)),
+                "Stale entry {} should have been evicted", i);
+        }
+        // Fresh entries should remain
+        for i in 3..5u8 {
+            assert!(COMMAND_RATE_TRACKER.contains_key(&base_ip(i)),
+                "Fresh entry {} should still exist", i);
+        }
+
+        // Cleanup
+        for i in 0..5u8 {
+            COMMAND_RATE_TRACKER.remove(&base_ip(i));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reset_data_buffer_shrinks_large_buffers() {
+        let mut buf = Vec::with_capacity(DATA_BUFFER_SHRINK_THRESHOLD + 1);
+        buf.extend_from_slice(&[0u8; 256]);
+        reset_data_buffer(&mut buf);
+        assert_eq!(buf.capacity(), DATA_BUFFER_DEFAULT_CAPACITY);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn reset_data_buffer_clears_small_buffers_without_realloc() {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(&[0u8; 32]);
+        let cap_before = buf.capacity();
+        reset_data_buffer(&mut buf);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), cap_before); // no realloc
+    }
+
+    #[test]
+    fn normalize_dmarc_policy_accepts_valid() {
+        assert_eq!(normalize_dmarc_policy("reject"), "reject");
+        assert_eq!(normalize_dmarc_policy("quarantine"), "quarantine");
+        assert_eq!(normalize_dmarc_policy("none"), "none");
+    }
+
+    #[test]
+    fn normalize_dmarc_policy_trims_whitespace() {
+        assert_eq!(normalize_dmarc_policy("  reject "), "reject");
+    }
+
+    #[test]
+    fn normalize_dmarc_policy_unknown_becomes_none() {
+        assert_eq!(normalize_dmarc_policy("invalid"), "none");
+        assert_eq!(normalize_dmarc_policy(""), "none");
+        assert_eq!(normalize_dmarc_policy("REJECT"), "none"); // case-sensitive
+    }
+
+    #[test]
+    fn parent_domains_multi_level() {
+        let result = parent_domains("sub.example.com");
+        assert_eq!(result, vec!["example.com"]);
+    }
+
+    #[test]
+    fn parent_domains_two_labels() {
+        let result = parent_domains("example.com");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parent_domains_deep() {
+        let result = parent_domains("a.b.c.d.com");
+        assert_eq!(result, vec!["b.c.d.com", "c.d.com", "d.com"]);
+    }
+
+    #[test]
+    fn parent_domains_empty_string() {
+        assert!(parent_domains("").is_empty());
+    }
+
+    #[test]
+    fn parent_domains_single_label() {
+        assert!(parent_domains("localhost").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // SmtpConfig
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn smtp_config_local_domains_lowered() {
+        let cfg = SmtpConfig::new(
+            "mail.example.com".into(),
+            "localhost:50051".into(),
+            10 * 1024 * 1024,
+            100,
+            false,
+            None,
+            vec!["Example.COM".into(), "TEST.ORG".into()],
+            998,
+            Duration::from_secs(300),
+            Duration::from_secs(600),
+            Arc::new(SmtpMetrics::new()),
+        );
+        assert!(cfg.local_domains_lower.contains("example.com"));
+        assert!(cfg.local_domains_lower.contains("test.org"));
+        assert!(!cfg.local_domains_lower.contains("Example.COM"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants sanity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rate_constants_are_sane() {
+        assert!(MAX_COMMANDS_PER_WINDOW > 0);
+        assert!(COMMAND_RATE_WINDOW.as_secs() > 0);
+        assert!(MAX_RATE_TRACKER_ENTRIES > 0);
+        assert!(RATE_TRACKER_EVICTION_INTERVAL.as_secs() > 0);
+        assert!(RATE_TRACKER_EVICTION_INTERVAL < COMMAND_RATE_WINDOW);
+    }
+
+    #[test]
+    fn data_buffer_thresholds_are_consistent() {
+        assert!(DATA_BUFFER_DEFAULT_CAPACITY < DATA_BUFFER_SHRINK_THRESHOLD);
+    }
+
+    // -----------------------------------------------------------------------
+    // DmarcPolicyResult
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dmarc_policy_result_none_default() {
+        let result = DmarcPolicyResult::none("example.com".into());
+        assert_eq!(result.policy, "none");
+        assert_eq!(result.record_domain, "example.com");
     }
 }

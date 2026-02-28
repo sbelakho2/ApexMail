@@ -606,6 +606,10 @@
 	- Evidence (2026-02-26): Added shared `useApiResource` hook in `apps/control-plane/src/lib/use-api-resource.ts` and refactored client pages `apps/control-plane/src/app/tenants/page.tsx`, `apps/control-plane/src/app/campaigns/page.tsx`, and `apps/control-plane/src/app/inbox/page.tsx` to use it for standardized `data/loading/refetch/error` fetch state handling.
 - [x] 🔵 **C-075** — `app/api/dashboard/stats/route.ts`: `healthStatus` heuristic equates "any alert" with "platform down"
 	- Evidence (2026-02-26): Updated health-status mapping in `apps/control-plane/src/app/api/dashboard/stats/route.ts` to threshold-based severity (`down` only at high critical volume; otherwise `degraded` for non-zero critical/high alerts), avoiding false "platform down" for isolated alerts.
+- [x] 🟡 **C-076** — Multiple control-plane pages: inconsistent content width and spacing wrappers (`max-w-*` drift)
+	- Evidence (2026-02-27): Standardized root container usage across control-plane routes by introducing shared page primitives in `apps/control-plane/src/app/globals.css` (`.cp-page*`) and normalizing page root wrappers in `apps/control-plane/src/app/**/page.tsx` to use the unified container classes.
+- [x] 🔵 **C-077** — Missing canonical docs for control-plane UI contract and sales automation operations
+	- Evidence (2026-02-27): Added `docs/development/control-plane-ui-ux.md` (global UI/UX rules) and `docs/operations/control-plane-sales-automation.md` (sales endpoints, persistence behaviors, validation checklist), then linked both in `docs/README.md`.
 
 ---
 

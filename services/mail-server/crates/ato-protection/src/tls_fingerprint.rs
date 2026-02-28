@@ -21,6 +21,7 @@
 //! 3. **Anomaly detection** — Detect sudden changes in TLS stack that indicate
 //!    credential theft running on a different system
 
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 
@@ -151,6 +152,8 @@ pub struct UserTlsHistory {
     pub last_fingerprint: Option<TlsFingerprint>,
     /// Maximum fingerprints to track
     max_fingerprints: usize,
+    /// Timestamp of the most recent `record()` call — used for TTL-based map eviction.
+    pub last_seen: DateTime<Utc>,
 }
 
 impl UserTlsHistory {
@@ -161,6 +164,7 @@ impl UserTlsHistory {
             lookup_set: HashSet::new(),
             last_fingerprint: None,
             max_fingerprints,
+            last_seen: Utc::now(),
         }
     }
 
@@ -180,6 +184,7 @@ impl UserTlsHistory {
         }
 
         self.last_fingerprint = Some(fp.clone());
+        self.last_seen = Utc::now();
         is_new
     }
 

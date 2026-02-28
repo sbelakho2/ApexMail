@@ -88,7 +88,7 @@ export default function InboxPage() {
     }
 
     return (
-        <div className="max-w-6xl mx-auto">
+        <div className="cp-page cp-page--narrow">
             <div className="flex items-center justify-between mb-6">
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Inbox Sentinel</h1>

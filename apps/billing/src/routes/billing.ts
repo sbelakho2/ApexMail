@@ -563,5 +563,89 @@ export function billingRoutes(ctx: BillingContext): Hono<BillingEnv> {
     });
   });
 
+  // Cancel subscription
+  router.post('/cancel', async (c) => {
+    const tenantId = c.get('tenantId');
+    const body = await c.req.json();
+
+    const schema = z.object({
+      reason: z.string().max(500).optional(),
+      feedback: z.string().max(2000).optional(),
+      cancelImmediately: z.boolean().optional().default(false),
+    });
+
+    const parsed = schema.parse(body);
+
+    // Get current subscription
+    const subscriptionResult = await ctx.stripe.getSubscription(tenantId);
+
+    if (!subscriptionResult.ok) {
+      return operationFailed(c, subscriptionResult.error, 'Failed to fetch subscription');
+    }
+
+    if (!subscriptionResult.value) {
+      return c.json({ error: 'No active subscription found' }, 404);
+    }
+
+    const subscription = subscriptionResult.value;
+
+    // Cancel the subscription
+    const cancelResult = await ctx.stripe.cancelSubscription(
+      subscription.stripeSubscriptionId,
+      { cancelAtPeriodEnd: !parsed.cancelImmediately }
+    );
+
+    if (!cancelResult.ok) {
+      return operationFailed(c, cancelResult.error, 'Failed to cancel subscription');
+    }
+
+    // Determine effective date
+    const effectiveDate = parsed.cancelImmediately
+      ? new Date().toISOString()
+      : subscription.billingCycleEnd;
+
+    // Update tenant plan if immediate cancellation
+    if (parsed.cancelImmediately) {
+      const updateResult = await ctx.db.query(
+        `UPDATE tenants SET plan = 'free', updated_at = NOW() WHERE id = $1`,
+        [tenantId]
+      );
+
+      if (!updateResult.ok || updateResult.value.rowCount !== 1) {
+        console.error('Failed to update tenant plan after cancellation');
+      }
+    }
+
+    // Audit trail for cancellation
+    const auditResult = await ctx.db.query(
+      `INSERT INTO audit_logs (id, tenant_id, action, resource_type, metadata, created_at)
+       VALUES (gen_random_uuid(), $1, 'subscription.cancelled', 'subscription',
+               $2::jsonb, NOW())`,
+      [
+        tenantId,
+        JSON.stringify({
+          previousPlan: subscription.plan,
+          reason: parsed.reason ?? 'not provided',
+          feedback: parsed.feedback ?? null,
+          cancelImmediately: parsed.cancelImmediately,
+          effectiveDate,
+        }),
+      ]
+    );
+
+    if (!auditResult.ok || auditResult.value.rowCount !== 1) {
+      console.error('Failed to write cancellation audit log');
+    }
+
+    return c.json({
+      success: true,
+      message: parsed.cancelImmediately
+        ? 'Subscription cancelled immediately'
+        : 'Subscription will be cancelled at the end of the billing period',
+      effectiveDate,
+      willDowngradeTo: 'free',
+    });
+  });
+
   return router;
 }

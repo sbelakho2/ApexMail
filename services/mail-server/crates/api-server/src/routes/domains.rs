@@ -1,5 +1,14 @@
 //! Domain management routes.
+//!
+//! Handles domain lifecycle:
+//! 1. Customer adds a domain via POST /v1/domains
+//! 2. Customer configures DNS records (SPF, DKIM, DMARC, Return-Path)
+//! 3. Customer triggers verification via POST /v1/domains/:id/verify
+//! 4. On successful verification, we **also create the domain identity in SES**
+//!    so that SES can send on behalf of the customer's domain.
+//! 5. GET /v1/domains/:id/dns-records shows required DNS records.
 
+use aws_sdk_sesv2::types::DkimSigningKeyLength;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -8,7 +17,7 @@ use chrono::{DateTime, Utc};
 use dns_resolver::DnsLookup;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -197,6 +206,15 @@ async fn delete_domain(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
+    // Fetch domain name before deleting (for SES cleanup)
+    let domain_name: Option<(String,)> = sqlx::query_as(
+        "SELECT name FROM domains WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+
     let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
         .bind(id)
         .bind(auth.tenant_id)
@@ -206,6 +224,17 @@ async fn delete_domain(
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("domain not found".into()));
     }
+
+    // Clean up SES identity (best-effort, non-blocking)
+    if let Some((name,)) = domain_name {
+        tokio::spawn({
+            let state = state.clone();
+            async move {
+                delete_ses_domain_identity(&state, &name).await;
+            }
+        });
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -275,15 +304,34 @@ async fn verify_domain(
 
     let status = if spf && dkim && dmarc { "verified" } else { "pending" };
 
+    // ── SES identity creation ──────────────────────────────────
+    // When DNS verification passes, create/verify the domain identity in SES
+    // so that SES can send on behalf of this domain.
+    let mut ses_verified = false;
+    if status == "verified" {
+        match create_ses_domain_identity(&state, &row.name).await {
+            Ok(()) => {
+                ses_verified = true;
+                info!(domain = %row.name, "SES domain identity created/verified");
+            }
+            Err(e) => {
+                // SES identity creation is best-effort — domain is still verified
+                // in our system even if SES call fails (can be retried).
+                warn!(domain = %row.name, error = %e, "SES identity creation failed (non-blocking)");
+            }
+        }
+    }
+
     sqlx::query(
         "UPDATE domains SET spf_verified=$1, dkim_verified=$2, dmarc_verified=$3,
-         return_path_verified=$4, status=$5, updated_at=NOW() WHERE id=$6",
+         return_path_verified=$4, status=$5, ses_verified=$6, updated_at=NOW() WHERE id=$7",
     )
     .bind(spf)
     .bind(dkim)
     .bind(dmarc)
     .bind(return_path)
     .bind(status)
+    .bind(ses_verified)
     .bind(id)
     .execute(&state.db)
     .await?;
@@ -347,6 +395,92 @@ async fn get_dns_records(
         domain: row.name,
         records,
     }))
+}
+
+// ─── SES identity management ───────────────────────────────────
+
+/// Create a domain identity in AWS SES v2 so SES can send from this domain.
+///
+/// Uses Easy DKIM with 2048-bit RSA keys. SES manages DKIM signing when
+/// sending via the SES API — the customer only needs their existing DNS records.
+///
+/// If the identity already exists, SES returns success (idempotent).
+async fn create_ses_domain_identity(state: &AppState, domain: &str) -> Result<(), ApiError> {
+    let _ses_provider = &state.ses_provider;
+
+    // We access the raw SES client through the provider's client.
+    // For now, construct a fresh client from the provider's region.
+    let region = aws_sdk_sesv2::config::Region::new(state.config.aws_region.clone());
+    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(region)
+        .load()
+        .await;
+    let client = aws_sdk_sesv2::Client::new(&sdk_config);
+
+    // Create the email identity with Easy DKIM
+    let dkim_attrs = aws_sdk_sesv2::types::DkimSigningAttributes::builder()
+        .domain_signing_selector("apexmail")
+        .next_signing_key_length(DkimSigningKeyLength::Rsa2048Bit)
+        .build();
+
+    let result = client
+        .create_email_identity()
+        .email_identity(domain)
+        .dkim_signing_attributes(dkim_attrs)
+        .configuration_set_name(
+            state
+                .config
+                .ses_configuration_set
+                .as_deref()
+                .unwrap_or("apexmail-default"),
+        )
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) => {
+            let dkim_status = resp
+                .dkim_attributes()
+                .and_then(|d| d.status())
+                .map(|s| format!("{:?}", s))
+                .unwrap_or_else(|| "unknown".into());
+
+            info!(domain = %domain, dkim_status = %dkim_status, "SES email identity created");
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            // If identity already exists, that's fine
+            if msg.contains("AlreadyExistsException") || msg.contains("already exists") {
+                info!(domain = %domain, "SES email identity already exists");
+                Ok(())
+            } else {
+                Err(ApiError::ServiceUnavailable(format!(
+                    "SES CreateEmailIdentity failed: {msg}"
+                )))
+            }
+        }
+    }
+}
+
+/// Delete a domain identity from SES when the domain is removed.
+async fn delete_ses_domain_identity(state: &AppState, domain: &str) {
+    let region = aws_sdk_sesv2::config::Region::new(state.config.aws_region.clone());
+    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(region)
+        .load()
+        .await;
+    let client = aws_sdk_sesv2::Client::new(&sdk_config);
+
+    match client
+        .delete_email_identity()
+        .email_identity(domain)
+        .send()
+        .await
+    {
+        Ok(_) => info!(domain = %domain, "SES email identity deleted"),
+        Err(e) => warn!(domain = %domain, error = %e, "Failed to delete SES identity (non-blocking)"),
+    }
 }
 
 // ─── Row types ─────────────────────────────────────────────────

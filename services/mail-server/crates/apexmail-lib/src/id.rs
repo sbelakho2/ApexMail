@@ -35,6 +35,11 @@ pub fn generate_webhook_secret() -> String {
     generate_id("whsec", 24)
 }
 
+/// Generate an email verification token.
+pub fn generate_verification_token() -> String {
+    generate_id("vfy", 32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

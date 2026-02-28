@@ -86,6 +86,8 @@ No monthly commitment. API calls: first 100K free, then $0.10/1K.
 Available from **Pro** plan and above. Requires average sending volume > 500 emails/day.
 Warmup, monitoring, and autoscaling included.
 
+> **Transport note:** With the default SES transport, dedicated IPs are provisioned through AWS SES ($24.95/mo provider cost per IP). With self-hosted SMTP, dedicated IPs are sourced from the hosting provider and managed by the built-in warmup engine.
+
 ---
 
 ## Feature Matrix

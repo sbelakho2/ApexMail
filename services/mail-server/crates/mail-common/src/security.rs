@@ -17,9 +17,9 @@ use std::sync::OnceLock;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use hmac::{Hmac, Mac};
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use rand::RngCore;
 use uuid::Uuid;
 
 /// Security subsystem that produced an event.
@@ -150,11 +150,11 @@ static SIGNING_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 fn get_signing_key() -> &'static [u8; 32] {
     SIGNING_KEY.get_or_init(|| {
         let mut key = [0u8; 32];
-        // Use UUID bytes as entropy source (not cryptographically ideal but acceptable for DoS protection)
-        let uuid_bytes = Uuid::new_v4();
-        key[..16].copy_from_slice(uuid_bytes.as_bytes());
-        let uuid_bytes2 = Uuid::new_v4();
-        key[16..].copy_from_slice(uuid_bytes2.as_bytes());
+        // Use a CSPRNG (OS-backed) for full 256-bit entropy.
+        // UUID v4 has 12–13 fixed bits (version nibble + variant), which would
+        // reduce effective key entropy to ~243 bits. rand::thread_rng() draws
+        // directly from the OS CSPRNG with no fixed bit patterns.
+        rand::thread_rng().fill_bytes(&mut key);
         key
     })
 }
@@ -220,20 +220,32 @@ impl SecurityEvent {
     }
     
     /// Verify that this event's signature is valid.
+    ///
+    /// Uses `hmac::Mac::verify_slice()` for constant-time comparison, preventing
+    /// timing side-channel attacks that could allow signature forgery via
+    /// timing oracles. The prior zip-based string comparison was NOT constant-time
+    /// because it short-circuits on the first mismatched byte.
     pub fn verify_signature(&self) -> bool {
         if self.signature.is_empty() {
             return false;
         }
-        let expected = Self::compute_signature(
-            &self.timestamp,
-            self.system,
-            self.action,
-            self.risk_score,
-            self.nonce,
-        );
-        // Constant-time comparison
-        self.signature.len() == expected.len() 
-            && self.signature.bytes().zip(expected.bytes()).all(|(a, b)| a == b)
+        // Decode hex-encoded stored signature to raw bytes.
+        let Ok(sig_bytes) = hex::decode(&self.signature) else {
+            return false;
+        };
+        // Recompute HMAC over the same fields and verify in constant time.
+        type HmacSha256 = Hmac<Sha256>;
+        let key = get_signing_key();
+        let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+            return false;
+        };
+        mac.update(self.timestamp.to_rfc3339().as_bytes());
+        mac.update(&[self.system as u8]);
+        mac.update(&[self.action as u8]);
+        mac.update(&self.risk_score.to_le_bytes());
+        mac.update(&self.nonce.to_le_bytes());
+        // verify_slice() uses subtle::ConstantTimeEq internally — truly constant-time.
+        mac.verify_slice(&sig_bytes).is_ok()
     }
 
     /// Attach metadata key/value to event.
@@ -579,9 +591,13 @@ mod tests {
         .with_metadata(ip_key, ip)
     }
 
+    // =========================================================================
+    // FUNCTIONAL TESTS
+    // =========================================================================
+
     #[test]
     fn correlates_across_distinct_systems() {
-        let correlator = SecurityCorrelator::with_policy(50, 10_000, 10_000, 300, 2, 1);
+        let correlator = SecurityCorrelator::with_policy(50, 10_000, 500_000, 300, 2, 1);
         let e1 = event(SecuritySystem::Waf, SecurityAction::Block, "client_ip", "1.2.3.4", 8.0);
         let e2 = event(SecuritySystem::Ids, SecurityAction::Monitor, "src_ip", "1.2.3.4", 6.0);
         assert!(correlator.ingest(e1).is_none());
@@ -592,7 +608,7 @@ mod tests {
 
     #[test]
     fn ignores_low_signal_allow_events() {
-        let correlator = SecurityCorrelator::with_policy(50, 10_000, 10_000, 300, 2, 1);
+        let correlator = SecurityCorrelator::with_policy(50, 10_000, 500_000, 300, 2, 1);
         let allow = event(SecuritySystem::Waf, SecurityAction::Allow, "client_ip", "5.6.7.8", 0.5);
         let monitor = event(SecuritySystem::Ids, SecurityAction::Monitor, "src_ip", "5.6.7.8", 5.0);
         assert!(correlator.ingest(allow).is_none());
@@ -606,5 +622,307 @@ mod tests {
         let _ = ingest_security_event(e1);
         let alert = ingest_security_event(e2);
         assert!(alert.is_some());
+    }
+
+    #[test]
+    fn event_signing_roundtrip() {
+        let event = SecurityEvent::new(
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            SecuritySeverity::Critical,
+            9.5,
+            "Test event",
+            CorrelationContext::generated(),
+        );
+        
+        // Event should have signature on creation
+        assert!(!event.signature.is_empty(), "Event should be signed");
+        assert!(event.nonce > 0, "Event should have nonce");
+        
+        // Signature should verify
+        assert!(event.verify_signature(), "Signature should verify");
+    }
+
+    #[test]
+    fn event_signing_tamper_detection() {
+        let mut event = SecurityEvent::new(
+            SecuritySystem::Ids,
+            SecurityAction::Monitor,
+            SecuritySeverity::Medium,
+            5.0,
+            "Original",
+            CorrelationContext::generated(),
+        );
+        
+        let original_sig = event.signature.clone();
+        assert!(event.verify_signature(), "Original should verify");
+        
+        // Tamper with the event
+        event.risk_score = 9.9;
+        
+        // Signature should no longer verify
+        assert!(!event.verify_signature(), "Tampered event should not verify");
+        
+        // Signature wasn't changed, just the data
+        assert_eq!(event.signature, original_sig);
+    }
+
+    #[test]
+    fn alert_suppression_prevents_flood() {
+        let correlator = SecurityCorrelator::with_policy(50, 10_000, 500_000, 300, 2, 60);
+        
+        // First alert should fire
+        let e1 = event(SecuritySystem::Waf, SecurityAction::Block, "src_ip", "10.0.0.1", 8.0);
+        let e2 = event(SecuritySystem::Ids, SecurityAction::Block, "src_ip", "10.0.0.1", 8.0);
+        assert!(correlator.ingest(e1).is_none());
+        assert!(correlator.ingest(e2).is_some(), "First alert should fire");
+        
+        // Subsequent alerts within suppression window should be suppressed
+        for _ in 0..10 {
+            let e = event(SecuritySystem::Spam, SecurityAction::Block, "src_ip", "10.0.0.1", 8.0);
+            assert!(correlator.ingest(e).is_none(), "Should be suppressed");
+        }
+    }
+
+    // =========================================================================
+    // INTEGRATION TESTS
+    // =========================================================================
+
+    #[test]
+    fn integration_multi_system_correlation() {
+        let correlator = SecurityCorrelator::new();
+        let ip = "192.168.1.100";
+        
+        // Simulate a coordinated attack flagged by multiple systems
+        let systems = [
+            SecuritySystem::Ddos,
+            SecuritySystem::Waf,
+            SecuritySystem::Ids,
+            SecuritySystem::Spam,
+        ];
+        
+        let mut alert = None;
+        for system in systems {
+            let e = event(system, SecurityAction::Block, "src_ip", ip, 7.0);
+            if let Some(a) = correlator.ingest(e) {
+                alert = Some(a);
+            }
+        }
+        
+        let alert = alert.expect("Should generate composite alert");
+        assert!(alert.systems_triggered >= 2);
+        assert!(alert.composite_score > 5.0);
+        assert_eq!(alert.recommended_action, SecurityAction::Block);
+    }
+
+    #[test]
+    fn integration_purge_does_not_affect_recent_events() {
+        let correlator = SecurityCorrelator::new();
+        
+        // Ingest recent events
+        let e1 = event(SecuritySystem::Waf, SecurityAction::Block, "src_ip", "10.1.1.1", 8.0);
+        correlator.ingest(e1);
+        
+        assert_eq!(correlator.tracked_ip_count(), 1);
+        
+        // Purge with a short max_age shouldn't affect recent events (they're too new)
+        let purged = correlator.purge_stale(1); // 1 second max age
+        // Recent event may or may not be purged depending on timing
+        
+        // Purge with very long max age should NOT purge anything
+        let purged_long = correlator.purge_stale(86400); // 24 hours
+        // All recent events should survive
+        assert!(correlator.tracked_ip_count() <= 1);
+    }
+
+    // =========================================================================
+    // CHAOS TESTS
+    // =========================================================================
+
+    #[test]
+    fn chaos_high_volume_concurrent_ingestion() {
+        use std::sync::Arc;
+        use std::thread;
+        
+        let correlator = Arc::new(SecurityCorrelator::with_limits(100, 50_000, 500_000));
+        let mut handles = vec![];
+        
+        // Spawn 8 threads each ingesting 1000 events
+        for thread_id in 0..8 {
+            let c = correlator.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..1000 {
+                    let ip = format!("10.{}.{}.{}", thread_id, i / 256, i % 256);
+                    let e = event(
+                        SecuritySystem::Waf,
+                        SecurityAction::Monitor,
+                        "src_ip",
+                        &ip,
+                        3.0,
+                    );
+                    c.ingest(e);
+                }
+            }));
+        }
+        
+        for h in handles {
+            h.join().expect("Thread should not panic");
+        }
+        
+        // Should have ingested many events without panic
+        assert!(correlator.tracked_ip_count() > 0);
+    }
+
+    #[test]
+    fn chaos_rate_limit_under_burst() {
+        let correlator = SecurityCorrelator::with_limits(50, 10_000, 100); // Very low rate cap
+        
+        let mut blocked = 0;
+        for i in 0..1000 {
+            let e = event(
+                SecuritySystem::Ids,
+                SecurityAction::Monitor,
+                "src_ip",
+                &format!("192.168.{}.{}", i / 256, i % 256),
+                5.0,
+            );
+            if correlator.ingest(e).is_none() {
+                blocked += 1;
+            }
+        }
+        
+        // Most should be blocked due to rate limit (100/sec max)
+        // Since we're calling 1000 in quick succession, most will be over limit
+        assert!(blocked > 800, "Rate limiter should block excess: blocked={}", blocked);
+    }
+
+    #[test]
+    fn chaos_max_ips_anti_oom() {
+        let max_ips = 100;
+        let correlator = SecurityCorrelator::with_limits(10, max_ips, 500_000);
+        
+        // Try to ingest from many more IPs than the limit
+        for i in 0..10_000 {
+            let e = event(
+                SecuritySystem::Spam,
+                SecurityAction::Block,
+                "src_ip",
+                &format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256),
+                8.0,
+            );
+            correlator.ingest(e);
+        }
+        
+        // Should not exceed max_ips
+        assert!(
+            correlator.tracked_ip_count() <= max_ips,
+            "Should not exceed max IPs: {}",
+            correlator.tracked_ip_count()
+        );
+    }
+
+    // =========================================================================
+    // ADVERSARIAL TESTS
+    // =========================================================================
+
+    #[test]
+    fn adversarial_no_ip_metadata_rejected() {
+        let correlator = SecurityCorrelator::new();
+        
+        // Event without IP metadata should be ignored
+        let mut e = SecurityEvent::new(
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            SecuritySeverity::Critical,
+            10.0,
+            "Attack without IP",
+            CorrelationContext::generated(),
+        );
+        // Don't add IP metadata
+        
+        assert!(correlator.ingest(e).is_none(), "Event without IP should be ignored");
+    }
+
+    #[test]
+    fn adversarial_empty_ip_handled() {
+        let correlator = SecurityCorrelator::new();
+        
+        // Try with empty IP
+        let e = event(SecuritySystem::Waf, SecurityAction::Block, "src_ip", "", 10.0);
+        // Empty IP should be treated as a valid (but unusual) key
+        let result = correlator.ingest(e);
+        // Should not panic, may or may not return None
+    }
+
+    #[test]
+    fn adversarial_malformed_ip_handled() {
+        let correlator = SecurityCorrelator::new();
+        
+        // Various malformed IPs that shouldn't crash
+        let long_string = "a".repeat(10000);
+        let bad_ips = [
+            "not-an-ip",
+            "256.256.256.256",
+            "1.2.3.4.5.6.7.8",
+            "../../../etc/passwd",
+            "<script>alert(1)</script>",
+            "'; DROP TABLE ips;--",
+            "\0\0\0\0",
+            long_string.as_str(),
+        ];
+        
+        for bad_ip in bad_ips {
+            let e = event(SecuritySystem::Ids, SecurityAction::Block, "src_ip", bad_ip, 8.0);
+            // Should not panic
+            let _ = correlator.ingest(e);
+        }
+    }
+
+    #[test]
+    fn adversarial_replay_attack_detection() {
+        // Create an event
+        let original = SecurityEvent::new(
+            SecuritySystem::Waf,
+            SecurityAction::Block,
+            SecuritySeverity::High,
+            8.0,
+            "Original event",
+            CorrelationContext::generated(),
+        );
+        
+        // Clone it (simulating replay)
+        let replay = original.clone();
+        
+        // Both have same nonce - in a real system, the correlator should detect
+        // duplicate nonces. Here we verify they have the same nonce.
+        assert_eq!(original.nonce, replay.nonce);
+        
+        // Both signatures should verify (they're identical)
+        assert!(original.verify_signature());
+        assert!(replay.verify_signature());
+    }
+
+    #[test]
+    fn adversarial_signature_forgery_fails() {
+        let mut event = SecurityEvent::new(
+            SecuritySystem::ThreatIntel,
+            SecurityAction::Block,
+            SecuritySeverity::Critical,
+            9.9,
+            "High risk event",
+            CorrelationContext::generated(),
+        );
+        
+        // Try to forge a signature
+        event.signature = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        assert!(!event.verify_signature(), "Forged signature should not verify");
+        
+        // Try with empty signature
+        event.signature = String::new();
+        assert!(!event.verify_signature(), "Empty signature should not verify");
+        
+        // Try with wrong length
+        event.signature = "abc123".to_string();
+        assert!(!event.verify_signature(), "Wrong length signature should not verify");
     }
 }

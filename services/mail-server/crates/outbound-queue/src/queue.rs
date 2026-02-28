@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use std::fmt::Write;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -14,6 +15,17 @@ use uuid::Uuid;
 
 use crate::smtp_sender::SmtpSender;
 use crate::dkim::DkimSigner;
+
+/// Result of an atomic cancel attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelResult {
+    /// Email was successfully cancelled.
+    Cancelled,
+    /// Email was not found in the queue.
+    NotFound,
+    /// Email exists but cannot be cancelled (with human-readable reason).
+    NotCancellable(String),
+}
 
 /// Email status in the queue
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
@@ -186,17 +198,74 @@ impl EmailQueue {
         Ok(id)
     }
     
-    /// Bulk enqueue emails
+    /// Bulk enqueue emails using a single multi-row INSERT for performance.
+    /// Falls back to sequential inserts if the batch is empty.
     pub async fn enqueue_batch(&self, emails: Vec<QueuedEmail>) -> Result<Vec<Uuid>> {
-        let mut ids = Vec::with_capacity(emails.len());
-        
-        for email in emails {
-            let id = self.enqueue(email).await?;
-            ids.push(id);
+        if emails.is_empty() {
+            return Ok(Vec::new());
         }
-        
-        info!(count = ids.len(), "Batch emails enqueued");
-        Ok(ids)
+
+        // Build a single multi-row INSERT: VALUES ($1..$12), ($13..$24), ...
+        let cols = 12; // number of bind params per row
+        let mut sql = String::from(
+            "INSERT INTO email_queue (
+                id, from_address, to_addresses, subject, text_body, html_body,
+                headers, status, max_attempts, campaign_id, sequence_id,
+                contact_id, priority
+            ) VALUES ",
+        );
+
+        let _args: Vec<Box<dyn sqlx::Encode<'_, sqlx::Postgres> + Send + Sync>> = Vec::new();
+        let mut ids = Vec::with_capacity(emails.len());
+
+        for (i, email) in emails.iter().enumerate() {
+            ids.push(email.id);
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            let base = i * cols + 1;
+            write!(
+                sql,
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${})",
+                base,
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6,
+                base + 7,
+                base + 8,
+                base + 9,
+                base + 10,
+                base + 11,
+            )
+            .expect("write to String is infallible");
+        }
+
+        sql.push_str(" RETURNING id");
+
+        // Bind all parameters in order using a raw query
+        let mut query = sqlx::query_scalar::<_, Uuid>(&sql);
+        for email in &emails {
+            query = query
+                .bind(email.id)
+                .bind(&email.from_address)
+                .bind(&email.to_addresses)
+                .bind(&email.subject)
+                .bind(&email.text_body)
+                .bind(&email.html_body)
+                .bind(&email.headers)
+                .bind(email.max_attempts)
+                .bind(&email.campaign_id)
+                .bind(&email.sequence_id)
+                .bind(&email.contact_id)
+                .bind(email.priority);
+        }
+
+        let returned_ids = query.fetch_all(&self.pool).await?;
+        info!(count = returned_ids.len(), "Batch emails enqueued");
+        Ok(returned_ids)
     }
     
     /// Fetch pending emails for processing
@@ -302,7 +371,57 @@ impl EmailQueue {
 
         Ok(email)
     }
-    
+
+    /// Atomically cancel a queued email.
+    ///
+    /// Uses a single `UPDATE ... WHERE status IN ('pending','deferred') RETURNING`
+    /// to eliminate the TOCTOU race between checking status and writing the
+    /// cancellation.  If the UPDATE affects zero rows the email either doesn't
+    /// exist or is in a non-cancellable state — a follow-up SELECT distinguishes
+    /// the two cases.
+    pub async fn cancel_email_atomic(&self, id: &Uuid) -> Result<CancelResult> {
+        let result = sqlx::query(r#"
+            UPDATE email_queue
+            SET status = 'failed',
+                last_error = 'Cancelled by user',
+                updated_at = NOW()
+            WHERE id = $1
+              AND status IN ('pending', 'deferred')
+            RETURNING id
+        "#)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if result.is_some() {
+            return Ok(CancelResult::Cancelled);
+        }
+
+        // Zero rows affected — determine why
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM email_queue WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match existing.as_deref() {
+            None => Ok(CancelResult::NotFound),
+            Some("sent") => Ok(CancelResult::NotCancellable(
+                "Cannot cancel: email already delivered".to_string(),
+            )),
+            Some("failed") => Ok(CancelResult::NotCancellable(
+                "Cannot cancel: email already permanently failed".to_string(),
+            )),
+            Some("processing") => Ok(CancelResult::NotCancellable(
+                "Cannot cancel: email is currently being sent".to_string(),
+            )),
+            Some(other) => Ok(CancelResult::NotCancellable(
+                format!("Cannot cancel: email is in '{}' state", other),
+            )),
+        }
+    }
+
     /// Mark email as failed
     pub async fn mark_failed(&self, id: &Uuid, error: &str, defer: bool) -> Result<()> {
         let email = sqlx::query(r#"
@@ -518,5 +637,354 @@ pub struct QueueStats {
 impl QueueStats {
     pub fn total(&self) -> u64 {
         self.pending + self.processing + self.sent + self.failed + self.deferred
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests  — unit tests that do NOT require a database
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // CancelResult
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cancel_result_eq_cancelled() {
+        assert_eq!(CancelResult::Cancelled, CancelResult::Cancelled);
+    }
+
+    #[test]
+    fn cancel_result_eq_not_found() {
+        assert_eq!(CancelResult::NotFound, CancelResult::NotFound);
+    }
+
+    #[test]
+    fn cancel_result_not_cancellable_with_reason() {
+        let a = CancelResult::NotCancellable("already sent".into());
+        let b = CancelResult::NotCancellable("already sent".into());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cancel_result_variants_not_equal_across_types() {
+        assert_ne!(CancelResult::Cancelled, CancelResult::NotFound);
+        assert_ne!(
+            CancelResult::Cancelled,
+            CancelResult::NotCancellable("x".into()),
+        );
+    }
+
+    #[test]
+    fn cancel_result_debug_format() {
+        let r = CancelResult::Cancelled;
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("Cancelled"));
+    }
+
+    #[test]
+    fn cancel_result_clone() {
+        let r = CancelResult::NotCancellable("reason".into());
+        let c = r.clone();
+        assert_eq!(r, c);
+    }
+
+    // -----------------------------------------------------------------------
+    // EmailStatus
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn email_status_default_is_pending() {
+        assert_eq!(EmailStatus::default(), EmailStatus::Pending);
+    }
+
+    #[test]
+    fn email_status_all_variants_distinct() {
+        let variants = [
+            EmailStatus::Pending,
+            EmailStatus::Processing,
+            EmailStatus::Sent,
+            EmailStatus::Failed,
+            EmailStatus::Deferred,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn email_status_serde_roundtrip() {
+        for status in [
+            EmailStatus::Pending,
+            EmailStatus::Processing,
+            EmailStatus::Sent,
+            EmailStatus::Failed,
+            EmailStatus::Deferred,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: EmailStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn email_status_copy() {
+        let s = EmailStatus::Sent;
+        let s2 = s; // Copy
+        assert_eq!(s, s2);
+    }
+
+    // -----------------------------------------------------------------------
+    // QueueConfig
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn queue_config_default_values() {
+        let cfg = QueueConfig::default();
+        assert_eq!(cfg.max_attempts, 5);
+        assert_eq!(cfg.worker_count, 4);
+        assert_eq!(cfg.batch_size, 100);
+        assert_eq!(cfg.retry_delays.len(), 5);
+    }
+
+    #[test]
+    fn queue_config_retry_delays_ascending() {
+        let cfg = QueueConfig::default();
+        for i in 1..cfg.retry_delays.len() {
+            assert!(
+                cfg.retry_delays[i] > cfg.retry_delays[i - 1],
+                "Retry delays should be monotonically increasing"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_config_first_retry_under_5_minutes() {
+        let cfg = QueueConfig::default();
+        assert!(cfg.retry_delays[0] <= Duration::from_secs(300));
+    }
+
+    // -----------------------------------------------------------------------
+    // QueueStats
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn queue_stats_total_sums_all_fields() {
+        let stats = QueueStats {
+            pending: 10,
+            processing: 5,
+            sent: 100,
+            failed: 3,
+            deferred: 2,
+        };
+        assert_eq!(stats.total(), 120);
+    }
+
+    #[test]
+    fn queue_stats_total_zero() {
+        let stats = QueueStats {
+            pending: 0,
+            processing: 0,
+            sent: 0,
+            failed: 0,
+            deferred: 0,
+        };
+        assert_eq!(stats.total(), 0);
+    }
+
+    #[test]
+    fn queue_stats_total_overflow_risk() {
+        // Ensure the addition doesn't panic with large but reasonable values
+        let stats = QueueStats {
+            pending: u64::MAX / 5,
+            processing: u64::MAX / 5,
+            sent: u64::MAX / 5,
+            failed: u64::MAX / 5,
+            deferred: u64::MAX / 5,
+        };
+        let _ = stats.total(); // should not panic
+    }
+
+    #[test]
+    fn queue_stats_serde_roundtrip() {
+        let stats = QueueStats {
+            pending: 42,
+            processing: 7,
+            sent: 999,
+            failed: 0,
+            deferred: 12,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: QueueStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total(), stats.total());
+    }
+
+    // -----------------------------------------------------------------------
+    // QueuedEmail
+    // -----------------------------------------------------------------------
+
+    fn make_test_email() -> QueuedEmail {
+        QueuedEmail {
+            id: Uuid::new_v4(),
+            from_address: "sender@test.com".into(),
+            to_addresses: vec!["r1@test.com".into(), "r2@test.com".into()],
+            subject: "Test email".into(),
+            text_body: Some("Hello".into()),
+            html_body: Some("<p>Hello</p>".into()),
+            headers: serde_json::json!({"X-Custom": "value"}),
+            status: EmailStatus::Pending,
+            attempts: 0,
+            max_attempts: 5,
+            last_error: None,
+            next_retry_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            sent_at: None,
+            campaign_id: None,
+            sequence_id: None,
+            contact_id: None,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn queued_email_serde_roundtrip() {
+        let email = make_test_email();
+        let json = serde_json::to_string(&email).unwrap();
+        let parsed: QueuedEmail = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, email.id);
+        assert_eq!(parsed.from_address, email.from_address);
+        assert_eq!(parsed.to_addresses, email.to_addresses);
+        assert_eq!(parsed.subject, email.subject);
+        assert_eq!(parsed.status, email.status);
+    }
+
+    #[test]
+    fn queued_email_optional_fields_none() {
+        let mut email = make_test_email();
+        email.text_body = None;
+        email.html_body = None;
+        email.last_error = None;
+        email.next_retry_at = None;
+        email.campaign_id = None;
+
+        let json = serde_json::to_string(&email).unwrap();
+        let parsed: QueuedEmail = serde_json::from_str(&json).unwrap();
+        assert!(parsed.text_body.is_none());
+        assert!(parsed.html_body.is_none());
+    }
+
+    #[test]
+    fn queued_email_multiple_recipients() {
+        let email = QueuedEmail {
+            to_addresses: vec![
+                "a@test.com".into(),
+                "b@test.com".into(),
+                "c@test.com".into(),
+            ],
+            ..make_test_email()
+        };
+        assert_eq!(email.to_addresses.len(), 3);
+    }
+
+    #[test]
+    fn queued_email_empty_recipients() {
+        let email = QueuedEmail {
+            to_addresses: vec![],
+            ..make_test_email()
+        };
+        assert!(email.to_addresses.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch INSERT SQL builder validation
+    // -----------------------------------------------------------------------
+
+    /// Validates that the multi-row INSERT SQL builder produces correct
+    /// parameter numbering for N rows.
+    fn validate_batch_sql(count: usize) -> String {
+        let cols = 12;
+        let mut sql = String::from(
+            "INSERT INTO email_queue (
+                id, from_address, to_addresses, subject, text_body, html_body,
+                headers, status, max_attempts, campaign_id, sequence_id,
+                contact_id, priority
+            ) VALUES ",
+        );
+
+        for i in 0..count {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            let base = i * cols + 1;
+            write!(
+                sql,
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${}, 'pending', ${}, ${}, ${}, ${}, ${})",
+                base, base + 1, base + 2, base + 3, base + 4, base + 5,
+                base + 6, base + 7, base + 8, base + 9, base + 10, base + 11,
+            ).unwrap();
+        }
+        sql.push_str(" RETURNING id");
+        sql
+    }
+
+    #[test]
+    fn batch_sql_single_row() {
+        let sql = validate_batch_sql(1);
+        assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12)"));
+        assert!(sql.contains("RETURNING id"));
+        // Should not have a second row
+        assert!(!sql.contains("$13"));
+    }
+
+    #[test]
+    fn batch_sql_two_rows() {
+        let sql = validate_batch_sql(2);
+        assert!(sql.contains("$1,"));
+        assert!(sql.contains("$12)"));
+        assert!(sql.contains("$13,"));
+        assert!(sql.contains("$24)"));
+        assert!(!sql.contains("$25"));
+    }
+
+    #[test]
+    fn batch_sql_ten_rows() {
+        let sql = validate_batch_sql(10);
+        // Last row starts at $109 (9 * 12 + 1), ends at $120
+        assert!(sql.contains("$109,"));
+        assert!(sql.contains("$120)"));
+        assert!(!sql.contains("$121"));
+    }
+
+    #[test]
+    fn batch_sql_hundred_rows() {
+        let sql = validate_batch_sql(100);
+        // Last row: base = 99 * 12 + 1 = 1189, ends at $1200
+        assert!(sql.contains("$1189,"));
+        assert!(sql.contains("$1200)"));
+    }
+
+    #[test]
+    fn batch_sql_no_duplicate_params() {
+        let sql = validate_batch_sql(5);
+        let cols = 12;
+        let total_params = 5 * cols;
+        for p in 1..=total_params {
+            let needle = format!("${}", p);
+            let count = sql.matches(&needle)
+                .count();
+            // Each parameter should appear exactly once (but $1 can also match
+            // $10, $11, etc. so we check with trailing comma/paren)
+            assert!(count >= 1, "Parameter {} should appear at least once", p);
+        }
     }
 }

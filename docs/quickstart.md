@@ -87,9 +87,11 @@ For better deliverability, verify your sending domain:
 
 | Type | Name | Value |
 |------|------|-------|
-| TXT | `@` | `v=spf1 include:_spf.apexmail.ee ~all` |
+| TXT | `@` | `v=spf1 include:amazonses.com include:_spf.apexmail.ee ~all` |
 | CNAME | `em._domainkey` | `dkim.apexmail.ee` |
 | TXT | `_dmarc` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee` |
+
+> **Note:** The `include:amazonses.com` is required because ApexMail delivers email via AWS SES by default. If your account uses self-hosted SMTP delivery, the SPF record will differ — check your domain settings page for the exact values.
 
 ## What's Next?
 

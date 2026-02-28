@@ -60,13 +60,43 @@ impl Default for AnalyticsConfig {
     }
 }
 
+/// Which transport backend to use for email delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportType {
+    /// Self-hosted SMTP (direct-to-MX via outbound queue or relay).
+    Smtp,
+    /// AWS SES v2 API.
+    Ses,
+}
+
+impl Default for TransportType {
+    fn default() -> Self {
+        // Default to SES — the pragmatic choice per architecture decision.
+        Self::Ses
+    }
+}
+
+impl TransportType {
+    /// Parse from env var string: "smtp" | "ses" (case-insensitive).
+    pub fn from_env(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "smtp" | "self-hosted" | "direct" => Self::Smtp,
+            _ => Self::Ses,
+        }
+    }
+}
+
 /// Email processor-specific configuration.
 #[derive(Debug, Clone)]
 pub struct EmailConfig {
     /// Base processor config.
     pub base: ProcessorConfig,
-    /// SMTP configuration.
+    /// Which transport backend to use.
+    pub transport_type: TransportType,
+    /// SMTP configuration (used when transport_type == Smtp).
     pub smtp: SmtpConfig,
+    /// SES configuration (used when transport_type == Ses).
+    pub ses: SesConfig,
     /// DKIM configuration.
     pub dkim: DkimConfig,
     /// Tracking configuration.
@@ -84,7 +114,9 @@ impl Default for EmailConfig {
                 name: "email".to_string(),
                 ..Default::default()
             },
+            transport_type: TransportType::default(),
             smtp: SmtpConfig::default(),
+            ses: SesConfig::default(),
             dkim: DkimConfig::default(),
             tracking: TrackingConfig::default(),
             warmup: WarmupConfig::default(),
@@ -190,6 +222,33 @@ impl Default for IpRateLimitConfig {
         Self {
             enabled: false,
             ip_address: None,
+        }
+    }
+}
+
+/// AWS SES v2 configuration.
+#[derive(Debug, Clone)]
+pub struct SesConfig {
+    /// AWS region for SES (e.g. "eu-west-1", "us-east-1").
+    pub region: String,
+    /// SES configuration set name (for tracking, reputation, etc.).
+    pub configuration_set: Option<String>,
+    /// Default "From" domain when tenant domain is not yet verified in SES.
+    pub default_from_domain: Option<String>,
+    /// Maximum send rate (emails per second) — SES account-level limit.
+    pub max_send_rate: u32,
+    /// Enable SES feedback forwarding (bounces/complaints via email in addition to SNS).
+    pub feedback_forwarding: bool,
+}
+
+impl Default for SesConfig {
+    fn default() -> Self {
+        Self {
+            region: "eu-west-1".to_string(),
+            configuration_set: None,
+            default_from_domain: None,
+            max_send_rate: 50,
+            feedback_forwarding: false,
         }
     }
 }

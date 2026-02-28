@@ -103,6 +103,15 @@ export function useSettingsController() {
     const [settingsImportJson, setSettingsImportJson] = React.useState('');
     const [revealedApiKey, setRevealedApiKey] = React.useState(false);
     const [toasts, setToasts] = React.useState<Array<{ id: string; message: string; tone: ToastTone }>>([]);
+    
+    // Delete account state
+    const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
+    const [deletePassword, setDeletePassword] = React.useState('');
+    const [deleteConfirmation, setDeleteConfirmation] = React.useState('');
+    const [deleteReason, setDeleteReason] = React.useState('');
+    const [deleteLoading, setDeleteLoading] = React.useState(false);
+    const [deleteError, setDeleteError] = React.useState<string | null>(null);
+
     const avatarInputRef = React.useRef<HTMLInputElement | null>(null);
     const saveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
     const resetTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -391,6 +400,74 @@ export function useSettingsController() {
         setIsDirty(true);
     }, []);
 
+    const openDeleteDialog = React.useCallback(() => {
+        setDeleteDialogOpen(true);
+        setDeletePassword('');
+        setDeleteConfirmation('');
+        setDeleteReason('');
+        setDeleteError(null);
+    }, []);
+
+    const closeDeleteDialog = React.useCallback(() => {
+        setDeleteDialogOpen(false);
+        setDeletePassword('');
+        setDeleteConfirmation('');
+        setDeleteReason('');
+        setDeleteError(null);
+        setDeleteLoading(false);
+    }, []);
+
+    const handleDeleteAccount = React.useCallback(async () => {
+        // Validate confirmation phrase
+        if (deleteConfirmation.trim().toUpperCase() !== 'DELETE MY ACCOUNT') {
+            setDeleteError("Please type 'DELETE MY ACCOUNT' to confirm");
+            return;
+        }
+
+        // Validate password
+        if (!deletePassword || deletePassword.length < 8) {
+            setDeleteError('Please enter your current password');
+            return;
+        }
+
+        setDeleteLoading(true);
+        setDeleteError(null);
+
+        try {
+            const res = await fetch('/api/account', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    password: deletePassword,
+                    confirmation: deleteConfirmation,
+                    reason: deleteReason || undefined,
+                }),
+            });
+
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || 'Failed to delete account');
+            }
+
+            const data = await res.json();
+            
+            // Clear local storage
+            localStorage.removeItem('apexmail-user-settings');
+            
+            pushToast(data.message || 'Account deletion scheduled', 'success');
+            closeDeleteDialog();
+            
+            // Redirect to logout after a short delay
+            setTimeout(() => {
+                window.location.href = '/logout';
+            }, 2000);
+        } catch (err) {
+            setDeleteError(err instanceof Error ? err.message : 'Failed to delete account');
+        } finally {
+            setDeleteLoading(false);
+        }
+    }, [deleteConfirmation, deletePassword, deleteReason, pushToast, closeDeleteDialog]);
+
     const activePlanData = React.useMemo(() => PLANS.find((plan) => plan.name === currentPlan), [currentPlan]);
 
     return {
@@ -415,6 +492,12 @@ export function useSettingsController() {
             revealedApiKey,
             toasts,
             activePlanData,
+            deleteDialogOpen,
+            deletePassword,
+            deleteConfirmation,
+            deleteReason,
+            deleteLoading,
+            deleteError,
         },
         refs: {
             avatarInputRef,
@@ -436,6 +519,12 @@ export function useSettingsController() {
             handleVerificationSend,
             handleApiKeyAction,
             handlePlanChange,
+            openDeleteDialog,
+            closeDeleteDialog,
+            setDeletePassword,
+            setDeleteConfirmation,
+            setDeleteReason,
+            handleDeleteAccount,
         },
         constants: {
             sectionIds: SETTINGS_SECTION_IDS,

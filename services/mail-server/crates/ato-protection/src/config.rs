@@ -1,6 +1,33 @@
 //! ATO protection configuration
+//!
+//! ## Security hardening (February 2026)
+//!
+//! - **Mandatory Redis backend**: Production deployments now require Redis for
+//!   cross-node lockout state. Single-node deployments can explicitly opt out
+//!   by setting `allow_single_node_mode = true`.
 
 use serde::{Deserialize, Serialize};
+
+/// Deployment mode controls Redis requirement enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DeploymentMode {
+    /// Development mode: Redis optional, warnings only.
+    Development,
+    /// Production mode (default): Redis required or explicit opt-out.
+    #[default]
+    Production,
+}
+
+/// Validation error for ATO configuration.
+#[derive(Debug, Clone)]
+pub enum AtoConfigError {
+    /// Redis URL missing in production mode without explicit opt-out.
+    RedisRequiredInProduction,
+    /// Invalid travel speed (must be positive).
+    InvalidTravelSpeed,
+    /// MFA threshold must be less than block threshold.
+    InvalidThresholds,
+}
 
 /// Configuration for ATO protection
 ///
@@ -88,7 +115,27 @@ pub struct AtoConfig {
     /// Requires the `redis-lockout` feature flag for actual Redis I/O.
     /// Without the feature flag, setting this field creates a
     /// `RedisLockoutBackend` whose operations are no-ops (with warnings).
+    ///
+    /// **Security Note (Feb 2026):** In production mode, Redis is now
+    /// mandatory for cross-node lockout consistency. Set `allow_single_node_mode`
+    /// to `true` to explicitly opt out (not recommended).
     pub redis_lockout_url: Option<String>,
+
+    // ---- Deployment Mode ----
+
+    /// Deployment mode (default: Production).
+    ///
+    /// In Production mode, the config validator requires either:
+    /// - A valid `redis_lockout_url`, OR
+    /// - `allow_single_node_mode = true` (explicit opt-out)
+    pub deployment_mode: DeploymentMode,
+
+    /// Allow single-node mode without Redis (default: false).
+    ///
+    /// **Security Warning:** Enabling this means lockout state is NOT shared
+    /// across nodes. An attacker could target different nodes sequentially
+    /// to bypass lockout thresholds.
+    pub allow_single_node_mode: bool,
 }
 
 impl Default for AtoConfig {
@@ -110,6 +157,60 @@ impl Default for AtoConfig {
             rate_limit_rps: 50,
             use_process_global_lockout_registry: true,
             redis_lockout_url: None,
+            deployment_mode: DeploymentMode::Production,
+            allow_single_node_mode: false,
+        }
+    }
+}
+
+impl AtoConfig {
+    /// Validate configuration for security requirements.
+    ///
+    /// In production mode, this requires:
+    /// - Redis URL configured, OR
+    /// - Explicit opt-out via `allow_single_node_mode`
+    ///
+    /// Returns `Ok(())` if valid, or `Err(AtoConfigError)` with details.
+    pub fn validate(&self) -> Result<(), AtoConfigError> {
+        // Check travel speed
+        if self.max_travel_speed_kmh <= 0.0 {
+            return Err(AtoConfigError::InvalidTravelSpeed);
+        }
+
+        // MFA threshold must be less than block threshold
+        if self.mfa_threshold >= self.block_threshold {
+            return Err(AtoConfigError::InvalidThresholds);
+        }
+
+        // Production mode: require Redis or explicit opt-out
+        if self.deployment_mode == DeploymentMode::Production {
+            if self.redis_lockout_url.is_none() && !self.allow_single_node_mode {
+                return Err(AtoConfigError::RedisRequiredInProduction);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if Redis is configured.
+    pub fn has_redis(&self) -> bool {
+        self.redis_lockout_url.is_some()
+    }
+
+    /// Return a development-mode config (for testing).
+    pub fn development() -> Self {
+        Self {
+            deployment_mode: DeploymentMode::Development,
+            ..Self::default()
+        }
+    }
+
+    /// Return a production config with Redis URL.
+    pub fn production_with_redis(redis_url: impl Into<String>) -> Self {
+        Self {
+            deployment_mode: DeploymentMode::Production,
+            redis_lockout_url: Some(redis_url.into()),
+            ..Self::default()
         }
     }
 }

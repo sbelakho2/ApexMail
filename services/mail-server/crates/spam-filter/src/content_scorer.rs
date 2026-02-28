@@ -362,7 +362,7 @@ pub fn normalize_leet_speak(text: &str) -> String {
             'Ν' | 'ν' => 'n', // Greek nu
             'Κ' | 'κ' => 'k', // Greek kappa
             'Α' | 'α' => 'a', // Greek alpha
-            'Ε' | 'ε' => 'e', // Greek epsilon
+            'Ε' => 'e', // Greek capital epsilon (lowercase already covered above)
             'Ο' | 'ο' => 'o', // Greek omicron
             'а' => 'a', // Cyrillic а
             'е' => 'e', // Cyrillic е

@@ -38,7 +38,8 @@ ApexMail is a monorepo containing multiple services that work together to provid
 | `@apexmail/analytics` | Parquet compaction, reconciliation, DuckDB queries | 3002 |
 | `@apexmail/control-plane` | Internal administration dashboard for platform owners | 3020 |
 | `@apexmail/worker` | Background job processing (email delivery, webhooks) | N/A |
-| `@apexmail/mta` | Inbound email, bounce, and feedback loop processing | 25, 2525, 2526 |
+| `@apexmail/mta` | **Inbound** email, bounce, and feedback loop processing | 25, 2525, 2526 |
+| `outbound-queue` (Rust) | Outbound email delivery via AWS SES (default) or self-hosted SMTP | N/A |
 
 ### Packages
 
@@ -263,6 +264,7 @@ See `.env.example` for all available configuration options.
 
 | Variable | Description | Required |
 |----------|-------------|----------|
+| `EMAIL_TRANSPORT_TYPE` | `ses` (default) or `smtp` | No (defaults to `ses`) |
 | `DATABASE_URL` | PostgreSQL connection string | Yes |
 | `REDIS_URL` | Redis connection string | Yes |
 | `JWT_SECRET` | Secret for JWT signing (32+ chars) | Yes |
@@ -297,8 +299,9 @@ Kubernetes deployment documentation is planned for a future release. For now, us
 - Tracking IDs use AES-128-GCM encryption
 - JWT tokens have configurable expiry
 - Rate limiting is applied per tenant
-- DKIM signing for all outbound email
+- DKIM signing for all outbound email (SES Easy DKIM 2048-bit or self-hosted keys)
 - SPF/DMARC validation for inbound email
+- Dual delivery transport: AWS SES (primary) with self-hosted SMTP opt-in
 - Optional mCaptcha protection on login routes for both web and control-plane apps (see `docs/security/mcaptcha-login.md`)
 
 ## License

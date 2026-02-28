@@ -27,7 +27,7 @@
 | Server Name | Role | Private IP |
 |-------------|------|-----------|
 | `apx-api-1` | API + Redis | `10.0.1.1` |
-| `apx-worker-1` | Worker + MTA | `10.0.1.2` |
+| `apx-worker-1` | Worker + Inbound MTA | `10.0.1.2` |
 | `apx-db-1` | PostgreSQL primary | `10.0.1.3` |
 | `apx-db-2` | PostgreSQL standby | `10.0.1.4` |
 | `apx-mon-1` | Prometheus + Grafana | `10.0.1.5` |
@@ -60,14 +60,15 @@ apx-<role>-<index>
 - Inter-server traffic (API ↔ PostgreSQL, API ↔ Redis, Worker ↔ PostgreSQL) travels over the private network **exclusively**.
 - No service listens on a public IP except:
   - `apx-api-1`: ports 80/443 (nginx reverse proxy).
-  - `apx-worker-1`: port 25/587 (MTA — direct, not proxied).
+  - `apx-worker-1`: port 25/587 (inbound MTA — direct, not proxied).
+- **Outbound email delivery** defaults to **AWS SES API** (no local SMTP egress required). When `EMAIL_TRANSPORT_TYPE=smtp`, the worker sends outbound mail directly from this server using the `OUTBOUND_IPS` pool.
 
 ### Firewall Rules
 
 | Source | Destination | Port(s) | Protocol | Purpose |
 |--------|-------------|---------|----------|---------|
 | Any | `apx-api-1` | 80, 443 | TCP | HTTP/HTTPS (nginx) |
-| Any | `apx-worker-1` | 25, 587 | TCP | SMTP inbound |
+| Any | `apx-worker-1` | 25, 587 | TCP | SMTP inbound (+ opt-in outbound) |
 | Private network | `apx-db-1/2` | 5432 | TCP | PostgreSQL |
 | Private network | `apx-api-1` | 6379 | TCP | Redis |
 | Private network | `apx-mon-1` | 9090, 3000 | TCP | Prometheus, Grafana |

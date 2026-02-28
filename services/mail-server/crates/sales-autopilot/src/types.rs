@@ -163,6 +163,9 @@ pub enum SalesError {
     #[error("enrichment failed: {0}")]
     EnrichmentFailed(String),
 
+    #[error("database error: {0}")]
+    Database(String),
+
     #[error("max campaigns reached ({0})")]
     MaxCampaignsReached(usize),
 
@@ -185,7 +188,7 @@ impl axum::response::IntoResponse for SalesError {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
             SalesError::EnrichmentFailed(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            SalesError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into()),
+            SalesError::Database(_) | SalesError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into()),
         };
         (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
     }
@@ -246,6 +249,32 @@ mod tests {
     }
 
     #[test]
+    fn test_database_error_display() {
+        let err = SalesError::Database("connection refused".into());
+        assert!(err.to_string().contains("database error"));
+        assert!(err.to_string().contains("connection refused"));
+    }
+
+    #[test]
+    fn test_all_error_variants_display() {
+        let id = Uuid::nil();
+        let errors: Vec<SalesError> = vec![
+            SalesError::LeadNotFound(id),
+            SalesError::CampaignNotFound(id),
+            SalesError::EventNotFound(id),
+            SalesError::InvalidInput("bad".into()),
+            SalesError::EnrichmentFailed("timeout".into()),
+            SalesError::Database("pg error".into()),
+            SalesError::MaxCampaignsReached(10),
+            SalesError::SlotUnavailable,
+        ];
+        for err in &errors {
+            let msg = err.to_string();
+            assert!(!msg.is_empty(), "Error display should not be empty: {:?}", err);
+        }
+    }
+
+    #[test]
     fn test_message_category_serde() {
         let cats = [
             MessageCategory::Lead,
@@ -259,5 +288,177 @@ mod tests {
             let parsed: MessageCategory = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, cat);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional comprehensive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lead_status_all_variants_round_trip() {
+        for status in [
+            LeadStatus::New,
+            LeadStatus::Contacted,
+            LeadStatus::Qualified,
+            LeadStatus::Converted,
+            LeadStatus::Lost,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: LeadStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, status);
+            // Display matches serde name
+            let display = status.to_string();
+            assert!(json.contains(&display));
+        }
+    }
+
+    #[test]
+    fn lead_status_display_values() {
+        assert_eq!(LeadStatus::New.to_string(), "new");
+        assert_eq!(LeadStatus::Contacted.to_string(), "contacted");
+        assert_eq!(LeadStatus::Qualified.to_string(), "qualified");
+        assert_eq!(LeadStatus::Converted.to_string(), "converted");
+        assert_eq!(LeadStatus::Lost.to_string(), "lost");
+    }
+
+    #[test]
+    fn campaign_status_display_values() {
+        assert_eq!(CampaignStatus::Draft.to_string(), "draft");
+        assert_eq!(CampaignStatus::Active.to_string(), "active");
+        assert_eq!(CampaignStatus::Paused.to_string(), "paused");
+        assert_eq!(CampaignStatus::Completed.to_string(), "completed");
+    }
+
+    #[test]
+    fn lead_score_boundary() {
+        let lead = Lead {
+            id: Uuid::nil(),
+            email: "x@x.com".into(),
+            name: "X".into(),
+            company: "".into(),
+            title: "".into(),
+            score: 0,
+            source: "".into(),
+            status: LeadStatus::New,
+            created_at: Utc::now(),
+        };
+        assert_eq!(lead.score, 0);
+        
+        let lead_max = Lead { score: 100, ..lead.clone() };
+        assert_eq!(lead_max.score, 100);
+        
+        // u8 can hold 255 but semantically score is 0-100
+        let lead_over = Lead { score: 255, ..lead };
+        let json = serde_json::to_value(&lead_over).unwrap();
+        assert_eq!(json["score"], 255);
+    }
+
+    #[test]
+    fn lead_clone() {
+        let lead = Lead {
+            id: Uuid::new_v4(),
+            email: "test@test.com".into(),
+            name: "Test".into(),
+            company: "TestCo".into(),
+            title: "Dev".into(),
+            score: 50,
+            source: "web".into(),
+            status: LeadStatus::Qualified,
+            created_at: Utc::now(),
+        };
+        let cloned = lead.clone();
+        assert_eq!(lead.id, cloned.id);
+        assert_eq!(lead.email, cloned.email);
+        assert_eq!(lead.status, cloned.status);
+    }
+
+    #[test]
+    fn company_serde_roundtrip() {
+        let company = Company {
+            id: Uuid::new_v4(),
+            name: "Acme".into(),
+            domain: "acme.com".into(),
+            industry: "tech".into(),
+            size: "50-200".into(),
+            revenue_range: "$1M-$10M".into(),
+            enriched_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&company).unwrap();
+        let parsed: Company = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "Acme");
+        assert_eq!(parsed.domain, "acme.com");
+    }
+
+    #[test]
+    fn campaign_serde_roundtrip() {
+        let campaign = Campaign {
+            id: Uuid::new_v4(),
+            name: "Launch".into(),
+            template_id: "tpl-1".into(),
+            audience: "{}".into(),
+            status: CampaignStatus::Active,
+            sent: 1000,
+            opened: 450,
+            clicked: 120,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&campaign).unwrap();
+        let parsed: Campaign = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "Launch");
+        assert_eq!(parsed.status, CampaignStatus::Active);
+        assert_eq!(parsed.sent, 1000);
+    }
+
+    #[test]
+    fn calendar_event_with_and_without_meeting_link() {
+        let with_link = CalendarEvent {
+            id: Uuid::new_v4(),
+            title: "Demo".into(),
+            attendees: vec!["a@a.com".into()],
+            start_at: Utc::now(),
+            end_at: Utc::now(),
+            meeting_link: Some("https://meet.example.com/abc".into()),
+        };
+        let json = serde_json::to_value(&with_link).unwrap();
+        assert!(json["meeting_link"].is_string());
+
+        let without_link = CalendarEvent {
+            meeting_link: None,
+            ..with_link
+        };
+        let json = serde_json::to_value(&without_link).unwrap();
+        assert!(json["meeting_link"].is_null());
+    }
+
+    #[test]
+    fn ad_click_serde() {
+        let click = AdClick {
+            id: Uuid::new_v4(),
+            campaign_id: Uuid::new_v4(),
+            source: "google".into(),
+            cost: 1.50,
+            converted: true,
+        };
+        let json = serde_json::to_string(&click).unwrap();
+        let parsed: AdClick = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.source, "google");
+        assert!(parsed.converted);
+        assert!((parsed.cost - 1.50).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn inbox_message_serde() {
+        let msg = InboxMessage {
+            id: Uuid::new_v4(),
+            from: "sender@test.com".into(),
+            subject: "Hello".into(),
+            received_at: Utc::now(),
+            category: MessageCategory::Lead,
+            replied: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: InboxMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.from, "sender@test.com");
+        assert!(!parsed.replied);
     }
 }

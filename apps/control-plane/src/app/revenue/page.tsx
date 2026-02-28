@@ -82,7 +82,7 @@ export default function RevenuePage() {
     const maxMrr = Math.max(...monthlyData.map(m => m.mrr));
 
     return (
-        <div className="max-w-7xl mx-auto">
+        <div className="cp-page">
             <div className="flex items-center justify-between mb-6">
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Revenue Metrics</h1>

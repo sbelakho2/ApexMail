@@ -117,23 +117,68 @@ Important: keep `MCAPTCHA_ENABLED` and `NEXT_PUBLIC_MCAPTCHA_ENABLED` aligned to
 ENCRYPTION_KEY="base64-encoded-32-byte-key"
 ```
 
-### Email Sending
+### Email Delivery Transport
+
+ApexMail supports two delivery transports: **AWS SES** (default) and **self-hosted SMTP** (opt-in). The transport is selected via the `EMAIL_TRANSPORT_TYPE` environment variable.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MTA_HOST` | | `localhost` | Postfix host |
-| `MTA_PORT` | | `25` | Postfix port |
-| `MTA_HOSTNAME` | ✓ | - | HELO/EHLO hostname |
+| `EMAIL_TRANSPORT_TYPE` | | `ses` | Transport backend: `ses` (AWS SES) or `smtp` (self-hosted) |
 | `DEFAULT_FROM_EMAIL` | | - | Default sender address |
 | `DEFAULT_FROM_NAME` | | - | Default sender name |
 
+#### AWS SES Configuration (default)
+
+When `EMAIL_TRANSPORT_TYPE=ses` (or omitted), emails are delivered via the AWS SES v2 API.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AWS_ACCESS_KEY_ID` | ✓ | - | AWS IAM access key for SES |
+| `AWS_SECRET_ACCESS_KEY` | ✓ | - | AWS IAM secret key for SES |
+| `AWS_DEFAULT_REGION` | | `eu-west-1` | AWS region for SES |
+| `SES_CONFIGURATION_SET` | | - | SES configuration set for event tracking |
+
 ```env
-MTA_HOST=postfix
-MTA_PORT=25
-MTA_HOSTNAME=mail.example.com
+EMAIL_TRANSPORT_TYPE=ses
+AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxx
+AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AWS_DEFAULT_REGION=eu-west-1
+SES_CONFIGURATION_SET=apexmail-production
 DEFAULT_FROM_EMAIL=noreply@example.com
 DEFAULT_FROM_NAME="ApexMail"
 ```
+
+SES handles DKIM signing automatically via Easy DKIM (2048-bit RSA). Domain identities are auto-provisioned when tenants verify domains.
+
+#### Self-Hosted SMTP Configuration (opt-in)
+
+When `EMAIL_TRANSPORT_TYPE=smtp`, emails are delivered via direct SMTP relay or direct-to-MX.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SMTP_HOST` | | `localhost` | SMTP relay host (or use outbound-queue for direct MX) |
+| `SMTP_PORT` | | `587` | SMTP relay port |
+| `SMTP_SECURE` | | `true` | Use TLS |
+| `SMTP_USERNAME` | | - | SMTP auth username |
+| `SMTP_PASSWORD` | | - | SMTP auth password |
+| `OUTBOUND_IPS` | | - | Comma-separated outbound IPs for source binding |
+| `MTA_HOSTNAME` | ✓ | - | HELO/EHLO hostname |
+
+```env
+EMAIL_TRANSPORT_TYPE=smtp
+SMTP_HOST=localhost
+SMTP_PORT=25
+MTA_HOSTNAME=mail.example.com
+OUTBOUND_IPS=203.0.113.1,203.0.113.2
+DEFAULT_FROM_EMAIL=noreply@example.com
+DEFAULT_FROM_NAME="ApexMail"
+```
+
+When `OUTBOUND_IPS` is set, the outbound-queue service:
+- Initialises an IP pool with round-robin rotation
+- Source-binds TCP sockets to the selected IP
+- Enforces warmup daily limits per IP
+- Runs background DNSBL monitoring (every 15 minutes)
 
 ### DKIM Configuration
 
@@ -264,9 +309,11 @@ Verification status:
 
 ---
 
-## SMTP Configuration
+## SMTP Configuration (Self-Hosted Opt-In Only)
 
-### Postfix Main Configuration
+> **Note:** This section applies only when using `EMAIL_TRANSPORT_TYPE=smtp`. When using the default SES transport, SMTP configuration is not needed for outbound delivery. SMTP configuration below may still apply to inbound mail processing (ports 25/2525/2526).
+
+### Postfix Main Configuration (if using Postfix relay)
 
 `/etc/postfix/main.cf`:
 
@@ -314,9 +361,11 @@ mailbox_size_limit = 0
 header_checks = regexp:/etc/postfix/header_checks
 ```
 
-### IP Warmup Schedule
+### IP Warmup Schedule (Self-Hosted SMTP Only)
 
-When using new IP addresses, follow this warmup schedule:
+> **Note:** When using SES with dedicated IPs, warmup is handled automatically by AWS. This schedule applies only to self-hosted SMTP with `OUTBOUND_IPS`.
+
+When using new IP addresses for self-hosted delivery, follow this warmup schedule:
 
 | Day | Daily Volume | Notes |
 |-----|--------------|-------|

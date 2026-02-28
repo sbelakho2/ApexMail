@@ -63,7 +63,7 @@ interface DashboardStats {
 
 function DashboardLoadingSkeleton() {
     return (
-        <div className="max-w-7xl mx-auto animate-pulse">
+        <div className="cp-page animate-pulse">
             <div className="mb-10">
                 <div className="h-10 w-48 rounded bg-muted" />
                 <div className="mt-2 h-4 w-96 rounded bg-muted" />
@@ -152,7 +152,7 @@ export default function ControlPlaneDashboard() {
     if (!stats) return null;
 
     return (
-        <div className="max-w-7xl mx-auto">
+        <div className="cp-page">
             <div className="mb-10">
                 <div className="flex items-center justify-between">
                     <div>

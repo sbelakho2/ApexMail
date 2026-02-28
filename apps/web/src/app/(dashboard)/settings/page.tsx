@@ -22,6 +22,14 @@ import {
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+    DialogFooter,
+} from '@/components/ui/dialog';
 import { cn, formatDate } from '@/lib/utils';
 import { PlanSelector, PaygUsageDashboard } from '@/components/billing';
 import { useSettingsController } from './use-settings-controller';
@@ -50,6 +58,12 @@ export default function SettingsPage() {
             toasts,
             activePlanData,
             isDirty,
+            deleteDialogOpen,
+            deletePassword,
+            deleteConfirmation,
+            deleteReason,
+            deleteLoading,
+            deleteError,
         },
         refs: {
             avatarInputRef,
@@ -71,6 +85,12 @@ export default function SettingsPage() {
             handleVerificationSend,
             handleApiKeyAction,
             handlePlanChange,
+            openDeleteDialog,
+            closeDeleteDialog,
+            setDeletePassword,
+            setDeleteConfirmation,
+            setDeleteReason,
+            handleDeleteAccount,
         },
     } = useSettingsController();
 
@@ -358,7 +378,12 @@ export default function SettingsPage() {
                                     <p className="mt-1 text-sm text-muted-foreground">
                                         Permanently delete your account and all associated data.
                                     </p>
-                                    <Button variant="destructive" size="sm" className="mt-4 min-h-[44px]">
+                                    <Button 
+                                        variant="destructive" 
+                                        size="sm" 
+                                        className="mt-4 min-h-[44px]"
+                                        onClick={openDeleteDialog}
+                                    >
                                         Delete Account
                                     </Button>
                                 </div>
@@ -820,6 +845,78 @@ export default function SettingsPage() {
                     )}
                 </div>
             </div>
+
+            {/* Delete Account Confirmation Dialog */}
+            <Dialog open={deleteDialogOpen} onOpenChange={(open) => !open && closeDeleteDialog()}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle className="text-destructive">Delete Account</DialogTitle>
+                        <DialogDescription>
+                            This action cannot be undone. Your account will be scheduled for deletion
+                            and you will have 30 days to cancel before all data is permanently removed.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="space-y-4 py-4">
+                        {deleteError && (
+                            <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+                                {deleteError}
+                            </div>
+                        )}
+
+                        <div className="space-y-2">
+                            <Label htmlFor="delete-password">Current Password</Label>
+                            <Input
+                                id="delete-password"
+                                type="password"
+                                placeholder="Enter your current password"
+                                value={deletePassword}
+                                onChange={(e) => setDeletePassword(e.target.value)}
+                                disabled={deleteLoading}
+                            />
+                        </div>
+
+                        <div className="space-y-2">
+                            <Label htmlFor="delete-confirmation">
+                                Type <span className="font-mono font-bold">DELETE MY ACCOUNT</span> to confirm
+                            </Label>
+                            <Input
+                                id="delete-confirmation"
+                                type="text"
+                                placeholder="DELETE MY ACCOUNT"
+                                value={deleteConfirmation}
+                                onChange={(e) => setDeleteConfirmation(e.target.value)}
+                                disabled={deleteLoading}
+                            />
+                        </div>
+
+                        <div className="space-y-2">
+                            <Label htmlFor="delete-reason">Reason for leaving (optional)</Label>
+                            <Textarea
+                                id="delete-reason"
+                                placeholder="Help us improve by telling us why you're leaving..."
+                                value={deleteReason}
+                                onChange={(e) => setDeleteReason(e.target.value)}
+                                disabled={deleteLoading}
+                                rows={3}
+                            />
+                        </div>
+                    </div>
+
+                    <DialogFooter>
+                        <Button variant="outline" onClick={closeDeleteDialog} disabled={deleteLoading}>
+                            Cancel
+                        </Button>
+                        <Button 
+                            variant="destructive" 
+                            onClick={handleDeleteAccount}
+                            disabled={deleteLoading || deleteConfirmation.toUpperCase() !== 'DELETE MY ACCOUNT'}
+                        >
+                            {deleteLoading ? 'Deleting...' : 'Delete My Account'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

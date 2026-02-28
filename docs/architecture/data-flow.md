@@ -3,7 +3,8 @@
 > **Implementation Note (2026-02):** This document describes the conceptual data flow. The actual implementation uses:
 > - **Rust tracking service** instead of TypeScript API
 > - **PostgreSQL-native queues** instead of BullMQ (see [queue-system.md](./queue-system.md))
-> - **Rust MTA crate** instead of Postfix
+> - **Rust MTA crate** instead of Postfix (for inbound SMTP only)
+> - **AWS SES** as the default outbound delivery transport (self-hosted SMTP available as opt-in)
 > - Code examples below are pseudo-code; actual implementation is in `services/mail-server/crates/`
 
 ## Email Sending Pipeline
@@ -15,16 +16,23 @@
 └────────────────────────────────────────────────────────────────────────────────┘
 
   ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
-  │  API    │────▶│ Validate │────▶│  Queue   │────▶│  Render  │────▶│ Postfix │
-  │ Request │     │ & Enrich │     │ (BullMQ) │     │ Template │     │   MTA   │
+  │  API    │────▶│ Validate │────▶│  Queue   │────▶│  Render  │────▶│Transport│
+  │ Request │     │ & Enrich │     │(Postgres)│     │ Template │     │(SES/SMTP)│
   └─────────┘     └──────────┘     └──────────┘     └──────────┘     └─────────┘
        │                                                                   │
-       │                                                                   │
-       ▼                                                                   ▼
-  ┌─────────┐                                                        ┌─────────┐
-  │  Log    │                                                        │ Deliver │
-  │ Attempt │                                                        │  Email  │
-  └─────────┘                                                        └─────────┘
+       │                                                              ┌────┴────┐
+       ▼                                                              │         │
+  ┌─────────┐                                                    ┌────┴───┐ ┌───┴────┐
+  │  Log    │                                                    │AWS SES │ │Direct  │
+  │ Attempt │                                                    │(default│ │MX SMTP │
+  └─────────┘                                                    │        │ │(opt-in)│
+                                                                 └────┬───┘ └───┬────┘
+                                                                      │         │
+                                                                      ▼         ▼
+                                                                 ┌─────────────────┐
+                                                                 │    Deliver       │
+                                                                 │    Email         │
+                                                                 └─────────────────┘
 ```
 
 ### Step-by-Step Flow
@@ -126,8 +134,10 @@ messageQueue.process('send', async (job) => {
     },
   });
   
-  // 6. Submit to Postfix
-  await postfixClient.submit(message);
+  // 6. Submit to delivery transport
+  //    Default: SES v2 SendEmail API (RawMessage)
+  //    Opt-in:  Direct SMTP via SmtpSender (outbound-queue)
+  await transport.send(message);
   
   // 7. Update status
   await db.messages.update({
@@ -137,16 +147,26 @@ messageQueue.process('send', async (job) => {
 });
 ```
 
-#### 5. Postfix Delivery
+#### 5. Delivery Transport
+
+**AWS SES (default — `EMAIL_TRANSPORT_TYPE=ses`):**
 ```
-# Postfix queue stages:
-incoming → active → deferred → bounce
+Worker builds RFC 5322 MIME message
+  → SES v2 SendEmail API (RawMessage)
+  → SES handles DKIM signing, MX delivery, retries
+  → SNS publishes events (bounce/complaint/delivery)
+  → /v1/ses/notifications webhook processes events
+  → Database updated
+```
 
-# Success path:
-incoming → active → delivered
-
-# Temporary failure:
-incoming → active → deferred (retry) → active → delivered
+**Self-Hosted SMTP (opt-in — `EMAIL_TRANSPORT_TYPE=smtp`):**
+```
+Outbound-queue SmtpSender:
+  → Resolve MX records (cached, TTL-aware)
+  → IpPool selects source IP (round-robin, warmup-aware)
+  → TcpSocket::bind(source_ip) → STARTTLS → deliver
+  → Custom DKIM signing (per-domain keys)
+  → Bounce/complaint via DSN + FBL servers
 
 # Permanent failure:
 incoming → active → bounce → notification
@@ -224,7 +244,7 @@ interface ClickEvent {
 
 #### Bounce Events
 ```typescript
-// From Postfix bounce notifications
+// From SES SNS notifications (default) or SMTP DSN (self-hosted opt-in)
 
 interface BounceEvent {
   type: 'bounce';

@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,7 @@ use trust_dns_resolver::error::ResolveErrorKind;
 use trust_dns_resolver::proto::op::ResponseCode;
 
 use crate::dkim::DkimSigner;
+use crate::ip_rotation::IpPool;
 
 /// SMTP Send Result
 #[derive(Debug, Clone)]
@@ -97,6 +99,8 @@ pub struct SmtpSender {
     mx_cache: Cache<String, Vec<String>>,
     /// Per-MX SMTP connection pool to reduce TCP/TLS handshakes
     connection_pool: RwLock<HashMap<String, Vec<PooledStream>>>,
+    /// Optional IP pool for source-binding and rotation (self-hosted path).
+    ip_pool: Option<Arc<tokio::sync::RwLock<IpPool>>>,
 }
 
 struct OutboundMetrics {
@@ -187,7 +191,13 @@ impl SmtpSender {
                 .time_to_live(Duration::from_secs(mx_cache_ttl_secs))
                 .build(),
             connection_pool: RwLock::new(HashMap::new()),
+            ip_pool: None,
         }
+    }
+    
+    /// Attach an IP pool for source-binding and rotation.
+    pub fn set_ip_pool(&mut self, pool: Arc<tokio::sync::RwLock<IpPool>>) {
+        self.ip_pool = Some(pool);
     }
     
     /// Set DKIM signer
@@ -386,8 +396,20 @@ impl SmtpSender {
 
         debug!(mx = %mx_host, addr = %socket_addr, "Connecting to MX server");
 
-        // Connect with timeout
-        let stream = timeout(timeout_duration, TcpStream::connect(socket_addr)).await??;
+        // Connect with timeout — use source-bound socket when IP pool is available
+        let stream = if let Some(ref ip_pool) = self.ip_pool {
+            let pool = ip_pool.read().await;
+            let (stream, source_ip) = timeout(
+                timeout_duration,
+                pool.connect_with_source(socket_addr, None),
+            )
+            .await
+            .map_err(|_| anyhow!("Timed out connecting to {}", mx_host))??;
+            debug!(source = %source_ip, mx = %mx_host, "Connected with source-bound IP");
+            stream
+        } else {
+            timeout(timeout_duration, TcpStream::connect(socket_addr)).await??
+        };
         let (result, pooled) = timeout(
             session_timeout,
             self.smtp_session_plain(stream, mx_host, from, recipients, message, message_id, true),

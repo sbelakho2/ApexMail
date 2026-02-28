@@ -31,6 +31,11 @@ export const CHART_PALETTE = [
     CHART_COLORS.teal,
 ];
 
+function truncateChartLabel(label: string, max = 12): string {
+    const safe = String(label ?? '');
+    return safe.length > max ? `${safe.slice(0, max - 1)}…` : safe;
+}
+
 interface DataPoint {
     label: string;
     value: number;
@@ -67,19 +72,19 @@ export function StatCard({ label, value, change, changeLabel, icon, trend }: Sta
 
     return (
         <div className="card p-5">
-            <div className="flex items-start justify-between">
-                <div>
-                    <p className="text-xs font-medium text-surface-600 uppercase tracking-wide">{label}</p>
-                    <p className="text-2xl apex-metric-number mt-1">{value}</p>
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                    <p className="text-xs font-medium text-surface-600 uppercase tracking-wide truncate">{label}</p>
+                    <p className="text-2xl apex-metric-number mt-1 truncate">{value}</p>
                     {change !== undefined && (
-                        <p className={`text-xs font-medium mt-2 flex items-center gap-1 ${trendColor}`}>
+                        <p className={`text-xs font-medium mt-2 flex items-center gap-1 min-w-0 ${trendColor}`}>
                             <span>{trendIcon}</span>
-                            <span>{change > 0 ? '+' : ''}{change}%</span>
-                            {changeLabel && <span className="text-surface-400 ml-1">{changeLabel}</span>}
+                            <span className="whitespace-nowrap">{change > 0 ? '+' : ''}{change}%</span>
+                            {changeLabel && <span className="text-surface-400 ml-1 truncate">{changeLabel}</span>}
                         </p>
                     )}
                 </div>
-                {icon && <span className="text-2xl">{icon}</span>}
+                {icon && <span className="text-2xl flex-shrink-0">{icon}</span>}
             </div>
         </div>
     );
@@ -220,17 +225,18 @@ interface BarChartProps {
 
 export function BarChart({ data, height = 200, showValues = true, horizontal = false, ariaLabel = 'Bar chart' }: BarChartProps) {
     const maxValue = Math.max(...data.map(d => d.value));
+    const safeMaxValue = maxValue || 1;
 
     if (horizontal) {
         return (
             <div className="space-y-3">
                 {data.map((d, i) => {
-                    const percent = (d.value / maxValue) * 100;
+                    const percent = (d.value / safeMaxValue) * 100;
                     const color = d.color || CHART_PALETTE[i % CHART_PALETTE.length];
                     return (
                         <div key={`${d.label}-${d.value}`}>
                             <div className="flex justify-between text-sm mb-1">
-                                <span className="text-surface-600">{d.label}</span>
+                                <span className="text-surface-600 min-w-0 max-w-[75%] truncate">{d.label}</span>
                                 {showValues && <span className="text-surface-900 font-medium">{d.value.toLocaleString()}</span>}
                             </div>
                             <div className="h-6 bg-surface-100 rounded-lg overflow-hidden">
@@ -248,10 +254,10 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
     const barWidth = Math.min(60, (300 / data.length) - 8);
 
     return (
-        <div className="w-full">
-            <svg width="100%" height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
+        <div className="w-full overflow-x-auto">
+            <svg width="100%" height={height} className="overflow-hidden" role="img" aria-label={ariaLabel}>
                 {data.map((d, i) => {
-                    const barHeight = (d.value / maxValue) * (height - 40);
+                    const barHeight = (d.value / safeMaxValue) * (height - 40);
                     const x = (i * (100 / data.length)) + (50 / data.length);
                     const color = d.color || CHART_PALETTE[i % CHART_PALETTE.length];
                     return (
@@ -281,7 +287,7 @@ export function BarChart({ data, height = 200, showValues = true, horizontal = f
                                 textAnchor="middle"
                                 className="text-xs fill-surface-500"
                             >
-                                {d.label}
+                                {truncateChartLabel(d.label, 10)}
                             </text>
                         </g>
                     );
@@ -317,9 +323,10 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
     const padding = { top: 10, right: 10, bottom: 30, left: 50 };
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
+    const xDenominator = Math.max(data.length - 1, 1);
 
     const points = data.map((d, i) => ({
-        x: padding.left + (i / (data.length - 1)) * chartWidth,
+        x: padding.left + (i / xDenominator) * chartWidth,
         y: padding.top + chartHeight - ((d.value - minValue) / range) * chartHeight,
         ...d,
     }));
@@ -334,7 +341,7 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
     }));
 
     return (
-        <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
+        <svg width={width} height={height} className="overflow-hidden" role="img" aria-label={ariaLabel}>
             {/* Grid lines */}
             {showGrid && yTicks.map((tick) => (
                 <g key={tick.value}>
@@ -369,7 +376,7 @@ export function LineChart({ data, width = 400, height = 150, color = CHART_COLOR
             {/* X-axis labels (show every few) */}
             {points.filter((_, i) => i % Math.ceil(data.length / 6) === 0 || i === data.length - 1).map((p) => (
                 <text key={p.date} x={p.x} y={height - 8} textAnchor="middle" className="text-xs fill-surface-400">
-                    {p.date}
+                    {truncateChartLabel(p.date, 8)}
                 </text>
             ))}
         </svg>
@@ -400,6 +407,7 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
     const padding = { top: 10, right: 10, bottom: 30, left: 50 };
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
+    const xDenominator = Math.max(data.length - 1, 1);
 
     return (
         <div>
@@ -421,7 +429,7 @@ export function MultiLineChart({ data, series, width = 500, height = 200, showLe
                 {/* Lines for each series */}
                 {series.map(s => {
                     const points = data.map((d, i) => ({
-                        x: padding.left + (i / (data.length - 1)) * chartWidth,
+                        x: padding.left + (i / xDenominator) * chartWidth,
                         y: padding.top + chartHeight - (((d[s.key] as number) - minValue) / range) * chartHeight,
                     }));
                     const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
@@ -475,16 +483,17 @@ export function Sparkline({ data, width = 100, height = 30, color = CHART_COLORS
     const max = Math.max(...data);
     const min = Math.min(...data);
     const range = max - min || 1;
+    const xDenominator = Math.max(data.length - 1, 1);
 
     const points = data.map((v, i) => ({
-        x: (i / (data.length - 1)) * width,
+        x: (i / xDenominator) * width,
         y: height - ((v - min) / range) * height,
     }));
 
     const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
 
     return (
-        <svg width={width} height={height} className="overflow-visible" role="img" aria-label={ariaLabel}>
+        <svg width={width} height={height} className="overflow-hidden" role="img" aria-label={ariaLabel}>
             <path d={path} fill="none" stroke={color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
         </svg>
     );
@@ -503,6 +512,7 @@ interface HeatMapProps {
 
 export function HeatMap({ data, width = 500, height = 150, ariaLabel = 'Heat map chart' }: HeatMapProps) {
     const maxValue = Math.max(...data.map(d => d.value));
+    const safeMaxValue = maxValue || 1;
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const _hours = Array.from({ length: 24 }, (_, i) => i);
 
@@ -520,7 +530,7 @@ export function HeatMap({ data, width = 500, height = 150, ariaLabel = 'Heat map
 
             {/* Cells */}
             {data.map((d, i) => {
-                const intensity = d.value / maxValue;
+                const intensity = d.value / safeMaxValue;
                 const color = `rgba(37, 99, 235, ${0.1 + intensity * 0.9})`;
                 return (
                     <rect
@@ -560,7 +570,8 @@ export function FunnelChart({ data, height = 200, ariaLabel = 'Funnel chart' }: 
             {data.map((d, i) => {
                 const widthPercent = (d.value / maxValue) * 100;
                 const color = d.color || CHART_PALETTE[i % CHART_PALETTE.length];
-                const conversionRate = i > 0 ? ((d.value / data[i - 1].value) * 100).toFixed(1) : null;
+                const previousValue = i > 0 ? data[i - 1].value : 0;
+                const conversionRate = i > 0 && previousValue > 0 ? ((d.value / previousValue) * 100).toFixed(1) : null;
                 const width = Math.max(24, Math.min(100, widthPercent));
                 const leftOffset = (100 - width) / 2;
 
@@ -571,13 +582,13 @@ export function FunnelChart({ data, height = 200, ariaLabel = 'Funnel chart' }: 
                                 <rect x={leftOffset} y="0" width={width} height={rowHeight} rx="8" ry="8" fill={color} />
                             </svg>
                             <div className="absolute inset-0 flex items-center justify-between px-4 pointer-events-none">
-                                <span className="text-white font-medium text-sm truncate">{d.label}</span>
-                                <span className="text-white/90 text-sm">{d.value.toLocaleString()}</span>
+                                <span className="text-white font-medium text-sm truncate min-w-0 max-w-[70%]">{d.label}</span>
+                                <span className="text-white/90 text-sm whitespace-nowrap">{d.value.toLocaleString()}</span>
                             </div>
                         </div>
                         {conversionRate && (
-                            <div className="absolute -right-16 top-1/2 -translate-y-1/2 text-xs text-surface-500">
-                                {conversionRate}%
+                            <div className="mt-1 text-right text-xs text-surface-500 whitespace-nowrap pr-1">
+                                Conversion: {conversionRate}%
                             </div>
                         )}
                     </div>

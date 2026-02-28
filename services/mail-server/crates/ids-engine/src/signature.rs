@@ -93,7 +93,7 @@ impl SignatureSet {
         let mut all_patterns = Vec::new();
         let mut pattern_to_sig = Vec::new();
 
-        // Compile per-signature regex patterns
+        // Compile per-signature regex patterns.
         let mut compiled_regexes = Vec::with_capacity(signatures.len());
         for (sig_idx, sig) in signatures.iter().enumerate() {
             for pattern in &sig.content_patterns {
@@ -114,8 +114,13 @@ impl SignatureSet {
             compiled_regexes.push(regexes);
         }
 
+        // Use MatchKind::Standard (non-leftmost) so that find_overlapping_iter
+        // returns a match for EVERY registered pattern at every position, even
+        // when two signatures share an identical byte string as their content
+        // pattern.  LeftmostFirst would suppress duplicate patterns, causing
+        // the second signature to never receive its AC hit.
         let automaton = AhoCorasickBuilder::new()
-            .match_kind(MatchKind::LeftmostFirst)
+            .match_kind(MatchKind::Standard)
             .ascii_case_insensitive(true)
             .build(&all_patterns)
             .map_err(|e| format!("Failed to build automaton: {}", e))?;
@@ -139,10 +144,15 @@ impl SignatureSet {
         let mut matched_sigs = std::collections::HashSet::new();
         let mut results = Vec::new();
 
-        // Phase 1: find AC content-pattern matches
+        // Phase 1: find AC content-pattern matches and map each back to its sig.
+        //
+        // Using find_overlapping_iter (requires MatchKind::Standard) ensures
+        // that two signatures sharing an identical byte string both receive a
+        // match notification — LeftmostFirst + find_iter would suppress the
+        // second hit, causing the later signature to never fire.
         let mut ac_matched_sigs = std::collections::HashSet::new();
         if let Some(automaton) = &self.automaton {
-            for mat in automaton.find_iter(payload) {
+            for mat in automaton.find_overlapping_iter(payload) {
                 let sig_idx = self.pattern_to_sig[mat.pattern().as_usize()];
                 ac_matched_sigs.insert(sig_idx);
             }
@@ -152,15 +162,22 @@ impl SignatureSet {
         for (sig_idx, sig) in self.signatures.iter().enumerate() {
             let has_content = !sig.content_patterns.is_empty();
             let has_regex = !sig.regex_patterns.is_empty();
+            // OR semantics: ANY one of the sig's content patterns being present
+            // is sufficient to satisfy the content requirement.  A sig with
+            // multiple content patterns like ["<script", "onerror=", "javascript:"]
+            // fires when ANY of those tokens appears (alternatives).  Hybrid sigs
+            // that need AND logic (e.g. "base64 header AND powershell body") should
+            // be expressed with content_patterns for the fast-filter term and
+            // regex_patterns for the confirming term.
             let ac_hit = ac_matched_sigs.contains(&sig_idx);
 
             let fires = match (has_content, has_regex) {
                 (true, true) => {
-                    // Both required: AC must hit AND at least one regex must match
+                    // Hybrid: any content pattern hit AND at least one regex match
                     ac_hit && self.any_regex_match(sig_idx, payload)
                 }
                 (true, false) => {
-                    // Content-only: AC hit suffices
+                    // Content-only: any content pattern hit suffices
                     ac_hit
                 }
                 (false, true) => {
@@ -811,15 +828,19 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
         },
         Signature {
             sid: 2000081,
-            rev: 1,
+            rev: 2,
             message: "SMTP: Encoded script payload in body".into(),
-            content_patterns: vec![b"Content-Transfer-Encoding: base64".to_vec(), b"powershell".to_vec()],
+            // Hybrid sig: fast-filter on the base64 transfer-encoding header,
+            // then confirm with a regex so that "powershell" must actually appear
+            // in the message body — prevents false positives from any base64-
+            // encoded attachment that doesn't contain a script payload.
+            content_patterns: vec![b"Content-Transfer-Encoding: base64".to_vec()],
             action: SignatureAction::Alert,
             severity: SigSeverity::High,
             category: "malware".into(),
             protocol: "smtp".into(),
             references: vec![],
-            regex_patterns: vec![],
+            regex_patterns: vec![r#"(?i)powershell"#.into()],
         },
         Signature {
             sid: 2000082,
@@ -857,8 +878,14 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
             protocol: "http".into(),
             references: vec!["CVE-2021-44228".into()],
             regex_patterns: vec![
-                // ${j${::-n}di:ldap://...} and similar nested obfuscations
-                r#"\$\{[^\}]*j[^\}]*n[^\}]*d[^\}]*i[^\}]*:[^\}]*//[^\}]*\}"#.into(),
+                // ${j${::-n}di:ldap://...} and similar nested obfuscations.
+                //
+                // The previous pattern used [^\}]* which stops at every `}`,
+                // making it impossible to match payloads like ${j${::-n}di:...}
+                // where a nested lookup closes before the outer one.  Using
+                // bounded `.{0,50}` (dot-all is enabled by RegexBuilder) lets
+                // the engine match across embedded closing braces.
+                r#"\$\{.{0,50}j.{0,50}n.{0,50}d.{0,50}i.{0,50}:.{0,50}//"#.into(),
             ],
         },
         Signature {

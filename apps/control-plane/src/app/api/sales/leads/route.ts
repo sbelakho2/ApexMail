@@ -41,6 +41,17 @@ export async function GET(request: Request) {
             mx_records: string | null;
             score: number | null;
             tags: string | null;
+            contact_email: string | null;
+            contact_name: string | null;
+            contact_title: string | null;
+            company_size: string | null;
+            estimated_deal_value: number | null;
+            last_contacted_at: Date | null;
+            next_follow_up_at: Date | null;
+            assigned_to: string | null;
+            icp_fit: string | null;
+            linkedin_url: string | null;
+            website_traffic: string | null;
             created_at: Date;
         }>(`
             SELECT 
@@ -55,9 +66,20 @@ export async function GET(request: Request) {
                 mx_records,
                 score,
                 tags,
+                contact_email,
+                contact_name,
+                contact_title,
+                company_size,
+                estimated_deal_value,
+                last_contacted_at,
+                next_follow_up_at,
+                assigned_to,
+                icp_fit,
+                linkedin_url,
+                website_traffic,
                 created_at
             FROM sales_leads
-            ORDER BY created_at DESC
+            ORDER BY score DESC NULLS LAST, created_at DESC
             LIMIT $1 OFFSET $2
         `, [limit, offset]);
 
@@ -107,8 +129,21 @@ export async function GET(request: Request) {
             emailProvider: row.email_provider,
             mxRecords: row.mx_records ? JSON.parse(row.mx_records) : [],
             score: row.score ?? 50,
-            status: row.status as 'new' | 'contacted' | 'qualified' | 'nurturing',
+            status: row.status ?? 'new',
             tags: row.tags ? JSON.parse(row.tags) : [],
+            contactEmail: row.contact_email ?? null,
+            contactName: row.contact_name ?? null,
+            contactTitle: row.contact_title ?? null,
+            companySize: row.company_size ?? null,
+            estimatedDealValue: row.estimated_deal_value ?? null,
+            lastContactedAt: row.last_contacted_at ? new Date(row.last_contacted_at).toISOString() : null,
+            nextFollowUpAt: row.next_follow_up_at ? new Date(row.next_follow_up_at).toISOString() : null,
+            engagementHistory: [],
+            notes: row.notes ?? '',
+            assignedTo: row.assigned_to ?? null,
+            icpFit: row.icp_fit ?? 'unscored',
+            linkedinUrl: row.linkedin_url ?? null,
+            websiteTraffic: row.website_traffic ?? null,
         }));
 
         const stats = {

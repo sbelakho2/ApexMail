@@ -5,7 +5,9 @@
 >
 > **Implementation Note (2026-02):** The MTA is implemented as a Rust crate at `services/mail-server/crates/mta/`. Postfix is not used; SMTP handling is native Rust using the `lettre` and `mail-parser` crates.
 
-This document covers the architecture, security controls, and authentication engine of the ApexMail Mail Transfer Agent (MTA). All inbound email processing, sender authentication, and feedback loop handling are managed by this subsystem.
+This document covers the architecture, security controls, and authentication engine of the ApexMail Mail Transfer Agent (MTA). All **inbound** email processing, sender authentication, and feedback loop handling are managed by this subsystem.
+
+> **Scope:** This document covers the **inbound MTA** only. Outbound email delivery is handled by the transport layer (AWS SES by default, self-hosted SMTP opt-in). See [ADR 0011 — Dual Delivery](../adr/0011-dual-delivery-ses-primary.md) and [Delivery Transport](delivery-transport.md) for outbound architecture.
 
 ---
 

@@ -32,3 +32,4 @@ trust-dns-resolver.workspace = true
 mail-parser.workspace = true
 mail-auth.workspace = true
 axum.workspace = true
+dashmap.workspace = true

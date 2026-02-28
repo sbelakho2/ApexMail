@@ -7,25 +7,34 @@ use reqwest::Client;
 use sqlx::PgPool;
 
 use crate::config::Config;
+use crate::ses_provider::SesIpProvider;
 
 /// Cheaply-cloneable handle shared across all request handlers.
 pub type AppState = Arc<AppStateInner>;
 
-/// Inner struct holding the database pool, Redis pool, and config.
+/// Inner struct holding the database pool, Redis pool, config, and SES provider.
 pub struct AppStateInner {
     pub db: PgPool,
     pub redis: RedisPool,
     pub config: Config,
     pub http_client: Client,
+    pub ses_provider: SesIpProvider,
 }
 
 impl AppStateInner {
-    pub fn new(db: PgPool, redis: RedisPool, config: Config, http_client: Client) -> AppState {
+    pub fn new(
+        db: PgPool,
+        redis: RedisPool,
+        config: Config,
+        http_client: Client,
+        ses_provider: SesIpProvider,
+    ) -> AppState {
         Arc::new(Self {
             db,
             redis,
             config,
             http_client,
+            ses_provider,
         })
     }
 }

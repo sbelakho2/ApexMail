@@ -99,6 +99,11 @@ All components include automatic health monitoring and alerting.
 
 ## Dedicated IP Pools
 
+Dedicated IPs operate differently depending on the delivery transport:
+
+- **SES transport (default):** Dedicated IPs are provisioned through AWS SES. Warmup is managed automatically by SES. Cost: $24.95/mo per IP.
+- **Self-hosted SMTP transport:** IPs are sourced from the hosting provider (e.g. Hetzner). The built-in IP warmup engine manages gradual volume ramp-up.
+
 ### Configure Dedicated IPs
 
 ```bash

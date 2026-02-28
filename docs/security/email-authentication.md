@@ -3,6 +3,8 @@
 
 ApexMail implements comprehensive email authentication beyond basic SPF/DKIM/DMARC to maximize deliverability and brand visibility.
 
+> **Delivery transport note:** When using the default **AWS SES** transport, DKIM is configured automatically via SES Easy DKIM (2048-bit RSA). SPF alignment is achieved by including `amazonses.com` in the sender domain's SPF record. When using self-hosted SMTP, DKIM keys are managed locally and SPF records point to the server's outbound IPs.
+
 ## Overview
 
 Modern email authentication requires multiple layers:

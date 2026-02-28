@@ -1,8 +1,8 @@
-//! Authentication routes: login, logout, refresh, API key management.
+//! Authentication routes: login, logout, refresh, register, API key management.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, post};
+use axum::routing::{delete, post, get};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -16,6 +16,8 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(login))
+        .route("/register", post(register))
+        .route("/verify-email", get(verify_email))
         .route("/api-keys", post(create_api_key).get(list_api_keys))
         .route("/api-keys/:id", delete(revoke_api_key))
         .route("/logout", post(logout))
@@ -197,6 +199,239 @@ struct UserRow {
     password_hash: String,
     role: String,
     status: String,
+}
+
+// ─── Registration types ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub company_name: String,
+    pub email: String,
+    pub name: String,
+    pub password: String,
+    #[serde(default = "default_plan")]
+    pub plan: String,
+}
+
+fn default_plan() -> String {
+    "free".into()
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterResponse {
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub verification_token: String,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyEmailQuery {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifyEmailResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+// ─── Registration handler ──────────────────────────────────────
+
+async fn register(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterRequest>,
+) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
+    // Validate input
+    if body.company_name.is_empty() || body.company_name.len() > 100 {
+        return Err(ApiError::Validation(vec!["company_name must be 1-100 characters".into()]));
+    }
+    if body.email.is_empty() || body.email.len() > 254 {
+        return Err(ApiError::Validation(vec!["invalid email address".into()]));
+    }
+    if body.name.is_empty() || body.name.len() > 100 {
+        return Err(ApiError::Validation(vec!["name must be 1-100 characters".into()]));
+    }
+    if body.password.len() < 12 || body.password.len() > 128 {
+        return Err(ApiError::Validation(vec!["password must be 12-128 characters".into()]));
+    }
+
+    // Validate password strength
+    let has_lower = body.password.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = body.password.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = body.password.chars().any(|c| c.is_ascii_digit());
+    let has_special = body.password.chars().any(|c| !c.is_alphanumeric());
+    if !has_lower || !has_upper || !has_digit || !has_special {
+        return Err(ApiError::Validation(vec![
+            "password must include uppercase, lowercase, number, and special character".into()
+        ]));
+    }
+
+    // Validate plan
+    let valid_plans = ["free", "starter", "pro", "growth", "scale", "enterprise", "payg"];
+    if !valid_plans.contains(&body.plan.as_str()) {
+        return Err(ApiError::Validation(vec![format!("invalid plan: {}", body.plan)]));
+    }
+
+    let email_lower = body.email.to_lowercase();
+
+    // Check if email already exists
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1"
+    )
+    .bind(&email_lower)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if existing.is_some() {
+        return Err(ApiError::Conflict("an account with this email already exists".into()));
+    }
+
+    // Generate IDs and slug
+    let tenant_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let slug = generate_slug(&body.company_name);
+    let now = Utc::now();
+
+    // Hash password
+    let password_hash = apexmail_lib::crypto::hash_password(&body.password)
+        .map_err(|e| ApiError::Internal(format!("password hashing failed: {e}")))?;
+
+    // Generate verification token
+    let verification_token = apexmail_lib::id::generate_verification_token();
+    let verification_expires = now + ChronoDuration::hours(24);
+
+    // Create tenant
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+    )
+    .bind(tenant_id)
+    .bind(&body.company_name)
+    .bind(&slug)
+    .bind(&body.plan)
+    .bind("pending")
+    .bind(serde_json::json!({}))
+    .bind(serde_json::json!({}))
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await?;
+
+    // Create user with owner role
+    sqlx::query(
+        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, 
+                           email_verified, mfa_enabled, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+    )
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(&email_lower)
+    .bind(&body.name)
+    .bind(&password_hash)
+    .bind("owner")
+    .bind("active")
+    .bind(false) // email_verified = false until verified
+    .bind(false) // mfa_enabled
+    .bind(serde_json::json!({
+        "verification_token": verification_token,
+        "verification_expires": verification_expires.to_rfc3339(),
+    }))
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await?;
+
+    tracing::info!(
+        tenant_id = %tenant_id,
+        user_id = %user_id,
+        plan = %body.plan,
+        "New tenant registered"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterResponse {
+            tenant_id,
+            user_id,
+            verification_token,
+            message: "Account created. Please verify your email.".into(),
+        }),
+    ))
+}
+
+fn generate_slug(company_name: &str) -> String {
+    let base: String = company_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = base.trim_matches('-').to_string();
+    // Add random suffix for uniqueness
+    format!("{}-{}", slug, &Uuid::new_v4().to_string()[..8])
+}
+
+// ─── Email verification handler ────────────────────────────────
+
+async fn verify_email(
+    State(state): State<AppState>,
+    Query(params): Query<VerifyEmailQuery>,
+) -> Result<Json<VerifyEmailResponse>, ApiError> {
+    if params.token.is_empty() || params.token.len() > 128 {
+        return Err(ApiError::Validation(vec!["invalid verification token".into()]));
+    }
+
+    // Find user with matching verification token
+    let user: Option<(Uuid, Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, tenant_id, metadata FROM users 
+         WHERE metadata->>'verification_token' = $1 
+         AND email_verified = false
+         LIMIT 1"
+    )
+    .bind(&params.token)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let (user_id, tenant_id, metadata) = match user {
+        Some(u) => u,
+        None => {
+            return Err(ApiError::BadRequest("invalid or expired verification token".into()));
+        }
+    };
+
+    // Check expiry
+    if let Some(expires_str) = metadata.get("verification_expires").and_then(|v| v.as_str()) {
+        if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_str) {
+            if Utc::now() > expires {
+                return Err(ApiError::BadRequest("verification token has expired".into()));
+            }
+        }
+    }
+
+    // Mark email as verified
+    sqlx::query(
+        "UPDATE users SET email_verified = true, 
+         metadata = metadata - 'verification_token' - 'verification_expires',
+         updated_at = NOW()
+         WHERE id = $1"
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+
+    // Activate tenant
+    sqlx::query(
+        "UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1"
+    )
+    .bind(tenant_id)
+    .execute(&state.db)
+    .await?;
+
+    tracing::info!(user_id = %user_id, tenant_id = %tenant_id, "Email verified");
+
+    Ok(Json(VerifyEmailResponse {
+        success: true,
+        message: "Email verified successfully. You can now log in.".into(),
+    }))
 }
 
 async fn create_api_key(

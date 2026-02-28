@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { formatNumber, formatRelativeTime } from '@/lib/utils';
+import { deleteFetcher } from '@/hooks/use-api';
 
 interface Suppression {
     id: string;
@@ -58,8 +59,12 @@ export default function CompliancePage() {
         );
         if (!confirmed) return;
 
-        const res = await fetch(`/v1/suppressions/${id}`, { method: 'DELETE' });
-        if (res.ok) setSuppressions(prev => prev.filter(s => s.id !== id));
+        try {
+            await deleteFetcher(`/v1/suppressions/${id}`);
+            setSuppressions(prev => prev.filter(s => s.id !== id));
+        } catch {
+            // Silently handle — toast notification could be added here
+        }
     }
 
     return (

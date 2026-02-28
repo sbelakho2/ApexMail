@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod error;
+pub mod hot_config;
 pub mod security;
 
 pub use config::Config;

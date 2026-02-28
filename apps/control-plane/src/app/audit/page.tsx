@@ -166,7 +166,7 @@ export default function AuditLogsPage() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto">
+        <div className="cp-page">
             <div className="flex items-center justify-between mb-8">
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Audit Logs</h1>
@@ -445,7 +445,7 @@ export default function AuditLogsPage() {
 
                         <div className="mb-8">
                             <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2 block">User Agent</label>
-                            <div className="font-mono text-sm text-muted-foreground bg-muted/50 p-3 rounded-lg border border-border break-all">{selectedLog.userAgent}</div>
+                            <div className="font-mono text-sm text-muted-foreground bg-muted/50 p-3 rounded-lg border border-border break-words overflow-x-auto max-h-32">{selectedLog.userAgent}</div>
                         </div>
 
                         <div>

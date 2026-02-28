@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page, type Route } from '@playwright/test';
 
 const WEB_URL = process.env.WEB_URL || 'http://127.0.0.1:3010';
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'http://localhost:3020';
@@ -12,7 +12,7 @@ const viewports = {
     mobile: { width: 390, height: 844 },
 };
 
-async function disableMotion(page: Parameters<typeof test>[0]['page']) {
+async function disableMotion(page: Page) {
     await page.addStyleTag({
         content: `
             *, *::before, *::after {
@@ -25,30 +25,32 @@ async function disableMotion(page: Parameters<typeof test>[0]['page']) {
     });
 }
 
-async function freezeTime(page: Parameters<typeof test>[0]['page']) {
+async function freezeTime(page: Page) {
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    await page.addInitScript(fixedTime => {
-        const fixed = new Date(fixedTime as string).getTime();
+    await page.addInitScript((fixedTime: string) => {
+        const fixed = new Date(fixedTime).getTime();
         const OriginalDate = Date;
         const globalDate = globalThis as typeof globalThis & { Date: DateConstructor };
-        // @ts-expect-error - override Date in the browser context for stability
         globalDate.Date = class extends OriginalDate {
             constructor(...args: unknown[]) {
-                if (args.length === 0) {
-                    return new OriginalDate(fixed);
+                super(fixed);
+                if (args.length > 0) {
+                    return Reflect.construct(OriginalDate, args, new.target);
                 }
-                return new OriginalDate(...args);
             }
 
             static now() {
                 return fixed;
             }
+
+            static parse = OriginalDate.parse;
+            static UTC = OriginalDate.UTC;
         } as DateConstructor;
     }, FIXED_VISUAL_TIME);
 }
 
-async function mockWebDashboardApis(page: Parameters<typeof test>[0]['page']) {
-    await page.route('**/api/v1/analytics/dashboard**', async route => {
+async function mockWebDashboardApis(page: Page) {
+    await page.route('**/api/v1/analytics/dashboard**', async (route: Route) => {
         await route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -102,7 +104,7 @@ async function mockWebDashboardApis(page: Parameters<typeof test>[0]['page']) {
         });
     });
 
-    await page.route('**/api/v1/analytics/volume**', async route => {
+    await page.route('**/api/v1/analytics/volume**', async (route: Route) => {
         await route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -120,7 +122,7 @@ async function mockWebDashboardApis(page: Parameters<typeof test>[0]['page']) {
         });
     });
 
-    await page.route('**/api/v1/analytics/engagement**', async route => {
+    await page.route('**/api/v1/analytics/engagement**', async (route: Route) => {
         await route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -138,7 +140,7 @@ async function mockWebDashboardApis(page: Parameters<typeof test>[0]['page']) {
         });
     });
 
-    await page.route('**/api/v1/messages**', async route => {
+    await page.route('**/api/v1/messages**', async (route: Route) => {
         await route.fulfill({
             status: 200,
             contentType: 'application/json',
@@ -185,9 +187,9 @@ async function mockWebDashboardApis(page: Parameters<typeof test>[0]['page']) {
     });
 }
 
-async function gotoAndSnap(page: Parameters<typeof test>[0]['page'], url: string, name: string) {
+async function gotoAndSnap(page: Page, url: string, name: string) {
     await page.goto(url, { waitUntil: 'domcontentloaded' });
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await page.waitForTimeout(400);
     await page.evaluate(() => {
         if (document.activeElement instanceof HTMLElement) {
@@ -198,7 +200,7 @@ async function gotoAndSnap(page: Parameters<typeof test>[0]['page'], url: string
 }
 
 async function assertApexCardCompliance(
-    page: Parameters<typeof test>[0]['page'],
+    page: Page,
     selector: string,
     minCount = 1,
 ) {
@@ -212,10 +214,11 @@ async function assertApexCardCompliance(
         const card = cards.nth(index);
         await expect(card).toBeVisible();
 
-        const style = await card.evaluate(element => {
+        const style = await card.evaluate((element: HTMLElement) => {
             const computed = window.getComputedStyle(element as HTMLElement);
             return {
                 borderRadius: computed.borderRadius,
+                borderTopLeftRadius: computed.borderTopLeftRadius,
                 boxShadow: computed.boxShadow,
                 borderColor: computed.borderColor,
                 backgroundColor: computed.backgroundColor,
@@ -224,7 +227,10 @@ async function assertApexCardCompliance(
         });
 
         expect(style.className).toMatch(/apex-card|premium-card|bg-card/);
-        expect(parseFloat(style.borderRadius)).toBeGreaterThanOrEqual(10);
+        const radiusSource = style.borderTopLeftRadius || style.borderRadius;
+        const parsedRadius = Number.parseFloat(String(radiusSource));
+        expect(Number.isFinite(parsedRadius)).toBe(true);
+        expect(parsedRadius).toBeGreaterThanOrEqual(10);
         expect(style.boxShadow).not.toBe('none');
         expect(style.borderColor).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
         expect(style.backgroundColor).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
@@ -395,13 +401,11 @@ test.describe('Control Plane Visuals', () => {
     test('control-plane analytics apex card compliance', async ({ page }) => {
         await page.setViewportSize(viewports.desktop);
         await page.goto(`${CONTROL_PLANE_URL}/analytics`, { waitUntil: 'domcontentloaded' });
-        await page.waitForLoadState('networkidle');
+        await page.waitForLoadState('load');
 
         await assertApexCardCompliance(page, '.apex-card, .bg-card.border', 6);
 
         const cardsRegion = page.locator('main').first();
-        await expect(cardsRegion).toHaveScreenshot('control-analytics-apex-card-compliance.png', {
-            fullPage: false,
-        });
+        await expect(cardsRegion).toHaveScreenshot('control-analytics-apex-card-compliance.png');
     });
 });

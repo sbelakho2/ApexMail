@@ -338,6 +338,41 @@ impl IdsEngine {
         let stale_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(60);
         self.alert_counts.retain(|_, (_, instant)| *instant > stale_cutoff);
     }
+
+    /// Spawn a background Tokio task that calls [`Self::cleanup`] every
+    /// `interval_secs` seconds.
+    ///
+    /// Without this (or equivalent external scheduling), the connection tracker
+    /// and alert rate-limit map grow unboundedly for long-lived processes.
+    /// The returned [`tokio::task::JoinHandle`] can be aborted by the caller
+    /// to stop the background loop on shutdown.
+    ///
+    /// Requires the engine to be wrapped in an `Arc` so the task can hold an
+    /// independent reference after this method returns.
+    pub fn run_cleanup_loop(
+        self: std::sync::Arc<Self>,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let interval = tokio::time::Duration::from_secs(interval_secs);
+            let mut ticker = tokio::time::interval(interval);
+            // Skip the immediate first tick so we don't clean up on startup.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let before_conns = self.active_connections();
+                self.cleanup();
+                let after_conns = self.active_connections();
+                if before_conns != after_conns {
+                    tracing::debug!(
+                        removed = before_conns.saturating_sub(after_conns),
+                        remaining = after_conns,
+                        "IDS engine periodic cleanup evicted stale connections"
+                    );
+                }
+            }
+        })
+    }
 }
 
 /// Normalize a payload for evasion-resistant signature matching.
@@ -355,6 +390,10 @@ fn normalize_payload(data: &[u8]) -> Vec<u8> {
 
     while let Some(ch) = chars.next() {
         match ch {
+            // URL-form-encoded space: `+` in query strings is decoded as space.
+            // Attackers use `+` to bypass regex patterns that match on \s+,
+            // e.g., `UNION+SELECT` evades `union\s+select` without this step.
+            '+' => result.push(' '),
             // URL decoding: %XX
             '%' => {
                 let mut hex = String::new();

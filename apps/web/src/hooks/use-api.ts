@@ -425,14 +425,6 @@ export function useDeleteContact() {
     );
 }
 
-export function useUpdateCampaign(id: string) {
-    return useAPIPut<Campaign, Partial<Campaign>>(`/v1/campaigns/${id}`, {
-        onSuccess: () => {
-            globalMutate((key) => typeof key === 'string' && key.startsWith('/v1/campaigns'));
-        },
-    });
-}
-
 // Specific API hooks for lists
 export function useLists() {
     return useAPI<List[]>('/v1/lists');

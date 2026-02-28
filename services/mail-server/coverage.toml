@@ -1,0 +1,161 @@
+# ==============================================================================
+# ApexMail Coverage Enforcement Configuration
+# ==============================================================================
+# This file defines minimum coverage requirements that must be met for CI to pass.
+# Different packages have different requirements based on criticality.
+#
+# Coverage types:
+# - lines: Lines of code executed 
+# - branches: Decision branches (if/else, match arms) covered
+# - functions: Functions called at least once
+#
+# Tiered approach:
+# - Tier 1 (Critical): Security crates - 90% required
+# - Tier 2 (Core): Business logic - 80% required
+# - Tier 3 (Support): Utilities & infrastructure - 70% required
+# ==============================================================================
+
+# Global minimum thresholds (applies to all code)
+[global]
+lines = 75
+branches = 70
+functions = 75
+
+# Fail CI if global thresholds are not met
+enforce = true
+
+# ==============================================================================
+# Tier 1: Security-Critical Packages (90% required)
+# These handle authentication, encryption, input validation
+# ==============================================================================
+
+[packages.waf-engine]
+lines = 90
+branches = 85
+functions = 90
+description = "Web Application Firewall - Must catch all attack patterns"
+
+[packages.ids-engine]
+lines = 90
+branches = 85
+functions = 90
+description = "Intrusion Detection - Pattern matching must be thorough"
+
+[packages.spam-filter]
+lines = 85
+branches = 80
+functions = 85
+description = "Spam filtering - ML and rule-based detection"
+
+[packages.dlp-engine]
+lines = 90
+branches = 85
+functions = 90
+description = "Data Loss Prevention - Sensitive data detection"
+
+[packages.sandbox]
+lines = 85
+branches = 80
+functions = 85
+description = "Attachment sandbox - Isolation security"
+
+[packages.ato-protection]
+lines = 90
+branches = 85
+functions = 90
+description = "Account Takeover Prevention - Critical auth protection"
+
+[packages.threat-intel]
+lines = 85
+branches = 80
+functions = 85
+description = "Threat intelligence - Reputation scoring"
+
+[packages.mail-common]
+lines = 85
+branches = 80
+functions = 85
+description = "Common mail types - Shared security primitives"
+
+# ==============================================================================
+# Tier 2: Core Business Logic (80% required)
+# ==============================================================================
+
+[packages.smtp-server]
+lines = 80
+branches = 75
+functions = 80
+description = "SMTP protocol implementation"
+
+[packages.imap-server]
+lines = 80
+branches = 75
+functions = 80
+description = "IMAP protocol implementation"
+
+[packages.mta]
+lines = 80
+branches = 75
+functions = 80
+description = "Mail Transfer Agent - Core routing"
+
+[packages.queue]
+lines = 80
+branches = 75
+functions = 80
+description = "Message queue - Delivery management"
+
+[packages.storage]
+lines = 80
+branches = 75
+functions = 80
+description = "Mail storage - Data persistence"
+
+# ==============================================================================
+# Tier 3: Support & Infrastructure (70% required)
+# ==============================================================================
+
+[packages.metrics]
+lines = 70
+branches = 65
+functions = 70
+description = "Observability - Metrics collection"
+
+[packages.tracing]
+lines = 70
+branches = 65
+functions = 70
+description = "Distributed tracing"
+
+[packages.config]
+lines = 70
+branches = 65
+functions = 70
+description = "Configuration management"
+
+# ==============================================================================
+# Excluded from coverage (test code, examples, generated)
+# ==============================================================================
+
+[exclude]
+paths = [
+  "**/tests/**",
+  "**/benches/**",
+  "**/examples/**",
+  "**/*.generated.rs",
+  "**/build.rs",
+  "**/fuzz-tests/**",
+  "**/integration-tests/**",
+  "**/functional-tests/**",
+  "**/performance-tests/**",
+  "**/load-tests/**",
+]
+
+# Functions to exclude (test utilities, debug code)
+functions = [
+  "test_*",
+  "mock_*",
+  "debug_*",
+  "fmt",
+  "default",
+]

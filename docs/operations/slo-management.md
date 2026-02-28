@@ -62,7 +62,7 @@ Excludes: Client network time, long-polling endpoints
 ```
 Delivery Rate = (Delivered messages / Sent messages) × 100
 
-Delivered = Confirmed by receiving MTA
+Delivered = Confirmed by receiving MTA (SES delivery event or SMTP 250 OK)
 Excludes: Invalid addresses, suppressed recipients
 ```
 

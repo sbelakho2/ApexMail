@@ -144,7 +144,7 @@ export default function AnalyticsPage() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto overflow-x-hidden" ref={printRef}>
+        <div className="cp-page overflow-x-hidden pb-4 xl:pb-0" ref={printRef}>
             {/* Print Header - Only visible when printing */}
             <div className="hidden print:block print-header mb-8">
                 <div className="flex items-center justify-between">
@@ -165,7 +165,7 @@ export default function AnalyticsPage() {
                     <h1 className="text-2xl font-bold text-foreground">Analytics & Insights</h1>
                     <p className="text-muted-foreground mt-1">Deep business intelligence across all operations • Times shown in {timezone}</p>
                     <p className="text-xs text-muted-foreground mt-1">Last updated {formatDateTime(generatedAt)}</p>
-                    <div className="mt-2 flex items-center gap-2 text-xs">
+                    <div className="mt-2 flex items-center gap-2 text-xs min-h-[20px]">
                         <span className={cn(
                             'inline-flex items-center rounded-full px-2 py-0.5 border',
                             dataSource === 'simulated'
@@ -174,8 +174,6 @@ export default function AnalyticsPage() {
                         )}>
                             Source: {dataSource === 'simulated' ? 'Live Data Unavailable' : 'Live Production Data'}
                         </span>
-                        {loadingAnalytics && <span className="text-muted-foreground">Refreshing live analytics…</span>}
-                        {!loadingAnalytics && analyticsError && <span className="text-destructive">{analyticsError}</span>}
                     </div>
                 </div>
                 <div className="flex items-center gap-3 overflow-x-auto">

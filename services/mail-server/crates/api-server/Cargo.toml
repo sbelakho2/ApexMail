@@ -40,5 +40,13 @@ headers = "0.4"
 http = "1.0"
 dirs = "5.0"
 
+# AWS SDK (SES dedicated IP management)
+aws-config = { workspace = true }
+aws-sdk-sesv2 = { workspace = true }
+
+# Internal crates
+ops-service = { path = "../ops-service" }
+billing-service = { path = "../billing-service" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

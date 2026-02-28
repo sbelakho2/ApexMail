@@ -7,17 +7,21 @@ pub mod smtp_sender;
 pub mod queue;
 pub mod dkim;
 pub mod service;
+pub mod ip_rotation;
+pub mod dnsbl;
 
 use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use mail_proto::generated::outbound_service_server::OutboundServiceServer;
 use crate::dkim::DkimSigner;
+use crate::dnsbl::DnsblChecker;
+use crate::ip_rotation::IpPool;
 use crate::queue::{EmailQueue, QueueConfig};
 use crate::service::OutboundServiceImpl;
 use crate::smtp_sender::SmtpSender;
@@ -54,6 +58,12 @@ struct Cli {
     #[arg(long, default_value = "100")]
     batch_size: usize,
     
+    /// Outbound IP addresses for self-hosted sending (comma-separated).
+    /// When provided, these IPs are added to the IP pool for source-binding
+    /// and round-robin rotation.
+    #[arg(long, env = "OUTBOUND_IPS", value_delimiter = ',')]
+    outbound_ips: Vec<String>,
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -82,7 +92,54 @@ async fn main() -> Result<()> {
     info!("Connected to database");
     
     // Create SMTP sender
-    let smtp_sender = SmtpSender::new(cli.from_domain.clone());
+    let mut smtp_sender = SmtpSender::new(cli.from_domain.clone());
+
+    // Wire IP pool if outbound IPs are configured (self-hosted path)
+    if !cli.outbound_ips.is_empty() {
+        let mut pool = IpPool::new();
+        for ip_str in &cli.outbound_ips {
+            match ip_str.trim().parse::<std::net::IpAddr>() {
+                Ok(ip) => {
+                    pool.add_ip(ip_rotation::OutboundIp::new_healthy(ip, None));
+                    info!(ip = %ip, "Added outbound IP to pool");
+                }
+                Err(e) => {
+                    warn!(ip = %ip_str, error = %e, "Skipping invalid outbound IP");
+                }
+            }
+        }
+        let pool = Arc::new(tokio::sync::RwLock::new(pool));
+        smtp_sender.set_ip_pool(pool);
+        info!(count = cli.outbound_ips.len(), "IP pool initialised for source-bound sending");
+
+        // Start background DNSBL monitoring for our outbound IPs
+        let dnsbl_ips: Vec<std::net::IpAddr> = cli.outbound_ips.iter()
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        if !dnsbl_ips.is_empty() {
+            tokio::spawn(async move {
+                let checker = DnsblChecker::new();
+                loop {
+                    for ip in &dnsbl_ips {
+                        let report = checker.check_all(*ip).await;
+                        if report.listing_count() > 0 {
+                            warn!(
+                                ip = %ip,
+                                listings = report.listing_count(),
+                                severity = ?report.max_severity(),
+                                "IP listed on DNSBL(s) — review needed"
+                            );
+                        } else {
+                            debug!(ip = %ip, "DNSBL check clean");
+                        }
+                    }
+                    // Check every 15 minutes
+                    tokio::time::sleep(std::time::Duration::from_secs(900)).await;
+                }
+            });
+            info!("Background DNSBL monitor started (15-minute interval)");
+        }
+    }
     
     // Create queue
     let queue_config = QueueConfig {

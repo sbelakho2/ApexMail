@@ -24,6 +24,11 @@ parking_lot = "0.12"
 # HMAC for event signing
 hmac = "0.12"
 sha2 = "0.10"
+hex = "0.4"
+# CSPRNG for cryptographic key generation
+rand.workspace = true
+# Lock-free atomic config hot-reload
+arc-swap.workspace = true
 # Optional — enabled by crates that pull in sqlx
 sqlx = { workspace = true, optional = true }
 

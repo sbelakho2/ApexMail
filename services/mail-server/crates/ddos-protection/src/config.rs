@@ -1,4 +1,10 @@
 //! Configuration for DDoS protection
+//!
+//! ## Security hardening (February 2026)
+//!
+//! - **Adaptive thresholds**: Added configuration for per-IP adaptive rate
+//!   limiting using Z-score anomaly detection. Static thresholds are still
+//!   available as fallback but adaptive mode is recommended for production.
 
 use std::time::Duration;
 
@@ -12,6 +18,27 @@ pub struct ProtectorConfig {
     
     /// System-wide cost capacity
     pub system_cost_capacity: u64,
+    
+    // ─── Per-IP Adaptive Thresholds (Feb 2026) ────────────────
+    
+    /// Enable per-IP adaptive rate limiting (recommended for production).
+    ///
+    /// When enabled, the system tracks per-IP request patterns and
+    /// automatically adjusts rate limits based on observed behavior.
+    pub enable_per_ip_adaptive: bool,
+    
+    /// Per-IP adaptive Z-score threshold for anomaly detection.
+    /// IPs exceeding this z-score from their baseline are flagged.
+    pub per_ip_z_threshold: f64,
+    
+    /// Per-IP adaptive baseline window in seconds.
+    pub per_ip_baseline_window_secs: u64,
+    
+    /// Per-IP minimum rate limit (requests per minute).
+    pub per_ip_min_rpm: u64,
+    
+    /// Per-IP maximum rate limit (requests per minute).
+    pub per_ip_max_rpm: u64,
     
     // ─── Reputation ───────────────────────────────────────────
     
@@ -77,6 +104,13 @@ impl Default for ProtectorConfig {
             // Rate limiting
             default_cost_budget: 100_000,
             system_cost_capacity: 10_000_000,
+            
+            // Per-IP adaptive thresholds (Feb 2026)
+            enable_per_ip_adaptive: true, // Enabled by default for production safety
+            per_ip_z_threshold: 3.0,
+            per_ip_baseline_window_secs: 300, // 5 minutes
+            per_ip_min_rpm: 10,
+            per_ip_max_rpm: 10_000,
             
             // Reputation
             block_threshold: 10,

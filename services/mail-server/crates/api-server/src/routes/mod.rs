@@ -1,5 +1,6 @@
 pub mod health;
 pub mod auth;
+pub mod account;
 pub mod messages;
 pub mod domains;
 pub mod templates;
@@ -14,3 +15,4 @@ pub mod contacts;
 pub mod automations;
 pub mod ai_insights;
 pub mod dedicated_ips;
+pub mod ses_notifications;

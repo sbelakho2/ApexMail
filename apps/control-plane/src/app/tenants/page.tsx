@@ -116,7 +116,7 @@ export default function TenantsPage() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto">
+        <div className="cp-page">
             <div className="flex items-center justify-between mb-6">
                 <div>
                     <h1 className="text-2xl font-bold text-foreground">Tenant Overview</h1>

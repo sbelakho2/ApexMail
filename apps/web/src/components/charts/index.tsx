@@ -44,6 +44,11 @@ const COLOR_ARRAY = [
   '#8b5cf6', // violet
 ];
 
+function truncateAxisLabel(value: unknown, max = 14): string {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 function getTooltipColorClass(color?: string): { text: string; dot: string } {
   if (!color) return { text: 'text-foreground', dot: 'bg-muted-foreground/60' };
   const token = color.toLowerCase();
@@ -139,6 +144,8 @@ export function ApexLineChart({
  {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
  <XAxis
  dataKey={xKey}
+ tickFormatter={(value) => truncateAxisLabel(value)}
+ minTickGap={16}
  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
  tickLine={{ stroke: 'hsl(var(--border))' }}
  axisLine={{ stroke: 'hsl(var(--border))' }}
@@ -223,11 +230,22 @@ export function ApexBarChart({
  {layout === 'vertical' ? (
  <>
  <XAxis type="number" tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} tickFormatter={formatter} />
- <YAxis type="category" dataKey={xKey} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} />
+ <YAxis
+  type="category"
+  dataKey={xKey}
+  width={130}
+  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
+  tickFormatter={(value) => truncateAxisLabel(value, 18)}
+ />
  </>
  ) : (
  <>
- <XAxis dataKey={xKey} tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} />
+ <XAxis
+  dataKey={xKey}
+  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
+  tickFormatter={(value) => truncateAxisLabel(value)}
+  minTickGap={16}
+ />
  <YAxis tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }} tickFormatter={formatter} />
  </>
  )}
@@ -295,6 +313,8 @@ export function ApexAreaChart({
  {showGrid && <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />}
  <XAxis
  dataKey={xKey}
+ tickFormatter={(value) => truncateAxisLabel(value)}
+ minTickGap={16}
  tick={{ fill: 'hsl(var(--muted-foreground))', fontSize: 12 }}
  />
  <YAxis

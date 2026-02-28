@@ -200,4 +200,153 @@ mod tests {
         let new_leads = svc.list_leads(Some(LeadStatus::New), None);
         assert_eq!(new_leads.len(), 2);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional comprehensive tests for all code paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_creates_empty_service() {
+        let svc = CrmService::default();
+        assert!(svc.list_leads(None, None).is_empty());
+    }
+
+    #[test]
+    fn create_lead_returns_new_status_and_zero_score() {
+        let svc = CrmService::new();
+        let lead = svc.create_lead(
+            "t@t.com".into(), "T".into(), "C".into(), "E".into(), "src".into(),
+        );
+        assert_eq!(lead.status, LeadStatus::New);
+        assert_eq!(lead.score, 0);
+    }
+
+    #[test]
+    fn create_lead_unique_ids() {
+        let svc = CrmService::new();
+        let a = svc.create_lead("a@a.com".into(), "A".into(), "".into(), "".into(), "".into());
+        let b = svc.create_lead("b@b.com".into(), "B".into(), "".into(), "".into(), "".into());
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn get_lead_missing_returns_error() {
+        let svc = CrmService::new();
+        match svc.get_lead(Uuid::new_v4()) {
+            Err(SalesError::LeadNotFound(_)) => {}
+            other => panic!("Expected LeadNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn update_status_all_transitions() {
+        let svc = CrmService::new();
+        let lead = svc.create_lead("x@x.com".into(), "X".into(), "".into(), "".into(), "".into());
+        let id = lead.id;
+
+        for status in [
+            LeadStatus::Contacted,
+            LeadStatus::Qualified,
+            LeadStatus::Converted,
+            LeadStatus::Lost,
+            LeadStatus::New, // back to New
+        ] {
+            let updated = svc.update_lead_status(id, status).unwrap();
+            assert_eq!(updated.status, status);
+        }
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let svc = CrmService::new();
+        svc.create_lead("UPPER@TEST.COM".into(), "LOUD".into(), "BIG".into(), "".into(), "".into());
+        assert_eq!(svc.search_leads("upper").len(), 1);
+        assert_eq!(svc.search_leads("UPPER").len(), 1);
+        assert_eq!(svc.search_leads("loud").len(), 1);
+        assert_eq!(svc.search_leads("big").len(), 1);
+    }
+
+    #[test]
+    fn search_empty_query_returns_all() {
+        let svc = make_svc();
+        assert_eq!(svc.search_leads("").len(), 2);
+    }
+
+    #[test]
+    fn search_no_match_returns_empty() {
+        let svc = make_svc();
+        assert!(svc.search_leads("zzz_nonexistent").is_empty());
+    }
+
+    #[test]
+    fn filter_by_status_and_source_combined() {
+        let svc = make_svc();
+        let leads = svc.list_leads(Some(LeadStatus::New), Some("product_hunt"));
+        assert_eq!(leads.len(), 1);
+        assert_eq!(leads[0].name, "Alice");
+    }
+
+    #[test]
+    fn filter_by_nonexistent_source() {
+        let svc = make_svc();
+        assert!(svc.list_leads(None, Some("zzz")).is_empty());
+    }
+
+    #[test]
+    fn filter_by_status_after_update() {
+        let svc = make_svc();
+        let id = svc.list_leads(None, None)[0].id;
+        svc.update_lead_status(id, LeadStatus::Qualified).unwrap();
+        let qualified = svc.list_leads(Some(LeadStatus::Qualified), None);
+        assert_eq!(qualified.len(), 1);
+        let still_new = svc.list_leads(Some(LeadStatus::New), None);
+        assert_eq!(still_new.len(), 1); // only Bob
+    }
+
+    #[test]
+    fn score_lead_boundary_values() {
+        // Exact boundaries
+        assert_eq!(CrmService::score_lead(0.0, 0.0, 0.0), 0);
+        assert_eq!(CrmService::score_lead(1.0, 1.0, 1.0), 100);
+        
+        // Negative inputs clamped to 0
+        assert_eq!(CrmService::score_lead(-1.0, -1.0, -1.0), 0);
+        
+        // Only engagement
+        assert_eq!(CrmService::score_lead(1.0, 0.0, 0.0), 40);
+        
+        // Only company size
+        assert_eq!(CrmService::score_lead(0.0, 1.0, 0.0), 30);
+        
+        // Only recency
+        assert_eq!(CrmService::score_lead(0.0, 0.0, 1.0), 30);
+    }
+
+    #[test]
+    fn score_lead_fractional() {
+        // 0.25 * 40 + 0.75 * 30 + 0.5 * 30 = 10 + 22.5 + 15 = 47.5 → 48
+        assert_eq!(CrmService::score_lead(0.25, 0.75, 0.5), 48);
+    }
+
+    #[test]
+    fn clone_service_shares_state() {
+        let svc = CrmService::new();
+        let svc2 = svc.clone();
+        svc.create_lead("a@a.com".into(), "A".into(), "".into(), "".into(), "".into());
+        assert_eq!(svc2.list_leads(None, None).len(), 1);
+    }
+
+    #[test]
+    fn search_matches_company_field() {
+        let svc = CrmService::new();
+        svc.create_lead("x@x.com".into(), "X".into(), "Unique Corp".into(), "".into(), "".into());
+        assert_eq!(svc.search_leads("unique corp").len(), 1);
+    }
+
+    #[test]
+    fn search_matches_email_field() {
+        let svc = CrmService::new();
+        svc.create_lead("special@domain.com".into(), "N".into(), "C".into(), "".into(), "".into());
+        assert_eq!(svc.search_leads("special@domain").len(), 1);
+    }
 }

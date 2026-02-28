@@ -1,7 +1,9 @@
 # ADR 0002: MTA Stack
 
 ## Status
-Accepted
+Accepted — **Amended by [ADR 0011](./0011-dual-delivery-ses-primary.md)**
+
+> **Amendment (2026-02):** Outbound delivery now defaults to **AWS SES** as the primary transport. The self-hosted MTA (Rust-native SMTP, not Postfix) is retained as an opt-in path for operators who need full IP control. See [ADR 0011](./0011-dual-delivery-ses-primary.md) for the full decision record. The inbound MTA architecture described below is unchanged.
 
 > **Implementation Note (2026-02):** The MTA is implemented as a Rust crate (`services/mail-server/crates/mta/`). Postfix is not deployed as a separate container. SMTP handling is native Rust.
 
