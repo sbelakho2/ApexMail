@@ -55,6 +55,10 @@ pub fn build_app(state: AppState) -> Router {
     let public = Router::new()
         .nest("/health", routes::health::router())
         .nest("/v1/auth", routes::auth::router())
+        .nest("/v1/auth/session", routes::session::router())
+        .nest("/v1/auth/forgot-password", routes::forgot_password::router())
+        .nest("/v1/auth/sso", routes::sso::router())
+        .nest("/v1/auth/csrf", routes::csrf::router())
         .nest("/v1/ses", routes::ses_notifications::router());
 
     // ── Authenticated v1 routes ─────────────────────────────
@@ -76,6 +80,34 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/ai", routes::ai_insights::router())
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
+        // Migrated auth routes (require session/auth)
+        .nest("/v1/auth/impersonate", routes::impersonate::router())
+        .nest("/v1/auth/telemetry", routes::telemetry::router())
+        // Control-plane admin routes
+        .nest("/v1/admin/tenants", routes::admin::tenants::router())
+        .nest("/v1/admin/features", routes::admin::features::router())
+        .nest("/v1/admin/gdpr", routes::admin::gdpr::router())
+        .nest("/v1/admin/secrets", routes::admin::secrets::router())
+        .nest("/v1/admin/audit", routes::admin::audit::router())
+        .nest("/v1/admin/dashboard", routes::admin::dashboard::router())
+        .nest("/v1/admin/compliance", routes::admin::compliance_overview::router())
+        .nest("/v1/admin/risk", routes::admin::risk::router())
+        .nest("/v1/admin/revenue", routes::admin::revenue::router())
+        .nest("/v1/admin/inbox", routes::admin::inbox::router())
+        .nest("/v1/admin/calendar", routes::admin::calendar::router())
+        .nest("/v1/admin/warmup", routes::admin::warmup::router())
+        .nest("/v1/admin/content", routes::admin::content::router())
+        .nest("/v1/admin/autopilot", routes::admin::autopilot::router())
+        .nest("/v1/admin/proxy", routes::admin::proxy::router())
+        .nest("/v1/admin/sales", routes::admin::sales::router())
+        .nest("/v1/admin/analytics", routes::admin::analytics::router())
+        .nest("/v1/admin/analytics/export", routes::admin::analytics_export::router())
+        .nest("/v1/admin/campaigns", routes::admin::campaigns::router())
+        .nest("/v1/admin/crm/leads", routes::admin::crm_leads::router())
+        .nest("/v1/admin/leads/discovery", routes::admin::leads_discovery::router())
+        .nest("/v1/admin/support", routes::admin::support::router())
+        .nest("/v1/admin/support/analytics", routes::admin::support_analytics::router())
+        .nest("/v1/admin/system/health", routes::admin::system_health::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

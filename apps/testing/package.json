@@ -22,6 +22,8 @@
         "test:visual": "playwright test --project=visual",
         "test:visual:update": "playwright test --project=visual --update-snapshots",
         "test:visual:console": "playwright test --config=playwright.console-visual.config.ts",
+        "test:screenshot:all": "playwright test --config=playwright.screenshot-all.config.ts --update-snapshots",
+        "test:screenshot:verify": "playwright test --config=playwright.screenshot-all.config.ts",
         "test:perf": "tsx src/performance/runner.ts",
         "test:chaos": "tsx src/chaos/runner.ts",
         "test:load": "k6 run src/load/scenarios.js",

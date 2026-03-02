@@ -43,6 +43,21 @@ jobs:
       - name: Verify SSL provisioning config
         run: pnpm tsx tools/check_ssl_assets.ts
 
+      - name: Verify API contract manifest
+        run: pnpm verify:contracts
+
+      - name: Run contract tests (consumer/producer)
+        run: pnpm verify:contracts:tests
+
+      - name: Enforce billing TS Stripe boundary
+        run: pnpm verify:billing:boundary
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Enforce Rust quality gates (fmt/clippy/no-unsafe)
+        run: pnpm verify:rust:quality
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest

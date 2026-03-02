@@ -1,10 +1,3 @@
-/**
- * CSRF token endpoint
- */
-
-import { buildCsrfResponse } from '@/lib/csrf';
-import type { NextRequest } from 'next/server';
-
-export async function GET(request: NextRequest) {
-    return buildCsrfResponse(request);
-}
+/** @migration Proxied to Rust: /v1/csrf */
+import { proxyToRust } from '@/lib/rust-api';
+export const GET = (r: Request) => proxyToRust(r, '/v1/csrf');

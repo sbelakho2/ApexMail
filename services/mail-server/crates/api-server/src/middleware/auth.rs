@@ -84,6 +84,28 @@ impl FromRequestParts<AppState> for AuthUser {
 // ─── API Key authentication ────────────────────────────────────
 
 async fn authenticate_api_key(key: &str, state: &AppState) -> Result<AuthUser, ApiError> {
+    // ── Control-plane static key (no DB lookup) ────────────
+    if let Some(ref cp_key) = state.config.control_plane_api_key {
+        // Constant-time comparison via HMAC equality to prevent timing attacks
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(b"cp-key-compare").unwrap();
+        mac.update(cp_key.as_bytes());
+        let expected = mac.finalize().into_bytes();
+        let mut mac2 = HmacSha256::new_from_slice(b"cp-key-compare").unwrap();
+        mac2.update(key.as_bytes());
+        if mac2.verify(&expected).is_ok() {
+            tracing::debug!("authenticated via control-plane static API key");
+            return Ok(AuthUser {
+                tenant_id: Uuid::nil(), // sentinel: system-level admin
+                user_id: None,
+                api_key_id: None,
+                scopes: vec!["*".into()],
+            });
+        }
+    }
+
     // Fix #10: Use HMAC-SHA256 with the configured secret instead of plain SHA-256.
     // This prevents offline brute-force if the database is compromised.
     let key_hash = apexmail_lib::hash_api_key_with_secret(key, &state.config.api_key_hash_secret);

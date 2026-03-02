@@ -7,12 +7,19 @@ import type { BillingEnv, BillingContext } from '../app.js';
 
 export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
   const router = new Hono<BillingEnv>();
+  const DEADLETTER_KEY = 'stripe:deadletter';
+  const MAX_DEADLETTER_EVENTS = 1000;
 
   // Stripe webhooks
   router.post('/stripe', async (c) => {
     const signature = c.req.header('stripe-signature');
 
     if (!signature) {
+      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+        reason: 'missing_signature',
+        occurredAt: new Date().toISOString(),
+      }));
+      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
       return c.json({ error: 'Missing stripe-signature header' }, 400);
     }
 
@@ -25,10 +32,22 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
       const parsed = JSON.parse(rawBody) as { id?: string };
       eventId = parsed.id;
     } catch {
+      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+        reason: 'invalid_json_payload',
+        occurredAt: new Date().toISOString(),
+        payloadPreview: rawBody.slice(0, 1024),
+      }));
+      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
       return c.json({ error: 'Invalid JSON payload' }, 400);
     }
     
     if (!eventId) {
+      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+        reason: 'missing_event_id',
+        occurredAt: new Date().toISOString(),
+        payloadPreview: rawBody.slice(0, 1024),
+      }));
+      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
       return c.json({ error: 'Missing event ID' }, 400);
     }
     
@@ -44,6 +63,13 @@ export function webhooksRoutes(ctx: BillingContext): Hono<BillingEnv> {
     const result = await ctx.stripe.processWebhook(rawBody, signature);
 
     if (!result.ok) {
+      await ctx.redis.lpush(DEADLETTER_KEY, JSON.stringify({
+        reason: 'processing_failed',
+        occurredAt: new Date().toISOString(),
+        eventId,
+        error: result.error instanceof Error ? result.error.message : String(result.error),
+      }));
+      await ctx.redis.ltrim(DEADLETTER_KEY, 0, MAX_DEADLETTER_EVENTS - 1);
       // On processing failure, remove dedup key to allow retry
       await ctx.redis.del(dedupKey);
       console.error('Stripe webhook error:', result.error);

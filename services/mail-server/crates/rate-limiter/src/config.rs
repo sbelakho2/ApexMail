@@ -16,10 +16,7 @@ pub struct RateLimitConfig {
 }
 
 fn nonzero_or_min(value: u32) -> NonZeroU32 {
-    NonZeroU32::new(value).unwrap_or_else(|| {
-        // Safety: 1 is a valid non-zero value.
-        unsafe { NonZeroU32::new_unchecked(1) }
-    })
+    NonZeroU32::new(value).unwrap_or(NonZeroU32::MIN)
 }
 
 impl RateLimitConfig {

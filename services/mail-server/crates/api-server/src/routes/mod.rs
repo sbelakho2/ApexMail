@@ -16,3 +16,14 @@ pub mod automations;
 pub mod ai_insights;
 pub mod dedicated_ips;
 pub mod ses_notifications;
+
+// Migrated from apps/web auth routes
+pub mod session;
+pub mod forgot_password;
+pub mod sso;
+pub mod impersonate;
+pub mod csrf;
+pub mod telemetry;
+
+// Migrated from apps/control-plane
+pub mod admin;

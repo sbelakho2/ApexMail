@@ -57,6 +57,24 @@ pub struct Config {
     pub ses_default_warmup_days: u32,
     /// SES configuration set for event tracking (bounces, complaints, deliveries).
     pub ses_configuration_set: Option<String>,
+
+    // ── OAuth / SSO ─────────────────────────────────────────
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
+    pub github_client_id: Option<String>,
+    pub github_client_secret: Option<String>,
+    pub oauth_redirect_base_url: String,
+
+    // ── Session / Impersonation ─────────────────────────────
+    pub session_secret: String,
+    pub impersonation_secret: String,
+    pub csrf_secret: String,
+
+    // ── Control Plane ───────────────────────────────────────
+    /// Static API key used by the control-plane backend to authenticate
+    /// internal requests. If set, X-API-Key matching this value bypasses
+    /// the normal api_keys DB lookup and returns a super-admin identity.
+    pub control_plane_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +252,18 @@ impl Config {
                 &env_or("SES_DEFAULT_WARMUP_DAYS", "14"),
             )?,
             ses_configuration_set: env::var("SES_CONFIGURATION_SET").ok(),
+
+            google_client_id: env::var("GOOGLE_CLIENT_ID").ok(),
+            google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
+            github_client_id: env::var("GITHUB_CLIENT_ID").ok(),
+            github_client_secret: env::var("GITHUB_CLIENT_SECRET").ok(),
+            oauth_redirect_base_url: env_or("OAUTH_REDIRECT_BASE_URL", "http://localhost:3000"),
+
+            session_secret: env_or("SESSION_SECRET", "dev-session-secret-change-me"),
+            impersonation_secret: env_or("IMPERSONATION_SECRET", "dev-impersonation-secret-change-me"),
+            csrf_secret: env_or("CSRF_SECRET", "dev-csrf-secret-change-me"),
+
+            control_plane_api_key: env::var("CONTROL_PLANE_API_KEY").ok().filter(|s| !s.is_empty()),
         };
 
         // Production security checks
@@ -319,6 +349,13 @@ impl Config {
                 "wildcard CORS origin (*) is not allowed in production".into(),
             ));
         }
+        if let Some(ref cp_key) = self.control_plane_api_key {
+            if cp_key.len() < 32 {
+                return Err(ConfigError::SecurityCheck(
+                    "CONTROL_PLANE_API_KEY must be at least 32 characters in production".into(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -383,6 +420,15 @@ mod tests {
             ses_ip_pool_prefix: "apexmail".into(),
             ses_default_warmup_days: 14,
             ses_configuration_set: None,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            oauth_redirect_base_url: "http://localhost:3000".into(),
+            session_secret: "test-session-secret-1234567890ab".into(),
+            impersonation_secret: "test-impersonation-secret-12345".into(),
+            csrf_secret: "test-csrf-secret-1234567890abcd".into(),
+            control_plane_api_key: None,
         };
         assert!(config.validate_production().is_err());
     }

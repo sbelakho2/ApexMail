@@ -82,12 +82,8 @@ async fn delete_account(
     auth: AuthUser,
     Json(body): Json<DeleteAccountRequest>,
 ) -> Result<(StatusCode, Json<DeleteAccountResponse>), ApiError> {
-    // Only owners can delete accounts
-    if auth.role != "owner" {
-        return Err(ApiError::Forbidden(
-            "only account owners can delete the account".into(),
-        ));
-    }
+    // Only owners can delete accounts (require wildcard / full scope)
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
     // Validate confirmation phrase
     if body.confirmation.trim().to_uppercase() != "DELETE MY ACCOUNT" {
@@ -155,7 +151,7 @@ async fn delete_account(
 
     tracing::info!(
         tenant_id = %auth.tenant_id,
-        user_id = %auth.user_id,
+        user_id = ?auth.user_id,
         deletion_at = %deletion_at,
         "Account deletion scheduled"
     );
